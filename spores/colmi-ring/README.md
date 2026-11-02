@@ -17,8 +17,33 @@ not part of the ABI.
 
 | Target | BLE backend | Shape |
 |---|---|---|
-| desktop (Linux/macOS) | `btleplug` (BlueZ / CoreBluetooth) | `soil-ble-host` binary |
-| CAT S22 (Android) | Android Bluetooth GATT via JNI | Rust core as `cdylib`, thin Kotlin Activity |
+| macOS | CoreBluetooth via `btleplug` | `soil-ble-host` binary |
+| desktop Linux | BlueZ via D-Bus inside `btleplug` | `soil-ble-host` binary |
+| CAT S22 / Fire TV (Android) | Android Bluetooth GATT via JNI | Rust core as `cdylib`, thin Kotlin Activity |
+
+## Backends and D-Bus
+
+The Spore never sees a backend. `soil:ble` is the same WIT on every target.
+
+- **macOS:** `btleplug` uses CoreBluetooth. There is no D-Bus dependency or
+  runtime requirement. `libdbus-sys` is gated to Linux only; it is not built or
+  linked on macOS.
+- **Linux:** BlueZ exposes BLE over D-Bus, so `btleplug` needs a running
+  `dbus-daemon` and BlueZ. The vendored `libdbus-sys` on Linux is only a static
+  packaging choice for the S22/musl host; it does not add a second IPC layer.
+- **Android / Fire TV / S22:** use the Android Bluetooth stack through JNI, not
+  BlueZ and not D-Bus. That backend is still pending.
+- **If fungOS has no D-Bus:** BlueZ-over-D-Bus cannot work. The transport-
+  agnostic options are a direct HCI backend on Linux (privileged, device-
+  specific) or the Android JNI backend. Neither changes the Spore or the WIT.
+
+On macOS the host binary can be used without a guest for a radio smoke test:
+
+```sh
+cargo run -p soil-ble-host -- --scan 4000
+```
+
+This prints CoreBluetooth peripheral UUIDs, RSSI and local names.
 
 The radio is always local, so swapping backends never changes a Spore.
 

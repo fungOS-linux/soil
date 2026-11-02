@@ -177,7 +177,26 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let guest_path = args
         .next()
-        .context("usage: soil-ble-host <guest.wasm> [guest args...]")?;
+        .context("usage: soil-ble-host [--scan [timeout-ms]] <guest.wasm> [guest args...]")?;
+    if guest_path == "--scan" {
+        let timeout_ms = args
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(3_000);
+        let mut ble = ble::Ble::new().context("init BLE backend")?;
+        let devices = ble.scan(timeout_ms).context("scan BLE")?;
+        for device in devices {
+            println!(
+                "{}\t{}\t{}",
+                device.id,
+                device
+                    .rssi
+                    .map_or_else(|| "-".to_string(), |r| r.to_string()),
+                device.name.unwrap_or_default()
+            );
+        }
+        return Ok(());
+    }
     let guest_args: Vec<String> = args.collect();
     let host_id = std::env::var("SOIL_HOST_ID")
         .ok()
