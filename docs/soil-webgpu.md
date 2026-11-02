@@ -91,7 +91,7 @@ The host:
 The default presenter discards the frame. The CLI and tests use `FrameCapture`,
 which retains exactly one frame. No guest callback runs on the host; no native
 window, swapchain, pointer, or mapped memory crosses into Wasm. Canvas still owns
-the window, target extent, final composition and presentation timing.
+the window, target extent, final presentation decision and timing.
 
 ## Proof
 
