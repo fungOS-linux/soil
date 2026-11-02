@@ -30,19 +30,16 @@ struct State {
     /// Scan handles are one-based indexes into this list. They are Soil-issued
     /// and deliberately not the platform peripheral id.
     devices: Vec<String>,
-    wasi: wasmtime_wasi::p2::WasiCtx,
+    wasi: wasmtime_wasi::WasiCtx,
     table: wasmtime_wasi::ResourceTable,
 }
 
-impl wasmtime_wasi::p2::IoView for State {
-    fn table(&mut self) -> &mut wasmtime_wasi::ResourceTable {
-        &mut self.table
-    }
-}
-
-impl wasmtime_wasi::p2::WasiView for State {
-    fn ctx(&mut self) -> &mut wasmtime_wasi::p2::WasiCtx {
-        &mut self.wasi
+impl wasmtime_wasi::WasiView for State {
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        wasmtime_wasi::WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -194,17 +191,21 @@ fn main() -> Result<()> {
 
     let engine = Engine::default();
     let component = Component::from_file(&engine, &guest_path)
+        .map_err(anyhow::Error::from)
         .with_context(|| format!("load component {guest_path}"))?;
 
     let mut linker = Linker::<State>::new(&engine);
     // The guest is a wasip2 component (std pulls in wasi:io/cli), so WASI must
     // be present even though the ring protocol itself never touches it.
-    wasmtime_wasi::p2::add_to_linker_sync::<State>(&mut linker).context("link wasi:cli")?;
+    wasmtime_wasi::p2::add_to_linker_sync::<State>(&mut linker)
+        .map_err(anyhow::Error::from)
+        .context("link wasi:cli")?;
 
     soil::ble::ble::add_to_linker::<State, wasmtime::component::HasSelf<State>>(
         &mut linker,
         |state| state,
     )
+    .map_err(anyhow::Error::from)
     .context("link soil:ble/ble")?;
 
     let state = State {
@@ -212,15 +213,14 @@ fn main() -> Result<()> {
         session,
         host_id,
         devices: Vec::new(),
-        wasi: wasmtime_wasi::p2::WasiCtxBuilder::new()
-            .inherit_stdio()
-            .build(),
+        wasi: wasmtime_wasi::WasiCtxBuilder::new().inherit_stdio().build(),
         table: wasmtime_wasi::ResourceTable::new(),
     };
     let mut store = Store::new(&engine, state);
 
-    let bindings =
-        Host_::instantiate(&mut store, &component, &linker).context("instantiate guest")?;
+    let bindings = Host_::instantiate(&mut store, &component, &linker)
+        .map_err(anyhow::Error::from)
+        .context("instantiate guest")?;
 
     match bindings.call_run(&mut store, &guest_args) {
         Ok(Ok(())) => Ok(()),

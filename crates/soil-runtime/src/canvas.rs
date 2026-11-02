@@ -24,7 +24,7 @@ impl SurfaceSize {
         }
     }
 }
-pub trait CanvasSurface {
+pub trait CanvasSurface: Send {
     fn size(&self) -> SurfaceSize {
         SurfaceSize::Inner
     }
@@ -75,7 +75,9 @@ impl OwnerSurface {
             .map_err(anyhow::Error::msg)
     }
     pub fn update_frame_time(&mut self, elapsed_ms: u64) {
-        self.owner.update_frame_time(elapsed_ms);
+        // Host-owned pacing policy: the owner animates on 80 ms steps, so a
+        // sub-step timestamp must not produce a distinct frame.
+        self.owner.update_frame_time(elapsed_ms / 80 * 80);
     }
     pub fn with_size(size: SurfaceSize) -> Result<Self> {
         let (width, height) = size.dimensions();
@@ -144,63 +146,67 @@ pub(crate) fn link(linker: &mut wasmtime::Linker<crate::Limits>) -> Result<()> {
     linker.func_wrap(
         IMPORT,
         "present",
-        |mut caller: wasmtime::Caller<'_, crate::Limits>| -> Result<i32> {
-            if caller.data().3.enabled {
-                let view = caller.data().3.presentation();
-                if let Some(surface) = &mut caller.data_mut().2.surface {
-                    surface.update_status(view)?;
+        |mut caller: wasmtime::Caller<'_, crate::Limits>| -> wasmtime::Result<i32> {
+            crate::host((|| -> Result<i32> {
+                if caller.data().3.enabled {
+                    let view = caller.data().3.presentation();
+                    if let Some(surface) = &mut caller.data_mut().2.surface {
+                        surface.update_status(view)?;
+                    }
                 }
-            }
-            if caller.data().4.enabled {
-                let view = caller.data().4.presentation();
-                if let Some(surface) = &mut caller.data_mut().2.surface {
-                    surface.update_model_estimate(view)?;
+                if caller.data().4.enabled {
+                    let view = caller.data().4.presentation();
+                    if let Some(surface) = &mut caller.data_mut().2.surface {
+                        surface.update_model_estimate(view)?;
+                    }
                 }
-            }
-            let host = &mut caller.data_mut().2;
-            host.presents += 1;
-            ensure!(host.presents <= 1, "canvas present budget");
-            let Some(surface) = &mut host.surface else {
-                return Ok(1);
-            };
-            let (width, height) = surface.size().dimensions();
-            let frame = surface.present()?;
-            ensure!(
-                frame.width == width
-                    && frame.height == height
-                    && frame.pixels.len() == width as usize * height as usize * 4,
-                "invalid Canvas owner frame"
-            );
-            ensure!(
-                frame.pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255),
-                "nonopaque Canvas frame"
-            );
-            host.frame = Some(frame);
-            Ok(0)
+                let host = &mut caller.data_mut().2;
+                host.presents += 1;
+                ensure!(host.presents <= 1, "canvas present budget");
+                let Some(surface) = &mut host.surface else {
+                    return Ok(1);
+                };
+                let (width, height) = surface.size().dimensions();
+                let frame = surface.present()?;
+                ensure!(
+                    frame.width == width
+                        && frame.height == height
+                        && frame.pixels.len() == width as usize * height as usize * 4,
+                    "invalid Canvas owner frame"
+                );
+                ensure!(
+                    frame.pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255),
+                    "nonopaque Canvas frame"
+                );
+                host.frame = Some(frame);
+                Ok(0)
+            })())
         },
     )?;
     linker.func_wrap(
         IMPORT,
         "navigate",
-        |mut caller: wasmtime::Caller<'_, crate::Limits>, key: i32| -> Result<i32> {
-            let host = &mut caller.data_mut().2;
-            host.actions += 1;
-            ensure!(host.actions <= 1, "canvas action budget");
-            let key = match key {
-                1 => Key::Up,
-                2 => Key::Down,
-                3 => Key::Left,
-                4 => Key::Right,
-                5 => Key::Select,
-                6 => Key::Back,
-                7 => Key::Home,
-                _ => return Ok(2),
-            };
-            let Some(surface) = &mut host.surface else {
-                return Ok(1);
-            };
-            surface.key(key)?;
-            Ok(0)
+        |mut caller: wasmtime::Caller<'_, crate::Limits>, key: i32| -> wasmtime::Result<i32> {
+            crate::host((|| -> Result<i32> {
+                let host = &mut caller.data_mut().2;
+                host.actions += 1;
+                ensure!(host.actions <= 1, "canvas action budget");
+                let key = match key {
+                    1 => Key::Up,
+                    2 => Key::Down,
+                    3 => Key::Left,
+                    4 => Key::Right,
+                    5 => Key::Select,
+                    6 => Key::Back,
+                    7 => Key::Home,
+                    _ => return Ok(2),
+                };
+                let Some(surface) = &mut host.surface else {
+                    return Ok(1);
+                };
+                surface.key(key)?;
+                Ok(0)
+            })())
         },
     )?;
     Ok(())
@@ -211,18 +217,22 @@ pub(crate) fn link_animation(linker: &mut wasmtime::Linker<crate::Limits>) -> Re
     linker.func_wrap(
         "soil:canvas/animation@0.1.0",
         "tick",
-        |mut caller: wasmtime::Caller<'_, crate::Limits>, elapsed_ms: i64| -> Result<i32> {
-            let time = u64::try_from(elapsed_ms)?;
-            let host = &mut caller.data_mut().2;
-            let expected = host
-                .expected_time
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("unexpected or repeated animation tick"))?;
-            ensure!(time == expected, "guest changed host frame time");
-            if let Some(surface) = &mut host.surface {
-                surface.update_frame_time(time);
-            }
-            Ok(0)
+        |mut caller: wasmtime::Caller<'_, crate::Limits>,
+         elapsed_ms: i64|
+         -> wasmtime::Result<i32> {
+            crate::host((|| -> Result<i32> {
+                let time = u64::try_from(elapsed_ms)?;
+                let host = &mut caller.data_mut().2;
+                let expected = host
+                    .expected_time
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("unexpected or repeated animation tick"))?;
+                ensure!(time == expected, "guest changed host frame time");
+                if let Some(surface) = &mut host.surface {
+                    surface.update_frame_time(time);
+                }
+                Ok(0)
+            })())
         },
     )?;
     Ok(())

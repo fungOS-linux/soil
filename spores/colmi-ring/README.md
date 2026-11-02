@@ -6,7 +6,7 @@ rule as every other capability: **transport in Soil, protocol in the Spore**.
 | Piece | Path | Owns |
 |---|---|---|
 | Contract | [`wit/soil-ble.wit`](../../wit/soil-ble.wit) | 8 bounded BLE verbs, typed errors |
-| Host | [`crates/soil-ble-host`](../../crates/soil-ble-host) | wasmtime 34, btleplug/BlueZ/CoreBluetooth, radio lease |
+| Host | [`crates/soil-ble-host`](../../crates/soil-ble-host) | wasmtime 50, btleplug/BlueZ/CoreBluetooth, radio lease |
 | Spore | [`spores/colmi-ring`](.) | 16-byte framing, bind, battery, command semantics |
 
 This code moved here from `FuturePresentLabs/reversal` (`colmi/host`) so the

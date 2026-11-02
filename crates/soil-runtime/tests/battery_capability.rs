@@ -87,7 +87,7 @@ fn fixture_guest(
         bytes,
         DEFAULT_FUEL,
         Some(Box::new(Surface(views.clone()))),
-        Some(BatteryGrant::new(path, max_age)),
+        Some(BatteryGrant::new(path, max_age).with_refresh(Duration::ZERO)),
     )
     .unwrap();
     (guest, views, thread)

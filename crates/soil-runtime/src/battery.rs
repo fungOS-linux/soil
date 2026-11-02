@@ -16,7 +16,10 @@ pub struct BatteryGrant {
     /// every animation frame costs a full socket round trip. Serve a recent
     /// host-owned sample instead. Retention age is still revalidated by view().
     refresh: Duration,
-    cached: Option<(std::time::Instant, Result<RemoteBatterySample, BatteryFailure>)>,
+    cached: Option<(
+        std::time::Instant,
+        Result<RemoteBatterySample, BatteryFailure>,
+    )>,
 }
 impl BatteryGrant {
     pub fn new(socket: PathBuf, max_age: Duration) -> Self {
@@ -26,6 +29,13 @@ impl BatteryGrant {
             refresh: Duration::from_millis(500),
             cached: None,
         }
+    }
+    /// Override the short host-side sample cache. A zero refresh forces one
+    /// provider round trip per guest read, which keeps retained-token tests
+    /// deterministic.
+    pub fn with_refresh(mut self, refresh: Duration) -> Self {
+        self.refresh = refresh;
+        self
     }
     fn read(&mut self) -> Result<RemoteBatterySample, BatteryFailure> {
         if let Some((at, sample)) = &self.cached

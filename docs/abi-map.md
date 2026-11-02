@@ -9,7 +9,7 @@ The canonical contracts for `soil:view`, `soil:time`, `soil:storage`,
 `soil:ble` and `soil:canvas` live in [`wit/`](../wit) and are enforced by
 `crates/soil-abi`. The BLE host, the COLMI ring Spore, the S22 runtime, the
 Canvas input normalizer and the Canvas decision record also live here. The remaining runtime
-contract still lives in `canvas-model-host` (`wasmtime 34`, core no-import scenes
+contract still lives in `canvas-model-host` (`wasmtime 50`, core no-import scenes
 + component-model Soil S1) until that crate is extracted; this document is the
 review map for what else exists and what is missing.
 

@@ -4,6 +4,13 @@ use anyhow::{Context, Result, bail};
 use fpl_gfx::{Primitive, PrimitiveKind, Rect, Scene, SoftwareImage, Theme, ThemeRole};
 use wasmtime::{Config, Engine, Module, ResourceLimiter, Store, StoreLimits, StoreLimitsBuilder};
 
+/// Convert an internal anyhow failure into the error type Wasmtime host
+/// functions must return. Wasmtime 50 no longer implements `std::error::Error`
+/// for its own error, so `?`/`From` cannot bridge the two automatically.
+pub(crate) fn host<T>(result: Result<T>) -> wasmtime::Result<T> {
+    result.map_err(wasmtime::Error::from_anyhow)
+}
+
 pub mod battery;
 pub mod canvas;
 pub mod estimate;
@@ -25,10 +32,10 @@ struct Limits(
     estimate::EstimateHost,
 );
 impl ResourceLimiter for Limits {
-    fn memory_growing(&mut self, c: usize, d: usize, m: Option<usize>) -> Result<bool> {
+    fn memory_growing(&mut self, c: usize, d: usize, m: Option<usize>) -> wasmtime::Result<bool> {
         self.0.memory_growing(c, d, m)
     }
-    fn table_growing(&mut self, c: usize, d: usize, m: Option<usize>) -> Result<bool> {
+    fn table_growing(&mut self, c: usize, d: usize, m: Option<usize>) -> wasmtime::Result<bool> {
         self.0.table_growing(c, d, m)
     }
     fn instances(&self) -> usize {
@@ -344,9 +351,11 @@ impl GuestScene {
         let input = self
             .instance
             .get_typed_func::<i32, ()>(&mut self.store, "input")
+            .map_err(anyhow::Error::from)
             .context("required export input: (i32) -> ()")?;
         input
             .call(&mut self.store, key as i32)
+            .map_err(anyhow::Error::from)
             .context("guest input")
     }
 
@@ -356,7 +365,8 @@ impl GuestScene {
         let store = &mut self.store;
         let instance = &self.instance;
         let run = instance.get_typed_func::<(), i32>(&mut *store, "run")?;
-        let ptr = usize::try_from(run.call(&mut *store, ())?).context("negative scene offset")?;
+        let ptr = usize::try_from(run.call(&mut *store, ()).map_err(anyhow::Error::from)?)
+            .context("negative scene offset")?;
         let len = usize::try_from(
             instance
                 .get_global(&mut *store, "scene_len")
@@ -486,8 +496,12 @@ pub fn run(bytes: &[u8], fuel: u64) -> Result<i32> {
     let mut config = Config::new();
     config.consume_fuel(true);
     config.cranelift_nan_canonicalization(true);
-    let engine = Engine::new(&config).context("create Wasmtime engine")?;
-    let module = Module::new(&engine, bytes).context("compile core Wasm")?;
+    let engine = Engine::new(&config)
+        .map_err(anyhow::Error::from)
+        .context("create Wasmtime engine")?;
+    let module = Module::new(&engine, bytes)
+        .map_err(anyhow::Error::from)
+        .context("compile core Wasm")?;
     let imports = module.imports().count();
     if imports != 0 {
         bail!("host_imports: module requests {imports} import(s)");
@@ -510,12 +524,19 @@ pub fn run(bytes: &[u8], fuel: u64) -> Result<i32> {
         ),
     );
     store.limiter(|x| x as &mut dyn ResourceLimiter);
-    store.set_fuel(fuel).context("set fuel")?;
-    let instance = wasmtime::Instance::new(&mut store, &module, &[]).context("instantiate")?;
+    store
+        .set_fuel(fuel)
+        .map_err(anyhow::Error::from)
+        .context("set fuel")?;
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .map_err(anyhow::Error::from)
+        .context("instantiate")?;
     let run = instance
         .get_typed_func::<(), i32>(&mut store, "run")
+        .map_err(anyhow::Error::from)
         .context("required export run: () -> i32")?;
     run.call(&mut store, ())
+        .map_err(anyhow::Error::from)
         .context("execute (fuel exhaustion is a hard failure)")
 }
 

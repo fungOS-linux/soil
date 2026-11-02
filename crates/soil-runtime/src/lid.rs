@@ -135,38 +135,42 @@ pub(crate) fn link(linker: &mut wasmtime::Linker<crate::Limits>) -> anyhow::Resu
         |mut caller: wasmtime::Caller<'_, crate::Limits>,
          ptr: i32,
          capacity: i32|
-         -> anyhow::Result<i32> {
-            anyhow::ensure!(
-                capacity == RECORD_BYTES as i32 && ptr >= 0,
-                "invalid lid buffer"
-            );
-            let memory = caller
-                .get_export("memory")
-                .and_then(|e| e.into_memory())
-                .ok_or_else(|| anyhow::anyhow!("lid memory missing"))?;
-            let end = (ptr as usize)
-                .checked_add(RECORD_BYTES)
-                .ok_or_else(|| anyhow::anyhow!("lid bounds"))?;
-            anyhow::ensure!(end <= memory.data_size(&caller), "lid buffer out of bounds");
-            let observation = caller.data_mut().1.read();
-            let status = observation.status();
-            memory.write(&mut caller, ptr as usize, &observation.bytes())?;
-            caller.data_mut().1.last = Some(observation);
-            Ok(status as i32)
+         -> wasmtime::Result<i32> {
+            crate::host((|| -> anyhow::Result<i32> {
+                anyhow::ensure!(
+                    capacity == RECORD_BYTES as i32 && ptr >= 0,
+                    "invalid lid buffer"
+                );
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .ok_or_else(|| anyhow::anyhow!("lid memory missing"))?;
+                let end = (ptr as usize)
+                    .checked_add(RECORD_BYTES)
+                    .ok_or_else(|| anyhow::anyhow!("lid bounds"))?;
+                anyhow::ensure!(end <= memory.data_size(&caller), "lid buffer out of bounds");
+                let observation = caller.data_mut().1.read();
+                let status = observation.status();
+                memory.write(&mut caller, ptr as usize, &observation.bytes())?;
+                caller.data_mut().1.last = Some(observation);
+                Ok(status as i32)
+            })())
         },
     )?;
     linker.func_wrap(
         IMPORT,
         "log-change",
-        |mut caller: wasmtime::Caller<'_, crate::Limits>| -> anyhow::Result<()> {
-            let host = &mut caller.data_mut().1;
-            anyhow::ensure!(host.logs.is_empty(), "lid log budget exceeded");
-            let observation = host
-                .last
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("lid log without read"))?;
-            host.logs.push(observation);
-            Ok(())
+        |mut caller: wasmtime::Caller<'_, crate::Limits>| -> wasmtime::Result<()> {
+            crate::host((|| -> anyhow::Result<()> {
+                let host = &mut caller.data_mut().1;
+                anyhow::ensure!(host.logs.is_empty(), "lid log budget exceeded");
+                let observation = host
+                    .last
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("lid log without read"))?;
+                host.logs.push(observation);
+                Ok(())
+            })())
         },
     )?;
     Ok(())
