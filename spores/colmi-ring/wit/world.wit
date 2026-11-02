@@ -1,0 +1,8 @@
+// The COLMI ring protocol Spore: imports only the BLE capability.
+package colmi:ring@0.1.0;
+
+world ring-spore {
+  import soil:ble/ble@1.0.0;
+
+  export run: func(args: list<string>) -> result<_, string>;
+}

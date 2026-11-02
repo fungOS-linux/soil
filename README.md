@@ -5,12 +5,13 @@ called **Spores**: a Spore is a signed manifest (module CID, capabilities, targe
 engine version) plus its module bytes. Distribution is planned as the **Spore
 Store** — publish by CID, resolve by CID + target, revoke, never re-sign.
 
-Status: **early.** The runtime host is not implemented; nothing here is a
-shipped product surface yet. Canonical capability contracts for `soil:view`,
-`soil:time` and `soil:storage` live in [`wit/`](wit) and are enforced by
-`crates/soil-abi`. The broader design record lives in the `mycelium` repository
-(`docs/soil-capabilities.md`, PR pending) and covers the remaining capability
-boundary (`soil:ble`, `soil:gpu`, `soil:audio`, `soil:stream`, `soil:surface`),
+Status: **early.** The full runtime host is not implemented; the first
+capability host (BLE) and one real Spore do run. Nothing here is a shipped
+product surface yet. Canonical capability contracts for `soil:view`,
+`soil:time`, `soil:storage` and `soil:ble` live in [`wit/`](wit) and are enforced
+by `crates/soil-abi`. The broader design record lives in the `mycelium`
+repository (`docs/soil-capabilities.md`, PR pending) and covers the remaining
+capability boundary (`soil:gpu`, `soil:audio`, `soil:stream`, `soil:surface`),
 signed-Spore verification, and the target matrix (macOS, Linux, Android/Fire TV,
 CAT S22; tvOS is AOT-only because it forbids JIT).
 
@@ -36,9 +37,14 @@ Principles:
 | [`soil:view@1.0.0`](wit/soil-view.wit) | `soil:view`, optional `soil:view.capture` | WIT + Viewer state machine |
 | [`soil:time@1.0.0`](wit/soil-time.wit) | `soil:time` | WIT |
 | [`soil:storage@1.0.0`](wit/soil-storage.wit) | `soil:storage.read`, optional `soil:storage.write` | WIT |
+| [`soil:ble@1.0.0`](wit/soil-ble.wit) | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | WIT + host + COLMI ring Spore |
 
 `cargo test --workspace` parses every package and asserts its reviewed name,
 interface and functions, so an accidental ABI change fails the build.
+
+The first host-backed capability is BLE: [`crates/soil-ble-host`](crates/soil-ble-host)
+runs the [`spores/colmi-ring`](spores/colmi-ring) protocol Spore against a real
+radio on desktop. See [`spores/colmi-ring/README.md`](spores/colmi-ring/README.md).
 
 ## Development
 
@@ -46,6 +52,7 @@ interface and functions, so an accidental ABI change fails the build.
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo check -p viewer-spore --target wasm32-wasip2
+cargo check --manifest-path spores/colmi-ring/Cargo.toml --target wasm32-wasip2
 ```
 
 The capability contracts parse as WIT, and the Viewer state machine has no host

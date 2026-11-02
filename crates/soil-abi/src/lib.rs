@@ -38,4 +38,22 @@ pub const CONTRACTS: &[Contract] = &[
         package: "soil:storage@1.0.0",
         interfaces: &[("storage", &["read", "write"])],
     },
+    Contract {
+        file: "wit/soil-ble.wit",
+        source: include_str!("../../../wit/soil-ble.wit"),
+        package: "soil:ble@1.0.0",
+        interfaces: &[(
+            "ble",
+            &[
+                "scan",
+                "connect",
+                "disconnect",
+                "services",
+                "read",
+                "write",
+                "subscribe",
+                "next-event",
+            ],
+        )],
+    },
 ];

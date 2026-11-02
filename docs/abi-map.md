@@ -5,10 +5,11 @@ Spore may import and the ones it must not. It does not grant anything; a Spore
 gets a capability only when its signed manifest, the Mycelium grant, and host
 policy intersect.
 
-The canonical contracts for `soil:view`, `soil:time` and `soil:storage` live in
-[`wit/`](../wit) and are enforced by `crates/soil-abi`. The remaining runtime
-contract still lives in `canvas-model-host` (`wasmtime 34`, core no-import scenes
-+ component-model Soil S1) until that crate is extracted; this document is the
+The canonical contracts for `soil:view`, `soil:time`, `soil:storage` and
+`soil:ble` live in [`wit/`](../wit) and are enforced by `crates/soil-abi`. The
+BLE host and the COLMI ring Spore also live here. The remaining runtime contract
+still lives in `canvas-model-host` (`wasmtime 34`, core no-import scenes +
+component-model Soil S1) until that crate is extracted; this document is the
 review map for what else exists and what is missing.
 
 ## Rules
@@ -37,7 +38,7 @@ review map for what else exists and what is missing.
 | `soil:mic@1` | audio capture | `soil:mic.capture` | yes | Bounded PCM chunks. Visible capture indicator; no background capture. Separate from playback so muting output never implies mic permission. |
 | `soil:camera@1` | camera capture | `soil:camera.capture` | yes | Still/low-rate frames only. Full-rate video belongs on `soil:stream`/producer path. No device paths or raw controls. |
 | `soil:input@1` | gamepad / remote / global input | `soil:input` | later | Surface already owns windowed pointer/key. This is for controllers and media keys when no surface is focused. |
-| `soil:ble@1` | BLE radio | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | yes | Eight verbs, Soil-issued handles, signed lease for the radio. |
+| `soil:ble@1` | BLE radio | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | yes | Eight verbs, Soil-issued handles, typed errors, local lease (signed lease pending). Canonical WIT: [`wit/soil-ble.wit`](../wit/soil-ble.wit); host: [`crates/soil-ble-host`](../crates/soil-ble-host). |
 | `soil:stream@1` | Unibus stream | `soil:stream` plus kind/schema grants | yes | Bounded subscription resource; read/write/credit; no endpoints, producer ids, or tokens. |
 | `soil:view@1` | host-owned web/Spore/retained view | `soil:view`, optional `soil:view.capture` | yes | Target ids only; bounded open/act/observe/capture. Host owns the browser/Spore engine, pixels and capture buffer. Canonical WIT: [`wit/soil-view.wit`](../wit/soil-view.wit). |
 | `soil:api@1` | authenticated upstream API | `soil:api` plus service/operation grant | yes | Host-mediated request/response. Soil holds the credential and mints/brokers delegated tokens; the Spore never sees them. |
@@ -244,12 +245,13 @@ Any unsupported row is a named denial, not an empty success.
 ## Priorities
 
 1. **Canonical here:** `view` (WIT + state machine), `time` (WIT), `storage`
-   (WIT).
+   (WIT), `ble` (WIT + wasmtime/btleplug host + COLMI ring Spore).
 2. **Already in S1/runtime elsewhere:** `surface` (design), `gpu` (WIT), `audio`
-   playback (WIT), `ble` (component + mock), `stream` (design).
-3. **Next, highest value:** the host adapters and denial fixtures for `time` and
-   `storage`, then `api`, `mic`, `camera`. `audio` waits for a concrete Spore
-   that plays something.
+   playback (WIT), `stream` (design).
+3. **Next, highest value:** finish the BLE gaps (signed lease, DIS `ring-id`,
+   Unibus publish, Android JNI), then the host adapters and denial fixtures for
+   `time` and `storage`, then `api`, `mic`, `camera`. `audio` waits for a
+   concrete Spore that plays something.
 4. **After that:** `input` (media keys for the viewer), `notify`.
 5. **Only with a concrete workload:** `compute`, platform sensors, telephony,
    raw display control.

@@ -1,0 +1,10 @@
+// Host-side bindings for the COLMI ring host binary. The world matches the
+// ring Spore so one `bindgen!` call gives us both the BLE import trait and the
+// `run` entry point.
+package soil:ble-host@0.1.0;
+
+world host {
+  import soil:ble/ble@1.0.0;
+
+  export run: func(args: list<string>) -> result<_, string>;
+}

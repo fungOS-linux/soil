@@ -1,0 +1,98 @@
+// Host BLE radio capability.
+//
+// Transport stays in Soil; the device protocol stays in the Spore. A Spore
+// receives Soil-issued device handles and characteristic UUIDs, never a MAC,
+// path, socket, permission, or radio handle it can forge.
+//
+// Limits (Soil-enforced, not expressible in WIT):
+// - at most 64 devices per scan, 8 subscribed characteristics per link
+// - scan <= 30 s; next-event bounded per call; every call has a deadline
+// - read <= 512 B per call; write <= 512 B per call; the Spore chunks frames
+// - at most one link and one live radio lease per Soil host
+// - no fs, net, clock, env, or device enumeration beyond scan results
+package soil:ble@1.0.0;
+
+interface types {
+  /// Soil-issued handle for a scan result. Opaque; not an address.
+  type device-handle = u32;
+
+  record device {
+    handle: device-handle,
+    name: option<string>,
+    rssi: option<s16>,
+    /// Stable cross-host identity once Soil has read DIS; absent until then.
+    ring-id: option<string>,
+  }
+
+  record characteristic {
+    uuid: string,
+    readable: bool,
+    writable: bool,
+    notifiable: bool,
+  }
+
+  record service {
+    uuid: string,
+    characteristics: list<characteristic>,
+  }
+
+  /// One inbound notification. The UUID lets a Spore tell the command channel
+  /// from DFU; the payload is still opaque.
+  record notification {
+    char-uuid: string,
+    data: list<u8>,
+  }
+
+  /// One inbound radio event.
+  variant event {
+    notification(notification),
+    disconnected(string),
+  }
+}
+
+interface ble {
+  use types.{device, device-handle, service, event};
+
+  enum error {
+    /// The capability or radio lease was not granted to this Spore.
+    denied,
+    /// Unknown or stale device handle or characteristic.
+    not-found,
+    /// No live link.
+    not-connected,
+    /// Another authenticated Soil host holds a live radio lease.
+    leased,
+    /// A bounded Soil call hit its deadline.
+    timeout,
+    /// A frame, queue, scan or byte limit was exceeded.
+    over-budget,
+    /// The adapter or link is still coming up.
+    not-ready,
+    /// A malformed argument, e.g. an empty UUID.
+    invalid,
+    /// Backend failure; details are logged Soil-side, not echoed as text.
+    io,
+  }
+
+  /// Active scan for `timeout-ms`, returning Soil-issued handles.
+  scan: func(timeout-ms: u32) -> result<list<device>, error>;
+
+  /// Connect to a previously scanned handle. The host takes the radio lease.
+  connect: func(device: device-handle) -> result<_, error>;
+  disconnect: func() -> result<_, error>;
+
+  /// Discovered GATT tree on the current link.
+  services: func() -> result<list<service>, error>;
+
+  /// Read at most `max-bytes` from a characteristic. `0` is `invalid`.
+  read: func(char-uuid: string, max-bytes: u32) -> result<list<u8>, error>;
+  write: func(char-uuid: string, data: list<u8>) -> result<_, error>;
+
+  /// Enable notifications for a characteristic. Events are drained with
+  /// `next-event`.
+  subscribe: func(char-uuid: string) -> result<_, error>;
+
+  /// Wait up to `timeout-ms` for one event; `none` means the deadline expired
+  /// and is not an error.
+  next-event: func(timeout-ms: u32) -> result<option<event>, error>;
+}
