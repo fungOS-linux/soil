@@ -1,0 +1,40 @@
+;; Geometric launcher fixture, not a signed app or service frontend.
+;; Four rows; normalized input updates selected row; OK toggles detail, Back exits.
+(module
+ (import "soil:device/lid@0.1.0" "read" (func $lid-read (param i32 i32) (result i32)))
+ (import "soil:device/lid@0.1.0" "log-change" (func $lid-log))
+ (global $last-status (mut i32) (i32.const -1))
+ (global $last-position (mut i32) (i32.const -1))
+ (global $last-raw (mut i32) (i32.const -1))
+ (memory (export "memory") 1)
+ (global (export "scene_len") i32 (i32.const 704))
+ (global $selected (mut i32) (i32.const 0))
+ (global $detail (mut i32) (i32.const 0))
+ (data (i32.const 0) "\00\00\00\00\00\00\00\00\00\00\f0\43\00\00\20\44\00\00\0d\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\c0\41\00\00\c0\41\00\00\d8\43\00\00\40\42\00\02\0d\02\00\00\40\41\00\00\00\00\00\00\00\00\00\00\20\42\00\00\20\42\00\00\c8\42\00\00\80\41\00\06\0d\06\00\00\80\40\00\00\00\00\00\00\00\00\00\00\c0\41\00\00\d0\42\00\00\d8\43\00\00\c0\42\00\01\0d\01\00\00\40\41\00\00\00\00\00\00\00\00\00\00\40\42\00\00\00\43\00\00\40\42\00\00\40\42\00\06\0d\06\00\00\40\41\00\00\00\00\00\00\00\00\00\00\f0\42\00\00\08\43\00\00\60\43\00\00\40\41\00\04\0d\04\00\00\00\00\00\00\00\00\00\00\00\00\00\00\f0\42\00\00\20\43\00\00\10\43\00\00\00\41\00\05\0d\05\00\00\00\00\00\00\00\00\00\00\00\00\00\00\c0\41\00\00\58\43\00\00\d8\43\00\00\c0\42\00\01\0d\01\00\00\40\41\00\00\00\00\00\00\00\00\00\00\40\42\00\00\70\43\00\00\40\42\00\00\40\42\00\07\0d\07\00\00\40\41\00\00\00\00\00\00\00\00\00\00\f0\42\00\00\78\43\00\00\40\43\00\00\40\41\00\04\0d\04\00\00\00\00\00\00\00\00\00\00\00\00\00\00\f0\42\00\00\88\43\00\00\10\43\00\00\00\41\00\05\0d\05\00\00\00\00\00\00\00\00\00\00\00\00\00\00\c0\41\00\00\a4\43\00\00\d8\43\00\00\c0\42\00\01\0d\01\00\00\40\41\00\00\00\00\00\00\00\00\00\00\40\42\00\00\b0\43\00\00\40\42\00\00\40\42\00\08\0d\08\00\00\40\41\00\00\00\00\00\00\00\00\00\00\f0\42\00\00\b4\43\00\00\20\43\00\00\40\41\00\04\0d\04\00\00\00\00\00\00\00\00\00\00\00\00\00\00\f0\42\00\00\c0\43\00\00\10\43\00\00\00\41\00\05\0d\05\00\00\00\00\00\00\00\00\00\00\00\00\00\00\c0\41\00\00\dc\43\00\00\d8\43\00\00\c0\42\00\01\0d\01\00\00\40\41\00\00\00\00\00\00\00\00\00\00\40\42\00\00\e8\43\00\00\40\42\00\00\40\42\00\09\0d\09\00\00\40\41\00\00\00\00\00\00\00\00\00\00\f0\42\00\00\ec\43\00\00\00\43\00\00\40\41\00\04\0d\04\00\00\00\00\00\00\00\00\00\00\00\00\00\00\f0\42\00\00\f8\43\00\00\10\43\00\00\00\41\00\05\0d\05\00\00\00\00\00\00\00\00\00\00\00\00\00\00\c0\41\00\00\12\44\00\00\d8\43\00\00\00\42\00\02\0d\02\00\00\00\41\00\00\00\00\00\00\00\00\00\00\20\42\00\00\14\44\00\00\c0\42\00\00\80\41\00\06\0d\06\00\00\80\40\00\00\00\00\00\00\00\00\00\00\ac\43\00\00\14\44\00\00\c0\42\00\00\80\41\00\05\0d\05\00\00\80\40\00\00\00\00\00\00\00\00")
+ (func (export "input") (param $key i32)
+  (if (i32.or (i32.eq (local.get $key) (i32.const 1)) (i32.eq (local.get $key) (i32.const 3)))
+   (then (if (i32.gt_s (global.get $selected) (i32.const 0)) (then (global.set $selected (i32.sub (global.get $selected) (i32.const 1)))))))
+  (if (i32.or (i32.eq (local.get $key) (i32.const 2)) (i32.eq (local.get $key) (i32.const 4)))
+   (then (if (i32.lt_s (global.get $selected) (i32.const 3)) (then (global.set $selected (i32.add (global.get $selected) (i32.const 1)))))))
+  (if (i32.eq (local.get $key) (i32.const 5)) (then (global.set $detail (i32.xor (global.get $detail) (i32.const 1)))))
+  (if (i32.eq (local.get $key) (i32.const 6)) (then (global.set $detail (i32.const 0)))))
+ (func (export "run") (result i32) (local $i i32)
+  ;; Bounded capability read into non-scene memory. Guest chooses whether to log
+  ;; initial state and changes. Freshness/timestamps remain per-observation data.
+  (drop (call $lid-read (i32.const 4096) (i32.const 288)))
+  (if (i32.or
+        (i32.ne (global.get $last-status) (i32.load (i32.const 4096)))
+        (i32.or (i32.ne (global.get $last-position) (i32.load (i32.const 4100)))
+                (i32.ne (global.get $last-raw) (i32.load (i32.const 4104)))))
+   (then
+    (call $lid-log)
+    (global.set $last-status (i32.load (i32.const 4096)))
+    (global.set $last-position (i32.load (i32.const 4100)))
+    (global.set $last-raw (i32.load (i32.const 4104)))))
+  (loop $rows
+   (i32.store8 (i32.add (i32.const 113) (i32.mul (local.get $i) (i32.const 128)))
+    (select (i32.const 2) (i32.const 1) (i32.eq (local.get $i) (global.get $selected))))
+   (local.set $i (i32.add (local.get $i) (i32.const 1)))
+   (br_if $rows (i32.lt_s (local.get $i) (i32.const 4))))
+  (i32.store8 (i32.const 49) (select (i32.const 6) (i32.const 2) (global.get $detail)))
+  (i32.const 0)))

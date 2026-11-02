@@ -39,7 +39,7 @@ Principles:
 | [`soil:time@1.0.0`](wit/soil-time.wit) | `soil:time` | WIT |
 | [`soil:storage@1.0.0`](wit/soil-storage.wit) | `soil:storage.read`, optional `soil:storage.write` | WIT |
 | [`soil:ble@1.0.0`](wit/soil-ble.wit) | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | WIT + host + COLMI ring Spore |
-| [`soil:canvas@1.0.0`](wit/soil-canvas.wit) | `soil:canvas` | WIT + portable input normalizer + S22 reference host |
+| [`soil:canvas@1.0.0`](wit/soil-canvas.wit) | `soil:canvas` | WIT + input normalizer + S22 runtime/host |
 
 `cargo test --workspace` parses every package and asserts its reviewed name,
 interface and functions, so an accidental ABI change fails the build.
@@ -49,10 +49,13 @@ runs the [`spores/colmi-ring`](spores/colmi-ring) protocol Spore against a real
 radio on desktop. See [`spores/colmi-ring/README.md`](spores/colmi-ring/README.md).
 
 Canvas is the cross-platform owner; Spores never submit UI trees.
-[`crates/soil-canvas-input`](crates/soil-canvas-input) is the portable
-Linux/Android/macOS input normalizer for D-pad, media and Unicode text events;
+[`crates/soil-runtime`](crates/soil-runtime) is the S22 reference host (wasmtime
+core runner, Canvas/battery/lid/estimate capabilities). The portable
+Linux/Android/macOS input normalizer is
+[`crates/soil-canvas-input`](crates/soil-canvas-input);
 [`docs/soil-canvas.md`](docs/soil-canvas.md) records the decision and host
-obligations.
+obligations, and [`docs/soil-canvas-s22.md`](docs/soil-canvas-s22.md) records the
+S22 proving run.
 
 ## Development
 

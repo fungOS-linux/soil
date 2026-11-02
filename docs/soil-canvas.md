@@ -123,7 +123,8 @@ to `crates/soil-canvas-input` before digits, media, call, soft-key or PTT events
 reach the owner; the crate already covers the S22 device-tree keymap. That wiring
 is the next integration step, not a contract change.
 
-The `.089` inner scanout regression is fixed. Physical acceptance of colour
+The `.089` inner scanout regression is fixed. The detailed S22 implementation
+record lives in [`soil-canvas-s22.md`](soil-canvas-s22.md). Physical acceptance of colour
 order, stride, outer readability and both presenters still belongs to the
 parent/user; producer correctness is not scanout proof.
 

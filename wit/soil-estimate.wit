@@ -1,0 +1,14 @@
+package soil:device@0.1.0;
+
+/// Model output, never measured SOC or kernel battery capacity. Runtime uses
+/// the documented bounded core-Wasm lowering, not component canonical ABI.
+interface estimate {
+    enum availability { fresh, unknown, stale, denied }
+    record observation {
+        token: u64,
+        state: availability,
+        percent: option<u8>,
+    }
+    read: func() -> observation;
+    update-status: func(token: u64);
+}

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/soil-abi", "crates/soil-ble-host", "crates/soil-canvas-input", "crates/viewer-spore"]
+members = ["crates/soil-abi", "crates/soil-ble-host", "crates/soil-canvas-input", "crates/soil-runtime", "crates/viewer-spore"]
 exclude = ["spores/colmi-ring"]
 resolver = "3"
 

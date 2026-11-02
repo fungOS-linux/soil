@@ -1,0 +1,24 @@
+package soil:device@0.1.0;
+
+/// Read-only lid capability. Host grants permission per guest; never grants
+/// raw device access, socket selection, display policy or input injection.
+interface lid {
+    enum position { unqualified, open, closed }
+    enum failure { denied, unavailable, backend, ambiguous, resynchronizing, stale, invalid-time, disconnected, protocol }
+    record observation {
+        physical-position: position,
+        switch-asserted: bool,
+        event-node: string,
+        /// Provider monotonic clock, NOT comparable to guest/host clock.
+        observed-monotonic-ms: u64,
+        /// Provider age plus local elapsed time at read, not a wall-clock time.
+        age-ms: u64,
+    }
+    read: func() -> result<observation, failure>;
+    /// Bounded diagnostic: guest requests logging its most recent read.
+    /// Not arbitrary text and not device/display authority.
+    log-change: func();
+}
+world lid-observer {
+    import lid;
+}
