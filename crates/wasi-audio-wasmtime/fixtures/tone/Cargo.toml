@@ -11,3 +11,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wit-bindgen = { version = "0.57", features = ["futures-stream"] }
+soil-sdk = { path = "../../../soil-sdk", features = ["audio"] }

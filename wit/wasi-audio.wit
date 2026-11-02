@@ -40,7 +40,16 @@ interface playback {
   open: func(format: format) -> result<output, error>;
 }
 
+world guest {
+  import playback;
+}
+
 world audio {
   import playback;
+  export run: func() -> u32;
+}
+
+/// Minimal export-only world for an SDK consumer.
+world runner {
   export run: func() -> u32;
 }

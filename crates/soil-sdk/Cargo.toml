@@ -1,0 +1,14 @@
+[package]
+name = "soil-sdk"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = []
+audio = ["dep:soil-sdk-audio"]
+
+[dependencies]
+soil-sdk-audio = { path = "../soil-sdk-audio", optional = true }

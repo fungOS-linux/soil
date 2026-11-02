@@ -1,0 +1,55 @@
+// Draft `wasi:audio` proposal, maintained in Soil while no upstream package
+// exists. This is a bounded PCM sink, not the WebAudio graph API.
+package wasi:audio@0.1.0;
+
+interface playback {
+  record format {
+    sample-rate: u32,
+    channels: u8,
+  }
+
+  record status {
+    format: format,
+    queued-frames: u32,
+    underruns: u64,
+    latency-ms: u32,
+  }
+
+  enum error {
+    denied,
+    not-ready,
+    over-budget,
+    invalid,
+    underrun,
+    closed,
+    unsupported,
+    backend,
+  }
+
+  resource output {
+    format: func() -> result<format, error>;
+    /// Push interleaved f32 frames. Returns the number of complete frames
+    /// accepted; zero means backpressure, not failure.
+    write: func(frames: list<f32>) -> result<u32, error>;
+    /// Wait until the host queue is empty or the bounded timeout expires.
+    drain: func(timeout-ms: u32) -> result<_, error>;
+    status: func() -> result<status, error>;
+    close: func() -> result<_, error>;
+  }
+
+  open: func(format: format) -> result<output, error>;
+}
+
+world guest {
+  import playback;
+}
+
+world audio {
+  import playback;
+  export run: func() -> u32;
+}
+
+/// Minimal export-only world for an SDK consumer.
+world runner {
+  export run: func() -> u32;
+}

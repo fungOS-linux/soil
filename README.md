@@ -60,7 +60,10 @@ requests a `wasi:webgpu` adapter/device, runs WGSL compute and reads the result
 back through `wgpu-core`. See [`docs/soil-webgpu.md`](docs/soil-webgpu.md).
 The draft audio sink is [`crates/wasi-audio-wasmtime`](crates/wasi-audio-wasmtime):
 a real component pushes bounded PCM into a cpal host. See
-[`docs/wasi-audio.md`](docs/wasi-audio.md).
+[`docs/wasi-audio.md`](docs/wasi-audio.md). Guest code uses the umbrella
+[`crates/soil-sdk`](crates/soil-sdk); its first feature, `audio`, provides
+`Output`, `write_all`, `tone` and `play_tone`. See
+[`docs/soil-sdk.md`](docs/soil-sdk.md).
 The portable Linux/Android/macOS input normalizer is
 [`crates/soil-canvas-input`](crates/soil-canvas-input);
 [`docs/soil-canvas.md`](docs/soil-canvas.md) records the decision and host

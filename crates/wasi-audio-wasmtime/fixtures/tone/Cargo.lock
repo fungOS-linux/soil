@@ -271,6 +271,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "soil-sdk"
+version = "0.1.0"
+dependencies = [
+ "soil-sdk-audio",
+]
+
+[[package]]
+name = "soil-sdk-audio"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -308,6 +322,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 name = "wasi-audio-tone"
 version = "0.1.0"
 dependencies = [
+ "soil-sdk",
  "wit-bindgen",
 ]
 
