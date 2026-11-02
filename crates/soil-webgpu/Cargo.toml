@@ -19,7 +19,7 @@ wasmtime = { version = "50", default-features = false, features = [
     "runtime",
     "std",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+pollster = "0.4"
 
 [dev-dependencies]
 wat = "1"

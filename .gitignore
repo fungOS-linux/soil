@@ -8,3 +8,6 @@ target/
 
 # Checked-in audio component fixture for the ignored device test.
 !crates/wasi-audio-wasmtime/fixtures/tone.wasm
+
+# Checked-in wgpu 29 component fixture for the ignored GPU test.
+!crates/soil-webgpu/fixtures/wgpu-compute.wasm

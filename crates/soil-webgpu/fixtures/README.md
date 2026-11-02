@@ -13,3 +13,7 @@ cargo build --manifest-path crates/soil-webgpu/fixtures/hello-compute/Cargo.toml
 cp crates/soil-webgpu/fixtures/hello-compute/target/wasm32-wasip2/release/soil_webgpu_hello_compute.wasm \
   crates/soil-webgpu/fixtures/hello-compute.wasm
 ```
+
+`wgpu-compute.wasm` is the real wgpu 29 drop-in fixture. It uses
+`wgpu_wasi_webgpu::instance()` and the ordinary wgpu API, but imports
+`wasi:webgpu@0.3.0-rc.2` and runs in Soil. See `wgpu-compute/README.md`.

@@ -55,9 +55,9 @@ Canvas is the cross-platform owner; Spores never submit UI trees.
 core runner, Canvas/battery/lid/estimate capabilities), and
 [`crates/soil-android`](crates/soil-android) is the JNI bridge used by the Canvas
 Android app. The portable
-WebGPU host is [`crates/soil-webgpu`](crates/soil-webgpu): a real component
-requests a `wasi:webgpu` adapter/device, runs WGSL compute and reads the result
-back through `wgpu-core`. See [`docs/soil-webgpu.md`](docs/soil-webgpu.md).
+WebGPU host is [`crates/soil-webgpu`](crates/soil-webgpu): raw
+`wasi:webgpu` components and real wgpu 29 programs both request a GPU
+adapter/device, run WGSL compute and read the result back through `wgpu-core`. See [`docs/soil-webgpu.md`](docs/soil-webgpu.md).
 The draft audio sink is [`crates/wasi-audio-wasmtime`](crates/wasi-audio-wasmtime):
 a real component pushes bounded PCM into a cpal host. See
 [`docs/wasi-audio.md`](docs/wasi-audio.md). Guest code uses the umbrella

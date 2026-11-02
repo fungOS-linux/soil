@@ -129,11 +129,7 @@ impl WebGpuRuntime {
 /// calls remain async internally so `wasi:webgpu` request/map futures work.
 pub fn run_component_blocking(bytes: &[u8]) -> Result<u32> {
     let runtime = WebGpuRuntime::new()?;
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("create WebGPU runtime")?
-        .block_on(runtime.run_component(bytes))
+    pollster::block_on(runtime.run_component(bytes))
 }
 
 #[cfg(test)]

@@ -31,6 +31,26 @@ without it the component cannot instantiate.
 The `WasiCtx` has no preopens, environment, arguments or network policy; a guest
 that imports a WASI authority it was not granted still fails to link.
 
+## wgpu 29 drop-in
+
+A real wgpu 29 program now builds for `wasm32-wasip2` and runs in Soil:
+
+```rust
+let instance = wgpu_wasi_webgpu::instance();
+let adapter = pollster::block_on(instance.request_adapter(&Default::default()))?;
+let (device, queue) = pollster::block_on(adapter.request_device(&Default::default()))?;
+// ordinary wgpu from here
+```
+
+The guest backend is a fork of [`wgpu-wasi-webgpu`](https://github.com/fungOS-linux/wgpu-wasi-webgpu)
+updated from `wasi:webgpu@0.0.1` to `0.3.0-rc.2`. It uses wgpu's `custom`
+dispatch traits, so wgpu itself is not forked for the backend. The fixture is
+pinned to revision `88938bb`.
+
+This proves compute. It does **not** prove wgpu `Surface`: `wasi:webgpu` still
+needs a Canvas-owned presentation target, and `gpu-canvas-context` remains a
+host TODO.
+
 ## Proof
 
 The fixture is a real component built from
@@ -54,6 +74,14 @@ Run any component with the CLI:
 
 ```sh
 cargo run -p soil-webgpu -- crates/soil-webgpu/fixtures/hello-compute.wasm
+cargo run -p soil-webgpu -- crates/soil-webgpu/fixtures/wgpu-compute.wasm
+# both print: webgpu: ok
+```
+
+The wgpu fixture needs a GPU adapter and is tested with:
+
+```sh
+cargo test -p soil-webgpu --test wgpu_compute -- --ignored --nocapture
 ```
 
 ## Limits of this proof

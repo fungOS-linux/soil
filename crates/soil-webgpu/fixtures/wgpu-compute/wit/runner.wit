@@ -1,0 +1,5 @@
+package soil:wgpu-compute-fixture@0.1.0;
+
+world runner {
+  export run: async func() -> u32;
+}
