@@ -1,0 +1,10 @@
+package soil:webgpu-host@0.1.0;
+
+/// A minimal WebGPU test world. The host adds only `wasi:webgpu`; the guest
+/// gets no WASI, filesystem, clock, network, or native device handle.
+world runner {
+  include wasi:webgpu/imports@0.3.0-rc.2;
+
+  /// Run one bounded WebGPU workload and return a host-visible status code.
+  export run: async func() -> u32;
+}

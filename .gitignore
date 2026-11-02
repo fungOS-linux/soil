@@ -2,3 +2,6 @@ target/
 *.wasm
 *.component.wasm
 .worktrees/
+
+# Checked-in WebGPU component fixture for the ignored GPU test.
+!crates/soil-webgpu/fixtures/hello-compute.wasm

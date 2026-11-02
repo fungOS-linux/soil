@@ -21,8 +21,10 @@ portable input normalizer is
   generic application capability.
 - **`soil:view` remains separate**: it is for host-owned web/Spore/retained
   content *inside* Canvas. It is not a second presentation ABI.
-- **`soil:gpu` / `soil:webgpu` remain host-side** for Canvas's own rendering and
-  composition, not for Spore UI.
+- **GPU work is not a second UI channel.** Canvas owns its own rendering. A Spore
+  may use the separately granted upstream `wasi:webgpu` for offscreen compute or
+  render, but its pixels still have to reach Canvas through a host-owned target;
+  it never gets a window or swapchain.
 
 Revisit `soil:surface` only when one of these is real:
 
