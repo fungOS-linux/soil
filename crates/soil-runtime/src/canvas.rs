@@ -75,9 +75,11 @@ impl OwnerSurface {
             .map_err(anyhow::Error::msg)
     }
     pub fn update_frame_time(&mut self, elapsed_ms: u64) {
-        // Host-owned pacing policy: the owner animates on 80 ms steps, so a
-        // sub-step timestamp must not produce a distinct frame.
-        self.owner.update_frame_time(elapsed_ms / 80 * 80);
+        self.owner.update_frame_time(elapsed_ms);
+    }
+    /// Opt-in decorative aurora curtain; no guest authority or device state.
+    pub fn set_aurora(&mut self, enabled: bool) {
+        self.owner.set_aurora(enabled);
     }
     pub fn with_size(size: SurfaceSize) -> Result<Self> {
         let (width, height) = size.dimensions();

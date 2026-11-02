@@ -67,6 +67,12 @@ fn run() -> Result<()> {
     } else {
         false
     };
+    let aurora = if let Some(index) = args.iter().position(|a| a == "--aurora") {
+        args.remove(index);
+        true
+    } else {
+        false
+    };
     // Battery authority is host-selected, explicit, and independent of keypad.
     let mut battery_socket = None;
     let mut battery_permission = None;
@@ -142,6 +148,10 @@ fn run() -> Result<()> {
         !animation || (simple_jarvis && battery_permission.is_some()),
         "--animate-reactor requires simple-jarvis and explicit battery permission"
     );
+    ensure!(
+        !aurora || simple_jarvis,
+        "--aurora requires --ui simple-jarvis"
+    );
     let surface = if args.len() >= 2 && args[args.len() - 2] == "--surface" {
         let size = match args.last().map(String::as_str) {
             Some("inner") => SurfaceSize::Inner,
@@ -166,7 +176,7 @@ fn run() -> Result<()> {
         || args[6] != "--interval-ms"
     {
         bail!(
-            "usage: soil-canvas --export-guest FILE.wasm\nsoil-canvas --guest FILE.wasm --output FILE.bgr --frames N --interval-ms MS [--keypad-socket PATH --allow-keypad|--deny-keypad] [--surface inner|outer] [--ui simple-jarvis [--battery-socket PATH --allow-battery|--deny-battery]]\nActual Canvas owner, explicit DEMO DATA. Atomic BGR24; inner480x640 or outer128x128; no DRM ownership."
+            "usage: soil-canvas --export-guest FILE.wasm\nsoil-canvas --guest FILE.wasm --output FILE.bgr --frames N --interval-ms MS [--keypad-socket PATH --allow-keypad|--deny-keypad] [--surface inner|outer] [--ui simple-jarvis [--battery-socket PATH --allow-battery|--deny-battery] [--aurora]]\nActual Canvas owner, explicit DEMO DATA. Atomic BGR24; inner480x640 or outer128x128; no DRM ownership."
         );
     }
     let frames: usize = args[5].parse()?;
@@ -179,11 +189,14 @@ fn run() -> Result<()> {
     std::fs::File::open(&args[1])?
         .take(soil_runtime::MAX_MODULE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
-    let owner = if simple_jarvis {
+    let mut owner = if simple_jarvis {
         OwnerSurface::simple_jarvis(surface)?
     } else {
         OwnerSurface::with_size(surface)?
     };
+    if aurora {
+        owner.set_aurora(true);
+    }
     let mut guest = if battery_permission.is_some() {
         let grant = if battery_permission == Some(true) {
             Some(BatteryGrant::new(
