@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/soil-abi", "crates/soil-ble-host", "crates/soil-canvas-input", "crates/soil-android", "crates/soil-runtime", "crates/soil-webgpu", "crates/viewer-spore"]
-exclude = ["spores/colmi-ring", "crates/soil-webgpu/fixtures/hello-compute"]
+members = ["crates/soil-abi", "crates/soil-ble-host", "crates/soil-canvas-input", "crates/soil-android", "crates/soil-runtime", "crates/soil-webgpu", "crates/wasi-audio-wasmtime", "crates/viewer-spore"]
+exclude = ["spores/colmi-ring", "crates/soil-webgpu/fixtures/hello-compute", "crates/wasi-audio-wasmtime/fixtures/tone"]
 resolver = "3"
 
 [workspace.package]

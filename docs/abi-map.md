@@ -36,7 +36,7 @@ review map for what else exists and what is missing.
 | `soil:canvas@1` | Canvas owner surface (window / layout / renderer) | `soil:canvas` | yes | Spore presents or navigates the host-owned Canvas surface. Typed state, generation-bound input, no pixels or display handles. Canonical WIT: [`wit/soil-canvas.wit`](../wit/soil-canvas.wit). |
 | `soil:surface@1` | window / compositor / seat | `soil:surface` | **deferred** | Spore submits a bounded retained scene; only if a Spore or non-Canvas host ever needs its own UI. Not on the v1 path. |
 | `wasi:webgpu@0.3.0-rc.2` | wgpu-core device | link `wasi:webgpu` | yes | Upstream WIT, no native handles. Host: [`crates/soil-webgpu`](../crates/soil-webgpu). Presentation stays Canvas-owned. |
-| `soil:audio@1` | audio sink | `soil:audio.playback` | yes | Bounded PCM push, credit, underruns. Sink is host policy. |
+| `wasi:audio@0.1.0` | audio sink | link `wasi:audio` | draft | Soil-maintained PCM sink; cpal host; no callbacks or device handles. [`docs/wasi-audio.md`](wasi-audio.md). |
 | `soil:mic@1` | audio capture | `soil:mic.capture` | yes | Bounded PCM chunks. Visible capture indicator; no background capture. Separate from playback so muting output never implies mic permission. |
 | `soil:camera@1` | camera capture | `soil:camera.capture` | yes | Still/low-rate frames only. Full-rate video belongs on `soil:stream`/producer path. No device paths or raw controls. |
 | `soil:input@1` | gamepad / remote / global input | `soil:input` | later | Canvas already owns focused keypad/remote input. This is only for global controllers/media keys when no Canvas surface is focused. |
@@ -256,8 +256,9 @@ Any unsupported row is a named denial, not an empty success.
    (WIT), `ble` (WIT + wasmtime/btleplug host + COLMI ring Spore), `canvas`
    (WIT + portable input normalizer + S22 reference host).
 2. **Upstream and wired here:** `wasi:webgpu@0.3.0-rc.2` (host + compute proof,
-   [`docs/soil-webgpu.md`](soil-webgpu.md)). `audio` playback is still WIT-only;
-   `stream` is design. `soil:surface` is deferred, not scheduled.
+   [`docs/soil-webgpu.md`](soil-webgpu.md)) and draft `wasi:audio@0.1.0`
+   (host + tone proof, [`docs/wasi-audio.md`](wasi-audio.md)). `stream` is
+   design. `soil:surface` is deferred, not scheduled.
 3. **Next, highest value:** wire `soil:canvas-input` into the S22/Fire TV hosts,
    finish the BLE gaps (signed lease, DIS `ring-id`, Unibus publish, Android
    JNI), then the host adapters and denial fixtures for `time` and `storage`,

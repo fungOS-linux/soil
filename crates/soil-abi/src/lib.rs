@@ -45,6 +45,12 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("surface", &["present", "observe", "input", "close"])],
     },
     Contract {
+        file: "wit/wasi-audio.wit",
+        source: include_str!("../../../wit/wasi-audio.wit"),
+        package: "wasi:audio@0.1.0",
+        interfaces: &[("playback", &["open"])],
+    },
+    Contract {
         file: "wit/soil-ble.wit",
         source: include_str!("../../../wit/soil-ble.wit"),
         package: "soil:ble@1.0.0",

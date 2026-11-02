@@ -1,0 +1,24 @@
+[package]
+name = "wasi-audio-wasmtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+cpal = "0.18"
+rtrb = "0.4"
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
+wasmtime = { version = "50", default-features = false, features = [
+    "anyhow",
+    "component-model",
+    "cranelift",
+    "runtime",
+    "std",
+] }
+
+[[bin]]
+name = "wasi-audio"
+path = "src/bin/wasi-audio.rs"

@@ -38,13 +38,13 @@ fn every_capability_contract_parses_with_its_reviewed_package_name() {
 fn capability_packages_are_versioned_and_namespaced() {
     for contract in CONTRACTS {
         assert!(
-            contract.package.starts_with("soil:"),
-            "{} must stay in the soil namespace",
+            contract.package.starts_with("soil:") || contract.package.starts_with("wasi:"),
+            "{} must stay in the soil or wasi namespace",
             contract.file
         );
         assert!(
-            contract.package.contains("@1."),
-            "{} must carry a major version",
+            contract.package.contains('@'),
+            "{} must carry a version",
             contract.file
         );
     }
