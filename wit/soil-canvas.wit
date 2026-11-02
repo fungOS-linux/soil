@@ -1,0 +1,83 @@
+// Canvas is the cross-platform owner: window, compositor, layout, theme,
+// rendering and input lifecycle stay in the host. A Spore is logic/data and
+// asks the granted Canvas surface to present or to receive normalized input.
+//
+// Limits (host-enforced):
+// - one granted surface per Spore; the host selects extent and display
+// - one present and one input per invocation; no per-frame callback
+// - input is a bounded semantic key, never a raw keycode or device event
+// - no pixels, framebuffer, DRM handle, window handle, path or clock
+package soil:canvas@1.0.0;
+
+interface surface {
+  enum failure {
+    /// The Spore has no Canvas grant.
+    denied,
+    /// The owner surface is not ready to present or accept input.
+    not-ready,
+    /// The supplied generation is older than the current owner state.
+    stale,
+    /// A present/input/frame budget was exceeded.
+    over-budget,
+    /// Malformed argument; no raw keycodes are accepted.
+    invalid,
+    /// The surface was closed by the host or the Spore.
+    closed,
+    /// The Canvas owner or platform presenter failed.
+    backend,
+  }
+
+  /// Host-normalized phone, remote and media keys. `number` is 0..=9.
+  /// The host validates the range; unsupported keys are dropped host-side.
+  variant key {
+    up,
+    down,
+    left,
+    right,
+    select,
+    back,
+    home,
+    menu,
+    info,
+    number(u8),
+    star,
+    hash,
+    call,
+    end-call,
+    push-to-talk,
+    soft-left,
+    soft-right,
+    play-pause,
+    rewind,
+    fast-forward,
+    next,
+    previous,
+    volume-up,
+    volume-down,
+    mute,
+  }
+
+  record state {
+    /// Increases on target/navigation/focus/visibility changes.
+    generation: u64,
+    /// Host-selected logical extent; the Spore never chooses a display.
+    width: u32,
+    height: u32,
+    scale: f32,
+    focused: bool,
+    visible: bool,
+  }
+
+  /// Render the granted owner surface. The host retains the pixels.
+  present: func() -> result<state, failure>;
+
+  /// Read the current owner state without presenting.
+  observe: func() -> result<state, failure>;
+
+  /// Deliver one normalized event. `generation` must match the state the
+  /// caller last observed; a stale generation is refused, never reordered.
+  input: func(generation: u64, key: key) -> result<state, failure>;
+
+  /// Release the grant. Further calls return `closed`.
+  close: func() -> result<_, failure>;
+}

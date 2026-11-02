@@ -5,11 +5,12 @@ Spore may import and the ones it must not. It does not grant anything; a Spore
 gets a capability only when its signed manifest, the Mycelium grant, and host
 policy intersect.
 
-The canonical contracts for `soil:view`, `soil:time`, `soil:storage` and
-`soil:ble` live in [`wit/`](../wit) and are enforced by `crates/soil-abi`. The
-BLE host and the COLMI ring Spore also live here. The remaining runtime contract
-still lives in `canvas-model-host` (`wasmtime 34`, core no-import scenes +
-component-model Soil S1) until that crate is extracted; this document is the
+The canonical contracts for `soil:view`, `soil:time`, `soil:storage`,
+`soil:ble` and `soil:canvas` live in [`wit/`](../wit) and are enforced by
+`crates/soil-abi`. The BLE host, the COLMI ring Spore, the Canvas input
+normalizer and the Canvas decision record also live here. The remaining runtime
+contract still lives in `canvas-model-host` (`wasmtime 34`, core no-import scenes
++ component-model Soil S1) until that crate is extracted; this document is the
 review map for what else exists and what is missing.
 
 ## Rules
@@ -32,12 +33,13 @@ review map for what else exists and what is missing.
 
 | WIT package | Host object | Grant shape | v1? | Notes |
 |---|---|---|---|---|
-| `soil:surface@1` | window / compositor / seat | `soil:surface` | yes | Spore submits a bounded retained scene; polls normalized pointer/key/focus/resize/tick. No raw keycodes, display ids, or window creation. |
+| `soil:canvas@1` | Canvas owner surface (window / layout / renderer) | `soil:canvas` | yes | Spore presents or navigates the host-owned Canvas surface. Typed state, generation-bound input, no pixels or display handles. Canonical WIT: [`wit/soil-canvas.wit`](../wit/soil-canvas.wit). |
+| `soil:surface@1` | window / compositor / seat | `soil:surface` | **deferred** | Spore submits a bounded retained scene; only if a Spore or non-Canvas host ever needs its own UI. Not on the v1 path. |
 | `soil:gpu@1` | wgpu/Metal/Vulkan/GLES device | `soil:gpu` | yes | Bounded draw list with CID meshes. No shaders, pipelines, raw buffers, or compute. |
 | `soil:audio@1` | audio sink | `soil:audio.playback` | yes | Bounded PCM push, credit, underruns. Sink is host policy. |
 | `soil:mic@1` | audio capture | `soil:mic.capture` | yes | Bounded PCM chunks. Visible capture indicator; no background capture. Separate from playback so muting output never implies mic permission. |
 | `soil:camera@1` | camera capture | `soil:camera.capture` | yes | Still/low-rate frames only. Full-rate video belongs on `soil:stream`/producer path. No device paths or raw controls. |
-| `soil:input@1` | gamepad / remote / global input | `soil:input` | later | Surface already owns windowed pointer/key. This is for controllers and media keys when no surface is focused. |
+| `soil:input@1` | gamepad / remote / global input | `soil:input` | later | Canvas already owns focused keypad/remote input. This is only for global controllers/media keys when no Canvas surface is focused. |
 | `soil:ble@1` | BLE radio | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | yes | Eight verbs, Soil-issued handles, typed errors, local lease (signed lease pending). Canonical WIT: [`wit/soil-ble.wit`](../wit/soil-ble.wit); host: [`crates/soil-ble-host`](../crates/soil-ble-host). |
 | `soil:stream@1` | Unibus stream | `soil:stream` plus kind/schema grants | yes | Bounded subscription resource; read/write/credit; no endpoints, producer ids, or tokens. |
 | `soil:view@1` | host-owned web/Spore/retained view | `soil:view`, optional `soil:view.capture` | yes | Target ids only; bounded open/act/observe/capture. Host owns the browser/Spore engine, pixels and capture buffer. Canonical WIT: [`wit/soil-view.wit`](../wit/soil-view.wit). |
@@ -56,6 +58,12 @@ not a host capability. It should expose its API through `soil:api`, its media
 through `soil:stream`, and optionally use `soil:audio`/`soil:gpu`. Baking an
 application into the host ABI would break the capability model and make every
 other app depend on it.
+
+`soil:canvas` is the explicit exception: Canvas is the fleet's cross-platform
+shell, not a Spore. It ships with the host, owns the window/compositor/layout/
+renderer, and is the only way a Spore presents UI. `soil:surface` stays deferred
+until a Spore must draw its own interface or a host runs without Canvas. See
+[`docs/soil-canvas.md`](soil-canvas.md).
 
 ## Contract sketches
 
@@ -245,16 +253,19 @@ Any unsupported row is a named denial, not an empty success.
 ## Priorities
 
 1. **Canonical here:** `view` (WIT + state machine), `time` (WIT), `storage`
-   (WIT), `ble` (WIT + wasmtime/btleplug host + COLMI ring Spore).
-2. **Already in S1/runtime elsewhere:** `surface` (design), `gpu` (WIT), `audio`
-   playback (WIT), `stream` (design).
-3. **Next, highest value:** finish the BLE gaps (signed lease, DIS `ring-id`,
-   Unibus publish, Android JNI), then the host adapters and denial fixtures for
-   `time` and `storage`, then `api`, `mic`, `camera`. `audio` waits for a
-   concrete Spore that plays something.
-4. **After that:** `input` (media keys for the viewer), `notify`.
-5. **Only with a concrete workload:** `compute`, platform sensors, telephony,
-   raw display control.
+   (WIT), `ble` (WIT + wasmtime/btleplug host + COLMI ring Spore), `canvas`
+   (WIT + portable input normalizer + S22 reference host).
+2. **Already in S1/runtime elsewhere:** `gpu` (WIT), `audio` playback (WIT),
+   `stream` (design). `soil:surface` is deferred, not scheduled.
+3. **Next, highest value:** wire `soil:canvas-input` into the S22/Fire TV hosts,
+   finish the BLE gaps (signed lease, DIS `ring-id`, Unibus publish, Android
+   JNI), then the host adapters and denial fixtures for `time` and `storage`,
+   then `api`, `mic`, `camera`. `audio` waits for a concrete Spore that plays
+   something.
+4. **After that:** `notify`.
+5. **Only with a concrete workload:** `surface` (if a Spore/non-Canvas host
+   needs its own UI), `compute`, platform sensors, telephony, raw display
+   control.
 
 ## Non-goals for v1
 

@@ -8,10 +8,11 @@ Store** — publish by CID, resolve by CID + target, revoke, never re-sign.
 Status: **early.** The full runtime host is not implemented; the first
 capability host (BLE) and one real Spore do run. Nothing here is a shipped
 product surface yet. Canonical capability contracts for `soil:view`,
-`soil:time`, `soil:storage` and `soil:ble` live in [`wit/`](wit) and are enforced
-by `crates/soil-abi`. The broader design record lives in the `mycelium`
+`soil:time`, `soil:storage`, `soil:ble` and `soil:canvas` live in [`wit/`](wit)
+and are enforced by `crates/soil-abi`. Canvas is the cross-platform owner;
+`soil:surface` is deferred. The broader design record lives in the `mycelium`
 repository (`docs/soil-capabilities.md`, PR pending) and covers the remaining
-capability boundary (`soil:gpu`, `soil:audio`, `soil:stream`, `soil:surface`),
+capability boundary (`soil:gpu`, `soil:audio`, `soil:stream`),
 signed-Spore verification, and the target matrix (macOS, Linux, Android/Fire TV,
 CAT S22; tvOS is AOT-only because it forbids JIT).
 
@@ -38,6 +39,7 @@ Principles:
 | [`soil:time@1.0.0`](wit/soil-time.wit) | `soil:time` | WIT |
 | [`soil:storage@1.0.0`](wit/soil-storage.wit) | `soil:storage.read`, optional `soil:storage.write` | WIT |
 | [`soil:ble@1.0.0`](wit/soil-ble.wit) | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | WIT + host + COLMI ring Spore |
+| [`soil:canvas@1.0.0`](wit/soil-canvas.wit) | `soil:canvas` | WIT + portable input normalizer + S22 reference host |
 
 `cargo test --workspace` parses every package and asserts its reviewed name,
 interface and functions, so an accidental ABI change fails the build.
@@ -45,6 +47,11 @@ interface and functions, so an accidental ABI change fails the build.
 The first host-backed capability is BLE: [`crates/soil-ble-host`](crates/soil-ble-host)
 runs the [`spores/colmi-ring`](spores/colmi-ring) protocol Spore against a real
 radio on desktop. See [`spores/colmi-ring/README.md`](spores/colmi-ring/README.md).
+
+Canvas is the cross-platform owner; Spores never submit UI trees.
+[`crates/soil-canvas-input`](crates/soil-canvas-input) is the portable
+Linux/Android key normalizer, and [`docs/soil-canvas.md`](docs/soil-canvas.md)
+records the decision and host obligations.
 
 ## Development
 
