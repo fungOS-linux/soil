@@ -5,7 +5,8 @@
 // Limits (host-enforced):
 // - one granted surface per Spore; the host selects extent and display
 // - one present and one input per invocation; no per-frame callback
-// - input is a bounded semantic key, never a raw keycode or device event
+// - input is a bounded semantic key or one printable Unicode scalar, never a
+//   raw keycode, scan code or device event
 // - no pixels, framebuffer, DRM handle, window handle, path or clock
 package soil:canvas@1.0.0;
 
@@ -55,6 +56,25 @@ interface surface {
     volume-up,
     volume-down,
     mute,
+    /// One printable Unicode scalar supplied by the host text system. This is
+    /// the layout/IME-correct path for A-Z, accents and non-ASCII scripts.
+    character(char),
+    backspace,
+    delete,
+    tab,
+    escape,
+  }
+
+  record modifiers {
+    shift: bool,
+    control: bool,
+    alt: bool,
+    meta: bool,
+  }
+
+  record event {
+    key: key,
+    modifiers: modifiers,
   }
 
   record state {
@@ -76,7 +96,9 @@ interface surface {
 
   /// Deliver one normalized event. `generation` must match the state the
   /// caller last observed; a stale generation is refused, never reordered.
-  input: func(generation: u64, key: key) -> result<state, failure>;
+  /// Text arrives as `character`; raw keycodes and platform scan codes never
+  /// cross this boundary.
+  input: func(generation: u64, event: event) -> result<state, failure>;
 
   /// Release the grant. Further calls return `closed`.
   close: func() -> result<_, failure>;

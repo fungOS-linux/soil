@@ -62,7 +62,8 @@ implementation details, not contract terms.
 
 ## Input
 
-`key` is a closed variant covering phone, remote and media keys:
+`key` is a closed variant covering phone, remote and media keys, plus text and
+editing:
 
 ```
 up down left right select back home menu info
@@ -70,16 +71,30 @@ number(0..=9) star hash call end-call push-to-talk
 soft-left soft-right
 play-pause rewind fast-forward next previous
 volume-up volume-down mute
+character(char) backspace delete tab escape
 ```
 
-`crates/soil-canvas-input` maps Linux evdev and Android keycodes to that set,
-tracks held keys, allows repeats only for directions, rejects out-of-range
-digits, and clears held state on resync without inventing releases. The S22
-keymap is covered directly: digits, `*`, `#`, phone, soft keys, app-select,
-voice/PTT, media and volume. Unknown or edit keys are dropped host-side.
+Every event also carries `modifiers { shift, control, alt, meta }`. `character`
+is one printable Unicode scalar — A-Z, accents and non-ASCII scripts all use the
+same path. The host text system is authoritative; `soil-canvas-input::text`
+takes the composed character so keyboard layout, dead keys and IME are not
+re-invented in Canvas or Soil.
 
-Raw keycodes, device paths and {keydown,keyup} transport details never cross the
-capability boundary.
+`crates/soil-canvas-input` provides:
+
+- `text(ch, modifiers)` for layout/IME-correct Unicode input;
+- Linux evdev mappings for phone/remote semantics and for desktop keyboards
+  (`A-Z`, digits, punctuation, Shift, Backspace, Delete, Tab, Escape, arrows);
+- Android/Fire TV mappings for both remote keycodes and hardware keyboards;
+- macOS virtual-keycode mappings for US-layout printable keys and special keys
+  (text remains the preferred path because macOS layouts are configurable);
+- held-key tracking, repeat only for directions and text editing, rejection of
+  out-of-range digits, and resync that clears held state without inventing
+  releases.
+
+The S22 keymap is covered directly: digits, `*`, `#`, phone, soft keys,
+app-select, voice/PTT, media and volume. Raw keycodes, device paths and
+`{keydown,keyup}` transport details never cross the capability boundary.
 
 ## Host obligations
 
@@ -127,8 +142,8 @@ the definition.
 
 ## Open decisions
 
-- When to add pointer/scroll and text/soft-keyboard events to `soil:canvas`
-  (the current keypad path is sufficient for S22 and Fire TV).
+- When to add pointer/scroll to `soil:canvas`; text, modifiers and soft-keyboard
+  characters are now in the contract.
 - Whether media/volume keys repeat while held, or stay single-shot.
 - Whether the two S22 soft keys are owner-visible actions or host chrome; the
   contract exposes them so the host can decide without a new ABI.

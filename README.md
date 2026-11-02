@@ -50,8 +50,9 @@ radio on desktop. See [`spores/colmi-ring/README.md`](spores/colmi-ring/README.m
 
 Canvas is the cross-platform owner; Spores never submit UI trees.
 [`crates/soil-canvas-input`](crates/soil-canvas-input) is the portable
-Linux/Android key normalizer, and [`docs/soil-canvas.md`](docs/soil-canvas.md)
-records the decision and host obligations.
+Linux/Android/macOS input normalizer for D-pad, media and Unicode text events;
+[`docs/soil-canvas.md`](docs/soil-canvas.md) records the decision and host
+obligations.
 
 ## Development
 
