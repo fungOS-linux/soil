@@ -39,7 +39,7 @@ Principles:
 | [`soil:time@1.0.0`](wit/soil-time.wit) | `soil:time` | WIT |
 | [`soil:storage@1.0.0`](wit/soil-storage.wit) | `soil:storage.read`, optional `soil:storage.write` | WIT |
 | [`soil:ble@1.0.0`](wit/soil-ble.wit) | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | WIT + host + COLMI ring Spore |
-| [`soil:canvas@1.0.0`](wit/soil-canvas.wit) | `soil:canvas` | WIT + input normalizer + S22 runtime/host |
+| [`soil:canvas@1.0.0`](wit/soil-canvas.wit) | `soil:canvas` | WIT + input normalizer + S22 runtime + Android JNI |
 
 `cargo test --workspace` parses every package and asserts its reviewed name,
 interface and functions, so an accidental ABI change fails the build.
@@ -50,12 +50,15 @@ radio on desktop. See [`spores/colmi-ring/README.md`](spores/colmi-ring/README.m
 
 Canvas is the cross-platform owner; Spores never submit UI trees.
 [`crates/soil-runtime`](crates/soil-runtime) is the S22 reference host (wasmtime
-core runner, Canvas/battery/lid/estimate capabilities). The portable
+core runner, Canvas/battery/lid/estimate capabilities), and
+[`crates/soil-android`](crates/soil-android) is the JNI bridge used by the Canvas
+Android app. The portable
 Linux/Android/macOS input normalizer is
 [`crates/soil-canvas-input`](crates/soil-canvas-input);
 [`docs/soil-canvas.md`](docs/soil-canvas.md) records the decision and host
-obligations, and [`docs/soil-canvas-s22.md`](docs/soil-canvas-s22.md) records the
-S22 proving run.
+obligations, [`docs/soil-canvas-s22.md`](docs/soil-canvas-s22.md) records the S22
+proving run, and [`docs/android.md`](docs/android.md) records the first Android
+JNI proof.
 
 ## Development
 
