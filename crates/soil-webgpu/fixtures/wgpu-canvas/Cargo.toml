@@ -1,0 +1,15 @@
+[package]
+name = "soil-wgpu-canvas"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wgpu = { version = "29", default-features = false, features = ["wgsl"] }
+wgpu-wasi-webgpu = { git = "https://github.com/fungOS-linux/wgpu-wasi-webgpu", rev = "88938bb" }
+wit-bindgen = "0.57"

@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-wasi-webgpu-wasmtime = "0.5.0"
+wasi-webgpu-wasmtime = { git = "https://github.com/fungOS-linux/wasi-gfx-runtime", rev = "9624cae" }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 wasmtime = { version = "50", default-features = false, features = [
     "anyhow",

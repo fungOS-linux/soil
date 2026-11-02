@@ -11,3 +11,6 @@ target/
 
 # Checked-in wgpu 29 component fixture for the ignored GPU test.
 !crates/soil-webgpu/fixtures/wgpu-compute.wasm
+
+# Checked-in wgpu 29 Canvas presentation fixture.
+!crates/soil-webgpu/fixtures/wgpu-canvas.wasm

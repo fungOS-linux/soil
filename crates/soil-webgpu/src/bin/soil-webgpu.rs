@@ -1,12 +1,56 @@
 //! Run one component that imports `wasi:webgpu` and exports `run`.
 //!
-//! Usage: soil-webgpu <component.wasm>
+//! Usage:
+//!   soil-webgpu <component.wasm>
+//!   soil-webgpu --frame FILE.bgr [--size WxH] <component.wasm>
 
-use std::{env, fs, process::ExitCode};
+use std::{env, fs, path::Path, process::ExitCode};
 
 fn main() -> ExitCode {
-    let Some(path) = env::args().nth(1) else {
-        eprintln!("usage: soil-webgpu <component.wasm>");
+    let mut frame_path = None;
+    let mut size = (480, 640);
+    let mut component = None;
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--frame" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--frame requires FILE.bgr");
+                    return ExitCode::FAILURE;
+                };
+                frame_path = Some(path);
+            }
+            "--size" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--size requires WxH");
+                    return ExitCode::FAILURE;
+                };
+                let Some((width, height)) = value.split_once('x') else {
+                    eprintln!("--size requires WxH");
+                    return ExitCode::FAILURE;
+                };
+                let (Ok(width), Ok(height)) = (width.parse(), height.parse()) else {
+                    eprintln!("--size requires positive integers");
+                    return ExitCode::FAILURE;
+                };
+                if width == 0 || height == 0 {
+                    eprintln!("--size requires positive integers");
+                    return ExitCode::FAILURE;
+                }
+                size = (width, height);
+            }
+            _ => {
+                if component.replace(arg).is_some() {
+                    eprintln!(
+                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] <component.wasm>"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
+    let Some(path) = component else {
+        eprintln!("usage: soil-webgpu [--frame FILE.bgr] [--size WxH] <component.wasm>");
         return ExitCode::FAILURE;
     };
     let bytes = match fs::read(&path) {
@@ -16,18 +60,58 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match soil_webgpu::run_component_blocking(&bytes) {
-        Ok(0) => {
-            println!("webgpu: ok");
-            ExitCode::SUCCESS
+    let result = if frame_path.is_some() {
+        match soil_webgpu::run_component_capture(&bytes, size.0, size.1) {
+            Ok((status, frame)) => {
+                if status != 0 {
+                    eprintln!("webgpu: guest status {status}");
+                    return ExitCode::FAILURE;
+                }
+                let Some(frame) = frame else {
+                    eprintln!("webgpu: guest did not present a Canvas frame");
+                    return ExitCode::FAILURE;
+                };
+                match write_bgr(frame_path.as_deref().expect("frame path"), &frame) {
+                    Ok(()) => {
+                        println!(
+                            "webgpu: ok frame={} width={} height={} format=bgr24",
+                            frame_path.as_deref().unwrap_or_default(),
+                            frame.width,
+                            frame.height
+                        );
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
         }
-        Ok(status) => {
-            eprintln!("webgpu: guest status {status}");
-            ExitCode::FAILURE
-        }
+    } else {
+        soil_webgpu::run_component_blocking(&bytes).map(|status| {
+            if status == 0 {
+                println!("webgpu: ok");
+            } else {
+                eprintln!("webgpu: guest status {status}");
+            }
+        })
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("webgpu: {error:#}");
             ExitCode::FAILURE
         }
     }
+}
+
+fn write_bgr(path: &str, frame: &soil_webgpu::CanvasFrame) -> anyhow::Result<()> {
+    let path = Path::new(path);
+    let mut bgr = Vec::with_capacity(frame.width as usize * frame.height as usize * 3);
+    for pixel in frame.rgba.as_chunks::<4>().0 {
+        bgr.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+    }
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    fs::write(&temporary, bgr)?;
+    fs::rename(temporary, path)?;
+    Ok(())
 }

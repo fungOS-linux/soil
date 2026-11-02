@@ -2951,8 +2951,7 @@ dependencies = [
 [[package]]
 name = "wasi-gfx-runtime-shared"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b6471cc31fbe5f1ace54181c8ec6aa61ecdc1327ae6efbb0a7c03c08713c014"
+source = "git+https://github.com/fungOS-linux/wasi-gfx-runtime?rev=9624cae#9624caec15e009644d2610897764d3ec1cdf807a"
 dependencies = [
  "async-broadcast",
  "futures",
@@ -2962,8 +2961,7 @@ dependencies = [
 [[package]]
 name = "wasi-webgpu-wasmtime"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2294f34acbfa100e60ddbb97290ffaa2e2fe57571bf4280f63ec5dafe6537b9"
+source = "git+https://github.com/fungOS-linux/wasi-gfx-runtime?rev=9624cae#9624caec15e009644d2610897764d3ec1cdf807a"
 dependencies = [
  "async-broadcast",
  "callback-future",

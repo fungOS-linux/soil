@@ -1,0 +1,18 @@
+package soil:canvas-gpu@0.1.0;
+
+/// Presentation-only bridge from a standard `wasi:webgpu` texture to the
+/// host-owned Canvas. This does not create a second GPU device ABI and does
+/// not expose a window or swapchain to the guest.
+interface surface {
+  use wasi:webgpu/webgpu@0.3.0-rc.2.{gpu-texture};
+
+  /// Host-selected physical Canvas extent.
+  size: func() -> tuple<u32, u32>;
+
+  /// Copy one guest-rendered texture into Canvas's next owner frame.
+  present: func(texture: borrow<gpu-texture>) -> result<_, string>;
+}
+
+world imports {
+  import surface;
+}

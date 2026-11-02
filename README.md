@@ -57,7 +57,9 @@ core runner, Canvas/battery/lid/estimate capabilities), and
 Android app. The portable
 WebGPU host is [`crates/soil-webgpu`](crates/soil-webgpu): raw
 `wasi:webgpu` components and real wgpu 29 programs both request a GPU
-adapter/device, run WGSL compute and read the result back through `wgpu-core`. See [`docs/soil-webgpu.md`](docs/soil-webgpu.md).
+adapter/device, run WGSL compute and render passes, read results back through
+`wgpu-core`, and hand a standard WebGPU texture to a host-owned Canvas frame
+through the narrow `soil:canvas-gpu` presentation bridge. See [`docs/soil-webgpu.md`](docs/soil-webgpu.md).
 The draft audio sink is [`crates/wasi-audio-wasmtime`](crates/wasi-audio-wasmtime):
 a real component pushes bounded PCM into a cpal host. See
 [`docs/wasi-audio.md`](docs/wasi-audio.md). Guest code uses the umbrella

@@ -6,12 +6,12 @@
 //! else. Adapter/device creation, validation, limits and queue submission stay
 //! in the host through `wgpu-core`; no native handle crosses the boundary.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use wasi_webgpu_wasmtime::reexports::{wgpu_core, wgpu_types};
 use wasi_webgpu_wasmtime::{WasiWebGpuCtx, WasiWebGpuCtxView, WasiWebGpuOptions};
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -21,8 +21,76 @@ wasmtime::component::bindgen!({
     exports: {
         "run": async,
     },
+    with: {
+        "wasi:webgpu/webgpu@0.3.0-rc.2.gpu-texture": wasi_webgpu_wasmtime::Texture,
+    },
     require_store_data_send: true,
 });
+
+/// One composed Canvas frame, tightly packed top-to-bottom RGBA8.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanvasFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Host-side destination for a guest `soil:canvas-gpu` frame.
+///
+/// Canvas owns the actual window and final composition; this trait only lets
+/// the WebGPU host hand over a completed frame. It is never called from inside
+/// a guest callback.
+pub trait CanvasGpuPresenter: Send {
+    fn size(&self) -> (u32, u32);
+    fn present(&mut self, frame: CanvasFrame) -> Result<()>;
+}
+
+struct DiscardPresenter {
+    size: (u32, u32),
+}
+
+impl CanvasGpuPresenter for DiscardPresenter {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn present(&mut self, _frame: CanvasFrame) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// A presenter that retains exactly one frame for tests and CLI output.
+#[derive(Clone, Default)]
+pub struct FrameCapture {
+    frame: Arc<Mutex<Option<CanvasFrame>>>,
+    size: (u32, u32),
+}
+
+impl FrameCapture {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            frame: Arc::new(Mutex::new(None)),
+            size: (width, height),
+        }
+    }
+
+    pub fn take(&self) -> Option<CanvasFrame> {
+        self.frame.lock().expect("frame capture poisoned").take()
+    }
+}
+
+impl CanvasGpuPresenter for FrameCapture {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn present(&mut self, frame: CanvasFrame) -> Result<()> {
+        let mut slot = self.frame.lock().expect("frame capture poisoned");
+        anyhow::ensure!(slot.is_none(), "canvas present budget");
+        *slot = Some(frame);
+        Ok(())
+    }
+}
 
 /// Host state for one component instance.
 pub struct WebGpuHost {
@@ -30,10 +98,15 @@ pub struct WebGpuHost {
     table: ResourceTable,
     options: WasiWebGpuOptions,
     wasi: WasiCtx,
+    presenter: Box<dyn CanvasGpuPresenter>,
 }
 
 impl WebGpuHost {
     pub fn new() -> Result<Self> {
+        Self::with_presenter(Box::new(DiscardPresenter { size: (480, 640) }))
+    }
+
+    pub fn with_presenter(presenter: Box<dyn CanvasGpuPresenter>) -> Result<Self> {
         let descriptor = wgpu_types::InstanceDescriptor {
             backends: wgpu_types::Backends::all(),
             flags: wgpu_types::InstanceFlags::from_build_config(),
@@ -47,6 +120,7 @@ impl WebGpuHost {
             table: ResourceTable::new(),
             options: WasiWebGpuOptions::default(),
             wasi: WasiCtxBuilder::new().build(),
+            presenter,
         })
     }
 }
@@ -57,6 +131,26 @@ impl WasiView for WebGpuHost {
             ctx: &mut self.wasi,
             table: &mut self.table,
         }
+    }
+}
+
+impl soil::canvas_gpu::surface::Host for WebGpuHost {
+    fn size(&mut self) -> (u32, u32) {
+        self.presenter.size()
+    }
+
+    fn present(
+        &mut self,
+        texture: wasmtime::component::Resource<wasi_webgpu_wasmtime::Texture>,
+    ) -> std::result::Result<(), String> {
+        let image = wasi_webgpu_wasmtime::read_texture_rgba(&self.instance, &self.table, texture)
+            .map_err(|e| e.to_string())?;
+        let frame = CanvasFrame {
+            width: image.width,
+            height: image.height,
+            rgba: image.rgba,
+        };
+        self.presenter.present(frame).map_err(|e| e.to_string())
     }
 }
 
@@ -93,6 +187,9 @@ impl WebGpuRuntime {
         wasi_webgpu_wasmtime::add_to_linker(&mut linker)
             .map_err(anyhow::Error::from)
             .context("link wasi:webgpu")?;
+        soil::canvas_gpu::surface::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+            .map_err(anyhow::Error::from)
+            .context("link soil:canvas-gpu")?;
         Ok(Self { engine, linker })
     }
 
@@ -107,10 +204,19 @@ impl WebGpuRuntime {
     /// Compile and run one guest component. The guest must export
     /// `run: async func() -> u32`; all other imports are denied by the linker.
     pub async fn run_component(&self, bytes: &[u8]) -> Result<u32> {
+        self.run_component_with_presenter(bytes, Box::new(DiscardPresenter { size: (480, 640) }))
+            .await
+    }
+
+    pub async fn run_component_with_presenter(
+        &self,
+        bytes: &[u8],
+        presenter: Box<dyn CanvasGpuPresenter>,
+    ) -> Result<u32> {
         let component = Component::new(&self.engine, bytes)
             .map_err(anyhow::Error::from)
             .context("compile WebGPU component")?;
-        let mut store = Store::new(&self.engine, WebGpuHost::new()?);
+        let mut store = Store::new(&self.engine, WebGpuHost::with_presenter(presenter)?);
         let instance = Runner::instantiate_async(&mut store, &component, &self.linker)
             .await
             .map_err(anyhow::Error::from)
@@ -130,6 +236,19 @@ impl WebGpuRuntime {
 pub fn run_component_blocking(bytes: &[u8]) -> Result<u32> {
     let runtime = WebGpuRuntime::new()?;
     pollster::block_on(runtime.run_component(bytes))
+}
+
+/// Run with a capture sink and return both guest status and the first frame.
+pub fn run_component_capture(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(u32, Option<CanvasFrame>)> {
+    let runtime = WebGpuRuntime::new()?;
+    let capture = FrameCapture::new(width, height);
+    let status =
+        pollster::block_on(runtime.run_component_with_presenter(bytes, Box::new(capture.clone())))?;
+    Ok((status, capture.take()))
 }
 
 #[cfg(test)]
