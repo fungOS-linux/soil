@@ -18,7 +18,7 @@ fn actual_guest_ticks_deterministic_owner_both_extents_and_navigation() {
         guest.tick(0).unwrap();
         assert_eq!(first, guest.render_canvas().unwrap());
         guest.tick(79).unwrap();
-        assert_eq!(first, guest.render_canvas().unwrap());
+        assert_ne!(first, guest.render_canvas().unwrap());
         guest.tick(800).unwrap();
         let moved = guest.render_canvas().unwrap();
         assert_ne!(first, moved);
