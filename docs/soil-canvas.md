@@ -103,6 +103,11 @@ The first real host is the S22 native Linux track:
 - `cat-drm-present` remains the sole DRM owner; Soil writes atomic BGR24 frames;
 - HAL keypad transport → host normalization → guest `input` → Canvas owner.
 
+The S22 worktree still carries its earlier seven-key normalizer. It must switch
+to `crates/soil-canvas-input` before digits, media, call, soft-key or PTT events
+reach the owner; the crate already covers the S22 device-tree keymap. That wiring
+is the next integration step, not a contract change.
+
 The `.089` inner scanout regression is fixed. Physical acceptance of colour
 order, stride, outer readability and both presenters still belongs to the
 parent/user; producer correctness is not scanout proof.
