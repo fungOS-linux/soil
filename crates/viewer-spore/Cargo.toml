@@ -1,0 +1,13 @@
+[package]
+name = "viewer-spore"
+description = "Presentation state and normalized remote actions for the Soil Viewer Spore"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+wit-parser = "0.233"

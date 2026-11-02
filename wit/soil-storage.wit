@@ -1,0 +1,36 @@
+// Host content-addressed asset cache.
+//
+// A Spore names a CID, never a path, directory, URL or handle. `read` is
+// granted by `soil:storage.read` (the default) and `write` by the separate
+// `soil:storage.write` grant. Writes reach a bounded host cache, never the
+// asset store or the Spore Store.
+package soil:storage@1.0.0;
+
+interface storage {
+  enum error {
+    /// The requested grant was not linked for this Spore.
+    denied,
+    /// The CID is not present in the host cache.
+    not-found,
+    /// The object, or the write, exceeds the host/caller budget. Never
+    /// silently truncate.
+    over-budget,
+    /// The CID is malformed or is not a content address.
+    invalid,
+    /// The host cache failed to read or commit the object.
+    io,
+  }
+
+  /// Read the bytes named by a CIDv1 content address.
+  ///
+  /// `max-bytes` bounds the response: an object larger than the limit is
+  /// `over-budget`, never a partial payload. `max-bytes == 0` is `invalid`.
+  read: func(cid: string, max-bytes: u32) -> result<list<u8>, error>;
+
+  /// Commit bytes to the bounded host cache under a CIDv1 address.
+  ///
+  /// Requires `soil:storage.write`; without it the call is `denied`. The host
+  /// may refuse an oversized or over-capacity write with `over-budget`. This
+  /// never mutates the published asset store.
+  write: func(cid: string, data: list<u8>) -> result<_, error>;
+}

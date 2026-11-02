@@ -5,10 +5,11 @@ Spore may import and the ones it must not. It does not grant anything; a Spore
 gets a capability only when its signed manifest, the Mycelium grant, and host
 policy intersect.
 
-The runtime contract already lives in `canvas-model-host` (`wasmtime 34`,
-core no-import scenes + component-model Soil S1). The canonical WIT packages
-should move here once the runtime crate is extracted; until then this is the
-review map for what exists and what is missing.
+The canonical contracts for `soil:view`, `soil:time` and `soil:storage` live in
+[`wit/`](../wit) and are enforced by `crates/soil-abi`. The remaining runtime
+contract still lives in `canvas-model-host` (`wasmtime 34`, core no-import scenes
++ component-model Soil S1) until that crate is extracted; this document is the
+review map for what else exists and what is missing.
 
 ## Rules
 
@@ -38,9 +39,10 @@ review map for what exists and what is missing.
 | `soil:input@1` | gamepad / remote / global input | `soil:input` | later | Surface already owns windowed pointer/key. This is for controllers and media keys when no surface is focused. |
 | `soil:ble@1` | BLE radio | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | yes | Eight verbs, Soil-issued handles, signed lease for the radio. |
 | `soil:stream@1` | Unibus stream | `soil:stream` plus kind/schema grants | yes | Bounded subscription resource; read/write/credit; no endpoints, producer ids, or tokens. |
+| `soil:view@1` | host-owned web/Spore/retained view | `soil:view`, optional `soil:view.capture` | yes | Target ids only; bounded open/act/observe/capture. Host owns the browser/Spore engine, pixels and capture buffer. Canonical WIT: [`wit/soil-view.wit`](../wit/soil-view.wit). |
 | `soil:api@1` | authenticated upstream API | `soil:api` plus service/operation grant | yes | Host-mediated request/response. Soil holds the credential and mints/brokers delegated tokens; the Spore never sees them. |
-| `soil:storage@1` | content-addressed assets | `soil:storage.read`, optional `soil:storage.write` | yes | CIDs, never paths. Read-only cache by default. |
-| `soil:time@1` | host monotonic clock | `soil:time` | yes | Monotonic milliseconds and host ticks only. No wall clock, sleep, or timer thread. |
+| `soil:storage@1` | content-addressed assets | `soil:storage.read`, optional `soil:storage.write` | yes | CIDs, never paths. Read-only cache by default. Canonical WIT: [`wit/soil-storage.wit`](../wit/soil-storage.wit). |
+| `soil:time@1` | host monotonic clock | `soil:time` | yes | Monotonic milliseconds and host ticks only. No wall clock, sleep, or timer thread. Canonical WIT: [`wit/soil-time.wit`](../wit/soil-time.wit). |
 | `soil:notify@1` | host notification UI | `soil:notify` | later | Rate-limited, user-visible. Never a background toast loop. |
 | `soil:display@1` | display enumeration/placement | — | no | Soil owns displays. Spore asks for a surface purpose, not a display id. |
 | `soil:net@1` | raw sockets/DNS | — | no | Use `soil:api` or `soil:stream`. No ambient HTTP, redirects, or arbitrary hosts. |
@@ -187,6 +189,9 @@ sees that token.
 
 ### `soil:storage@1`
 
+Canonical contract: [`wit/soil-storage.wit`](../wit/soil-storage.wit). The sketch
+below is retained for review history; the WIT file wins.
+
 ```wit
 // CIDs only; no paths, directory listing, or arbitrary URLs.
 package soil:storage@1.0.0;
@@ -201,6 +206,11 @@ interface storage {
 ```
 
 ### `soil:time@1`
+
+Canonical contract: [`wit/soil-time.wit`](../wit/soil-time.wit). The sketch below
+is retained for review history; the WIT file wins. The grant question is settled:
+`soil:time` is a grant, matching the no-ambient-authority rule, so both functions
+return `denied` without it.
 
 ```wit
 // Monotonic only. No wall clock, timezone, or sleeping thread.
@@ -227,16 +237,21 @@ interface time {
 | stream | Unibus/QUIC | Unibus/QUIC | Unibus/QUIC | Unibus/QUIC | WebTransport, explicit WebSocket fallback |
 | api | host HTTP + token exchange | same | same | same | BFF/host-mediated; no token in wasm |
 | storage | local CID cache | local CID cache | app cache | bundle only | OPFS/Cache Storage via host |
+| time | `mach_absolute_time` | `CLOCK_MONOTONIC` | `SystemClock.elapsedRealtime` | `mach_absolute_time` | `performance.now` |
 
 Any unsupported row is a named denial, not an empty success.
 
 ## Priorities
 
-1. **Already in S1/runtime:** `surface` (design), `gpu` (WIT), `audio` playback
-   (WIT), `ble` (component + mock), `stream` (design).
-2. **Next, highest value:** `api`, `storage`, `time`, `mic`, `camera`.
-3. **After that:** `input`, `notify`.
-4. **Only with a concrete workload:** `compute`, platform sensors, telephony,
+1. **Canonical here:** `view` (WIT + state machine), `time` (WIT), `storage`
+   (WIT).
+2. **Already in S1/runtime elsewhere:** `surface` (design), `gpu` (WIT), `audio`
+   playback (WIT), `ble` (component + mock), `stream` (design).
+3. **Next, highest value:** the host adapters and denial fixtures for `time` and
+   `storage`, then `api`, `mic`, `camera`. `audio` waits for a concrete Spore
+   that plays something.
+4. **After that:** `input` (media keys for the viewer), `notify`.
+5. **Only with a concrete workload:** `compute`, platform sensors, telephony,
    raw display control.
 
 ## Non-goals for v1
@@ -257,6 +272,11 @@ Any unsupported row is a named denial, not an empty success.
   `soil:audio.capture`; separate is safer for grants and privacy.
 - Whether `soil:camera` ever carries full-rate video, or only still/low-rate
   frames with `soil:stream` for video.
-- Whether `soil:time` is a grant or an always-available read-only primitive.
+- What the `soil:storage` write budget and eviction policy are. The contract
+  bounds writes per call and leaves total cache capacity to host policy.
 - Whether `soil:api` is the stable public name or a typed per-service package
   (`marbles:views`, `isochrone:...`) is preferred at the call site.
+
+Resolved: `soil:time` is a grant, not an always-available primitive. Both
+`monotonic-ms` and `tick` return `denied` without `soil:time`; hosts must not
+silently provide an ambient clock.

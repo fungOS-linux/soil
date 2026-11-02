@@ -1,0 +1,61 @@
+// Host-owned web/Spore/retained view.
+//
+// The target is an id in the host's reviewed index, never an arbitrary URL,
+// path or CID supplied by wasm. The host owns the browser/Spore engine, pixels
+// and capture buffer; the Spore owns presentation state and normalized actions.
+package soil:view@1.0.0;
+
+interface viewer {
+  enum kind {
+    web,
+    spore,
+    retained,
+  }
+
+  record target {
+    id: string,
+    kind: kind,
+    title: string,
+  }
+
+  record state {
+    target: target,
+    position: u64, // slide/page/step, zero-based
+    count: u64,
+    loading: bool,
+    fullscreen: bool,
+    generation: u64,
+  }
+
+  enum action {
+    next,
+    previous,
+    first,
+    last,
+    select,
+    back,
+    fullscreen-on,
+    fullscreen-off,
+    fullscreen-toggle,
+  }
+
+  enum error {
+    denied,
+    unknown-target,
+    not-ready,
+    unsupported,
+    over-budget,
+    capture-denied,
+    invalid,
+    closed,
+  }
+
+  resource view {
+    act: func(action: action) -> result<state, error>;
+    observe: func(timeout-ms: u32) -> result<state, error>;
+    capture: func(max-bytes: u32) -> result<list<u8>, error>; // PNG
+    close: func() -> result<_, error>;
+  }
+
+  open: func(target: string) -> result<view, error>;
+}
