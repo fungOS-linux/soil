@@ -14,13 +14,29 @@ fn main() {
     }
 }
 fn publish(guest: &mut GuestScene, path: &Path, clock: Option<std::time::Instant>) -> Result<()> {
+    let t0 = std::time::Instant::now();
     if let Some(start) = clock {
         guest.tick(u64::try_from(start.elapsed().as_millis())?)?;
     }
+    let t1 = std::time::Instant::now();
     let frame = guest.render_canvas()?;
+    let t2 = std::time::Instant::now();
+    let bgr = frame.to_bgr24()?;
+    let t3 = std::time::Instant::now();
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&temporary, frame.to_bgr24()?)?;
+    std::fs::write(&temporary, bgr)?;
     std::fs::rename(&temporary, path)?;
+    let t4 = std::time::Instant::now();
+    if std::env::var_os("SOIL_CANVAS_TIMING").is_some() {
+        eprintln!(
+            "timing tick={:?} render={:?} bgr={:?} write={:?} total={:?}",
+            t1 - t0,
+            t2 - t1,
+            t3 - t2,
+            t4 - t3,
+            t4 - t0
+        );
+    }
     Ok(())
 }
 fn run() -> Result<()> {
@@ -198,6 +214,7 @@ fn run() -> Result<()> {
     let mut last_failure = None;
     let clock = animation.then(std::time::Instant::now);
     for i in 0..frames {
+        let frame_start = std::time::Instant::now();
         if let Some(keypad) = &mut keypad {
             match keypad.poll() {
                 Ok(keys) => {
@@ -233,7 +250,14 @@ fn run() -> Result<()> {
             );
         }
         if i + 1 < frames {
-            std::thread::sleep(Duration::from_millis(interval));
+            // interval is a frame period, not a sleep-after-work budget. Keep
+            // the cadence when rendering is cheaper than the period; run flat
+            // out when it is not.
+            let period = Duration::from_millis(interval);
+            let elapsed = frame_start.elapsed();
+            if elapsed < period {
+                std::thread::sleep(period - elapsed);
+            }
         }
     }
     println!(
