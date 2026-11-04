@@ -24,9 +24,16 @@ cannot run cooperatively.
 
 ## cpal
 
-The cpal fork adds a `wasm32-wasip1-threads` host backend:
+The `cpal-soil` crate adds a `wasm32-wasip1-threads` host using cpal's
+public `custom` host API. An application changes only one line:
 
-- `cpal::default_host()` is the Soil host on this target;
+```rust
+let host = cpal_soil::host();
+```
+
+Then:
+
+- `host.default_output_device()` is the Soil device;
 - `build_output_stream` creates a guest-owned callback thread;
 - `Stream::play()` starts that thread;
 - the callback fills a fixed block;
@@ -39,8 +46,10 @@ The host owns a cpal output stream and a bounded lock-free ring. Its audio
 callback only drains the ring. It never calls Wasm, never borrows a guest
 `Store`, and never holds a guest lock.
 
-The cpal application source is unchanged. The only difference is the target and
-the cpal fork.
+Apart from `cpal_soil::host()` instead of `cpal::default_host()`, the cpal
+application source is unchanged. The crate returns cpal's native default host on
+non-WASI targets, so the same line works for native and threaded Wasm builds. No
+cpal fork is required.
 
 ## Run
 

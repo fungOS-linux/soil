@@ -7,7 +7,7 @@ use std::{f32::consts::TAU, thread, time::Duration};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 fn main() {
-    let host = cpal::default_host();
+    let host = cpal_soil::host();
     let device = host.default_output_device().expect("default output device");
     let config = device
         .default_output_config()

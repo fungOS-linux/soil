@@ -90,7 +90,8 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.2"
-source = "git+https://github.com/fungOS-linux/cpal?rev=39c02c2#39c02c2e737a62b5d6583213a3fcb4057de94e8e"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f02e8d0327b42d3e2e4ab2119af397344eb9fc54a34bf0ddeaa1277af8681f1"
 dependencies = [
  "alsa",
  "block2",
@@ -114,6 +115,13 @@ dependencies = [
  "web-sys",
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "cpal-soil"
+version = "0.1.0"
+dependencies = [
+ "cpal",
 ]
 
 [[package]]
@@ -548,6 +556,7 @@ name = "soil-cpal-tone"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "cpal-soil",
 ]
 
 [[package]]
