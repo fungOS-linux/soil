@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/soil-abi", "crates/soil-ble-host", "crates/soil-canvas-input", "crates/soil-android", "crates/soil-runtime", "crates/soil-webgpu", "crates/soil-process", "crates/cpal-soil", "crates/wasi-audio-wasmtime", "crates/soil-sdk", "crates/soil-sdk-audio", "crates/viewer-spore"]
+members = ["crates/soil-abi", "crates/soil-ble-host", "crates/soil-canvas-input", "crates/soil-android", "crates/soil-runtime", "crates/soil-webgpu", "crates/soil-process", "crates/cpal-soil", "crates/fungos-content", "crates/wasi-audio-wasmtime", "crates/soil-sdk", "crates/soil-sdk-audio", "crates/viewer-spore"]
 exclude = ["spores/colmi-ring", "crates/soil-webgpu/fixtures/hello-compute", "crates/soil-webgpu/fixtures/wgpu-compute", "crates/soil-webgpu/fixtures/wgpu-canvas", "crates/wasi-audio-wasmtime/fixtures/tone", "crates/soil-process/fixtures/cpal-tone"]
 resolver = "3"
 
