@@ -97,3 +97,5 @@ at your option.
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
+
+The threaded process lane is documented in [`docs/soil-process.md`](docs/soil-process.md). Ordinary cpal callback programs can run there with a guest-owned audio thread; the host device callback never enters Wasm.

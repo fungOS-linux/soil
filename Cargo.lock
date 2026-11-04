@@ -2537,6 +2537,17 @@ name = "soil-canvas-input"
 version = "0.1.0"
 
 [[package]]
+name = "soil-process"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cpal",
+ "rtrb",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "soil-runtime"
 version = "0.1.0"
 dependencies = [

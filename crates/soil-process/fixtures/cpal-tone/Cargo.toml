@@ -1,0 +1,14 @@
+[package]
+name = "soil-cpal-tone"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+cpal = { git = "https://github.com/fungOS-linux/cpal", rev = "4ce323f", default-features = false }
+
+[[bin]]
+name = "soil-cpal-tone"
+path = "src/main.rs"
