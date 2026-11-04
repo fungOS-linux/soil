@@ -6,8 +6,8 @@ gets a capability only when its signed manifest, the Mycelium grant, and host
 policy intersect.
 
 The canonical contracts for `soil:view`, `soil:time`, `soil:storage`,
-`soil:ble` and `soil:canvas` live in [`wit/`](../wit) and are enforced by
-`crates/soil-abi`. The BLE host, the COLMI ring Spore, the S22 runtime, the
+`soil:vfs`, `soil:index`, `soil:ble` and `soil:canvas` live in [`wit/`](../wit)
+and are enforced by `crates/soil-abi`. The BLE host, the COLMI ring Spore, the S22 runtime, the
 Canvas input normalizer and the Canvas decision record also live here. The remaining runtime
 contract still lives in `canvas-model-host` (`wasmtime 50`, core no-import scenes
 + component-model Soil S1) until that crate is extracted; this document is the
@@ -22,7 +22,7 @@ review map for what else exists and what is missing.
 3. **Bounded and polled.** No callbacks into wasm. Every call has a deadline,
    byte/item limit, and typed error.
 4. **Soil owns the platform object.** GPU device, camera device, audio device,
-   window, radio, and bus connection stay in the host.
+   window, radio, bus connection, VFS namespace and derived index stay in the host.
 5. **No second ACL.** Mycelium owns identity/grants; Unibus enforces on the
    bus; Soil enforces capability linking. A connector or Spore never mints
    authority.
@@ -45,6 +45,8 @@ review map for what else exists and what is missing.
 | `soil:view@1` | host-owned web/Spore/retained view | `soil:view`, optional `soil:view.capture` | yes | Target ids only; bounded open/act/observe/capture. Host owns the browser/Spore engine, pixels and capture buffer. Canonical WIT: [`wit/soil-view.wit`](../wit/soil-view.wit). |
 | `soil:api@1` | authenticated upstream API | `soil:api` plus service/operation grant | yes | Host-mediated request/response. Soil holds the credential and mints/brokers delegated tokens; the Spore never sees them. |
 | `soil:storage@1` | content-addressed assets | `soil:storage.read`, optional `soil:storage.write` | yes | CIDs, never paths. Read-only cache by default. Canonical WIT: [`wit/soil-storage.wit`](../wit/soil-storage.wit). |
+| `soil:vfs@1` | workspace namespace and bounded reads | `soil:vfs` | yes | Canonical workspace-relative paths, `ContentId`, paged listing and range reads. No host paths or providers. Canonical WIT: [`wit/soil-vfs.wit`](../wit/soil-vfs.wit). |
+| `soil:index@1` | derived browse/search index | `soil:index` | yes | Rebuildable, generationed, returns paths and snippets; never authority. Canonical WIT: [`wit/soil-index.wit`](../wit/soil-index.wit). |
 | `soil:time@1` | host monotonic clock | `soil:time` | yes | Monotonic milliseconds and host ticks only. No wall clock, sleep, or timer thread. Canonical WIT: [`wit/soil-time.wit`](../wit/soil-time.wit). |
 | `soil:notify@1` | host notification UI | `soil:notify` | later | Rate-limited, user-visible. Never a background toast loop. |
 | `soil:display@1` | display enumeration/placement | — | no | Soil owns displays. Spore asks for a surface purpose, not a display id. |
@@ -106,6 +108,9 @@ interface camera {
 
 A full-rate camera should not copy every frame through wasm. Use a producer
 path on `soil:stream` or `soil:surface` and let Soil own the buffer.
+
+The browser/finder design built on `soil:vfs` and `soil:index` is in
+[`docs/file-browser.md`](file-browser.md).
 
 ### `soil:mic@1`
 
@@ -259,7 +264,9 @@ Any unsupported row is a named denial, not an empty success.
    [`docs/soil-webgpu.md`](soil-webgpu.md)) and draft `wasi:audio@0.1.0`
    (host + tone proof, [`docs/wasi-audio.md`](wasi-audio.md)). `stream` is
    design. `soil:surface` is deferred, not scheduled.
-3. **Next, highest value:** wire `soil:canvas-input` into the S22/Fire TV hosts,
+3. **Next, highest value:** implement the `soil:vfs`/`soil:index` host adapter
+   over `fungos-vfs` and a small read-only file-browser Spore, then wire
+   `soil:canvas-input` into the S22/Fire TV hosts,
    finish the BLE gaps (signed lease, DIS `ring-id`, Unibus publish, Android
    JNI), then the host adapters and denial fixtures for `time` and `storage`,
    then `api`, `mic`, `camera`. `audio` waits for a concrete Spore that plays

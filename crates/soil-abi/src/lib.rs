@@ -39,6 +39,18 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("storage", &["read", "write"])],
     },
     Contract {
+        file: "wit/soil-vfs.wit",
+        source: include_str!("../../../wit/soil-vfs.wit"),
+        package: "soil:vfs@1.0.0",
+        interfaces: &[("vfs", &["ls", "stat", "read"])],
+    },
+    Contract {
+        file: "wit/soil-index.wit",
+        source: include_str!("../../../wit/soil-index.wit"),
+        package: "soil:index@1.0.0",
+        interfaces: &[("index", &["browse", "search", "state"])],
+    },
+    Contract {
         file: "wit/soil-canvas.wit",
         source: include_str!("../../../wit/soil-canvas.wit"),
         package: "soil:canvas@1.0.0",
