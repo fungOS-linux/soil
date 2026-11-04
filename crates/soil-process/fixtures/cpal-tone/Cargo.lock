@@ -90,7 +90,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.2"
-source = "git+https://github.com/fungOS-linux/cpal?rev=4ce323f#4ce323fc584f2f82640070eed9b4fab724573b37"
+source = "git+https://github.com/fungOS-linux/cpal?rev=39c02c2#39c02c2e737a62b5d6583213a3fcb4057de94e8e"
 dependencies = [
  "alsa",
  "block2",

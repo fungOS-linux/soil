@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-cpal = { git = "https://github.com/fungOS-linux/cpal", rev = "4ce323f", default-features = false }
+cpal = { git = "https://github.com/fungOS-linux/cpal", rev = "39c02c2", default-features = false }
 
 [[bin]]
 name = "soil-cpal-tone"
