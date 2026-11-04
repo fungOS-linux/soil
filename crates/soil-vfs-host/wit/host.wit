@@ -1,0 +1,6 @@
+package soil:vfs-host@0.1.0;
+
+world host {
+  import soil:vfs/vfs@1.0.0;
+  import soil:index/index@1.0.0;
+}

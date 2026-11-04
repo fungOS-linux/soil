@@ -48,7 +48,7 @@ pub const CONTRACTS: &[Contract] = &[
         file: "wit/soil-index.wit",
         source: include_str!("../../../wit/soil-index.wit"),
         package: "soil:index@1.0.0",
-        interfaces: &[("index", &["browse", "search", "state"])],
+        interfaces: &[("index", &["browse", "search", "state", "refresh"])],
     },
     Contract {
         file: "wit/soil-canvas.wit",

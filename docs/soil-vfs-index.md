@@ -27,7 +27,8 @@ locator can change without changing the entry or the index key.
    `vfs.ls`.
 4. `vfs.read(path, offset, length)` for preview bytes, thumbnails or a paged
    editor.
-5. `index.state()` to detect a stale/rebuilt generation.
+5. `index.state()` to detect a stale/rebuilt generation, or `index.refresh()`
+   to rebuild explicitly.
 
 `vfs.ls` is path-ordered and is the authoritative child list. `index.browse`
 may use a faster derived ordering, but it returns paths only; the Spore must

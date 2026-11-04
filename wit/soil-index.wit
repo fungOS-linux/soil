@@ -48,6 +48,8 @@ interface index {
     io,
     /// The caller's generation is older than the current index generation.
     stale,
+    /// This host has no backend for the requested mode.
+    unsupported,
   }
 
   record hit {
@@ -96,4 +98,8 @@ interface index {
 
   /// Inspect index readiness and generation.
   state: func() -> result<index-state, error>;
+
+  /// Rebuild from the current VFS namespace. Hosts may also rebuild in the
+  /// background; this call is the explicit refresh boundary.
+  refresh: func() -> result<index-state, error>;
 }
