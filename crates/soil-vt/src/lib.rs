@@ -56,6 +56,10 @@ pub struct Cell {
     /// The cell to the left of this one holds a wide cluster, so a renderer
     /// must not advance twice for it.
     pub wide_tail: bool,
+    /// Part of the terminal's selection. A renderer draws selection as a colour
+    /// inversion rather than as an overlay, because an overlay would hide the
+    /// glyphs it is supposed to make easier to read.
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +234,7 @@ fn read_cell(cell: &libghostty_vt::render::CellIteration<'_, '_>) -> Result<Cell
         faint: style.faint,
         inverse: style.inverse,
         wide_tail: cell.raw_cell()?.wide()? != libghostty_vt::screen::CellWide::Narrow,
+        selected: cell.is_selected()?,
     })
 }
 
@@ -304,8 +309,56 @@ mod tests {
     }
 
     #[test]
+    fn italic_is_an_attribute_and_selection_defaults_to_empty() {
+        let mut session = session();
+        session.write(b"\x1b[3mslanted\x1b[0m plain");
+        let snapshot = session.snapshot().unwrap();
+        assert!(snapshot.cell(0, 0).unwrap().italic);
+        assert!(!snapshot.cell(8, 0).unwrap().italic);
+        // Nothing is selected until a gesture says so; a renderer must be able
+        // to rely on the flag being meaningful rather than always true.
+        assert!(!snapshot.cell(0, 0).unwrap().selected);
+    }
+
+    #[test]
     fn zero_sized_terminal_is_rejected() {
         assert!(Session::new(0, 10, 100).is_err());
         assert!(Session::new(10, 0, 100).is_err());
+    }
+}
+
+#[cfg(test)]
+mod colour_tests {
+    use super::*;
+
+    fn cell_after(sequence: &[u8]) -> Cell {
+        let mut session = Session::new(20, 2, 10).expect("terminal");
+        session.write(sequence);
+        session.snapshot().unwrap().cell(0, 0).cloned().unwrap()
+    }
+
+    #[test]
+    fn indexed_256_colours_resolve_to_rgb() {
+        // 196 is the top of the 6x6x6 cube: pure red. A terminal that only
+        // supported the basic sixteen would report None here.
+        let cell = cell_after(b"\x1b[38;5;196mX");
+        let fg = cell.fg.expect("256-colour foreground resolves to rgb");
+        assert!(fg.r > 200 && fg.g < 60 && fg.b < 60, "{fg:?}");
+    }
+
+    #[test]
+    fn truecolor_is_not_quantised() {
+        let cell = cell_after(b"\x1b[38;2;1;2;3mX");
+        let fg = cell.fg.expect("truecolor foreground");
+        assert_eq!((fg.r, fg.g, fg.b), (1, 2, 3));
+    }
+
+    #[test]
+    fn background_and_foreground_are_independent() {
+        let cell = cell_after(b"\x1b[48;5;21m\x1b[38;5;226mX");
+        let fg = cell.fg.expect("foreground");
+        let bg = cell.bg.expect("background");
+        assert!(fg.r > 200 && fg.g > 200, "yellow fg: {fg:?}");
+        assert!(bg.b > 150, "blue bg: {bg:?}");
     }
 }
