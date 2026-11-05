@@ -12,3 +12,6 @@ pub use soil_sdk_appdata as appdata;
 
 #[cfg(feature = "appdata")]
 pub use soil_sdk_appdata::Result as AppDataResult;
+
+#[cfg(feature = "records")]
+pub use soil_sdk_records as records;

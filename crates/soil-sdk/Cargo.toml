@@ -10,7 +10,9 @@ publish = false
 default = []
 audio = ["dep:soil-sdk-audio"]
 appdata = ["dep:soil-sdk-appdata"]
+records = ["dep:soil-sdk-records"]
 
 [dependencies]
 soil-sdk-audio = { path = "../soil-sdk-audio", optional = true }
 soil-sdk-appdata = { path = "../soil-sdk-appdata", optional = true }
+soil-sdk-records = { path = "../soil-sdk-records", optional = true }

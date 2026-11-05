@@ -78,6 +78,31 @@ settings.save(&value)?;
 App identity comes from the signed manifest. The Spore never supplies an app id
 or a host path.
 
+## `soil-sdk-records`
+
+```rust
+use soil_sdk::records::Book;
+
+let contacts = Book::new("contact");
+let page = contacts.scan(None, 50)?;
+for entry in page.entries {
+    let body: Contact = serde_json::from_slice(&entry.body)?;
+}
+```
+
+Typed access uses the `Record` trait:
+
+```rust
+impl soil_sdk::records::Record for Contact {
+    const COLLECTION: &'static str = "contact";
+    const SCHEMA: &'static str = "fungos.contacts/contact";
+}
+```
+
+`crates/soil-records-host` exposes one `fungos-records` contact book as this
+collection. `changes`/`apply` are `unsupported` in the Spore host for now; the
+native Unibus provider is still the sync path.
+
 ## Proof
 
 The audio tone fixture now uses the SDK:
@@ -94,7 +119,7 @@ cargo run -p wasi-audio-wasmtime -- crates/wasi-audio-wasmtime/fixtures/tone.was
 
 ## Next features
 
-- `records` — typed/dynamic books, refs, and query helpers
+- `vfs` — read-only workspace path/range helpers
 - `canvas` — normalized input and host-owned surface calls
 - `ble` — typed scan/connect/read/write/notify helpers
 - `storage` — CID reads/writes

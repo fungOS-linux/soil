@@ -90,3 +90,7 @@ interface records {
 world records-host {
   import records;
 }
+
+world guest {
+  import records;
+}
