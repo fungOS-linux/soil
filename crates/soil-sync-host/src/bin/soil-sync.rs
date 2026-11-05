@@ -32,7 +32,7 @@ use unibus_iroh::{
     transport::{IrohListener, IrohTransport, SessionConfig},
 };
 
-const DEFAULT_KINDS: &str = "records.sync.pull.v1,records.sync.ops.v1,records.sync.push.v1,records.sync.ack.v1,records.sync.error.v1,notify.publish.v1,notify.update.v1,notify.withdraw.v1,notify.ack.v1,notify.state.v1,ringer.incoming.v1,ringer.accept.v1,ringer.decline.v1,ringer.end.v1";
+const DEFAULT_KINDS: &str = "records.sync.pull.v1,records.sync.ops.v1,records.sync.push.v1,records.sync.ack.v1,records.sync.error.v1,notify.publish.v1,notify.update.v1,notify.withdraw.v1,notify.ack.v1,notify.state.v1,notify.cleanup.v1,notify.cleanup-undo.v1,ringer.incoming.v1,ringer.accept.v1,ringer.decline.v1,ringer.end.v1";
 const DEFAULT_MAX_PAYLOAD: u32 = 16 * 1024 * 1024;
 
 #[derive(Parser)]

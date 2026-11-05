@@ -1,12 +1,12 @@
 # soil-notify-host
 
-Host-owned broker for `soil:notify` and `soil:ringer`.
+Host-owned broker for `soil:notify`, including its `ringer` interface.
 
 This is a host crate, not a Spore.
 
 ```text
 Spore UI / publisher Spore
-  -> soil:notify/* or soil:ringer/calls
+  -> soil:notify/* including soil:notify/ringer
   -> soil-notify-host
        app identity, inbox state, focus policy, history, cleanup, ring claim
   -> host Unibus adapter
@@ -64,7 +64,7 @@ visibility decisions.
 
 ## Wasmtime wiring
 
-`NotifyRuntime` links `soil:notify/*` and `soil:ringer/calls` plus WASI. The
+`NotifyRuntime` links `soil:notify/*` including `soil:notify/ringer` plus WASI. The
 real `spores/notify/module.wasm` runs against it in
 `component::tests::runs_the_real_notify_spore_against_the_host`.
 

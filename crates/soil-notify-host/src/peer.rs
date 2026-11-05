@@ -11,9 +11,9 @@ use serde_json::Value;
 use unibus::{Envelope as WireEnvelope, Message, PeerSession};
 
 use crate::{
-    Envelope, NOTIFY_ACK, NOTIFY_PUBLISH, NOTIFY_STATE, NOTIFY_UPDATE, NOTIFY_WITHDRAW,
-    NotifyBroker, NotifyError, RINGER_ACCEPT, RINGER_DECLINE, RINGER_END, RINGER_INCOMING, Ring,
-    RingPhase,
+    Envelope, NOTIFY_ACK, NOTIFY_CLEANUP, NOTIFY_CLEANUP_UNDO, NOTIFY_PUBLISH, NOTIFY_STATE,
+    NOTIFY_UPDATE, NOTIFY_WITHDRAW, NotifyBroker, NotifyError, RINGER_ACCEPT, RINGER_DECLINE,
+    RINGER_END, RINGER_INCOMING, Ring, RingPhase, parse_cleanup_scope,
 };
 
 pub struct NotifyPeerAdapter {
@@ -144,8 +144,36 @@ impl NotifyPeerAdapter {
                     .get("dismissed")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let acted_action = body.get("acted_action").and_then(Value::as_str);
                 self.broker
-                    .apply_remote_state(id, read, dismissed)
+                    .apply_remote_state(id, read, dismissed, acted_action)
+                    .map_err(notify_error)?;
+                Ok(true)
+            }
+            NOTIFY_CLEANUP => {
+                let id = body
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .context("cleanup id")?;
+                let scope = body
+                    .get("scope")
+                    .and_then(Value::as_str)
+                    .and_then(parse_cleanup_scope)
+                    .context("cleanup scope")?;
+                let value = body.get("value").and_then(Value::as_str);
+                let older_than_ms = body.get("older_than_ms").and_then(Value::as_u64);
+                self.broker
+                    .apply_remote_cleanup(scope, value, older_than_ms, id)
+                    .map_err(notify_error)?;
+                Ok(true)
+            }
+            NOTIFY_CLEANUP_UNDO => {
+                let id = body
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .context("cleanup undo id")?;
+                self.broker
+                    .apply_remote_cleanup_undo(id)
                     .map_err(notify_error)?;
                 Ok(true)
             }
@@ -283,6 +311,84 @@ mod tests {
         );
         assert_eq!(session.sent[0].message.kind, NOTIFY_PUBLISH);
         assert_eq!(session.sent[0].destination.as_deref(), None);
+    }
+
+    #[test]
+    fn applies_remote_act_cleanup_and_undo() {
+        let broker = Arc::new(NotifyBroker::in_memory("studio").unwrap());
+        let adapter = NotifyPeerAdapter::new(Arc::clone(&broker), "home", "mac");
+        let publish = WireEnvelope::new(
+            "home",
+            "mac",
+            Some("studio"),
+            "",
+            Message::new(NOTIFY_PUBLISH, serde_json::to_value(envelope()).unwrap()),
+        );
+        adapter.handle(&publish).unwrap();
+        let state = WireEnvelope::new(
+            "home",
+            "mac",
+            Some("studio"),
+            "",
+            Message::new(
+                NOTIFY_STATE,
+                serde_json::json!({
+                    "id":"n1","read":true,"dismissed":false,"acted_action":"open"
+                }),
+            ),
+        );
+        adapter.handle(&state).unwrap();
+        let item = broker
+            .inbox(&crate::Filter {
+                include_read: true,
+                ..crate::Filter::default()
+            })
+            .unwrap()
+            .remove(0);
+        assert_eq!(item.acted_action.as_deref(), Some("open"));
+
+        let cleanup = WireEnvelope::new(
+            "home",
+            "mac",
+            Some("studio"),
+            "",
+            Message::new(
+                NOTIFY_CLEANUP,
+                serde_json::json!({"id":"cleanup-test","scope":"read","value":null,"older_than_ms":null}),
+            ),
+        );
+        adapter.handle(&cleanup).unwrap();
+        assert!(
+            broker
+                .inbox(&crate::Filter {
+                    include_read: true,
+                    ..crate::Filter::default()
+                })
+                .unwrap()
+                .is_empty()
+        );
+
+        let undo = WireEnvelope::new(
+            "home",
+            "mac",
+            Some("studio"),
+            "",
+            Message::new(
+                NOTIFY_CLEANUP_UNDO,
+                serde_json::json!({"id":"cleanup-test"}),
+            ),
+        );
+        adapter.handle(&undo).unwrap();
+        assert_eq!(
+            broker
+                .inbox(&crate::Filter {
+                    include_read: true,
+                    ..crate::Filter::default()
+                })
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

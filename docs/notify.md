@@ -8,8 +8,8 @@ Status: **contracts + Spore + host broker core, 2026-11-05.**
 dev.fungos.notify Spore
   tray, focus controls, history, cleanup, ringer UI
 
-soil:notify + soil:ringer
-  capability contracts
+soil:notify@1.1.0
+  capability contract: publisher, inbox, focus, history, cleanup, ringer
 
 soil-notify-host
   host-owned broker: identity, inbox state, focus, history, cleanup, ring claim
@@ -22,8 +22,8 @@ The broker is not a Spore. A Spore cannot import Unibus or Iroh, and a Spore
 cannot export `soil:notify` for another Spore to import. App identity, attention
 policy and the ring answer claim must stay host-owned.
 
-The notify Spore is one package with two WIT imports. Its grants remain
-separate: inbox, focus, history, cleanup and ringer calls.
+The notify Spore imports one WIT package with several interfaces. Its grants
+remain separate: inbox, focus, history, cleanup and ringer.
 
 ## Publisher rules
 

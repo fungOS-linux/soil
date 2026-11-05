@@ -15,15 +15,15 @@ wasmtime::component::bindgen!({
     world: "runner",
     with: {
         "soil:notify/inbox.subscription": InboxSubscription,
-        "soil:ringer/calls.subscription": RingerSubscription,
+        "soil:notify/ringer.subscription": RingerSubscription,
     },
 });
 
+use soil::notify::ringer as ringer_api;
 use soil::notify::{
     cleanup as cleanup_api, focus as focus_api, history as history_api, inbox as inbox_api,
     publisher as publisher_api, types as notify_types,
 };
-use soil::ringer::calls as ringer_api;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 

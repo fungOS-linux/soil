@@ -27,6 +27,8 @@ pub const NOTIFY_UPDATE: &str = "notify.update.v1";
 pub const NOTIFY_WITHDRAW: &str = "notify.withdraw.v1";
 pub const NOTIFY_ACK: &str = "notify.ack.v1";
 pub const NOTIFY_STATE: &str = "notify.state.v1";
+pub const NOTIFY_CLEANUP: &str = "notify.cleanup.v1";
+pub const NOTIFY_CLEANUP_UNDO: &str = "notify.cleanup-undo.v1";
 pub const RINGER_INCOMING: &str = "ringer.incoming.v1";
 pub const RINGER_ACCEPT: &str = "ringer.accept.v1";
 pub const RINGER_DECLINE: &str = "ringer.decline.v1";
@@ -575,18 +577,22 @@ impl NotifyBroker {
         id: &str,
         read: bool,
         dismissed: bool,
+        acted_action: Option<&str>,
     ) -> Result<(), NotifyError> {
         let db = self
             .db
             .lock()
             .map_err(|_| NotifyError::Io("lock poisoned".into()))?;
         db.execute(
-            "UPDATE inbox_state SET read=?1,dismissed_at_ms=CASE WHEN ?2 THEN ?3 ELSE dismissed_at_ms END
-             WHERE device_id=?4 AND notification_id=?5",
+            "UPDATE inbox_state SET read=?1,
+             dismissed_at_ms=CASE WHEN ?2 THEN ?3 ELSE dismissed_at_ms END,
+             acted_action=COALESCE(?4, acted_action)
+             WHERE device_id=?5 AND notification_id=?6",
             params![
                 read as i64,
                 dismissed as i64,
                 now_ms() as i64,
+                acted_action,
                 self.device_id,
                 id,
             ],
@@ -703,7 +709,7 @@ impl NotifyBroker {
                 filter.limit.max(1) as i64,
                 filter.offset as i64
             ],
-            |row| read_inbox_row(row),
+            read_inbox_row,
         )?;
         let now = now_ms();
         let mut items = Vec::new();
@@ -799,7 +805,7 @@ impl NotifyBroker {
             &db,
             &self.peers,
             NOTIFY_STATE,
-            &serde_json::json!({ "id": id, "device": self.device_id, "read": true, "dismissed": true })
+            &serde_json::json!({ "id": id, "device": self.device_id, "read": true, "dismissed": true, "acted_action": null })
                 .to_string(),
             now_ms(),
         )?;
@@ -828,6 +834,20 @@ impl NotifyBroker {
              WHERE device_id=?2 AND notification_id=?3",
             params![action_id, self.device_id, id],
         )?;
+        enqueue(
+            &db,
+            &self.peers,
+            NOTIFY_STATE,
+            &serde_json::json!({
+                "id": id,
+                "device": self.device_id,
+                "read": true,
+                "dismissed": false,
+                "acted_action": action_id,
+            })
+            .to_string(),
+            now_ms(),
+        )?;
         Ok(())
     }
 
@@ -849,7 +869,7 @@ impl NotifyBroker {
         )?;
         let rows = stmt.query_map(
             params![self.device_id, limit.max(1) as i64, offset as i64],
-            |row| read_envelope_row(row),
+            read_envelope_row,
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -859,6 +879,30 @@ impl NotifyBroker {
         scope: CleanupScope,
         value: Option<&str>,
         older_than_ms: Option<u64>,
+    ) -> Result<CleanupReceipt, NotifyError> {
+        let id = format!("cleanup-{}:{}", self.device_id, now_ms());
+        self.cleanup_inner(scope, value, older_than_ms, &id, true)
+    }
+
+    /// Apply a replicated cleanup without echoing it back.
+    pub fn apply_remote_cleanup(
+        &self,
+        scope: CleanupScope,
+        value: Option<&str>,
+        older_than_ms: Option<u64>,
+        receipt: &str,
+    ) -> Result<u32, NotifyError> {
+        self.cleanup_inner(scope, value, older_than_ms, receipt, false)
+            .map(|receipt| receipt.cleared)
+    }
+
+    fn cleanup_inner(
+        &self,
+        scope: CleanupScope,
+        value: Option<&str>,
+        older_than_ms: Option<u64>,
+        receipt_id: &str,
+        broadcast: bool,
     ) -> Result<CleanupReceipt, NotifyError> {
         let mut db = self
             .db
@@ -931,12 +975,12 @@ impl NotifyBroker {
         drop(stmt);
         if selected.is_empty() {
             return Ok(CleanupReceipt {
-                id: String::new(),
+                id: receipt_id.to_owned(),
                 cleared: 0,
                 undo_until_ms: now + self.undo_window_ms,
             });
         }
-        let receipt = format!("cleanup-{}", now_ms());
+        let receipt = receipt_id.to_owned();
         let tx = db.transaction()?;
         for row in &selected {
             if let Some(id) = row.get("notification_id").and_then(|value| value.as_str()) {
@@ -954,6 +998,22 @@ impl NotifyBroker {
                 now as i64
             ],
         )?;
+        if broadcast {
+            enqueue(
+                &tx,
+                &self.peers,
+                NOTIFY_CLEANUP,
+                &serde_json::json!({
+                    "id": receipt,
+                    "scope": cleanup_scope_name(scope),
+                    "value": value,
+                    "older_than_ms": older_than_ms,
+                    "cleared": selected.len(),
+                })
+                .to_string(),
+                now,
+            )?;
+        }
         tx.commit()?;
         Ok(CleanupReceipt {
             id: receipt,
@@ -963,6 +1023,15 @@ impl NotifyBroker {
     }
 
     pub fn undo_cleanup(&self, receipt: &str) -> Result<u32, NotifyError> {
+        self.undo_cleanup_inner(receipt, true)
+    }
+
+    /// Apply a replicated cleanup undo without echoing it back.
+    pub fn apply_remote_cleanup_undo(&self, receipt: &str) -> Result<u32, NotifyError> {
+        self.undo_cleanup_inner(receipt, false)
+    }
+
+    fn undo_cleanup_inner(&self, receipt: &str, broadcast: bool) -> Result<u32, NotifyError> {
         let db = self
             .db
             .lock()
@@ -1004,6 +1073,15 @@ impl NotifyBroker {
             }
         }
         db.execute("DELETE FROM cleanup_undo WHERE id=?1", params![receipt])?;
+        if broadcast {
+            enqueue(
+                &db,
+                &self.peers,
+                NOTIFY_CLEANUP_UNDO,
+                &serde_json::json!({ "id": receipt }).to_string(),
+                now_ms(),
+            )?;
+        }
         Ok(restored)
     }
 
@@ -1319,6 +1397,33 @@ fn read_ring_state(db: &Connection, id: &str) -> Result<RingState, NotifyError> 
     .ok_or(NotifyError::NotFound)
 }
 
+fn cleanup_scope_name(scope: CleanupScope) -> &'static str {
+    match scope {
+        CleanupScope::Read => "read",
+        CleanupScope::Shown => "shown",
+        CleanupScope::Held => "held",
+        CleanupScope::All => "all",
+        CleanupScope::OlderThan => "older-than",
+        CleanupScope::App => "app",
+        CleanupScope::Category => "category",
+        CleanupScope::Archive => "archive",
+    }
+}
+
+pub fn parse_cleanup_scope(value: &str) -> Option<CleanupScope> {
+    Some(match value {
+        "read" => CleanupScope::Read,
+        "shown" => CleanupScope::Shown,
+        "held" => CleanupScope::Held,
+        "all" => CleanupScope::All,
+        "older-than" => CleanupScope::OlderThan,
+        "app" => CleanupScope::App,
+        "category" => CleanupScope::Category,
+        "archive" => CleanupScope::Archive,
+        _ => return None,
+    })
+}
+
 fn priority_name(priority: Priority) -> &'static str {
     match priority {
         Priority::Passive => "passive",
@@ -1444,6 +1549,29 @@ mod tests {
         assert!(matches!(broker.history(0, 10), Err(NotifyError::Denied)));
         broker.set_history_enabled(true);
         assert_eq!(broker.history(0, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn action_and_cleanup_enqueue_peer_state() {
+        let mut broker = NotifyBroker::in_memory("mac").unwrap();
+        broker.set_peers(["studio".to_owned()]);
+        broker.publish(envelope("n1", Priority::Active)).unwrap();
+        broker.act("n1", "open").unwrap();
+        let pending = broker.pending_outbox(now_ms() + 1, 100).unwrap();
+        assert!(pending.iter().any(|row| {
+            row.kind == NOTIFY_STATE && row.payload.contains("\"acted_action\":\"open\"")
+        }));
+        broker.dismiss("n1").unwrap();
+        let receipt = broker.cleanup(CleanupScope::Read, None, None).unwrap();
+        let pending = broker.pending_outbox(now_ms() + 1, 100).unwrap();
+        assert!(
+            pending
+                .iter()
+                .any(|row| { row.kind == NOTIFY_CLEANUP && row.payload.contains(&receipt.id) })
+        );
+        broker.undo_cleanup(&receipt.id).unwrap();
+        let pending = broker.pending_outbox(now_ms() + 1, 100).unwrap();
+        assert!(pending.iter().any(|row| row.kind == NOTIFY_CLEANUP_UNDO));
     }
 
     #[test]
