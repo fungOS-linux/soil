@@ -142,7 +142,7 @@ Operator inference profiles and `unibus-mcp`/DCP routes resolve from one Soil co
 
 ## CRM import
 
-`soil-crm-espo` imports EspoCRM accounts, contacts, leads, opportunities, calls, meetings, and tasks into schema-tagged records, with an incremental `modifiedAt` high-water mark. See [CRM](docs/crm.md) and [EspoCRM import](docs/crm-espo.md).
+`soil-crm-host` provides a deterministic mock CRM and a local team/private inspector; `soil-crm-espo` is the deferred EspoCRM importer. See [CRM](docs/crm.md) and [EspoCRM import](docs/crm-espo.md).
 
 ## Mush
 

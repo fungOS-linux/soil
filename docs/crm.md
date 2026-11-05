@@ -83,6 +83,34 @@ source
 source_id
 ```
 
+## Mock CRM
+
+Start with deterministic mock data before importing real Espo records:
+
+```sh
+cargo run -p soil-crm-host -- seed \
+  --root ~/.local/share/fungos/records \
+  --book personal/avery/crm
+
+cargo run -p soil-crm-host -- serve \
+  --root ~/.local/share/fungos/records \
+  --book personal/avery/crm \
+  --listen 127.0.0.1:8790
+```
+
+Open <http://127.0.0.1:8790/>.
+
+The inspector has two views:
+
+```text
+team view     account -> first-name projections -> shared activity
+private view  account -> full contacts -> all activity
+```
+
+The mock seed contains three accounts, five contacts, assignments, first-name
+projections, activities, and opportunities. It is written only by the explicit
+`seed` command; `serve` never mutates records.
+
 ## Import
 
 EspoCRM is the first source:
