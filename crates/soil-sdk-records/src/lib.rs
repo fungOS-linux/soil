@@ -177,6 +177,29 @@ impl<T: Record> TypedBook<T> {
         }
         Ok(out)
     }
+
+    /// Materialized changes, preserving tombstone entries.
+    pub fn changes(&self, since: Option<String>, limit: u32) -> Result<Vec<(Option<T>, Entry)>>
+    where
+        T: DeserializeOwned,
+    {
+        let page = self.book.changes(since, limit)?;
+        let mut out = Vec::with_capacity(page.entries.len());
+        for entry in page.entries {
+            let value = if entry.deleted {
+                None
+            } else {
+                Some(self.codec.decode(&entry.body)?)
+            };
+            out.push((value, entry));
+        }
+        Ok(out)
+    }
+
+    /// Apply remote entries using the host's revision/origin merge.
+    pub fn apply(&self, entries: Vec<Entry>) -> Result<records::ApplyResult> {
+        self.book.apply(entries)
+    }
 }
 
 #[cfg(test)]

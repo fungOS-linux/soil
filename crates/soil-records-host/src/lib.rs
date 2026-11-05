@@ -166,18 +166,13 @@ impl records::Host for RecordsBookHost {
         if limit == 0 || limit > MAX_PAGE {
             return Err(records::Error::OverBudget);
         }
-        let cursor = cursor.unwrap_or_default();
         let records = {
             let store = self.store.lock().expect("records store poisoned");
             store
-                .list(&self.book, None, usize::MAX)
+                .scan_records(&self.book, cursor.as_deref(), limit as usize + 1)
                 .map_err(|_| records::Error::Io)?
         };
-        let mut entries: Vec<_> = records
-            .into_iter()
-            .filter(|record| record.entity_id > cursor)
-            .take(limit as usize + 1)
-            .collect();
+        let mut entries: Vec<_> = records.into_iter().collect();
         let next = if entries.len() > limit as usize {
             entries.truncate(limit as usize);
             entries.last().map(|record| record.entity_id.clone())
@@ -209,8 +204,11 @@ impl records::Host for RecordsBookHost {
 
     fn delete(&mut self, key: records::Key) -> Result<(), records::Error> {
         let id = self.key(&key)?;
-        let schema = self.schema_name().unwrap_or("unknown/record").to_string();
         let mut store = self.store.lock().expect("records store poisoned");
+        let schema = store
+            .get(&self.book, &id)
+            .map(|record| record.schema_id)
+            .unwrap_or_else(|_| self.schema_name().unwrap_or("unknown/record").to_string());
         store
             .delete_record(&self.book, &id, &schema, 1)
             .map_err(|_| records::Error::Io)?;

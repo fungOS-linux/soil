@@ -103,6 +103,15 @@ impl soil_sdk::records::Record for Contact {
 Local CRUD, `changes`, and revision/origin `apply` are available; native
 `records.sync.*` remains the peer transport.
 
+Typed books also expose the change/apply path:
+
+```rust
+let changes = contacts.changes(cursor, 50)?; // Vec<(Option<Contact>, Entry)>
+let result = contacts.apply(remote_entries)?;
+```
+
+`None` is a tombstone; the `Entry` still carries its revision and origin.
+
 ## Proof
 
 The audio tone fixture now uses the SDK:
