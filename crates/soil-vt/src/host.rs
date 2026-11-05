@@ -32,6 +32,10 @@ use crate::{Snapshot, Session};
 enum Command {
     Write(Vec<u8>),
     Resize(u16, u16),
+    /// Ask for the bytes the emulator wants written back to the pty, with a
+    /// channel for the answer. A caller cannot read them from outside the thread
+    /// because the session that produced them lives only there.
+    DrainResponses(Sender<Vec<u8>>),
     Shutdown,
 }
 
@@ -71,6 +75,7 @@ impl Host {
             cells: vec![crate::Cell::default(); usize::from(cols) * usize::from(rows)],
             cursor: None,
             title: String::new(),
+            bells: 0,
         })));
         let generation = Arc::new(AtomicU64::new(0));
         let shared = Arc::clone(&latest);
@@ -101,6 +106,10 @@ impl Host {
                             if session.resize(cols, rows).is_err() {
                                 continue;
                             }
+                        }
+                        Command::DrainResponses(reply) => {
+                            let _ = reply.send(session.drain_responses());
+                            continue;
                         }
                         Command::Shutdown => return,
                     }
@@ -152,6 +161,16 @@ impl Host {
 
     /// Increments whenever a new grid is published. A host compares this against
     /// the value it last drew to skip the redraw entirely.
+    /// Take any bytes the program is waiting for (device status reports, mode
+    /// queries) so the caller can write them to the pty.
+    pub fn drain_responses(&self) -> Vec<u8> {
+        let (sender, receiver) = channel();
+        if self.commands.send(Command::DrainResponses(sender)).is_err() {
+            return Vec::new();
+        }
+        receiver.recv().unwrap_or_default()
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }

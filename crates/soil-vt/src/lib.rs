@@ -74,6 +74,9 @@ pub struct Snapshot {
     pub cells: Vec<Cell>,
     pub cursor: Option<(u16, u16)>,
     pub title: String,
+    /// Bells rung so far, cumulative. A renderer compares this with the value it
+    /// last acted on; a counter survives a dropped frame where a flag would not.
+    pub bells: u64,
 }
 
 impl Snapshot {
@@ -123,6 +126,12 @@ impl From<libghostty_vt::error::Error> for Error {
 /// A live terminal: the state a running program writes into.
 pub struct Session {
     terminal: Terminal<'static, 'static>,
+    /// Shared with the emulator's callbacks: libghostty-vt reports events as it
+    /// parses, so the counters must outlive the borrow that `write` holds.
+    bells: std::rc::Rc<std::cell::Cell<u64>>,
+    /// Bytes the emulator wants written back to the pty (device status reports,
+    /// and the kitty keyboard negotiation that a full-screen program expects).
+    responses: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
     render: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
@@ -144,12 +153,25 @@ impl Session {
         if cols == 0 || rows == 0 {
             return Err(Error("a terminal needs at least one cell".into()));
         }
+        let bells = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let responses = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut terminal = Terminal::new(Options {
+            cols,
+            rows,
+            max_scrollback: scrollback,
+        })?;
+        {
+            let counter = std::rc::Rc::clone(&bells);
+            terminal.on_bell(move |_| counter.set(counter.get() + 1));
+        }
+        {
+            let outbox = std::rc::Rc::clone(&responses);
+            terminal.on_pty_write(move |_, data| outbox.borrow_mut().extend_from_slice(data));
+        }
         Ok(Self {
-            terminal: Terminal::new(Options {
-                cols,
-                rows,
-                max_scrollback: scrollback,
-            })?,
+            terminal,
+            bells,
+            responses,
             render: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
@@ -162,6 +184,16 @@ impl Session {
 
     pub fn rows(&self) -> u16 {
         self.terminal.rows().unwrap_or(0)
+    }
+
+    /// Bells rung since the session started.
+    pub fn bells(&self) -> u64 {
+        self.bells.get()
+    }
+
+    /// Take the bytes the emulator wants sent back to the program, if any.
+    pub fn drain_responses(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.responses.borrow_mut())
     }
 
     /// Feed a program's output. Partial sequences are held by the emulator, so
@@ -220,6 +252,7 @@ impl Session {
             cells,
             cursor,
             title,
+            bells: self.bells(),
         })
     }
 }
@@ -258,6 +291,28 @@ mod tests {
         assert_eq!(snapshot.row_text(0), "hello");
         assert_eq!(snapshot.cell(0, 0).unwrap().text, "h");
         assert_eq!(snapshot.cursor, Some((5, 0)));
+    }
+
+    #[test]
+    fn a_bell_is_counted_and_survives_into_the_snapshot() {
+        let mut session = Session::new(10, 2, 0).unwrap();
+        assert_eq!(session.bells(), 0);
+        session.write(b"\x07");
+        assert_eq!(session.bells(), 1);
+        session.write(b"ab\x07\x07");
+        assert_eq!(session.snapshot().unwrap().bells, 3);
+    }
+
+    #[test]
+    fn the_emulator_answers_a_device_status_report() {
+        let mut session = Session::new(10, 2, 0).unwrap();
+        session.write(b"\x1b[6n");
+        let response = session.drain_responses();
+        assert!(!response.is_empty(), "a cursor position report is expected");
+        assert!(String::from_utf8_lossy(&response).contains('R'));
+        // Taking the bytes clears them: a caller that writes them to the pty
+        // must not send them twice.
+        assert!(session.drain_responses().is_empty());
     }
 
     #[test]
