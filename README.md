@@ -140,6 +140,10 @@ Operator inference profiles and `unibus-mcp`/DCP routes resolve from one Soil co
 
 `soil-scrub` is a local reversible redactor for prompts, tool calls, and tool output. It uses keyed session tokens, not hashes, and restores values only for explicitly scoped host tools. See [Scrubber](docs/scrubber.md).
 
+## CRM import
+
+`soil-crm-espo` imports EspoCRM accounts, contacts, leads, opportunities, calls, meetings, and tasks into schema-tagged records, with an incremental `modifiedAt` high-water mark. See [CRM](docs/crm.md) and [EspoCRM import](docs/crm-espo.md).
+
 ## Mush
 
 `mush` is now a Wasm Spore over `soil:vfs`, `soil:index`, and `soil:vfs-mut`: no host PATH, no subprocesses, workspace-relative paths, `.mushrc`, `PWD`/`OLDPWD`, `TERM`, `mkdir`, `rmdir`, and `rm` as namespace unlink. See [Mush](docs/mush.md).
