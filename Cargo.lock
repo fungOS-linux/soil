@@ -3599,6 +3599,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-spore-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "soil-spore",
+ "tempfile",
+ "wasmtime",
+]
+
+[[package]]
 name = "soil-vfs-host"
 version = "0.1.0"
 dependencies = [
