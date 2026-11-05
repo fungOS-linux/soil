@@ -3859,6 +3859,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-ui-demo"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "soil-scene",
+]
+
+[[package]]
 name = "soil-vfs-host"
 version = "0.1.0"
 dependencies = [

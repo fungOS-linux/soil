@@ -96,6 +96,13 @@ impl Present {
 pub struct Scene {
     pub schema: u32,
     pub nodes: Vec<Node>,
+    /// Draw this scene *over* what is behind it instead of on a host ground.
+    ///
+    /// Off by default, and deliberately: a scene that assumes transparency and
+    /// arrives a frame late shows the desktop through the gap, which reads as a
+    /// flicker. A window has a ground unless its Spore asks for the composite.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transparent: bool,
 }
 
 impl Scene {
@@ -103,6 +110,7 @@ impl Scene {
         Self {
             schema: SCENE_VERSION,
             nodes,
+            transparent: false,
         }
     }
 
