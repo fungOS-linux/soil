@@ -74,7 +74,10 @@ pub struct Manifest {
     pub schema: u32,
     pub spore: SporeMeta,
     pub engine: Engine,
-    pub module: Module,
+    /// Absent for a Spore with no semantics of its own -- chrome, for instance:
+    /// a dock is a composition, not a program.
+    #[serde(default)]
+    pub module: Option<Module>,
     pub ui: Ui,
     pub launch: Launch,
     #[serde(default)]
@@ -227,9 +230,21 @@ impl Manifest {
             )));
         }
 
-        safe_relative(&self.module.path)?;
-        if !self.module.path.ends_with(".wasm") {
-            return Err(Error::Invalid("module.path must end in .wasm".into()));
+        match &self.module {
+            Some(module) => {
+                safe_relative(&module.path)?;
+                if !module.path.ends_with(".wasm") {
+                    return Err(Error::Invalid("module.path must end in .wasm".into()));
+                }
+            }
+            // A Spore with no module must still do something: chrome draws a
+            // region, and nothing else is worth installing without semantics.
+            None if self.chrome.is_none() => {
+                return Err(Error::Invalid(
+                    "a Spore needs a module unless it draws chrome".into(),
+                ));
+            }
+            None => {}
         }
         safe_relative(&self.ui.entry)?;
         if !self.ui.entry.ends_with(".lua") {
@@ -309,7 +324,10 @@ impl Manifest {
 
     /// Every file the manifest declares explicitly.
     pub fn declared_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.module.path.clone(), self.ui.entry.clone()];
+        let mut paths = vec![self.ui.entry.clone()];
+        if let Some(module) = &self.module {
+            paths.push(module.path.clone());
+        }
         if let Some(chrome) = &self.chrome {
             paths.extend(chrome.sources.values().cloned());
         }

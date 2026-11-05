@@ -43,19 +43,17 @@ fn main() -> std::io::Result<()> {
     reader.get_ref().set_nonblocking(true)?;
     let started = Instant::now();
     let mut last_signature = String::new();
-    let mut next = Duration::ZERO;
+    // The host owns the clock: it asks for a frame when it can draw one and says
+    // how long it has been. A producer that renders on its own timer can only
+    // guess, and guessing wrong is either a queue of stale frames or a stutter.
+    let mut now_ms: u64 = 0;
     loop {
-        let now = started.elapsed();
-        if now < next {
-            std::thread::sleep(next - now);
-        }
-        next += Duration::from_micros(16_667);
-        if started.elapsed() > next {
-            // A stalled frame must not make the next fifty fire at once.
-            next = started.elapsed() + Duration::from_micros(16_667);
-        }
-        drain(&mut reader);
-        let t = started.elapsed().as_secs_f32();
+        let Some(clock) = wait_for_frame(&mut reader, &started) else {
+            return Ok(());
+        };
+        now_ms = clock.0;
+        let t = now_ms as f32 / 1000.0;
+        let _dt = clock.1;
         let scene = frame(t);
         let signature = serde_json::to_string(&scene).unwrap_or_default();
         if signature != last_signature {
@@ -69,6 +67,54 @@ fn main() -> std::io::Result<()> {
             last_signature = signature;
         }
     }
+}
+
+/// Block until the host asks for a frame, returning `(now_ms, dt_ms)`.
+fn wait_for_frame(
+    reader: &mut BufReader<UnixStream>,
+    _started: &Instant,
+) -> Option<(u64, u64)> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return None,
+            Ok(_) => {
+                let Ok(reply) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                match reply.get("kind").and_then(|k| k.as_str()) {
+                    Some("frame") => {
+                        let now = reply.get("now_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let dt = reply.get("dt_ms").and_then(|v| v.as_u64()).unwrap_or(16);
+                        return Some((now.saturating_sub(start_ms()), dt));
+                    }
+                    Some("error") => {
+                        eprintln!(
+                            "present refused: {}",
+                            reply.get("message").and_then(|m| m.as_str()).unwrap_or("?")
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// The producer's zero: the same wall clock the host stamps frames with.
+fn start_ms() -> u64 {
+    static START: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *START.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    })
 }
 
 /// Take whatever the host has said since the last frame, without waiting.
