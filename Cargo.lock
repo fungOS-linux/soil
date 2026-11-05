@@ -3981,6 +3981,7 @@ dependencies = [
  "bytemuck",
  "fontdue",
  "pollster",
+ "portable-pty",
  "serde_json",
  "soil-scene",
  "soil-vt",

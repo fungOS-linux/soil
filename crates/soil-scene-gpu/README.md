@@ -35,6 +35,13 @@ soil-vt-gpu --text $'$ hello\r\n' --cols 80 --rows 24 \
 
 Cell backgrounds become rects, runs of equal style become text nodes, and the
 cursor is a rect. ANSI true/palette colours and selection/inverse are resolved
-before the scene is built. The PTY loop and input routing remain the host's job;
-the next step is a resident terminal host that redraws this snapshot on output
-instead of a one-shot CLI.
+before the scene is built. `--shell` or `--command` runs a real pty, feeds `soil_vt::Host`, and republishes
+a shared frame whenever the grid generation changes:
+
+```sh
+soil-vt-gpu --canvas-socket "$CANVAS_CONFIG_DIR/ui.sock" --source-id vt-gpu \
+  --cols 80 --rows 24 --size 960x540 --command /bin/sh
+```
+
+Input routing back into the pty is still the host's job; the resident renderer
+already redraws on output instead of waiting for a one-shot snapshot.
