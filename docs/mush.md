@@ -74,6 +74,37 @@ mush --root ~/fungos-node --history ~/.local/state/mush/history
 `MUSH_HISTORY` overrides the path. Non-interactive input still uses a plain
 line loop.
 
+## Agent overlay
+
+`mush run op` materializes a VFS workspace into a host-side overlay, starts an
+Operator session there, then applies the resulting diff back to VFS.
+
+```sh
+mush run op --root ~/fungos-node
+mush run op --root ~/fungos-node --prompt "fix the failing tests"
+mush run op --root ~/fungos-node -- --model fpl/llm
+```
+
+Options:
+
+```text
+--operator-bin PATH   default operator-tui, or MUSH_OPERATOR
+--prompt TEXT         use a one-shot operator run
+--no-apply            show the diff and discard the overlay
+--keep                keep the materialized overlay directory
+--root PATH           VFS root
+```
+
+The overlay respects `.gitignore`, `.ignore`, and `.soilignore` in both
+directions. Build outputs and binaries covered by those files are never applied
+to VFS/CID. Default ignored paths include `.operator/`, `.cache/`, `target/`,
+`build/`, `dist/`, `node_modules/`, and `.worktrees/`.
+
+Git metadata under `.git/` is tracked when it is present in the VFS. The overlay
+is currently a materialized host directory, not a live FUSE mount. Operator is
+still a native process; this slice gives it VFS-derived workspace content and
+overlay apply/discard semantics, not yet a host filesystem sandbox.
+
 ## Commands
 
 ```text

@@ -4,9 +4,12 @@
 //! VFS root, the `soil:vfs` / `soil:index` / `soil:vfs-mut` grants, and the
 //! line-oriented terminal.
 
+mod overlay;
+
 use std::{
     io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{Context, Result};
@@ -168,6 +171,13 @@ fn run() -> Result<()> {
         .or_else(|| std::env::var("MUSH_ROOT").ok())
         .unwrap_or_else(|| "~/.local/share/fungos/vfs".into());
     let root = expand_home(&root);
+
+    if args.first().map(String::as_str) == Some("run")
+        && args.get(1).map(String::as_str) == Some("op")
+    {
+        args.drain(0..2);
+        return run_operator(&root, args);
+    }
     let wasm = take_option(&mut args, "--wasm")
         .or_else(|| std::env::var("MUSH_WASM").ok())
         .unwrap_or_else(|| "spores/mush/module.wasm".into());
@@ -256,6 +266,51 @@ fn run_lines(runtime: &mut Runtime) -> Result<()> {
         if response.exit {
             break;
         }
+    }
+    Ok(())
+}
+
+fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
+    let operator = take_option(&mut args, "--operator-bin")
+        .or_else(|| std::env::var("MUSH_OPERATOR").ok())
+        .unwrap_or_else(|| "operator-tui".into());
+    let prompt = take_option(&mut args, "--prompt");
+    let keep = args.iter().any(|arg| arg == "--keep");
+    let no_apply = args.iter().any(|arg| arg == "--no-apply");
+    args.retain(|arg| arg != "--keep" && arg != "--no-apply");
+    let overlay = overlay::Overlay::materialize(root)?;
+    let workspace = overlay.path().to_path_buf();
+    eprintln!("mush: overlay {}", workspace.display());
+
+    let mut command = Command::new(&operator);
+    command.arg("--workspace").arg(&workspace);
+    command.env("MUSH_ROOT", root);
+    command.env("MUSH_OVERLAY", &workspace);
+    if let Some(prompt) = prompt {
+        command.arg("--prompt").arg(prompt);
+    }
+    command.args(&args);
+    let status = command.status().context("start operator session")?;
+
+    let changes = overlay.diff()?;
+    for change in &changes {
+        eprintln!("mush: {:?} {}", change.kind, change.path);
+    }
+    if no_apply {
+        eprintln!("mush: overlay discarded ({})", changes.len());
+    } else {
+        let report = overlay.apply(root)?;
+        eprintln!(
+            "mush: applied {} written, {} deleted, {} directories",
+            report.written, report.deleted, report.directories
+        );
+    }
+    if keep {
+        let kept = overlay.keep();
+        eprintln!("mush: kept {}", kept.display());
+    }
+    if !status.success() {
+        anyhow::bail!("operator exited with {status}");
     }
     Ok(())
 }

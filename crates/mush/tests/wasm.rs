@@ -63,3 +63,51 @@ fn wasm_spore_supports_mkdir_rmdir_and_files() {
     assert!(stdout.contains("not-empty"), "{stdout}");
     assert!(stdout.contains("/"), "{stdout}");
 }
+
+#[cfg(unix)]
+#[test]
+fn run_op_applies_overlay_and_respects_gitignore() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut vfs = Vfs::open(dir.path()).unwrap();
+        vfs.put(".gitignore", b"target/\n", "text/plain", None)
+            .unwrap();
+        vfs.put("src/main.rs", b"old", "text/x-rust", None).unwrap();
+    }
+    let script = dir.path().join("fake-operator.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         while [ $# -gt 0 ]; do\n\
+           case \"$1\" in --workspace) ws=\"$2\"; shift;; esac\n\
+           shift\n\
+         done\n\
+         printf new > \"$ws/src/main.rs\"\n\
+         mkdir -p \"$ws/target/debug\"\n\
+         printf binary > \"$ws/target/debug/app\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("run")
+        .arg("op")
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--operator-bin")
+        .arg(&script)
+        .arg("--prompt")
+        .arg("update")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut vfs = Vfs::open(dir.path()).unwrap();
+    assert_eq!(vfs.get("src/main.rs").unwrap(), b"new");
+    assert!(vfs.file("target/debug/app").unwrap().is_none());
+}
