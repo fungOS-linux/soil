@@ -49,6 +49,7 @@ review map for what else exists and what is missing.
 | `soil:appdata@1` | private app storage | `soil:appdata` | yes | Local and per-user/per-app synced key-value storage. Opaque bytes, quota-bounded, not indexed or shareable. Canonical WIT: [`wit/soil-appdata.wit`](../wit/soil-appdata.wit). |
 | `soil:records@0.1` | durable records | `soil:records` read/write/sync | draft | Schema-tagged entries, tombstones, scan/changes/apply. Host adapter: [`crates/soil-records-host`](../crates/soil-records-host); guest SDK: [`crates/soil-sdk-records`](../crates/soil-sdk-records). |
 | `soil:index@1` | derived browse/search index | `soil:index` | yes | Rebuildable, generationed, returns paths and snippets; never authority. Canonical WIT: [`wit/soil-index.wit`](../wit/soil-index.wit). |
+| `soil:search@0.1` | global search | `soil:search` | draft | Host-composed files + records + future actions. Locators only, never authority. Host: [`crates/soil-search-host`](../crates/soil-search-host). |
 | `soil:time@1` | host monotonic clock | `soil:time` | yes | Monotonic milliseconds and host ticks only. No wall clock, sleep, or timer thread. Canonical WIT: [`wit/soil-time.wit`](../wit/soil-time.wit). |
 | `soil:notify@1` | host notification UI | `soil:notify` | later | Rate-limited, user-visible. Never a background toast loop. |
 | `soil:display@1` | display enumeration/placement | — | no | Soil owns displays. Spore asks for a surface purpose, not a display id. |

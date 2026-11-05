@@ -20,7 +20,7 @@ pub use embeddings::Model2VecEmbedder;
 #[cfg(feature = "remote")]
 pub use embeddings::RemoteEmbeddingProvider;
 use indexer::{IndexBackend, Node, NodeKind, SqliteIndex};
-use soil::index::index;
+pub use soil::index::index;
 use soil::vfs::vfs;
 
 pub(crate) const MAX_PAGE: u32 = 512;

@@ -1,0 +1,79 @@
+// Host-composed global search across granted local sources.
+//
+// This is a derived discovery surface, not authority. Files still come from
+// `soil:vfs`, records from `soil:records`, and actions from their owning host
+// capability. A hit is a locator plus display metadata; the caller fetches the
+// authoritative object through the source capability.
+package soil:search@0.1.0;
+
+interface search {
+  enum kind {
+    file,
+    record-entry,
+    action,
+  }
+
+  enum mode {
+    substring,
+    fuzzy,
+    full-text,
+    semantic,
+  }
+
+  enum error {
+    denied,
+    not-ready,
+    over-budget,
+    invalid,
+    stale,
+    io,
+    unsupported,
+  }
+
+  record query {
+    text: string,
+    /// Empty means all supported kinds.
+    kinds: list<kind>,
+    mode: option<mode>,
+    offset: u64,
+    limit: u32,
+  }
+
+  record hit {
+    kind: kind,
+    /// Source-local locator: a VFS path, `book/entity`, or action id.
+    id: string,
+    title: string,
+    subtitle: option<string>,
+    snippet: option<string>,
+    /// Higher is more relevant. Stable for one index generation.
+    score: u32,
+    /// Source identity, e.g. `vfs` or `records:personal/avery/contacts`.
+    source: string,
+    updated-at-ms: option<u64>,
+  }
+
+  record page {
+    hits: list<hit>,
+    next: option<u64>,
+    generation: u64,
+  }
+
+  record search-state {
+    ready: bool,
+    generation: u64,
+    sources: u32,
+  }
+
+  search: func(query: query) -> result<page, error>;
+  state: func() -> result<search-state, error>;
+  refresh: func() -> result<search-state, error>;
+}
+
+world search-host {
+  import search;
+}
+
+world guest {
+  import search;
+}

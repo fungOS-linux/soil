@@ -60,6 +60,12 @@ pub const CONTRACTS: &[Contract] = &[
         )],
     },
     Contract {
+        file: "wit/soil-search.wit",
+        source: include_str!("../../../wit/soil-search.wit"),
+        package: "soil:search@0.1.0",
+        interfaces: &[("search", &["search", "state", "refresh"])],
+    },
+    Contract {
         file: "wit/soil-unibus.wit",
         source: include_str!("../../../wit/soil-unibus.wit"),
         package: "soil:unibus@0.1.0",

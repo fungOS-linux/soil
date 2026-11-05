@@ -1466,7 +1466,7 @@ dependencies = [
 [[package]]
 name = "fungos-records"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/records.git?rev=f980e55c82ca02ad1e44446c932fbfc36f083432#f980e55c82ca02ad1e44446c932fbfc36f083432"
+source = "git+https://github.com/fungOS-linux/records.git?rev=723758921e16a9d7e070dec8896c2152c017ca57#723758921e16a9d7e070dec8896c2152c017ca57"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3573,6 +3573,19 @@ dependencies = [
  "soil-sdk-codec",
  "thiserror 2.0.21",
  "wit-bindgen",
+]
+
+[[package]]
+name = "soil-search-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fungos-records",
+ "fungos-vfs",
+ "serde_json",
+ "soil-vfs-host",
+ "tempfile",
+ "wasmtime",
 ]
 
 [[package]]

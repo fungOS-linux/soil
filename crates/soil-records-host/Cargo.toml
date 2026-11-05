@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "f980e55c82ca02ad1e44446c932fbfc36f083432" }
+fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "723758921e16a9d7e070dec8896c2152c017ca57" }
 serde_json = "1"
 wasmtime = { version = "50", features = ["anyhow"] }
 

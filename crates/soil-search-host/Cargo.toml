@@ -1,0 +1,19 @@
+[package]
+name = "soil-search-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "723758921e16a9d7e070dec8896c2152c017ca57" }
+soil-vfs-host = { path = "../soil-vfs-host" }
+serde_json = "1"
+wasmtime = { version = "50", features = ["anyhow"] }
+
+[dev-dependencies]
+fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "001a1dca542acdae6bfc9ba81679bf2948501976" }
+serde_json = "1"
+tempfile = "3"
