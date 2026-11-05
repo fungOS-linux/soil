@@ -1,0 +1,11 @@
+[package]
+name = "s22-canvas-surface"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[dependencies]
+fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "6b31e91c82fcc05cad3645e495ad1532014b9a43", default-features = false }
+canvas-workspace-ui = { git = "https://github.com/FuturePresentLabs/dock.git", rev = "6e3ba644388196224f2588b4fc78fdfddb866bed" }
+coherence-native = { git = "https://github.com/FuturePresentLabs/dock.git", rev = "6e3ba644388196224f2588b4fc78fdfddb866bed", features = ["egui"] }
+egui = { version = "=0.33.3", default-features = false, features = ["default_fonts"] }
+egui_software_backend = { version = "=0.0.2", default-features = false, features = ["std"] }

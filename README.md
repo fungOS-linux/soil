@@ -103,3 +103,8 @@ dual licensed as above, without any additional terms or conditions.
 The threaded process lane is documented in [`docs/soil-process.md`](docs/soil-process.md). Ordinary cpal callback programs can run there with a guest-owned audio thread; the host device callback never enters Wasm. The only app line is `let host = cpal_soil::host();` on both native and threaded Wasm.
 
 The first CID-neutral content/index slice is [`crates/fungos-content`](crates/fungos-content). See [`docs/fungos-content.md`](docs/fungos-content.md).
+
+## Dependencies
+
+Builds use crates.io, public git revisions, and packages inside this checkout.
+No sibling worktrees are required. See [dependency policy](docs/dependencies.md).

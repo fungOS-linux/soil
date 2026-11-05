@@ -14,7 +14,7 @@ remote = ["dep:serde_json", "dep:ureq"]
 [dependencies]
 anyhow = "1"
 blake3 = "1"
-fungos-vfs = { path = "../../../fungos-vfs" }
+fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "001a1dca542acdae6bfc9ba81679bf2948501976" }
 model2vec-rs = { version = "0.4", default-features = false, features = ["fancy-regex", "hf-hub"], optional = true }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde_json = { version = "1", optional = true }
