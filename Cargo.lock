@@ -2868,7 +2868,18 @@ dependencies = [
 name = "soil-sdk"
 version = "0.1.0"
 dependencies = [
+ "soil-sdk-appdata",
  "soil-sdk-audio",
+]
+
+[[package]]
+name = "soil-sdk-appdata"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "soil-sdk-codec",
+ "thiserror 2.0.21",
+ "wit-bindgen",
 ]
 
 [[package]]
@@ -2876,6 +2887,15 @@ name = "soil-sdk-audio"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",
+]
+
+[[package]]
+name = "soil-sdk-codec"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

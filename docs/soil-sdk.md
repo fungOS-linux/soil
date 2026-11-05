@@ -1,7 +1,8 @@
 # Soil SDK
 
-Status: **first guest feature, 2026-11-02.** `soil-sdk` is the umbrella crate
-for guest-side capability helpers. The first feature is `audio`.
+Status: **first guest features, 2026-11-04.** `soil-sdk` is the umbrella crate
+for guest-side capability helpers. Features are `audio`, `appdata`, and the
+shared `soil-sdk-codec` trait.
 
 Naming: `soil-sdk` is the library. “Fertilizer” can be the separate scaffold /
 project generator later; it should not be the import name.
@@ -9,7 +10,7 @@ project generator later; it should not be the import name.
 ## Shape
 
 ```toml
-soil-sdk = { path = "...", features = ["audio"] }
+soil-sdk = { path = "...", features = ["audio", "appdata"] }
 ```
 
 ```rust
@@ -28,8 +29,12 @@ capability crates, each with its own narrow guest world:
 
 ```text
 soil-sdk
-  └─ soil-sdk-audio
-       └─ wasi:audio/playback
+  ├─ soil-sdk-audio
+  │    └─ wasi:audio/playback
+  ├─ soil-sdk-codec
+  │    └─ serde JSON adapter
+  └─ soil-sdk-appdata
+       └─ soil:appdata/store
 ```
 
 That keeps the component’s imports equal to the features the Spore actually
@@ -48,6 +53,31 @@ uses.
 The guest owns sources, decoding and DSP. The host owns the device, format
 conversion, final mix and clock.
 
+## `soil-sdk-appdata`
+
+```rust
+use soil_sdk::appdata::synced::Json;
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Settings {
+    theme: String,
+}
+
+let settings = Json::<Settings>::open("settings")?;
+let mut value = settings.load_or_default()?;
+value.theme = "dark".into();
+settings.save(&value)?;
+```
+
+- `local::Json<T>` is device-only.
+- `synced::Json<T>` is per-app, per-user, replicated and encrypted by the host.
+- `load`, `load_or_default`, `load_with_meta`, `save`, `save_if_generation`,
+  `delete`, `list_keys`, `sync_state`.
+- `soil-sdk-codec` provides the `Codec` trait and `JsonCodec`.
+
+App identity comes from the signed manifest. The Spore never supplies an app id
+or a host path.
+
 ## Proof
 
 The audio tone fixture now uses the SDK:
@@ -64,6 +94,7 @@ cargo run -p wasi-audio-wasmtime -- crates/wasi-audio-wasmtime/fixtures/tone.was
 
 ## Next features
 
+- `records` — typed/dynamic books, refs, and query helpers
 - `canvas` — normalized input and host-owned surface calls
 - `ble` — typed scan/connect/read/write/notify helpers
 - `storage` — CID reads/writes

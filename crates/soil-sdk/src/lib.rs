@@ -6,3 +6,9 @@
 
 #[cfg(feature = "audio")]
 pub use soil_sdk_audio as audio;
+
+#[cfg(feature = "appdata")]
+pub use soil_sdk_appdata as appdata;
+
+#[cfg(feature = "appdata")]
+pub use soil_sdk_appdata::Result as AppDataResult;

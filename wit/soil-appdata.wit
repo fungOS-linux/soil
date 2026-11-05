@@ -1,0 +1,74 @@
+// Private app storage.
+//
+// AppData is scoped to the signed Spore's app identity and the current user.
+// The Spore sees opaque keys and bytes, never a host path, table, app id, or
+// another app's namespace.
+//
+// `local` is device-only. `synced` is a per-app, per-user private book that
+// replicates through the native records engine. Synced AppData is not indexed
+// or shareable; structured/shareable data belongs in `soil:records`.
+package soil:appdata@1.0.0;
+
+interface appdata {
+  enum scope {
+    local,
+    synced,
+  }
+
+  enum sync-state {
+    local,
+    syncing,
+    synced,
+    offline,
+    not-ready,
+  }
+
+  enum error {
+    /// The `soil:appdata` grant was not linked for this Spore.
+    denied,
+    /// The key does not exist.
+    not-found,
+    /// The key, value, page, or quota budget was exceeded.
+    over-budget,
+    /// The key is not canonical, or a generation is invalid.
+    invalid,
+    /// `set-if-generation` lost a race with another device.
+    conflict,
+    /// The synced book is not ready yet.
+    not-ready,
+    /// The host store failed.
+    io,
+  }
+
+  record meta {
+    key: string,
+    generation: u64,
+    size: u64,
+    updated-at-ms: u64,
+  }
+
+  resource store {
+    get: func(key: string) -> result<option<list<u8>>, error>;
+    get-meta: func(key: string) -> result<option<meta>, error>;
+
+    /// Last-writer-wins per key. Returns the new generation.
+    set: func(key: string, value: list<u8>) -> result<u64, error>;
+
+    /// Compare-and-set against the caller's last observed generation.
+    set-if-generation: func(key: string, value: list<u8>, generation: u64) -> result<u64, error>;
+
+    delete: func(key: string) -> result<_, error>;
+
+    /// List metadata for keys under a prefix. Values are fetched separately.
+    list-keys: func(prefix: string, limit: u32) -> result<list<meta>, error>;
+
+    generation: func() -> result<u64, error>;
+    sync-state: func() -> result<sync-state, error>;
+  }
+
+  open: func(scope: scope) -> result<store, error>;
+}
+
+world guest {
+  import appdata;
+}

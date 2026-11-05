@@ -46,6 +46,7 @@ review map for what else exists and what is missing.
 | `soil:api@1` | authenticated upstream API | `soil:api` plus service/operation grant | yes | Host-mediated request/response. Soil holds the credential and mints/brokers delegated tokens; the Spore never sees them. |
 | `soil:storage@1` | content-addressed assets | `soil:storage.read`, optional `soil:storage.write` | yes | CIDs, never paths. Read-only cache by default. Canonical WIT: [`wit/soil-storage.wit`](../wit/soil-storage.wit). |
 | `soil:vfs@1` | workspace namespace and bounded reads | `soil:vfs` | yes | Canonical workspace-relative paths, `ContentId`, paged listing and range reads. No host paths or providers. Canonical WIT: [`wit/soil-vfs.wit`](../wit/soil-vfs.wit). |
+| `soil:appdata@1` | private app storage | `soil:appdata` | yes | Local and per-user/per-app synced key-value storage. Opaque bytes, quota-bounded, not indexed or shareable. Canonical WIT: [`wit/soil-appdata.wit`](../wit/soil-appdata.wit). |
 | `soil:index@1` | derived browse/search index | `soil:index` | yes | Rebuildable, generationed, returns paths and snippets; never authority. Canonical WIT: [`wit/soil-index.wit`](../wit/soil-index.wit). |
 | `soil:time@1` | host monotonic clock | `soil:time` | yes | Monotonic milliseconds and host ticks only. No wall clock, sleep, or timer thread. Canonical WIT: [`wit/soil-time.wit`](../wit/soil-time.wit). |
 | `soil:notify@1` | host notification UI | `soil:notify` | later | Rate-limited, user-visible. Never a background toast loop. |
