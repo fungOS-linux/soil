@@ -216,3 +216,71 @@ fn polyline_joins_are_validated() {
             .is_err()
     );
 }
+
+#[test]
+fn chart_catalog_primitives_are_bounded() {
+    let node = |id: &str, content| Node {
+        id: id.into(),
+        parent: None,
+        transition_ms: None,
+        transform: Transform::default(),
+        content,
+    };
+    Scene::new(vec![
+        node(
+            "points",
+            Content::Points(soil_scene::Points {
+                points: vec![[0.0, 0.0], [0.5, 0.5]],
+                size: [0.02, 0.02],
+                ink: Some(Ink::Info),
+                rgb: None,
+                opacity: 0.8,
+            }),
+        ),
+        node(
+            "heatmap",
+            Content::Heatmap(soil_scene::Heatmap {
+                rows: 2,
+                cols: 2,
+                values: vec![0.0, 1.0, 2.0, 3.0],
+                min: None,
+                max: None,
+                opacity: 0.9,
+            }),
+        ),
+        node(
+            "candles",
+            Content::Candles(soil_scene::Candles {
+                candles: vec![soil_scene::Candle {
+                    x: 0.0,
+                    open: 1.0,
+                    high: 2.0,
+                    low: 0.0,
+                    close: 1.5,
+                }],
+                width: 0.1,
+                up_ink: Some(Ink::Success),
+                down_ink: Some(Ink::Danger),
+                opacity: 1.0,
+            }),
+        ),
+    ])
+    .validate()
+    .expect("valid chart catalog");
+
+    assert!(
+        Scene::new(vec![node(
+            "bad-heatmap",
+            Content::Heatmap(soil_scene::Heatmap {
+                rows: 2,
+                cols: 2,
+                values: vec![0.0],
+                min: None,
+                max: None,
+                opacity: 1.0,
+            }),
+        )])
+        .validate()
+        .is_err()
+    );
+}

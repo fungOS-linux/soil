@@ -257,6 +257,12 @@ pub enum Content {
     Polyline(Polyline),
     /// A filled area between a polyline and a local baseline.
     Area(Area),
+    /// A dense point cloud, one primitive instead of one node per point.
+    Points(Points),
+    /// A row-major scalar field rendered through the host heat ramp.
+    Heatmap(Heatmap),
+    /// OHLC candles, one primitive instead of a wick and body node each.
+    Candles(Candles),
     Shader(Shader),
 }
 
@@ -269,6 +275,9 @@ impl Content {
             Self::Image(image) => image.validate(),
             Self::Polyline(polyline) => polyline.validate(),
             Self::Area(area) => area.validate(),
+            Self::Points(points) => points.validate(),
+            Self::Heatmap(heatmap) => heatmap.validate(),
+            Self::Candles(candles) => candles.validate(),
             Self::Shader(shader) => shader.validate(),
         }
     }
@@ -370,6 +379,136 @@ impl Polyline {
         finite(self.opacity)?;
         if !(0.0..=1.0).contains(&self.opacity) {
             return Err(Error::invalid("polyline opacity must be 0..=1"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Points {
+    /// At least one point. Each point is `[x, y]` in local scene units.
+    pub points: Vec<[f32; 2]>,
+    /// Local width and height of each square point.
+    pub size: [f32; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ink: Option<Ink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgb: Option<[u8; 3]>,
+    #[serde(default = "opaque")]
+    pub opacity: f32,
+}
+
+impl Points {
+    fn validate(&self) -> Result<(), Error> {
+        if self.points.is_empty() || self.points.len() > 1_000_000 {
+            return Err(Error::invalid("points needs 1..=1,000,000 points"));
+        }
+        for point in &self.points {
+            finite(point[0])?;
+            finite(point[1])?;
+        }
+        for size in self.size {
+            if !size.is_finite() || size <= 0.0 {
+                return Err(Error::invalid("point size must be positive"));
+            }
+        }
+        finite(self.opacity)?;
+        if !(0.0..=1.0).contains(&self.opacity) {
+            return Err(Error::invalid("points opacity must be 0..=1"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Heatmap {
+    pub rows: u32,
+    pub cols: u32,
+    /// Row-major, exactly `rows * cols` finite values.
+    pub values: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f32>,
+    #[serde(default = "opaque")]
+    pub opacity: f32,
+}
+
+impl Heatmap {
+    fn validate(&self) -> Result<(), Error> {
+        if self.rows == 0 || self.cols == 0 || self.rows > 4096 || self.cols > 4096 {
+            return Err(Error::invalid("heatmap needs 1..=4096 rows and cols"));
+        }
+        if self.values.len() != self.rows as usize * self.cols as usize {
+            return Err(Error::invalid("heatmap values must be rows * cols"));
+        }
+        if self.values.len() > 4_000_000 {
+            return Err(Error::invalid("heatmap is too large"));
+        }
+        for value in &self.values {
+            finite(*value)?;
+        }
+        for bound in [self.min, self.max].into_iter().flatten() {
+            finite(bound)?;
+        }
+        if let (Some(min), Some(max)) = (self.min, self.max) {
+            if min >= max {
+                return Err(Error::invalid("heatmap min must be below max"));
+            }
+        }
+        finite(self.opacity)?;
+        if !(0.0..=1.0).contains(&self.opacity) {
+            return Err(Error::invalid("heatmap opacity must be 0..=1"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Candles {
+    pub candles: Vec<Candle>,
+    /// Body width in local scene units.
+    pub width: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up_ink: Option<Ink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub down_ink: Option<Ink>,
+    #[serde(default = "opaque")]
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Candle {
+    pub x: f32,
+    pub open: f32,
+    pub high: f32,
+    pub low: f32,
+    pub close: f32,
+}
+
+impl Candles {
+    fn validate(&self) -> Result<(), Error> {
+        if self.candles.is_empty() || self.candles.len() > 1_000_000 {
+            return Err(Error::invalid("candles needs 1..=1,000,000 entries"));
+        }
+        if !self.width.is_finite() || self.width <= 0.0 {
+            return Err(Error::invalid("candle width must be positive"));
+        }
+        for candle in &self.candles {
+            for value in [candle.x, candle.open, candle.high, candle.low, candle.close] {
+                finite(value)?;
+            }
+            if candle.high < candle.low {
+                return Err(Error::invalid("candle high must be above low"));
+            }
+        }
+        finite(self.opacity)?;
+        if !(0.0..=1.0).contains(&self.opacity) {
+            return Err(Error::invalid("candles opacity must be 0..=1"));
         }
         Ok(())
     }

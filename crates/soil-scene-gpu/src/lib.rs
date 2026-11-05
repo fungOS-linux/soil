@@ -419,6 +419,30 @@ fn world_bounds(node: &soil_scene::Node, nodes: &[soil_scene::Node]) -> (f32, f3
     (x, y, w, h)
 }
 
+fn heat_color(theme: Theme, t: f32) -> [u8; 3] {
+    let stops = [
+        (0.0, theme.primary),
+        (0.28, theme.info),
+        (0.52, theme.success),
+        (0.76, theme.warning),
+        (1.0, theme.danger),
+    ];
+    let t = t.clamp(0.0, 1.0);
+    for pair in stops.windows(2) {
+        let (a, ca) = pair[0];
+        let (b, cb) = pair[1];
+        if t <= b {
+            let u = ((t - a) / (b - a)).clamp(0.0, 1.0);
+            return [
+                (ca[0] as f32 + (cb[0] as f32 - ca[0] as f32) * u) as u8,
+                (ca[1] as f32 + (cb[1] as f32 - ca[1] as f32) * u) as u8,
+                (ca[2] as f32 + (cb[2] as f32 - ca[2] as f32) * u) as u8,
+            ];
+        }
+    }
+    stops[stops.len() - 1].1
+}
+
 fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) -> Vec<Vertex> {
     let mut out = Vec::new();
     let _ = (width, height);
@@ -427,7 +451,9 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
         match &node.content {
             soil_scene::Content::Rect(rect) => {
                 let color = ink(theme, rect.ink);
-                push_quad(&mut out, x, y, x + w, y + h, color, rect.opacity);
+                // Scene translation is the top-left in a y-up space; scale is
+                // positive down, so the quad spans `y - h .. y`.
+                push_quad(&mut out, x, y - h, x + w, y, color, rect.opacity);
             }
             soil_scene::Content::Area(area) => {
                 let color = ink(theme, area.ink);
@@ -442,6 +468,102 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                         [x2, y2],
                         [x2, base],
                         [x1, base],
+                        color,
+                        alpha,
+                    );
+                }
+            }
+            soil_scene::Content::Points(points) => {
+                let color = ink(theme, points.ink);
+                let alpha = points.opacity.clamp(0.0, 1.0);
+                let half_w = points.size[0] * 0.5 * w;
+                let half_h = points.size[1] * 0.5 * h;
+                for point in &points.points {
+                    let px = x + point[0] * w;
+                    let py = y + point[1] * h;
+                    push_quad(
+                        &mut out,
+                        px - half_w,
+                        py - half_h,
+                        px + half_w,
+                        py + half_h,
+                        color,
+                        alpha,
+                    );
+                }
+            }
+            soil_scene::Content::Heatmap(heatmap) => {
+                let cols = heatmap.cols as usize;
+                let rows = heatmap.rows as usize;
+                let cell_w = w / cols as f32;
+                let cell_h = h / rows as f32;
+                let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+                for value in &heatmap.values {
+                    lo = lo.min(*value);
+                    hi = hi.max(*value);
+                }
+                let lo = heatmap.min.unwrap_or(lo);
+                let hi = heatmap.max.unwrap_or(hi);
+                let span = if (hi - lo).abs() <= f32::EPSILON {
+                    1.0
+                } else {
+                    hi - lo
+                };
+                for row in 0..rows {
+                    for col in 0..cols {
+                        let value = heatmap.values[row * cols + col];
+                        let t = ((value - lo) / span).clamp(0.0, 1.0);
+                        let color = heat_color(theme, t);
+                        let x0 = x + col as f32 * cell_w;
+                        let top = y - row as f32 * cell_h;
+                        push_quad(
+                            &mut out,
+                            x0,
+                            top - cell_h - 0.5,
+                            x0 + cell_w + 0.5,
+                            top,
+                            color,
+                            heatmap.opacity.clamp(0.0, 1.0),
+                        );
+                    }
+                }
+            }
+            soil_scene::Content::Candles(candles) => {
+                let alpha = candles.opacity.clamp(0.0, 1.0);
+                let up = ink(theme, candles.up_ink);
+                let down = ink(theme, candles.down_ink);
+                let body = candles.width * w;
+                let pixel_x = 8.0 / width.max(1) as f32;
+                let pixel_y = 8.0 / height.max(1) as f32;
+                let wick = (body * 0.12).max(pixel_x);
+                for candle in &candles.candles {
+                    let cx = x + candle.x * w;
+                    let high = y + candle.high * h;
+                    let low = y + candle.low * h;
+                    let open = y + candle.open * h;
+                    let close = y + candle.close * h;
+                    let color = if candle.close >= candle.open {
+                        up
+                    } else {
+                        down
+                    };
+                    push_quad(
+                        &mut out,
+                        cx - wick * 0.5,
+                        high.min(low),
+                        cx + wick * 0.5,
+                        high.max(low),
+                        color,
+                        alpha,
+                    );
+                    let top = open.min(close);
+                    let bottom = open.max(close);
+                    push_quad(
+                        &mut out,
+                        cx - body * 0.5,
+                        top,
+                        cx + body * 0.5,
+                        bottom.max(top + pixel_y),
                         color,
                         alpha,
                     );
