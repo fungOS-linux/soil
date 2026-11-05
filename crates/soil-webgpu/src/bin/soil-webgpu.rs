@@ -5,12 +5,13 @@
 //!   soil-webgpu --frame FILE.bgr [--size WxH] <component.wasm>
 //!   soil-webgpu --canvas-socket PATH --source-id ID [--size WxH] <component.wasm>
 
-use std::{env, fs, path::Path, process::ExitCode};
+use std::{env, fs, path::Path, process::ExitCode, time::Duration};
 
 fn main() -> ExitCode {
     let mut frame_path = None;
     let mut canvas_socket = None;
     let mut source_id = None;
+    let mut hold = false;
     let mut size = (480, 640);
     let mut component = None;
     let mut args = env::args().skip(1);
@@ -37,6 +38,7 @@ fn main() -> ExitCode {
                 };
                 source_id = Some(id);
             }
+            "--hold" => hold = true,
             "--size" => {
                 let Some(value) = args.next() else {
                     eprintln!("--size requires WxH");
@@ -89,7 +91,15 @@ fn main() -> ExitCode {
     };
     let result = if let Some(socket) = canvas_socket {
         let source = source_id.expect("checked above");
-        match soil_webgpu::run_component_socket(&bytes, socket, source.clone(), size.0, size.1) {
+        let linger = hold.then_some(Duration::from_secs(60));
+        match soil_webgpu::run_component_socket(
+            &bytes,
+            socket,
+            source.clone(),
+            size.0,
+            size.1,
+            linger,
+        ) {
             Ok(status) if status == 0 => {
                 println!("webgpu: ok canvas source={source}");
                 Ok(())

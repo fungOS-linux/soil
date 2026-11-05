@@ -9,6 +9,7 @@
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -106,6 +107,7 @@ pub struct SocketPresenter {
     source_id: String,
     size: (u32, u32),
     revision: u64,
+    linger: Option<Duration>,
 }
 
 impl SocketPresenter {
@@ -137,7 +139,23 @@ impl SocketPresenter {
             source_id,
             size: (width, height),
             revision: 1,
+            linger: None,
         })
+    }
+
+    /// Keep the socket open after the host drops the presenter. This is for
+    /// previewing one frame from a CLI; a real Spore host stays resident.
+    pub fn with_linger(mut self, linger: Duration) -> Self {
+        self.linger = Some(linger);
+        self
+    }
+}
+
+impl Drop for SocketPresenter {
+    fn drop(&mut self) {
+        if let Some(linger) = self.linger {
+            std::thread::sleep(linger);
+        }
     }
 }
 
@@ -158,6 +176,12 @@ impl CanvasGpuPresenter for SocketPresenter {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&frame.rgba);
         let revision = self.revision;
         self.revision = self.revision.saturating_add(1);
+        let lease = format!(
+            r#"{{"kind":"present","payload":{{"kind":"gpu_lease","source_id":"{}","width":{},"height":{},"revision":{revision}}}}}"#,
+            self.source_id, frame.width, frame.height
+        );
+        self.stream.write_all(lease.as_bytes())?;
+        self.stream.write_all(b"\n")?;
         let message = format!(
             r#"{{"kind":"gpu_frame","source_id":"{}","width":{},"height":{},"revision":{revision},"rgba":"{encoded}"}}"#,
             self.source_id, frame.width, frame.height
@@ -322,9 +346,13 @@ pub fn run_component_socket(
     source_id: impl Into<String>,
     width: u32,
     height: u32,
+    linger: Option<Duration>,
 ) -> Result<u32> {
     let runtime = WebGpuRuntime::new()?;
-    let presenter = SocketPresenter::new(socket, source_id, width, height)?;
+    let mut presenter = SocketPresenter::new(socket, source_id, width, height)?;
+    if let Some(linger) = linger {
+        presenter = presenter.with_linger(linger);
+    }
     pollster::block_on(runtime.run_component_with_presenter(bytes, Box::new(presenter)))
 }
 
@@ -343,8 +371,52 @@ pub fn run_component_capture(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::UnixListener;
+
     const WEBGPU_WIT: &str = include_str!("../wit/deps/wasi-webgpu-0.3.0-rc.2/package.wit");
     const RUNNER_WIT: &str = include_str!("../wit/runner.wit");
+
+    #[test]
+    fn socket_presenter_announces_a_lease_before_its_frame() {
+        let path = std::env::temp_dir().join(format!(
+            "soil-webgpu-socket-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut lines = Vec::new();
+            for _ in 0..3 {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                lines.push(line);
+            }
+            lines
+        });
+        let mut presenter = SocketPresenter::new(&path, "triangle", 2, 1).unwrap();
+        presenter
+            .present(CanvasFrame {
+                width: 2,
+                height: 1,
+                rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
+            })
+            .unwrap();
+        drop(presenter);
+        let lines = server.join().unwrap();
+        let _ = std::fs::remove_file(path);
+        assert!(lines[0].contains(r#""kind":"hello""#));
+        assert!(lines[1].contains(r#""kind":"present""#));
+        assert!(lines[1].contains(r#""kind":"gpu_lease""#));
+        assert!(lines[2].contains(r#""kind":"gpu_frame""#));
+        assert!(lines[2].contains(r#""revision":1"#));
+    }
 
     #[test]
     fn pins_the_upstream_wasi_webgpu_contract() {

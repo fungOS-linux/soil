@@ -93,6 +93,21 @@ which retains exactly one frame. No guest callback runs on the host; no native
 window, swapchain, pointer, or mapped memory crosses into Wasm. Canvas still owns
 the window, target extent, final presentation decision and timing.
 
+The cross-process presenter, `SocketPresenter`, connects to Canvas's `ui.sock`
+and sends a `hello`, a `present` carrying `gpu_lease`, then a `gpu_frame`. Canvas
+stores the frame by lease `source_id` and composites it as an image layer inside
+the window it already owns:
+
+```sh
+cargo run -p soil-webgpu -- \
+  --canvas-socket "$CANVAS_CONFIG_DIR/ui.sock" \
+  --source-id triangle --size 480x640 --hold \
+  crates/soil-webgpu/fixtures/wgpu-canvas.wasm
+```
+
+`--hold` is a preview convenience: it keeps the producer connection open so the
+surface is not removed when the CLI exits. A real Spore host stays resident.
+
 ## Proof
 
 The fixture is a real component built from
