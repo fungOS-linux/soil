@@ -14,7 +14,7 @@ remote = ["dep:ureq"]
 [dependencies]
 anyhow = "1"
 blake3 = "1"
-fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "b4a2403d501627cc90c16ff6e965f3cfd1490560" }
+fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "bcd2bc682662467d1371a2c9f8436e08934132d9" }
 model2vec-rs = { version = "0.4", default-features = false, features = ["fancy-regex", "hf-hub"], optional = true }
 regex = "1"
 rusqlite = { version = "0.41", features = ["bundled"] }

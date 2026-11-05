@@ -3,6 +3,9 @@ target/
 *.component.wasm
 .worktrees/
 
+# Checked-in Mush Spore component.
+!spores/mush/module.wasm
+
 # Checked-in WebGPU component fixture for the ignored GPU test.
 !crates/soil-webgpu/fixtures/hello-compute.wasm
 

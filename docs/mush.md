@@ -1,31 +1,78 @@
 # Mush
 
-Mush is the sandboxed Shell over one VFS workspace.
+Mush is the sandboxed shell over one VFS workspace. The command engine is a
+Wasm Spore; the native `mush` process is only the host.
 
 ```sh
-mush --root ~/fungos-node
+mush --root ~/fungos-node \
+  --wasm spores/mush/module.wasm
 ```
 
-It has no host filesystem, `PATH`, environment, subprocess, or network access.
-Every path is workspace-relative. Every mutation is a VFS namespace operation.
+The Spore imports exactly three capabilities:
+
+```text
+soil:vfs       read, stat, list
+soil:index     browse, search, KNN
+soil:vfs-mut   write, remove, mkdir, rmdir, rename
+```
+
+It has no host filesystem, `PATH` lookup, subprocess, or network access.
+
+## Shell state
+
+Mush keeps real shell state across commands:
+
+```text
+PWD, OLDPWD, HOME, TERM, PATH, USER, LOGNAME, SHELL, PS1
+```
+
+```sh
+cd /projects
+pwd
+echo $PWD
+export TERM=xterm-256color
+export PS1="\u@mush:\w$ "
+cd -
+env
+```
+
+`PWD` is updated on `cd`; `cd -` returns to `OLDPWD`.
+
+## Startup file
+
+Mush loads `.mushrc` (or `mushrc`) from the VFS root before the first prompt:
+
+```sh
+# .mushrc
+export TERM=xterm-256color
+export PS1="mush:\w$ "
+export PROJECT=soil
+mkdir notes
+```
+
+The file is VFS content, not a host dotfile.
 
 ## Commands
 
 ```text
 help
 pwd
-cd [DIR]
-ls [DIR]
+cd [DIR|-]
+ls [-l] [DIR]
+mkdir DIR...
+rmdir DIR...
 cat PATH
 write PATH [TEXT...]
 rm PATH...
 mv FROM TO
 cp FROM TO
-stat PATH
-history PATH
 search QUERY
 source SCRIPT
 echo TEXT
+export KEY=VALUE
+unset KEY...
+env
+set [KEY=VALUE]
 exit
 ```
 
@@ -35,21 +82,26 @@ Scripts are Mush commands stored in the VFS:
 
 ```text
 # scripts/archive.mush
-mv notes/today.md notes/archive/today.md
+mkdir archive
+mv notes/today.md archive/today.md
 echo archived
 ```
 
 ```sh
-mush --root ~/fungos-node --script scripts/archive.mush
+mush --root ~/fungos-node --wasm spores/mush/module.wasm \
+  --script scripts/archive.mush
 ```
 
 Mush scripts are deliberately **not** POSIX shell scripts. There is no host
-`/bin/sh`, no `PATH`, and no `exec`. A script can only use Mush commands.
+`/bin/sh`, no `PATH` execution, and no `exec`. A script can only use Mush
+commands.
 
 ## Storage semantics
 
 ```text
 write  -> new ContentId/version under the path
+mkdir  -> explicit empty directory entry
+rmdir  -> remove an empty explicit directory
 mv     -> namespace rename; ContentId and history preserved
 cp     -> new version with the same bytes
 rm     -> namespace unlink; blob and history retained
@@ -57,20 +109,8 @@ rm     -> namespace unlink; blob and history retained
 
 `rm` is not blob destruction. Explicit VFS GC is the collector.
 
-## Status
+## Host boundary
 
-This is the first sandboxed authority slice: a native process whose only data
-access is the `fungos-vfs` root given on the command line. It is not yet a Wasm
-Spore and does not yet use `soil:terminal`.
-
-The next slice is the same command engine as a component with:
-
-```text
-soil:vfs      read
-soil:vfs      mutation (separate grant)
-soil:index    search
-soil:terminal cell grid + input
-```
-
-At that point `mush` runs inside Soil with no native filesystem or process
-authority at all.
+`mush` opens the VFS root, links the three grants, and calls the Spore one line
+at a time. The Spore returns output, prompt, and exit state. The current host is
+line-oriented; `soil:terminal` cell-grid rendering remains the next frontend.

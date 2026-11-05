@@ -34,7 +34,7 @@ pub(crate) trait IndexBackend: Send {
     ) -> Result<index::Page, index::Error>;
     fn search(&self, query: &index::Query) -> Result<index::Page, index::Error>;
     fn entry(&self, path: &str) -> Option<&Node>;
-    fn nodes(&self) -> &BTreeMap<String, Node>;
+    fn children(&self, parent: &str) -> &[String];
     fn missing_chunks(&self, model: &str, limit: usize) -> anyhow::Result<Vec<(String, String)>>;
     fn put_vector(&mut self, chunk_id: &str, model: &str, vector: &[f32]) -> anyhow::Result<()>;
     fn semantic_search(
@@ -62,6 +62,7 @@ pub(crate) enum NodeKind {
 pub(crate) struct SqliteIndex {
     db: Connection,
     nodes: BTreeMap<String, Node>,
+    children: BTreeMap<String, Vec<String>>,
     generation: u64,
     rebuilt_at_ms: u64,
     ready: bool,
@@ -121,6 +122,7 @@ impl SqliteIndex {
         let mut index = Self {
             db,
             nodes: BTreeMap::new(),
+            children: BTreeMap::new(),
             generation: 0,
             rebuilt_at_ms: 0,
             ready: false,
@@ -178,6 +180,7 @@ impl SqliteIndex {
             let (path, node) = row?;
             self.nodes.insert(path, node);
         }
+        self.children = build_children(&self.nodes);
         Ok(())
     }
 
@@ -284,9 +287,10 @@ impl SqliteIndex {
         &mut self,
         vfs: &mut Vfs,
         entries: &[FileEntry],
+        directories: &[String],
         source_hash: &str,
     ) -> anyhow::Result<()> {
-        let nodes = build_nodes(vfs, entries);
+        let nodes = build_nodes(vfs, entries, directories);
         let generation = self.generation.saturating_add(1);
         let rebuilt_at_ms = now_ms();
         let transaction = self.db.transaction()?;
@@ -336,6 +340,7 @@ impl SqliteIndex {
         }
         transaction.commit()?;
         self.nodes = nodes;
+        self.children = build_children(&self.nodes);
         self.generation = generation;
         self.rebuilt_at_ms = rebuilt_at_ms;
         self.ready = true;
@@ -561,11 +566,12 @@ impl SqliteIndex {
 impl IndexBackend for SqliteIndex {
     fn refresh(&mut self, vfs: &mut Vfs) -> anyhow::Result<()> {
         let entries = vfs.list("")?;
-        let source_hash = source_hash(&entries);
+        let directories = vfs.directories("")?;
+        let source_hash = source_hash(&entries, &directories);
         if self.ready && self.persisted_source()?.as_deref() == Some(&source_hash) {
             return Ok(());
         }
-        self.rebuild(vfs, &entries, &source_hash)
+        self.rebuild(vfs, &entries, &directories, &source_hash)
     }
 
     fn state(&self) -> index::IndexState {
@@ -594,9 +600,11 @@ impl IndexBackend for SqliteIndex {
             return Err(index::Error::Invalid);
         }
         let mut nodes: Vec<_> = self
-            .nodes
-            .values()
-            .filter(|node| parent_of(&node.entry.path) == parent)
+            .children
+            .get(parent)
+            .into_iter()
+            .flatten()
+            .filter_map(|path| self.nodes.get(path))
             .collect();
         match order {
             index::Order::Path => nodes.sort_by(|a, b| a.entry.path.cmp(&b.entry.path)),
@@ -666,8 +674,8 @@ impl IndexBackend for SqliteIndex {
         self.nodes.get(path)
     }
 
-    fn nodes(&self) -> &BTreeMap<String, Node> {
-        &self.nodes
+    fn children(&self, parent: &str) -> &[String] {
+        self.children.get(parent).map(Vec::as_slice).unwrap_or(&[])
     }
 
     fn missing_chunks(&self, model: &str, limit: usize) -> anyhow::Result<Vec<(String, String)>> {
@@ -699,7 +707,11 @@ impl IndexBackend for SqliteIndex {
     }
 }
 
-fn build_nodes(vfs: &mut Vfs, entries: &[FileEntry]) -> BTreeMap<String, Node> {
+fn build_nodes(
+    vfs: &mut Vfs,
+    entries: &[FileEntry],
+    directories: &[String],
+) -> BTreeMap<String, Node> {
     let mut nodes = BTreeMap::new();
     nodes.insert(
         String::new(),
@@ -745,6 +757,25 @@ fn build_nodes(vfs: &mut Vfs, entries: &[FileEntry]) -> BTreeMap<String, Node> {
         );
     }
 
+    for path in directories {
+        add_ancestors(&mut nodes, path);
+        nodes.entry(path.clone()).or_insert_with(|| Node {
+            entry: FileEntry {
+                path: path.clone(),
+                content_id: fungos_vfs::ContentId(String::new()),
+                size: 0,
+                media_type: "inode/directory".into(),
+                version: 0,
+                hydration: Hydration::Present,
+                pinned: false,
+                updated_at_ms: 0,
+            },
+            kind: NodeKind::Directory,
+            child_count: 0,
+            text: String::new(),
+        });
+    }
+
     let paths: Vec<String> = nodes.keys().cloned().collect();
     for path in paths {
         if path.is_empty() {
@@ -759,6 +790,21 @@ fn build_nodes(vfs: &mut Vfs, entries: &[FileEntry]) -> BTreeMap<String, Node> {
         }
     }
     nodes
+}
+
+fn build_children(nodes: &BTreeMap<String, Node>) -> BTreeMap<String, Vec<String>> {
+    let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for path in nodes.keys() {
+        if path.is_empty() {
+            continue;
+        }
+        let parent = parent_of(path);
+        children.entry(parent).or_default().push(path.clone());
+    }
+    for values in children.values_mut() {
+        values.sort();
+    }
+    children
 }
 
 fn add_ancestors(nodes: &mut BTreeMap<String, Node>, path: &str) {
@@ -847,8 +893,13 @@ fn is_indexable_text(entry: &FileEntry) -> bool {
     )
 }
 
-fn source_hash(entries: &[FileEntry]) -> String {
+fn source_hash(entries: &[FileEntry], directories: &[String]) -> String {
     let mut hasher = blake3::Hasher::new();
+    for path in directories {
+        hasher.update(b"dir\0");
+        hasher.update(path.as_bytes());
+        hasher.update(b"\n");
+    }
     for entry in entries {
         hasher.update(entry.path.as_bytes());
         hasher.update(b"\0");

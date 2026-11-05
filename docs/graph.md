@@ -39,6 +39,31 @@ An external identifier is one record with schema
 }
 ```
 
+## Graph queries
+
+`soil:graph@0.1.0` exposes read-only edge and reference queries over the same
+approved books:
+
+```wit
+neighbors(node, rel, direction, offset, limit) -> edge-page
+references(node, offset, limit)                    -> reference-page
+state() / refresh()
+```
+
+Examples:
+
+```text
+neighbors("record:personal/avery/projects#soil", none, both)
+  -> outgoing repository reference
+  -> incoming document mention
+
+neighbors("record:personal/avery/projects#soil", "references", out)
+references("record:personal/avery/projects#soil")
+```
+
+Edges carry `source`, `rel`, `target`, `role`, `title`, and `book`. A link never
+grants access; inaccessible targets remain unresolved locators.
+
 ## Search integration
 
 `soil:search@0.2.0` adds a bounded `references` list to every hit:

@@ -12,8 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "b4a2403d501627cc90c16ff6e965f3cfd1490560" }
+fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "bcd2bc682662467d1371a2c9f8436e08934132d9" }
 soil-vfs-host = { path = "../soil-vfs-host" }
+wasmtime = { version = "50", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -52,7 +52,10 @@ Principles:
 | [`soil:appdata@1.0.0`](wit/soil-appdata.wit) | `soil:appdata` | WIT + guest SDK; native host next |
 | [`soil:records@0.1.0`](wit/soil-records.wit) | `soil:records` read/write/sync | WIT + generic/contacts host + guest SDK |
 | [`soil:http@0.1.0`](wit/soil-http.wit) | `soil:http` | WIT + bounded host + direct transport proof |
-| [`soil:search@0.2.0`](wit/soil-search.wit) | `soil:search` | WIT + files/records host composition |
+| [`soil:index@1.1.0`](wit/soil-index.wit) | `soil:index` | derived browse/search + explicit KNN; fast direct-child traversal |
+| [`soil:vfs-mut@0.1.0`](wit/soil-vfs-mut.wit) | `soil:vfs-mut` | separate write/mkdir/rmdir/rename grant |
+| [`soil:search@0.2.0`](wit/soil-search.wit) | `soil:search` | WIT + files/records/graph host composition |
+| [`soil:graph@0.1.0`](wit/soil-graph.wit) | `soil:graph` | read-only edge/reference queries over records |
 | [`soil:ble@1.0.0`](wit/soil-ble.wit) | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | WIT + host + COLMI ring Spore |
 | [`soil:canvas@1.0.0`](wit/soil-canvas.wit) | `soil:canvas` | WIT + input normalizer + S22 runtime + Android JNI |
 | [`wasi:webgpu@0.3.0-rc.2`](crates/soil-webgpu/wit/deps/wasi-webgpu-0.3.0-rc.2/package.wit) | link `wasi:webgpu` | upstream WIT + host + compute fixture |
@@ -128,4 +131,4 @@ No sibling worktrees are required. See [dependency policy](docs/dependencies.md)
 
 ## Mush
 
-`mush` is the sandboxed shell over one VFS workspace: no host PATH, no subprocesses, workspace-relative paths, and `rm` as namespace unlink. See [Mush](docs/mush.md).
+`mush` is now a Wasm Spore over `soil:vfs`, `soil:index`, and `soil:vfs-mut`: no host PATH, no subprocesses, workspace-relative paths, `.mushrc`, `PWD`/`OLDPWD`, `TERM`, `mkdir`, `rmdir`, and `rm` as namespace unlink. See [Mush](docs/mush.md).

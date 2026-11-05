@@ -1,0 +1,669 @@
+//! Mush Spore: a sandboxed shell over `soil:vfs` and `soil:index`.
+//!
+//! The native host owns authority and calls one line at a time. This component
+//! owns parsing, `PWD`/`OLDPWD`, environment variables, startup files, and
+//! command semantics. It has no host filesystem, process, or network access.
+
+wit_bindgen::generate!({ path: "wit", world: "mush", generate_all });
+
+use std::{collections::BTreeMap, sync::Mutex};
+
+use soil::index::index::{self, Mode, Query};
+use soil::vfs::vfs::{self, Kind};
+use soil::vfs_mut::vfs_mut;
+
+const MAX_SCRIPT_DEPTH: u8 = 8;
+const READ_CHUNK: u32 = 64 * 1024;
+
+static SHELL: Mutex<Option<Shell>> = Mutex::new(None);
+
+struct Component;
+
+export!(Component);
+
+impl Guest for Component {
+    fn start(args: Vec<String>) -> Result<Response, String> {
+        let mut shell = Shell::new(args);
+        let output = shell.load_startup();
+        let prompt = shell.prompt();
+        let exit = shell.exit;
+        *SHELL.lock().map_err(|_| "shell state poisoned")? = Some(shell);
+        Ok(Response {
+            output,
+            exit,
+            prompt,
+        })
+    }
+
+    fn execute(line: String) -> Result<Response, String> {
+        let mut guard = SHELL.lock().map_err(|_| "shell state poisoned")?;
+        let shell = guard.as_mut().ok_or("shell not started")?;
+        shell.run_line(&line);
+        Ok(Response {
+            output: std::mem::take(&mut shell.out),
+            exit: shell.exit,
+            prompt: shell.prompt(),
+        })
+    }
+
+    fn prompt() -> String {
+        SHELL
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(Shell::prompt))
+            .unwrap_or_else(|| "mush:/$ ".into())
+    }
+
+    fn environment(name: String) -> Option<String> {
+        SHELL.lock().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .and_then(|shell| shell.env.get(&name).cloned())
+        })
+    }
+}
+
+struct Shell {
+    cwd: String,
+    env: BTreeMap<String, String>,
+    out: String,
+    exit: bool,
+    source_depth: u8,
+}
+
+impl Shell {
+    fn new(args: Vec<String>) -> Self {
+        let mut env = BTreeMap::new();
+        for (key, value) in [
+            ("HOME", "/"),
+            ("PWD", "/"),
+            ("OLDPWD", "/"),
+            ("PATH", "/bin:/usr/bin"),
+            ("TERM", "dumb"),
+            ("USER", "mush"),
+            ("LOGNAME", "mush"),
+            ("SHELL", "/bin/mush"),
+            ("MUSH_VERSION", env!("CARGO_PKG_VERSION")),
+        ] {
+            env.insert(key.into(), value.into());
+        }
+        let mut iter = args.into_iter();
+        while let Some(arg) = iter.next() {
+            if let Some(value) = arg.strip_prefix("--term=") {
+                env.insert("TERM".into(), value.into());
+            } else if arg == "--term" {
+                if let Some(value) = iter.next() {
+                    env.insert("TERM".into(), value);
+                }
+            } else if let Some(value) = arg.strip_prefix("--home=") {
+                env.insert("HOME".into(), value.into());
+            }
+        }
+        Self {
+            cwd: String::new(),
+            env,
+            out: String::new(),
+            exit: false,
+            source_depth: 0,
+        }
+    }
+
+    fn load_startup(&mut self) -> String {
+        for candidate in [".mushrc", "mushrc"] {
+            match self.read_file(candidate) {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    for line in text.lines() {
+                        self.run_line(line);
+                        if self.exit {
+                            break;
+                        }
+                    }
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        std::mem::take(&mut self.out)
+    }
+
+    fn run_line(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return;
+        }
+        let words = match split_words(line) {
+            Ok(words) => words,
+            Err(error) => {
+                self.error(&error);
+                return;
+            }
+        };
+        let Some(command) = words.first().map(String::as_str) else {
+            return;
+        };
+        let args: Vec<String> = words[1..].iter().map(|word| self.expand(word)).collect();
+        let result = match command {
+            "help" => {
+                self.out.push_str(HELP);
+                self.out.push('\n');
+                Ok(())
+            }
+            "exit" | "quit" => {
+                self.exit = true;
+                Ok(())
+            }
+            "pwd" => {
+                self.out.push_str(&self.display_cwd());
+                self.out.push('\n');
+                Ok(())
+            }
+            "cd" => self.cd(args.first().map(String::as_str)),
+            "ls" => self.ls(&args),
+            "mkdir" => self.mkdir(&args),
+            "rmdir" => self.rmdir(&args),
+            "cat" => self.cat(&args),
+            "write" => self.write(&args),
+            "rm" => self.rm(&args),
+            "mv" => self.mv(&args),
+            "cp" => self.cp(&args),
+            "search" => self.search(&args),
+            "source" => self.source(&args),
+            "echo" => {
+                self.out.push_str(&args.join(" "));
+                self.out.push('\n');
+                Ok(())
+            }
+            "export" | "set" => self.set_env(&args),
+            "unset" => self.unset_env(&args),
+            "env" => {
+                for (key, value) in &self.env {
+                    self.out.push_str(&format!("{key}={value}\n"));
+                }
+                Ok(())
+            }
+            other => Err(format!("unknown command {other}; try help")),
+        };
+        if let Err(error) = result {
+            self.error(&error);
+        }
+    }
+
+    fn cd(&mut self, target: Option<&str>) -> Result<(), String> {
+        let target = target.unwrap_or("~");
+        let target = if target == "-" {
+            self.env
+                .get("OLDPWD")
+                .cloned()
+                .unwrap_or_else(|| "/".into())
+        } else {
+            target.to_string()
+        };
+        let path = self.resolve(&target)?;
+        let entry = vfs::stat(&path).map_err(|error| format!("cd: {error:?}"))?;
+        if entry.kind != Kind::Directory {
+            return Err(format!("cd: not a directory: {}", self.display(&path)));
+        }
+        let old = self.display_cwd();
+        self.cwd = path;
+        self.env.insert("OLDPWD".into(), old);
+        self.env.insert("PWD".into(), self.display_cwd());
+        Ok(())
+    }
+
+    fn ls(&mut self, args: &[String]) -> Result<(), String> {
+        let mut long = false;
+        let mut target = None;
+        for arg in args {
+            if arg == "-l" {
+                long = true;
+            } else if arg == "-a" || arg == "-la" || arg == "-al" {
+            } else if target.is_none() {
+                target = Some(arg.as_str());
+            }
+        }
+        let dir = self.resolve(target.unwrap_or("."))?;
+        let mut offset = 0;
+        let mut entries = Vec::new();
+        loop {
+            let page = vfs::ls(&dir, offset, 512).map_err(|error| format!("ls: {error:?}"))?;
+            entries.extend(page.entries);
+            match page.next {
+                Some(next) if next > offset => offset = next,
+                _ => break,
+            }
+        }
+        for entry in entries {
+            if long {
+                let kind = if entry.kind == Kind::Directory {
+                    "d"
+                } else {
+                    "f"
+                };
+                self.out.push_str(&format!(
+                    "{kind}\t{}\t{}\t{}\n",
+                    entry.size, entry.content_id, entry.name
+                ));
+            } else {
+                self.out.push_str(&entry.name);
+                if entry.kind == Kind::Directory {
+                    self.out.push('/');
+                }
+                self.out.push('\n');
+            }
+        }
+        Ok(())
+    }
+
+    fn mkdir(&mut self, args: &[String]) -> Result<(), String> {
+        if args.is_empty() {
+            return Err("mkdir PATH...".into());
+        }
+        for arg in args {
+            let path = self.resolve(arg)?;
+            vfs_mut::mkdir(&path)
+                .map_err(|error| format!("mkdir {}: {error:?}", self.display(&path)))?;
+        }
+        Ok(())
+    }
+
+    fn rmdir(&mut self, args: &[String]) -> Result<(), String> {
+        if args.is_empty() {
+            return Err("rmdir PATH...".into());
+        }
+        for arg in args {
+            let path = self.resolve(arg)?;
+            vfs_mut::rmdir(&path)
+                .map_err(|error| format!("rmdir {}: {error:?}", self.display(&path)))?;
+        }
+        Ok(())
+    }
+
+    fn cat(&mut self, args: &[String]) -> Result<(), String> {
+        let Some(arg) = args.first() else {
+            return Err("cat PATH".into());
+        };
+        let path = self.resolve(arg)?;
+        let bytes = self.read_file(&path)?;
+        self.out.push_str(&String::from_utf8_lossy(&bytes));
+        Ok(())
+    }
+
+    fn write(&mut self, args: &[String]) -> Result<(), String> {
+        let Some(arg) = args.first() else {
+            return Err("write PATH [TEXT...]".into());
+        };
+        let path = self.resolve(arg)?;
+        let bytes = if args.len() > 1 {
+            format!("{}\n", args[1..].join(" ")).into_bytes()
+        } else {
+            Vec::new()
+        };
+        let result = vfs_mut::write(&path, &bytes, media_type(&path), None)
+            .map_err(|error| format!("write {}: {error:?}", self.display(&path)))?;
+        self.out.push_str(&format!(
+            "wrote {} v{} {}\n",
+            self.display(&path),
+            result.version,
+            result.content_id
+        ));
+        Ok(())
+    }
+
+    fn rm(&mut self, args: &[String]) -> Result<(), String> {
+        if args.is_empty() {
+            return Err("rm PATH...".into());
+        }
+        for arg in args {
+            let path = self.resolve(arg)?;
+            vfs_mut::remove(&path)
+                .map_err(|error| format!("rm {}: {error:?}", self.display(&path)))?;
+        }
+        Ok(())
+    }
+
+    fn mv(&mut self, args: &[String]) -> Result<(), String> {
+        if args.len() != 2 {
+            return Err("mv FROM TO".into());
+        }
+        let from = self.resolve(&args[0])?;
+        let to = self.resolve(&args[1])?;
+        let result = vfs_mut::rename(&from, &to).map_err(|error| {
+            format!(
+                "mv {} {}: {error:?}",
+                self.display(&from),
+                self.display(&to)
+            )
+        })?;
+        self.out.push_str(&format!(
+            "renamed {} -> {} ({})\n",
+            self.display(&from),
+            self.display(&to),
+            result.content_id
+        ));
+        Ok(())
+    }
+
+    fn cp(&mut self, args: &[String]) -> Result<(), String> {
+        if args.len() != 2 {
+            return Err("cp FROM TO".into());
+        }
+        let from = self.resolve(&args[0])?;
+        let to = self.resolve(&args[1])?;
+        let bytes = self.read_file(&from)?;
+        let result = vfs_mut::write(&to, &bytes, media_type(&to), None).map_err(|error| {
+            format!(
+                "cp {} {}: {error:?}",
+                self.display(&from),
+                self.display(&to)
+            )
+        })?;
+        self.out.push_str(&format!(
+            "copied {} -> {} v{}\n",
+            self.display(&from),
+            self.display(&to),
+            result.version
+        ));
+        Ok(())
+    }
+
+    fn search(&mut self, args: &[String]) -> Result<(), String> {
+        if args.is_empty() {
+            return Err("search QUERY".into());
+        }
+        let page = index::search(&Query {
+            text: args.join(" "),
+            mode: Some(Mode::Fuzzy),
+            parent: None,
+            media_type_prefix: None,
+            offset: 0,
+            limit: 50,
+        })
+        .map_err(|error| format!("search: {error:?}"))?;
+        for hit in page.hits {
+            self.out.push_str(&format!(
+                "{}\t{}\t{}\n",
+                hit.path,
+                hit.score,
+                hit.snippet.unwrap_or_default()
+            ));
+        }
+        Ok(())
+    }
+
+    fn source(&mut self, args: &[String]) -> Result<(), String> {
+        let Some(arg) = args.first() else {
+            return Err("source SCRIPT".into());
+        };
+        if self.source_depth >= MAX_SCRIPT_DEPTH {
+            return Err("source: nesting too deep".into());
+        }
+        let path = self.resolve(arg)?;
+        let bytes = self.read_file(&path)?;
+        let text = String::from_utf8(bytes).map_err(|_| "source: script is not UTF-8")?;
+        self.source_depth += 1;
+        for line in text.lines() {
+            self.run_line(line);
+            if self.exit {
+                break;
+            }
+        }
+        self.source_depth -= 1;
+        Ok(())
+    }
+
+    fn set_env(&mut self, args: &[String]) -> Result<(), String> {
+        if args.is_empty() {
+            for (key, value) in &self.env {
+                self.out.push_str(&format!("{key}={value}\n"));
+            }
+            return Ok(());
+        }
+        for arg in args {
+            let Some((key, value)) = arg.split_once('=') else {
+                return Err(format!("export: expected KEY=VALUE, got {arg:?}"));
+            };
+            if key.is_empty() {
+                return Err("export: empty variable name".into());
+            }
+            self.env.insert(key.into(), value.into());
+            if key == "PWD" {
+                self.cwd = self.resolve(value).unwrap_or_default();
+            }
+        }
+        Ok(())
+    }
+
+    fn unset_env(&mut self, args: &[String]) -> Result<(), String> {
+        for arg in args {
+            self.env.remove(arg);
+        }
+        Ok(())
+    }
+
+    fn resolve(&self, value: &str) -> Result<String, String> {
+        if value.contains('\\') {
+            return Err("invalid path".into());
+        }
+        let value = if value == "~" {
+            self.env.get("HOME").cloned().unwrap_or_else(|| "/".into())
+        } else if let Some(rest) = value.strip_prefix("~/") {
+            format!(
+                "{}/{}",
+                self.env.get("HOME").cloned().unwrap_or_else(|| "/".into()),
+                rest
+            )
+        } else {
+            value.to_string()
+        };
+        let mut parts: Vec<&str> = if value.starts_with('/') {
+            Vec::new()
+        } else {
+            self.cwd
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect()
+        };
+        for part in value.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                part => parts.push(part),
+            }
+        }
+        Ok(parts.join("/"))
+    }
+
+    fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        let mut offset = 0;
+        loop {
+            let chunk = vfs::read(path, offset, READ_CHUNK)
+                .map_err(|error| format!("{}: {error:?}", self.display(path)))?;
+            let len = chunk.data.len() as u64;
+            bytes.extend(chunk.data);
+            if chunk.eof || len == 0 {
+                break;
+            }
+            offset = offset.saturating_add(len);
+        }
+        Ok(bytes)
+    }
+
+    fn display_cwd(&self) -> String {
+        self.display(&self.cwd)
+    }
+
+    fn display(&self, path: &str) -> String {
+        if path.is_empty() {
+            "/".into()
+        } else {
+            format!("/{path}")
+        }
+    }
+
+    fn prompt(&self) -> String {
+        let format = self
+            .env
+            .get("PS1")
+            .cloned()
+            .unwrap_or_else(|| "mush:\\w$ ".into());
+        let mut prompt = String::new();
+        let mut chars = format.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                prompt.push(ch);
+                continue;
+            }
+            match chars.next() {
+                Some('u') => {
+                    prompt.push_str(self.env.get("USER").map(String::as_str).unwrap_or("mush"))
+                }
+                Some('h') => prompt.push_str("mush"),
+                Some('w') => prompt.push_str(&self.display_cwd()),
+                Some('W') => prompt.push_str(
+                    self.cwd
+                        .rsplit('/')
+                        .next()
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("/"),
+                ),
+                Some('$') => prompt.push('$'),
+                Some('n') => prompt.push('\n'),
+                Some('t') => prompt.push_str("00:00:00"),
+                Some(other) => prompt.push(other),
+                None => prompt.push('\\'),
+            }
+        }
+        self.expand(&prompt)
+    }
+
+    fn expand(&self, value: &str) -> String {
+        let mut out = String::new();
+        let mut chars = value.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '$' {
+                out.push(ch);
+                continue;
+            }
+            if chars.peek() == Some(&'{') {
+                chars.next();
+                let mut name = String::new();
+                for ch in chars.by_ref() {
+                    if ch == '}' {
+                        break;
+                    }
+                    name.push(ch);
+                }
+                out.push_str(self.env.get(&name).map(String::as_str).unwrap_or(""));
+                continue;
+            }
+            if chars.peek() == Some(&'?') {
+                chars.next();
+                out.push('0');
+                continue;
+            }
+            let mut name = String::new();
+            while let Some(&ch) = chars.peek() {
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    name.push(ch);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if name.is_empty() {
+                out.push('$');
+            } else {
+                out.push_str(self.env.get(&name).map(String::as_str).unwrap_or(""));
+            }
+        }
+        out
+    }
+
+    fn error(&mut self, error: &str) {
+        self.out.push_str("mush: ");
+        self.out.push_str(error);
+        self.out.push('\n');
+    }
+}
+
+fn media_type(path: &str) -> &'static str {
+    match path.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("rs") => "text/x-rust",
+        Some("md") => "text/markdown",
+        Some("json") => "application/json",
+        Some("toml") => "application/toml",
+        Some("yaml" | "yml") => "application/yaml",
+        Some("sh" | "bash") => "text/x-shellscript",
+        _ => "text/plain",
+    }
+}
+
+fn split_words(line: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escape = false;
+    for ch in line.chars() {
+        if escape {
+            word.push(ch);
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        if let Some(open) = quote {
+            if ch == open {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ch if ch.is_whitespace() => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            _ => word.push(ch),
+        }
+    }
+    if quote.is_some() {
+        return Err("unterminated quote".into());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    Ok(words)
+}
+
+const HELP: &str = "\
+mush — a sandboxed VFS shell
+
+  help                    this text
+  pwd                     print workspace path
+  cd [DIR|-]              change directory
+  ls [-l] [DIR]           list direct children
+  mkdir DIR...            create directories
+  rmdir DIR...            remove empty directories
+  cat PATH                print a file
+  write PATH [TEXT...]    create/replace a file
+  rm PATH...              unlink files (blobs retained)
+  mv FROM TO              rename a file
+  cp FROM TO              copy bytes to a new version
+  search QUERY            fuzzy index search
+  source SCRIPT           run a Mush script from the VFS
+  echo TEXT               print text
+  export KEY=VALUE        set an environment variable
+  unset KEY...            remove environment variables
+  env                     print the environment
+  set [KEY=VALUE]         print or set variables
+  exit                    leave
+";

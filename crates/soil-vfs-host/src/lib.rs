@@ -22,9 +22,13 @@ pub use embeddings::RemoteEmbeddingProvider;
 use indexer::{IndexBackend, Node, NodeKind, SqliteIndex};
 pub use soil::index::index;
 pub use soil::vfs::vfs;
+pub use soil::vfs_mut::vfs_mut;
+
+use soil::vfs_mut::vfs_mut as vfs_mut_api;
 
 pub(crate) const MAX_PAGE: u32 = 512;
 const MAX_RANGE: u32 = 1024 * 1024;
+const MAX_MUTATION_BYTES: usize = 16 * 1024 * 1024;
 
 /// Optional content transport used when a VFS path is only a placeholder.
 pub trait ContentHydrator: Send + Sync {
@@ -154,25 +158,34 @@ impl VfsHost {
         Ok(())
     }
 
-    fn semantic_search(&self, query: &index::Query) -> Result<index::Page, index::Error> {
+    fn knn_search(
+        &self,
+        text: &str,
+        parent: Option<&str>,
+        media_type_prefix: Option<&str>,
+        offset: u64,
+        limit: u32,
+    ) -> Result<index::Page, index::Error> {
         let Some(provider) = &self.embeddings else {
             return Err(index::Error::Unsupported);
         };
         let vector = provider
-            .embed(std::slice::from_ref(&query.text))
+            .embed(&[text.to_string()])
             .map_err(index_error)?
             .into_iter()
             .next()
             .ok_or(index::Error::Io)?;
-        let parent = query
-            .parent
-            .as_deref()
+        let parent = parent
             .map(normalize_parent)
             .transpose()
             .map_err(|_| index::Error::Invalid)?;
         let index = self.index_read();
+        let wanted = usize::try_from(offset.saturating_add(limit as u64))
+            .unwrap_or(MAX_PAGE as usize)
+            .saturating_mul(2)
+            .max(MAX_PAGE as usize);
         let raw = index
-            .semantic_search(provider.model_id(), &vector, MAX_PAGE as usize * 4)
+            .semantic_search(provider.model_id(), &vector, wanted)
             .map_err(index_error)?;
         let mut hits = Vec::new();
         for (path, score) in raw {
@@ -191,7 +204,7 @@ impl VfsHost {
                     continue;
                 }
             }
-            if let Some(prefix) = &query.media_type_prefix
+            if let Some(prefix) = media_type_prefix
                 && !node.entry.media_type.starts_with(prefix)
             {
                 continue;
@@ -204,15 +217,13 @@ impl VfsHost {
             });
         }
         hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
-        let start = usize::try_from(query.offset).unwrap_or(usize::MAX);
-        let page = hits
-            .into_iter()
-            .skip(start)
-            .take(query.limit as usize)
-            .collect();
+        let start = usize::try_from(offset).unwrap_or(usize::MAX);
+        let total = hits.len() as u64;
+        let page: Vec<_> = hits.into_iter().skip(start).take(limit as usize).collect();
+        let consumed = offset.saturating_add(page.len() as u64);
         Ok(index::Page {
             hits: page,
-            next: None,
+            next: (consumed < total).then_some(consumed),
             generation: index.state().generation,
         })
     }
@@ -256,6 +267,7 @@ fn vfs_error(error: VfsError) -> vfs::Error {
         VfsError::InvalidContentId(_)
         | VfsError::Conflict { .. }
         | VfsError::AlreadyExists(_)
+        | VfsError::NotEmpty(_)
         | VfsError::Leased { .. } => vfs::Error::Io,
         VfsError::RoleMismatch { .. } => vfs::Error::Denied,
     }
@@ -279,15 +291,11 @@ impl vfs::Host for VfsHost {
         if node.kind != NodeKind::Directory {
             return Err(vfs::Error::NotDirectory);
         }
-        let mut children: Vec<_> = index
-            .nodes()
-            .values()
-            .filter(|node| !node.entry.path.is_empty() && parent_of(&node.entry.path) == parent)
-            .collect();
-        children.sort_by(|a, b| a.entry.path.cmp(&b.entry.path));
+        let children = index.children(&parent);
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
         let entries: Vec<_> = children
-            .into_iter()
+            .iter()
+            .filter_map(|path| index.entry(path))
             .skip(start)
             .take(limit as usize)
             .map(to_entry)
@@ -344,12 +352,6 @@ fn normalize_parent(value: &str) -> Result<String, vfs::Error> {
     normalize_path(value).map_err(|_| vfs::Error::Invalid)
 }
 
-fn parent_of(path: &str) -> String {
-    path.rsplit_once('/')
-        .map(|(parent, _)| parent.to_string())
-        .unwrap_or_default()
-}
-
 fn to_entry(node: &Node) -> vfs::Entry {
     vfs::Entry {
         path: node.entry.path.clone(),
@@ -397,9 +399,31 @@ impl index::Host for VfsHost {
 
     fn search(&mut self, query: index::Query) -> Result<index::Page, index::Error> {
         if query.mode == Some(index::Mode::Semantic) {
-            return self.semantic_search(&query);
+            return self.knn_search(
+                &query.text,
+                query.parent.as_deref(),
+                query.media_type_prefix.as_deref(),
+                query.offset,
+                query.limit,
+            );
         }
         self.index_read().search(&query)
+    }
+
+    fn knn(&mut self, query: index::KnnQuery) -> Result<index::Page, index::Error> {
+        if query.limit == 0 || query.limit > MAX_PAGE {
+            return Err(index::Error::OverBudget);
+        }
+        if query.text.trim().is_empty() {
+            return Err(index::Error::Invalid);
+        }
+        self.knn_search(
+            &query.text,
+            query.parent.as_deref(),
+            query.media_type_prefix.as_deref(),
+            query.offset,
+            query.limit,
+        )
     }
 
     fn state(&mut self) -> Result<index::IndexState, index::Error> {
@@ -409,6 +433,117 @@ impl index::Host for VfsHost {
     fn refresh(&mut self) -> Result<index::IndexState, index::Error> {
         self.refresh_index().map_err(index_error)
     }
+}
+
+impl VfsHost {
+    fn refresh_after_mutation(&self) -> Result<(), vfs_mut_api::Error> {
+        self.refresh_index().map_err(|_| vfs_mut_api::Error::Io)?;
+        Ok(())
+    }
+}
+
+impl vfs_mut_api::Host for VfsHost {
+    fn write(
+        &mut self,
+        path: String,
+        data: Vec<u8>,
+        media_type: String,
+        expected_version: Option<u64>,
+    ) -> Result<vfs_mut_api::WriteResult, vfs_mut_api::Error> {
+        if data.len() > MAX_MUTATION_BYTES || media_type.trim().is_empty() {
+            return Err(vfs_mut_api::Error::OverBudget);
+        }
+        let entry = {
+            self.vfs
+                .lock()
+                .expect("vfs poisoned")
+                .put(&path, &data, &media_type, expected_version)
+                .map_err(mutation_error)?
+        };
+        self.refresh_after_mutation()?;
+        Ok(write_result(entry))
+    }
+
+    fn remove(&mut self, path: String) -> Result<(), vfs_mut_api::Error> {
+        {
+            let mut vfs = self.vfs.lock().expect("vfs poisoned");
+            if vfs.file(&path).map_err(mutation_error)?.is_none() {
+                return Err(vfs_mut_api::Error::NotFound);
+            }
+            vfs.remove(&path).map_err(mutation_error)?;
+        }
+        self.refresh_after_mutation()
+    }
+
+    fn mkdir(&mut self, path: String) -> Result<(), vfs_mut_api::Error> {
+        {
+            self.vfs
+                .lock()
+                .expect("vfs poisoned")
+                .mkdir(&path)
+                .map_err(mutation_error)?;
+        }
+        self.refresh_after_mutation()
+    }
+
+    fn rmdir(&mut self, path: String) -> Result<(), vfs_mut_api::Error> {
+        {
+            self.vfs
+                .lock()
+                .expect("vfs poisoned")
+                .rmdir(&path)
+                .map_err(mutation_error)?;
+        }
+        self.refresh_after_mutation()
+    }
+
+    fn rename(
+        &mut self,
+        source: String,
+        target: String,
+    ) -> Result<vfs_mut_api::WriteResult, vfs_mut_api::Error> {
+        let entry = {
+            self.vfs
+                .lock()
+                .expect("vfs poisoned")
+                .rename(&source, &target)
+                .map_err(mutation_error)?
+        };
+        self.refresh_after_mutation()?;
+        Ok(write_result(entry))
+    }
+}
+
+fn write_result(entry: fungos_vfs::FileEntry) -> vfs_mut_api::WriteResult {
+    vfs_mut_api::WriteResult {
+        path: entry.path,
+        version: entry.version,
+        content_id: entry.content_id.to_string(),
+        size: entry.size,
+    }
+}
+
+fn mutation_error(error: VfsError) -> vfs_mut_api::Error {
+    match error {
+        VfsError::NotFound(_) => vfs_mut_api::Error::NotFound,
+        VfsError::AlreadyExists(_) => vfs_mut_api::Error::AlreadyExists,
+        VfsError::NotEmpty(_) => vfs_mut_api::Error::NotEmpty,
+        VfsError::Conflict { .. } => vfs_mut_api::Error::Conflict,
+        VfsError::InvalidPath(_) | VfsError::InvalidContentId(_) => vfs_mut_api::Error::Invalid,
+        VfsError::ReadOnly | VfsError::RoleMismatch { .. } => vfs_mut_api::Error::Denied,
+        VfsError::Leased { .. } => vfs_mut_api::Error::Conflict,
+        VfsError::NotHydrated(_) | VfsError::Transport(_) | VfsError::Io(_) | VfsError::Sql(_) => {
+            vfs_mut_api::Error::Io
+        }
+    }
+}
+
+pub fn add_mutation_to_linker<T>(linker: &mut Linker<T>) -> anyhow::Result<()>
+where
+    T: vfs_mut_api::Host + 'static,
+{
+    vfs_mut_api::add_to_linker::<T, HasSelf<T>>(linker, |state| state)?;
+    Ok(())
 }
 
 pub fn add_to_linker<T>(linker: &mut Linker<T>) -> anyhow::Result<()>
@@ -468,6 +603,24 @@ mod tests {
                 .iter()
                 .all(|hit| hit.path.contains("greece") || hit.path == "notes.txt")
         );
+    }
+
+    #[test]
+    fn explicit_empty_directories_are_browsable() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut vfs = Vfs::open(dir.path()).unwrap();
+            vfs.mkdir("empty").unwrap();
+            vfs.mkdir("empty/nested").unwrap();
+        }
+        let mut host = VfsHost::open(dir.path()).unwrap();
+        let page = host.ls("empty".into(), 0, 10).unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].path, "empty/nested");
+        assert_eq!(page.entries[0].kind, vfs::Kind::Directory);
+        let entry = host.stat("empty".into()).unwrap();
+        assert_eq!(entry.kind, vfs::Kind::Directory);
+        assert_eq!(entry.child_count, 1);
     }
 
     #[test]
@@ -644,6 +797,28 @@ mod tests {
             .search(index::Query {
                 text: "trip".into(),
                 mode: Some(index::Mode::Semantic),
+                parent: None,
+                media_type_prefix: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].path, "notes.txt");
+        assert_eq!(page.hits[0].matched_by, Some(index::MatchSource::Embedding));
+    }
+
+    #[test]
+    fn knn_returns_the_same_nearest_chunk_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path());
+        let mut host = VfsHost::open(dir.path())
+            .unwrap()
+            .with_embeddings(Arc::new(FakeEmbeddings))
+            .unwrap();
+        let page = host
+            .knn(index::KnnQuery {
+                text: "trip".into(),
                 parent: None,
                 media_type_prefix: None,
                 offset: 0,

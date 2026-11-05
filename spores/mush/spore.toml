@@ -1,0 +1,30 @@
+schema = 1
+
+[spore]
+id = "dev.fungos.mush"
+name = "mush"
+version = "0.1.0"
+license = "MIT"
+summary = "Sandboxed VFS shell with a real environment and startup file"
+
+[engine]
+soil = ">=0.1"
+target = "wasm32-wasip2"
+abi = { vfs = "1.0.0", index = "1.1.0", vfs-mut = "0.1.0" }
+
+[module]
+path = "module.wasm"
+
+[ui]
+entry = "ui/shell.lua"
+jit = true
+hot_reload = true
+
+[launch]
+default = "native"
+surfaces = ["native", "canvas", "web"]
+
+[grants]
+"soil:vfs" = "read workspace files and directories"
+"soil:index" = "search the workspace and browse directories"
+"soil:vfs-mut" = "write, rename, unlink, mkdir, and rmdir in the workspace"

@@ -7,7 +7,7 @@
 
 mod discovery;
 mod git;
-mod graph;
+pub mod graph;
 mod tgrep;
 
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,7 @@ use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
 use tgrep::TgrepSource;
 use wasmtime::component::{HasSelf, Linker};
 
-wasmtime::component::bindgen!({ path: "wit", world: "search-host" });
+wasmtime::component::bindgen!({ path: "wit/search.wit", world: "search-host" });
 
 use soil::search::search as search_api;
 

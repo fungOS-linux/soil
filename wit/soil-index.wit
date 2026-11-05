@@ -4,7 +4,7 @@
 // answers browse/search queries and returns paths. The Spore then calls
 // `soil:vfs.stat`/`read` for the authoritative entry and bytes. A host may
 // rebuild the index at any time and bump `generation`.
-package soil:index@1.0.0;
+package soil:index@1.1.0;
 
 interface index {
   enum order {
@@ -84,6 +84,16 @@ interface index {
     limit: u32,
   }
 
+  record knn-query {
+    text: string,
+    /// Restrict to direct children of this path; none means the whole workspace.
+    parent: option<string>,
+    /// Optional media-type prefix filter, e.g. `image/` or `text/`.
+    media-type-prefix: option<string>,
+    offset: u64,
+    limit: u32,
+  }
+
   record index-state {
     ready: bool,
     generation: u64,
@@ -97,6 +107,10 @@ interface index {
   /// Search paths, media types, metadata, and indexed text. Results are paths;
   /// call `soil:vfs.stat` for authoritative entry data.
   search: func(query: query) -> result<page, error>;
+
+  /// Exact KNN over the host embedding index. Returns `unsupported` when the
+  /// host has no embedding provider; guests never choose a model.
+  knn: func(query: knn-query) -> result<page, error>;
 
   /// Inspect index readiness and generation.
   state: func() -> result<index-state, error>;

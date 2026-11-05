@@ -47,8 +47,8 @@ pub const CONTRACTS: &[Contract] = &[
     Contract {
         file: "wit/soil-index.wit",
         source: include_str!("../../../wit/soil-index.wit"),
-        package: "soil:index@1.0.0",
-        interfaces: &[("index", &["browse", "search", "state", "refresh"])],
+        package: "soil:index@1.1.0",
+        interfaces: &[("index", &["browse", "search", "knn", "state", "refresh"])],
     },
     Contract {
         file: "wit/soil-records.wit",
@@ -70,6 +70,12 @@ pub const CONTRACTS: &[Contract] = &[
         source: include_str!("../../../wit/soil-http.wit"),
         package: "soil:http@0.1.0",
         interfaces: &[("http", &["fetch"])],
+    },
+    Contract {
+        file: "wit/soil-graph.wit",
+        source: include_str!("../../../wit/soil-graph.wit"),
+        package: "soil:graph@0.1.0",
+        interfaces: &[("graph", &["neighbors", "references", "state", "refresh"])],
     },
     Contract {
         file: "wit/soil-unibus.wit",

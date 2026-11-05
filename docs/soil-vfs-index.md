@@ -1,6 +1,6 @@
 # `soil:vfs` and `soil:index`
 
-Status: **contract + persistent host index, 2026-11-04.**
+Status: **contract + persistent host index + KNN, 2026-11-05.**
 
 These two capabilities make a fast read-only file browser possible without
 giving a Spore a host filesystem path or a raw content provider.
@@ -10,7 +10,8 @@ giving a Spore a host filesystem path or a raw content provider.
 | Contract | Owns | Does not own |
 |---|---|---|
 | `soil:vfs@1` | canonical workspace namespace, entry metadata, bounded range reads | host paths, directory handles, providers, leases |
-| `soil:index@1` | derived browse order, search, snippets, generation | authority, mutations, content bytes |
+| `soil:index@1.1` | derived browse order, search, KNN, snippets, generation | authority, mutations, content bytes |
+| `soil:vfs-mut@0.1` | explicit workspace writes, mkdir/rmdir, rename | host paths, descriptors, providers |
 
 The rule remains:
 
@@ -27,7 +28,8 @@ locator can change without changing the entry or the index key.
    `vfs.ls`.
 4. `vfs.read(path, offset, length)` for preview bytes, thumbnails or a paged
    editor.
-5. `index.state()` to detect a stale/rebuilt generation, or `index.refresh()`
+5. `index.knn(text, ...)` when the host has an embedding provider.
+6. `index.state()` to detect a stale/rebuilt generation, or `index.refresh()`
    to rebuild explicitly.
 
 `vfs.ls` is path-ordered and is the authoritative child list. `index.browse`
@@ -44,6 +46,12 @@ stat before treating an entry as current.
   this slice; mutation belongs to a separate grant.
 - A placeholder read may hydrate through the host's content transport. The
   Spore never chooses a provider, endpoint, token, or lease.
+- Direct-child traversal uses a parent -> child index, so `browse`/`ls` cost
+  `O(children)` rather than scanning the whole workspace.
+- `knn` is an explicit host-selected embedding query. It returns `unsupported`
+  when the host has no provider; the Spore never chooses a model or endpoint.
+- `soil:vfs-mut` is a separate grant. Read-only `soil:vfs` does not imply write
+  authority.
 - The index is rebuildable and may be empty. `not-ready` is honest absence, not
   an empty result.
 - Text search is host-owned; snippets are bounded copies of host text, not a
@@ -81,6 +89,7 @@ Schema:
 ```sql
 entries(path PK, content_id, media_type, size, version, hydration,
         pinned, updated_at_ms, kind, child_count, text)
+directories(path) -- mirrored from explicit fungos-vfs directories
 chunks(chunk_id PK, path, content_id, ordinal, text)
 chunks_fts USING fts5(chunk_id UNINDEXED, path UNINDEXED, text)
 vectors(chunk_id, model, dimension, vector BLOB, norm)
@@ -102,7 +111,8 @@ Search behavior:
 | `substring` | in-memory entry/text scan |
 | `fuzzy` | in-memory path ranking |
 | `full-text` | SQLite FTS5 + exact path promotion |
-| `semantic` | opt-in host embedding provider + vector search |
+| `semantic` | opt-in host embedding provider + KNN |
+| `knn` | explicit host-selected vector query; `unsupported` without a provider |
 | `regex` | bounded case-insensitive regex over indexed paths/text |
 
 Vector helpers store `f32` BLOBs and rank by brute-force cosine. That is the v1
@@ -122,6 +132,9 @@ available behind the `remote` feature for host-owned HTTP, not a Spore import.
 
 The index is local and never synced. Sync durable intent through `records` and
 content through VFS/Unibus, then rebuild the index per device.
+
+Explicit directories are mirrored into the derived index from `fungos-vfs`, so
+empty directories are browsable and `rmdir` can enforce non-empty semantics.
 
 ## Code search
 
