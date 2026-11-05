@@ -23,6 +23,7 @@
 //! per frame, and a frame that arrives mid-write simply draws the previous
 //! state rather than tearing.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -42,7 +43,13 @@ enum Command {
 #[derive(Clone)]
 pub struct Host {
     commands: Sender<Command>,
-    latest: Arc<Mutex<Snapshot>>,
+    /// The published grid. `Arc` rather than a bare snapshot because a renderer
+    /// asks for it every frame, and cloning thousands of cells per frame is work
+    /// that produces no new pixels.
+    latest: Arc<Mutex<Arc<Snapshot>>>,
+    /// Bumped on every publication, so a host can tell "same screen" from "same
+    /// pointer" without comparing grids.
+    generation: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for Host {
@@ -58,14 +65,16 @@ impl Host {
         // `Session` is `!Send`, so constructing it here and handing it across a
         // thread boundary does not compile — which is the whole reason this type
         // exists. An empty grid stands in until the first real snapshot lands.
-        let latest = Arc::new(Mutex::new(crate::Snapshot {
+        let latest = Arc::new(Mutex::new(Arc::new(crate::Snapshot {
             cols,
             rows,
             cells: vec![crate::Cell::default(); usize::from(cols) * usize::from(rows)],
             cursor: None,
             title: String::new(),
-        }));
+        })));
+        let generation = Arc::new(AtomicU64::new(0));
         let shared = Arc::clone(&latest);
+        let published = Arc::clone(&generation);
         let (commands, receiver) = channel();
         let (ready, started) = channel();
         std::thread::Builder::new()
@@ -81,7 +90,8 @@ impl Host {
                 if let Ok(snapshot) = session.snapshot()
                     && let Ok(mut guard) = shared.lock()
                 {
-                    *guard = snapshot;
+                    *guard = Arc::new(snapshot);
+                    published.fetch_add(1, Ordering::Release);
                 }
                 let _ = ready.send(Ok(()));
                 while let Ok(command) = receiver.recv() {
@@ -99,7 +109,8 @@ impl Host {
                     if let Ok(snapshot) = session.snapshot()
                         && let Ok(mut guard) = shared.lock()
                     {
-                        *guard = snapshot;
+                        *guard = Arc::new(snapshot);
+                        published.fetch_add(1, Ordering::Release);
                     }
                 }
             })
@@ -113,7 +124,11 @@ impl Host {
             Err(error) => return Err(crate::Error(error.to_string())),
         }
 
-        Ok(Self { commands, latest })
+        Ok(Self {
+            commands,
+            latest,
+            generation,
+        })
     }
 
     /// Feed a program's output. Never blocks on the emulator.
@@ -125,13 +140,20 @@ impl Host {
         let _ = self.commands.send(Command::Resize(cols, rows));
     }
 
-    /// The most recent grid. Cheap enough to call every frame: it clones a
-    /// snapshot the emulator already built.
-    pub fn snapshot(&self) -> Snapshot {
+    /// The most recent grid, shared rather than copied. Cheap enough to call
+    /// every frame, which is the point: a frame that has not changed should cost
+    /// an `Arc` clone, not a grid.
+    pub fn snapshot(&self) -> Arc<Snapshot> {
         self.latest
             .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poison| poison.into_inner().clone())
+            .map(|guard| Arc::clone(&guard))
+            .unwrap_or_else(|poison| Arc::clone(&poison.into_inner()))
+    }
+
+    /// Increments whenever a new grid is published. A host compares this against
+    /// the value it last drew to skip the redraw entirely.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Stop the thread. Dropping the handle also ends it, because the channel
@@ -152,7 +174,7 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    fn wait_for(host: &Host, needle: &str) -> Snapshot {
+    fn wait_for(host: &Host, needle: &str) -> std::sync::Arc<Snapshot> {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let snapshot = host.snapshot();
@@ -201,6 +223,16 @@ mod tests {
         let writer = Arc::clone(&handle);
         std::thread::spawn(move || writer.write(b"cross-thread\r\n"));
         wait_for(&handle, "cross-thread");
+    }
+
+    #[test]
+    fn a_generation_only_moves_when_the_grid_moves() {
+        let host = Host::spawn(20, 3, 10).expect("host");
+        let start = host.generation();
+        assert_eq!(host.generation(), start, "no output, no new frame");
+        host.write(b"x\r\n");
+        wait_for(&host, "x");
+        assert!(host.generation() > start, "output must publish a frame");
     }
 
     #[test]
