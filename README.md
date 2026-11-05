@@ -109,3 +109,7 @@ The first CID-neutral content/index slice is [`crates/fungos-content`](crates/fu
 
 Builds use crates.io, public git revisions, and packages inside this checkout.
 No sibling worktrees are required. See [dependency policy](docs/dependencies.md).
+
+## Shell
+
+`soil shell` mounts a VFS through FUSE and starts an interactive shell. `soil rm` unlinks the namespace entry while retaining the content-addressed blob and history. See [Soil shell](docs/soil-shell.md).

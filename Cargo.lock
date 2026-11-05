@@ -3583,9 +3583,21 @@ dependencies = [
  "fungos-records",
  "fungos-vfs",
  "serde_json",
+ "soil-spore",
  "soil-vfs-host",
  "tempfile",
  "wasmtime",
+]
+
+[[package]]
+name = "soil-shell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fungos-vfs",
+ "serde_json",
+ "soil-vfs-host",
+ "tempfile",
 ]
 
 [[package]]
