@@ -10,6 +10,7 @@ interface search {
   enum kind {
     file,
     record-entry,
+    repository,
     action,
   }
 

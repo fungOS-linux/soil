@@ -5,10 +5,13 @@
 //! bounded page. It does not grant access: the host supplies the roots and
 //! approved books.
 
+mod git;
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use fungos_records::{Record, Store};
+use git::GitIndex;
 use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
 use wasmtime::component::{HasSelf, Linker};
 
@@ -24,6 +27,7 @@ pub struct SearchService {
     vfs: Option<VfsHost>,
     records: Option<Mutex<Store>>,
     books: Vec<String>,
+    git: Option<GitIndex>,
     generation: u64,
 }
 
@@ -33,6 +37,7 @@ impl SearchService {
             vfs,
             records: records.map(Mutex::new),
             books,
+            git: None,
             generation: 1,
         }
     }
@@ -61,8 +66,20 @@ impl SearchService {
         Ok(Self::new(Some(vfs), Some(records), books))
     }
 
+    /// Add explicit local Git roots. The host grants these; a Spore cannot add
+    /// or discover a root.
+    pub fn with_git_roots(mut self, roots: Vec<std::path::PathBuf>) -> Self {
+        let mut git = GitIndex::new(roots);
+        git.refresh();
+        self.git = Some(git);
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
     fn sources(&self) -> u32 {
-        u32::from(self.vfs.is_some()) + u32::from(self.records.is_some())
+        u32::from(self.vfs.is_some())
+            + u32::from(self.records.is_some())
+            + u32::from(self.git.is_some())
     }
 
     fn snapshot(&self) -> search_api::SearchState {
@@ -81,7 +98,11 @@ impl SearchService {
             return Err(search_api::Error::Invalid);
         }
         let kinds = if query.kinds.is_empty() {
-            vec![search_api::Kind::File, search_api::Kind::RecordEntry]
+            vec![
+                search_api::Kind::File,
+                search_api::Kind::RecordEntry,
+                search_api::Kind::Repository,
+            ]
         } else {
             query.kinds.clone()
         };
@@ -91,6 +112,9 @@ impl SearchService {
         }
         if kinds.contains(&search_api::Kind::RecordEntry) {
             hits.extend(self.record_hits(&query)?);
+        }
+        if kinds.contains(&search_api::Kind::Repository) {
+            hits.extend(self.git_hits(&query));
         }
         hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
         let start = usize::try_from(query.offset).unwrap_or(usize::MAX);
@@ -144,6 +168,30 @@ impl SearchService {
                 updated_at_ms: None,
             })
             .collect())
+    }
+
+    fn git_hits(&self, query: &search_api::Query) -> Vec<search_api::Hit> {
+        let Some(git) = &self.git else {
+            return Vec::new();
+        };
+        git.search(&query.text, MAX_PAGE as usize)
+            .into_iter()
+            .map(|(repo, score)| search_api::Hit {
+                kind: search_api::Kind::Repository,
+                id: repo.id.clone(),
+                title: repo.name,
+                subtitle: Some(match (repo.branch, repo.remote) {
+                    (Some(branch), Some(remote)) => format!("{branch} · {remote}"),
+                    (Some(branch), None) => branch,
+                    (None, Some(remote)) => remote,
+                    (None, None) => repo.id.clone(),
+                }),
+                snippet: None,
+                score,
+                source: "git".into(),
+                updated_at_ms: None,
+            })
+            .collect()
     }
 
     fn record_hits(
@@ -218,6 +266,9 @@ impl search_api::Host for SearchService {
     fn refresh(&mut self) -> Result<search_api::SearchState, search_api::Error> {
         if let Some(vfs) = self.vfs.as_mut() {
             vfs.refresh_index().map_err(|_| search_api::Error::Io)?;
+        }
+        if let Some(git) = self.git.as_mut() {
+            git.refresh();
         }
         self.generation = self.generation.saturating_add(1);
         Ok(self.snapshot())
@@ -305,6 +356,34 @@ mod tests {
             .unwrap();
         assert_eq!(page.hits.len(), 1);
         assert_eq!(page.hits[0].id, "notes/greece.txt");
+    }
+
+    #[test]
+    fn searches_git_repositories() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("fpl/dock");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            repo.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://github.com/acme/dock.git\n",
+        )
+        .unwrap();
+        let mut host =
+            SearchService::new(None, None, vec![]).with_git_roots(vec![dir.path().to_path_buf()]);
+        let page = host
+            .search(search_api::Query {
+                text: "dock".into(),
+                kinds: vec![search_api::Kind::Repository],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].kind, search_api::Kind::Repository);
+        assert_eq!(page.hits[0].id, "fpl/dock");
+        assert_eq!(page.hits[0].title, "dock");
     }
 
     #[test]
