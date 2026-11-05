@@ -28,18 +28,23 @@ const DEFAULT_ROOT: &str = "~/.local/share/fungos/records";
 const DEFAULT_BOOK: &str = "personal/avery/contacts";
 const DEFAULT_COLLECTION: &str = "contact";
 const DEFAULT_LISTEN: &str = "127.0.0.1:8787";
+const CONTACT_SCHEMA: &str = "fungos.contacts/contact";
 const MAX_ENTRIES: usize = 10_000;
 
 struct App {
     host: Mutex<RecordsBookHost>,
     book: String,
     collection: String,
+    schema: String,
+    kind: String,
 }
 
 struct Args {
     root: PathBuf,
     book: String,
     collection: String,
+    schema: Option<String>,
+    kind: Option<String>,
     listen: String,
 }
 
@@ -47,20 +52,39 @@ fn main() -> Result<()> {
     let Some(args) = parse_args()? else {
         return Ok(());
     };
-    let host = RecordsBookHost::open_contacts(&args.root, &args.book, &args.collection)
-        .with_context(|| format!("open {}", args.root.display()))?;
+    let host = match &args.schema {
+        Some(schema) => {
+            RecordsBookHost::open_with_schema(&args.root, &args.book, &args.collection, schema)
+        }
+        None => RecordsBookHost::open_contacts(&args.root, &args.book, &args.collection),
+    }
+    .with_context(|| format!("open {}", args.root.display()))?;
+    let schema = args
+        .schema
+        .clone()
+        .unwrap_or_else(|| CONTACT_SCHEMA.to_string());
+    let kind = args.kind.clone().unwrap_or_else(|| {
+        if args.collection == "event" || schema.contains("calendar") {
+            "calendar".into()
+        } else {
+            "contacts".into()
+        }
+    });
     let app = Arc::new(App {
         host: Mutex::new(host),
         book: args.book.clone(),
         collection: args.collection.clone(),
+        schema,
+        kind: kind.clone(),
     });
     let listener =
         TcpListener::bind(&args.listen).with_context(|| format!("bind {}", args.listen))?;
     println!(
-        "soil contacts: http://{}/  book={} collection={} root={}",
+        "soil {kind}: http://{}/  book={} collection={} schema={} root={}",
         args.listen,
         args.book,
         args.collection,
+        app.schema,
         args.root.display()
     );
     for stream in listener.incoming() {
@@ -69,11 +93,11 @@ fn main() -> Result<()> {
                 let app = Arc::clone(&app);
                 thread::spawn(move || {
                     if let Err(error) = handle(stream, &app) {
-                        eprintln!("soil contacts: request failed: {error:#}");
+                        eprintln!("soil inspector: request failed: {error:#}");
                     }
                 });
             }
-            Err(error) => eprintln!("soil contacts: accept failed: {error}"),
+            Err(error) => eprintln!("soil inspector: accept failed: {error}"),
         }
     }
     Ok(())
@@ -112,14 +136,26 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
                 .filter(|entry| q.is_empty() || search_text(entry).contains(&q))
                 .map(entry_json)
                 .collect();
-            rows.sort_by_key(|row| display_name(row).unwrap_or_default().to_lowercase());
+            rows.sort_by_key(|row| record_sort_key(row, &app.kind));
             let body = json!({
                 "book": app.book,
                 "collection": app.collection,
+                "schema": app.schema,
+                "kind": app.kind,
                 "total": rows.len(),
                 "records": rows,
             });
             respond_json(&mut stream, "200 OK", &body)
+        }
+        "/api/export.ics" => {
+            let entries = all_entries(app)?;
+            let ics = export_ics(&entries);
+            respond_attachment(
+                &mut stream,
+                "text/calendar; charset=utf-8",
+                "calendar.ics",
+                ics.as_bytes(),
+            )
         }
         "/api/export.vcf" => {
             let entries = all_entries(app)?;
@@ -135,15 +171,12 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
                     }
                 }
             }
-            stream.write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/vcard; charset=utf-8\r\nContent-Length: {}\r\nContent-Disposition: attachment; filename=\"contacts.vcf\"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-                    vcf.len()
-                )
-                .as_bytes(),
-            )?;
-            stream.write_all(vcf.as_bytes())?;
-            Ok(())
+            respond_attachment(
+                &mut stream,
+                "text/vcard; charset=utf-8",
+                "contacts.vcf",
+                vcf.as_bytes(),
+            )
         }
         path if path.starts_with("/api/records/") => {
             let id = percent_decode(&path["/api/records/".len()..]);
@@ -195,12 +228,30 @@ fn entry_json(entry: &Entry) -> Value {
     })
 }
 
-fn display_name(record: &Value) -> Option<String> {
-    record
-        .get("body")
-        .and_then(|body| body.get("display_name"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+fn record_title(record: &Value) -> Option<String> {
+    let body = record.get("body")?;
+    for key in ["display_name", "summary", "name", "subject", "title"] {
+        if let Some(value) = body.get(key).and_then(Value::as_str)
+            && !value.is_empty()
+        {
+            return Some(value.to_owned());
+        }
+    }
+    record.get("id").and_then(Value::as_str).map(str::to_owned)
+}
+
+fn record_sort_key(record: &Value, kind: &str) -> String {
+    let title = record_title(record).unwrap_or_default().to_lowercase();
+    if kind == "calendar" {
+        let start = record
+            .get("body")
+            .and_then(|body| body.get("start"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        format!("{start}\u{0}{title}")
+    } else {
+        title
+    }
 }
 
 fn search_text(entry: &Entry) -> String {
@@ -214,14 +265,47 @@ fn search_text(entry: &Entry) -> String {
         "title",
         "note",
         "birthday",
+        "summary",
+        "description",
+        "location",
+        "status",
+        "start",
+        "end",
+        "rrule",
+        "timezone",
     ] {
         if let Some(value) = body.get(key).and_then(Value::as_str) {
             parts.push(value);
         }
     }
-    for key in ["emails", "phones", "addresses", "urls"] {
+    for key in ["emails", "phones", "addresses", "urls", "categories"] {
         if let Some(values) = body.get(key).and_then(Value::as_array) {
             for value in values {
+                if let Some(value) = value.as_str() {
+                    parts.push(value);
+                } else if let Some(value) = value.get("value").and_then(Value::as_str) {
+                    parts.push(value);
+                }
+                if let Some(value) = value.get("name").and_then(Value::as_str) {
+                    parts.push(value);
+                }
+            }
+        }
+    }
+    if let Some(value) = body.get("organizer") {
+        if let Some(value) = value.get("name").and_then(Value::as_str) {
+            parts.push(value);
+        }
+        if let Some(value) = value.get("value").and_then(Value::as_str) {
+            parts.push(value);
+        }
+    }
+    for key in ["attendees"] {
+        if let Some(values) = body.get(key).and_then(Value::as_array) {
+            for value in values {
+                if let Some(value) = value.get("name").and_then(Value::as_str) {
+                    parts.push(value);
+                }
                 if let Some(value) = value.get("value").and_then(Value::as_str) {
                     parts.push(value);
                 }
@@ -229,6 +313,45 @@ fn search_text(entry: &Entry) -> String {
         }
     }
     parts.join(" ").to_lowercase()
+}
+
+fn export_ics(entries: &[Entry]) -> String {
+    let mut events = Vec::new();
+    let mut timezones = Vec::new();
+    for entry in entries {
+        let body = body_json(entry);
+        if let Some(values) = body.get("raw_timezones").and_then(Value::as_array) {
+            for value in values {
+                if let Some(value) = value.as_str()
+                    && !timezones.iter().any(|timezone: &String| timezone == value)
+                {
+                    timezones.push(value.to_string());
+                }
+            }
+        }
+        if let Some(raw) = body.get("raw_ics").and_then(Value::as_str)
+            && !raw.is_empty()
+        {
+            events.push(raw.to_string());
+        }
+    }
+    let mut out = String::from(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//fungOS//soil-records-web//EN\r\nCALSCALE:GREGORIAN\r\n",
+    );
+    for timezone in timezones {
+        out.push_str(&timezone);
+        if !out.ends_with('\n') {
+            out.push_str("\r\n");
+        }
+    }
+    for event in events {
+        out.push_str(&event);
+        if !out.ends_with('\n') {
+            out.push_str("\r\n");
+        }
+    }
+    out.push_str("END:VCALENDAR\r\n");
+    out
 }
 
 fn read_request(stream: &mut TcpStream) -> io::Result<Option<(String, String)>> {
@@ -267,6 +390,23 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]
 fn respond_json(stream: &mut TcpStream, status: &str, value: &Value) -> Result<()> {
     let body = serde_json::to_vec(value)?;
     respond(stream, status, "application/json; charset=utf-8", &body)
+}
+
+fn respond_attachment(
+    stream: &mut TcpStream,
+    content_type: &str,
+    filename: &str,
+    body: &[u8],
+) -> Result<()> {
+    stream.write_all(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nContent-Disposition: attachment; filename=\"{filename}\"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .as_bytes(),
+    )?;
+    stream.write_all(body)?;
+    Ok(())
 }
 
 fn query_param(query: &str, name: &str) -> Option<String> {
@@ -314,6 +454,8 @@ fn parse_args() -> Result<Option<Args>> {
         root: PathBuf::from(expand_home(DEFAULT_ROOT)),
         book: DEFAULT_BOOK.into(),
         collection: DEFAULT_COLLECTION.into(),
+        schema: None,
+        kind: None,
         listen: DEFAULT_LISTEN.into(),
     };
     let mut iter = env::args().skip(1);
@@ -327,10 +469,12 @@ fn parse_args() -> Result<Option<Args>> {
             "--collection" => {
                 args.collection = iter.next().context("--collection needs a value")?
             }
+            "--schema" => args.schema = Some(iter.next().context("--schema needs a value")?),
+            "--kind" => args.kind = Some(iter.next().context("--kind needs a value")?),
             "--listen" => args.listen = iter.next().context("--listen needs a value")?,
             "-h" | "--help" => {
                 println!(
-                    "soil-records-web [--root DIR] [--book BOOK] [--collection NAME] [--listen ADDR]\n\
+                    "soil-records-web [--root DIR] [--book BOOK] [--collection NAME] [--schema SCHEMA] [--kind contacts|calendar] [--listen ADDR]\n\
                      defaults: root={DEFAULT_ROOT} book={DEFAULT_BOOK} collection={DEFAULT_COLLECTION} listen={DEFAULT_LISTEN}"
                 );
                 return Ok(None);
@@ -405,8 +549,8 @@ header .spacer { flex: 1; }
   border-radius: 8px; padding: 6px 11px;
 }
 .button:hover { border-color: #3b4c5c; }
-main { display: grid; grid-template-columns: minmax(210px, 280px) 1fr; height: calc(100vh - 59px); }
-aside { border-right: 1px solid var(--line); min-height: 0; display: flex; flex-direction: column; }
+main { display: flex; height: calc(100vh - 59px); }
+aside { flex: 0 0 clamp(210px, 30vw, 300px); border-right: 1px solid var(--line); min-height: 0; display: flex; flex-direction: column; }
 .search { padding: 14px 14px 8px; }
 input {
   width: 100%; border: 1px solid var(--line); background: var(--panel);
@@ -429,10 +573,12 @@ input:focus { border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(91, 184,
 .row-main { min-width: 0; }
 .row-name { font-weight: 560; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row-sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.detail { overflow: auto; padding: 30px clamp(22px, 5vw, 64px) 80px; min-height: 0; }
+.detail { flex: 1; overflow: auto; padding: 30px clamp(22px, 5vw, 64px) 80px; min-height: 0; }
 .empty { color: var(--muted); margin-top: 18vh; text-align: center; }
 .detail-head { display: flex; gap: 20px; align-items: center; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
 .avatar.large { flex-basis: 68px; height: 68px; font-size: 22px; }
+.avatar.calendar { white-space: pre-line; line-height: 1.05; font-size: 10px; letter-spacing: 0.03em; }
+.avatar.large.calendar { font-size: 15px; }
 h1 { margin: 0; font-size: clamp(24px, 3vw, 36px); line-height: 1.12; letter-spacing: -0.02em; }
 .subtitle { color: var(--muted); margin-top: 5px; }
 .section { margin-top: 26px; }
@@ -459,19 +605,19 @@ pre {
   padding: 14px; color: #b9c7d1; max-height: 420px; overflow: auto;
 }
 .meta { color: var(--muted); font-size: 11px; margin-top: 22px; display: flex; flex-wrap: wrap; gap: 8px 18px; }
-@media (max-width: 460px) {
-  main { grid-template-columns: 1fr; height: auto; }
-  aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 48vh; }
+@media (max-width: 520px) {
+  main { flex-direction: column; height: auto; }
+  aside { flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--line); max-height: 48vh; }
   .detail { padding: 24px 18px 70px; }
 }
 </style>
 </head>
 <body>
 <header>
-  <div class="brand"><span class="dot"></span>Soil Contacts</div>
+  <div class="brand"><span class="dot"></span><span id="brand-name">Soil Contacts</span></div>
   <div class="status" id="status">Loading records…</div>
   <div class="spacer"></div>
-  <a class="button" href="/api/export.vcf" download="contacts.vcf">Export .vcf</a>
+  <a class="button" id="export" href="/api/export.vcf" download="contacts.vcf">Export .vcf</a>
 </header>
 <main>
   <aside>
@@ -482,7 +628,7 @@ pre {
   <section class="detail" id="detail"><div class="empty">Select a contact</div></section>
 </main>
 <script>
-const state = { records: [], filtered: [], selected: null };
+const state = { records: [], filtered: [], selected: null, kind: "contacts" };
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -491,18 +637,61 @@ function el(tag, className, text) {
   return node;
 }
 
+function isCalendar() { return state.kind === "calendar"; }
+
 function initials(name) {
   const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
   if (!parts.length) return "?";
   return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
 }
 
+function recordTitle(record) {
+  const b = record.body || {};
+  return b.display_name || b.summary || b.name || b.subject || b.title || record.id;
+}
+
+function icsDate(value) {
+  if (!value) return null;
+  const match = String(value).match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z)?)?$/);
+  if (!match) return null;
+  if (match[4]) {
+    return match[7]
+      ? new Date(Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6]))
+      : new Date(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6]);
+  }
+  return new Date(+match[1], +match[2] - 1, +match[3]);
+}
+
+function dateChip(value) {
+  const date = icsDate(value);
+  if (!date) return "—";
+  const months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  return months[date.getMonth()] + "\n" + String(date.getDate()).padStart(2, "0");
+}
+
+function formatWhen(body) {
+  const start = icsDate(body.start);
+  if (!start) return body.start || "";
+  const date = start.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+  if (body.all_day) return date + " · All day";
+  const time = start.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const end = icsDate(body.end);
+  if (!end) return date + " · " + time;
+  const sameDay = start.toDateString() === end.toDateString();
+  const endTime = end.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return date + " · " + time + (sameDay ? "–" + endTime : " → " + end.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + endTime);
+}
+
 function searchText(record) {
   const b = record.body || {};
-  const values = [b.display_name, b.given_name, b.family_name, b.organization, b.title, b.note, b.birthday];
+  const values = [b.display_name, b.given_name, b.family_name, b.organization, b.title, b.note, b.birthday,
+                  b.summary, b.description, b.location, b.status, b.start, b.end, b.rrule, b.timezone];
   for (const key of ["emails", "phones", "addresses", "urls"]) {
     for (const item of (b[key] || [])) values.push(item.value);
   }
+  for (const item of (b.categories || [])) values.push(item);
+  if (b.organizer) values.push(b.organizer.name, b.organizer.value);
+  for (const item of (b.attendees || [])) values.push(item.name, item.value);
   return values.filter(Boolean).join(" ").toLowerCase();
 }
 
@@ -514,12 +703,19 @@ function renderList() {
     const b = record.body || {};
     const row = el("li", "contact-row" + (state.selected && state.selected.id === record.id ? " active" : ""));
     row.tabIndex = 0;
-    const avatar = el("div", "avatar", initials(b.display_name));
+    const avatar = el("div", isCalendar() ? "avatar calendar" : "avatar",
+                      isCalendar() ? dateChip(b.start) : initials(b.display_name));
     const main = el("div", "row-main");
-    main.append(el("div", "row-name", b.display_name || record.id));
-    const org = [b.organization, b.title].filter(Boolean).join(" · ");
-    const email = (b.emails || [])[0] && b.emails[0].value;
-    main.append(el("div", "row-sub", org || email || b.note || record.id));
+    main.append(el("div", "row-name", recordTitle(record)));
+    let subtitle;
+    if (isCalendar()) {
+      subtitle = [formatWhen(b), b.location].filter(Boolean).join(" · ");
+    } else {
+      subtitle = [b.organization, b.title].filter(Boolean).join(" · ")
+        || ((b.emails || [])[0] && b.emails[0].value)
+        || b.note || record.id;
+    }
+    main.append(el("div", "row-sub", subtitle || record.id));
     row.append(avatar, main);
     row.addEventListener("click", () => select(record));
     row.addEventListener("keydown", (event) => {
@@ -531,10 +727,11 @@ function renderList() {
     fragment.append(row);
   }
   list.append(fragment);
+  const noun = isCalendar() ? "events" : "contacts";
   document.getElementById("count").textContent =
     state.filtered.length === state.records.length
-      ? state.records.length + " contacts"
-      : state.filtered.length + " of " + state.records.length + " contacts";
+      ? state.records.length + " " + noun
+      : state.filtered.length + " of " + state.records.length + " " + noun;
 }
 
 function fieldRow(label, value, kind) {
@@ -559,30 +756,35 @@ function section(title, items, kind) {
   return sec;
 }
 
-function select(record) {
-  state.selected = record;
-  renderList();
-  const detail = document.getElementById("detail");
-  detail.replaceChildren();
-  const b = record.body || {};
+function textSection(title, value) {
+  if (!value) return null;
+  const sec = el("section", "section");
+  sec.append(el("h2", "section-title", title));
+  sec.append(el("div", "note", value));
+  return sec;
+}
 
+function appendSections(detail, sections) {
+  for (const sec of sections) if (sec) detail.append(sec);
+}
+
+function renderContact(record, detail) {
+  const b = record.body || {};
   const head = el("div", "detail-head");
   head.append(el("div", "avatar large", initials(b.display_name)));
   const titleWrap = el("div");
-  titleWrap.append(el("h1", null, b.display_name || record.id));
+  titleWrap.append(el("h1", null, recordTitle(record)));
   const subtitle = [b.title, b.organization].filter(Boolean).join(" · ");
   if (subtitle) titleWrap.append(el("div", "subtitle", subtitle));
   head.append(titleWrap);
   detail.append(head);
 
-  for (const sec of [
+  appendSections(detail, [
     section("Email", b.emails, "email"),
     section("Phone", b.phones, "phone"),
     section("Address", b.addresses, "text"),
     section("URL", b.urls, "url"),
-  ]) {
-    if (sec) detail.append(sec);
-  }
+  ]);
 
   if (b.birthday) {
     const sec = el("section", "section");
@@ -591,12 +793,8 @@ function select(record) {
     detail.append(sec);
   }
 
-  if (b.note) {
-    const sec = el("section", "section");
-    sec.append(el("h2", "section-title", "Note"));
-    sec.append(el("div", "note", b.note));
-    detail.append(sec);
-  }
+  const note = textSection("Note", b.note);
+  if (note) detail.append(note);
 
   if (b.raw_vcard) {
     const raw = el("details", "raw");
@@ -605,6 +803,60 @@ function select(record) {
     pre.textContent = b.raw_vcard;
     raw.append(pre);
     detail.append(raw);
+  }
+}
+
+function renderEvent(record, detail) {
+  const b = record.body || {};
+  const head = el("div", "detail-head");
+  head.append(el("div", "avatar large calendar", dateChip(b.start)));
+  const titleWrap = el("div");
+  titleWrap.append(el("h1", null, recordTitle(record)));
+  const subtitle = formatWhen(b);
+  if (subtitle) titleWrap.append(el("div", "subtitle", subtitle));
+  head.append(titleWrap);
+  detail.append(head);
+
+  const organizer = b.organizer && (b.organizer.name || b.organizer.value)
+    ? [{ label: b.organizer.name, value: b.organizer.value }]
+    : [];
+  const attendees = (b.attendees || []).map((item) => ({
+    label: item.name,
+    value: item.value,
+  }));
+
+  appendSections(detail, [
+    section("When", [{ label: b.all_day ? "all-day" : b.timezone, value: formatWhen(b) }], "text"),
+    section("Where", b.location ? [{ label: "", value: b.location }] : [], "text"),
+    section("Organizer", organizer, "email"),
+    section("Attendees", attendees, "email"),
+    section("Categories", (b.categories || []).map((value) => ({ label: "", value })), "text"),
+    section("Recurrence", b.rrule ? [{ label: "", value: b.rrule }] : [], "text"),
+    section("Status", b.status ? [{ label: "", value: b.status }] : [], "text"),
+    textSection("Description", b.description),
+  ]);
+
+  if (b.raw_ics) {
+    const raw = el("details", "raw");
+    raw.append(el("summary", null, "Raw iCalendar event"));
+    const pre = el("pre");
+    pre.textContent = b.raw_ics;
+    raw.append(pre);
+    detail.append(raw);
+  }
+}
+
+function select(record) {
+  state.selected = record;
+  renderList();
+  const detail = document.getElementById("detail");
+  detail.replaceChildren();
+  const b = record.body || {};
+
+  if (isCalendar()) {
+    renderEvent(record, detail);
+  } else {
+    renderContact(record, detail);
   }
 
   const meta = el("div", "meta");
@@ -632,12 +884,23 @@ async function load() {
     const response = await fetch("/api/records", { cache: "no-store" });
     if (!response.ok) throw new Error("HTTP " + response.status);
     const data = await response.json();
+    state.kind = data.kind || "contacts";
     state.records = data.records || [];
     state.filtered = state.records.slice();
-    document.getElementById("status").textContent =
-      data.book + " / " + data.collection;
+    const calendar = isCalendar();
+    document.getElementById("brand-name").textContent = calendar ? "Soil Calendar" : "Soil Contacts";
+    document.title = calendar ? "Soil Calendar" : "Soil Contacts";
+    document.getElementById("status").textContent = data.book + " / " + data.collection;
+    document.getElementById("search").placeholder = calendar
+      ? "Search events, people, places…"
+      : "Search name, org, email, phone…";
+    const exportLink = document.getElementById("export");
+    exportLink.href = calendar ? "/api/export.ics" : "/api/export.vcf";
+    exportLink.download = calendar ? "calendar.ics" : "contacts.vcf";
+    exportLink.textContent = calendar ? "Export .ics" : "Export .vcf";
     renderList();
     if (state.records.length) select(state.records[0]);
+    else document.getElementById("detail").replaceChildren(el("div", "empty", calendar ? "No events" : "No contacts"));
   } catch (error) {
     document.getElementById("status").textContent = "Failed to load records";
     document.getElementById("detail").replaceChildren(el("div", "empty", String(error)));

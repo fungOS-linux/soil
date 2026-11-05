@@ -21,7 +21,7 @@ pub use embeddings::Model2VecEmbedder;
 pub use embeddings::RemoteEmbeddingProvider;
 use indexer::{IndexBackend, Node, NodeKind, SqliteIndex};
 pub use soil::index::index;
-use soil::vfs::vfs;
+pub use soil::vfs::vfs;
 
 pub(crate) const MAX_PAGE: u32 = 512;
 const MAX_RANGE: u32 = 1024 * 1024;

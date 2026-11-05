@@ -121,3 +121,34 @@ available behind the `remote` feature for host-owned HTTP, not a Spore import.
 
 The index is local and never synced. Sync durable intent through `records` and
 content through VFS/Unibus, then rebuild the index per device.
+
+## Browser inspector
+
+`soil-vfs-web` is a read-only local UI over the `soil:vfs` and `soil:index`
+host. It lists the namespace, searches the derived index, and previews bounded
+ranges without exposing a host filesystem path to the browser.
+
+```sh
+cargo run -p soil-vfs-host --bin soil-vfs-web -- \
+  --root ~/.local/share/fungos/vfs \
+  --listen 127.0.0.1:8788
+```
+
+Open <http://127.0.0.1:8788/>. The browser supports directory navigation,
+breadcrumbs, substring/fuzzy/full-text/semantic search, file metadata, text and
+image previews, and bounded raw/download reads.
+
+Endpoints:
+
+```text
+GET /                    HTML file browser
+GET /api/entries?path=   direct children with authoritative VFS metadata
+GET /api/search?q=&mode= derived-index hits plus current `stat` entries
+GET /api/stat?path=      one authoritative VFS entry
+GET /api/content?path=   bounded preview or download bytes
+GET /health              liveness
+```
+
+Semantic search remains an explicit `unsupported` unless the host was opened
+with an embedding provider. The UI does not invent authority: every path and
+byte read goes through `soil:vfs`.

@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "723758921e16a9d7e070dec8896c2152c017ca57" }
+fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "46450ede02588e533984378bc979cb4010f9867b" }
 soil-vfs-host = { path = "../soil-vfs-host" }
 serde_json = "1"
 wasmtime = { version = "50", features = ["anyhow"] }

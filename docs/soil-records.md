@@ -126,6 +126,20 @@ Then open <http://127.0.0.1:8787/>. It shows the contact list with search,
 per-contact detail, address/email/phone/URL labels, the raw vCard, record
 revision/origin metadata, and a `.vcf` export.
 
+The same inspector renders calendar books when given the event schema:
+
+```sh
+cargo run -p soil-records-host --bin soil-records-web -- \
+  --book personal/avery/calendar \
+  --collection event \
+  --schema fungos.calendar/event \
+  --listen 127.0.0.1:8789
+```
+
+It switches to an event list, date chips, event detail, recurrence/attendees,
+raw VEVENT preview, and `.ics` export. `--kind calendar` is available when the
+schema is not enough to infer the view.
+
 Endpoints:
 
 ```text
