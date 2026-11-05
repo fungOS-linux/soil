@@ -80,8 +80,6 @@ fungos.crm/account@1       -> account
 fungos.crm/company@1       -> company
 fungos.crm/contact@1       -> person
 fungos.crm/project@1       -> project
-fungos.crm/task@1          -> task
-fungos.task/task@1         -> task
 fungos.crm/opportunity@1   -> opportunity
 fungos.crm/activity@1      -> activity
 fungos.crm/call@1          -> call
@@ -97,6 +95,9 @@ fungos.sheets/sheet@1      -> sheet
 fungos.slide/slide@1       -> slide
 fungos.slides/slide@1      -> slide
 ```
+
+Marbles issues are not records. A future host adapter supplies them as `task`
+candidates with a `marbles://...` canonical ref.
 
 Unknown schemas are not mentionable. Privacy follows the books the host opened:
 a team book yields projections, a private book yields private records.

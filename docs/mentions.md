@@ -6,6 +6,7 @@ Mentions are stable locators embedded in text. They are not copied names.
 @[Ada Lovelace](record:personal/avery/crm#c-ada)
 @[Budget](file:sheets/budget.xlsx)
 @[Pilot](record:personal/avery/crm#p-acme-pilot)
+@[Fix SSO](marbles://store/fpl/acme/ACME-42)
 ```
 
 ## Resolve
@@ -14,6 +15,9 @@ Mentions are stable locators embedded in text. They are not copied names.
 the same token form. See [Global search](global-search.md).
 
 ## Persist
+
+Tasks are Marbles issues, not Soil records. Their canonical ref is the mention
+target. Soil stores only the graph link.
 
 One mention becomes one graph link in the source record's book:
 
