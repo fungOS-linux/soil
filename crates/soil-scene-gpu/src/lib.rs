@@ -429,6 +429,24 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                 let color = ink(theme, rect.ink);
                 push_quad(&mut out, x, y, x + w, y + h, color, rect.opacity);
             }
+            soil_scene::Content::Area(area) => {
+                let color = ink(theme, area.ink);
+                let alpha = area.opacity.clamp(0.0, 1.0);
+                for pair in area.points.windows(2) {
+                    let (x1, y1) = (x + pair[0][0] * w, y + pair[0][1] * h);
+                    let (x2, y2) = (x + pair[1][0] * w, y + pair[1][1] * h);
+                    let base = y + area.baseline * h;
+                    push_segment(
+                        &mut out,
+                        [x1, y1],
+                        [x2, y2],
+                        [x2, base],
+                        [x1, base],
+                        color,
+                        alpha,
+                    );
+                }
+            }
             soil_scene::Content::Polyline(polyline) => {
                 let color = ink(theme, polyline.ink);
                 let alpha = polyline.opacity.clamp(0.0, 1.0);
@@ -803,6 +821,30 @@ mod tests {
         let frame = render(&scene, 200, 120, Theme::default()).expect("render");
         let lit = frame.rgba.chunks_exact(4).any(|pixel| pixel[2] > 100);
         assert!(lit, "polyline should leave visible pixels");
+    }
+
+    #[test]
+    fn an_area_writes_visible_pixels() {
+        let scene = soil_scene::Scene::new(vec![soil_scene::Node {
+            id: "area".into(),
+            parent: None,
+            transition_ms: None,
+            transform: soil_scene::Transform {
+                translation: [0.0, 0.0, 0.0],
+                rotation: [0.0; 3],
+                scale: [1.0, 1.0, 1.0],
+            },
+            content: soil_scene::Content::Area(soil_scene::Area {
+                points: vec![[-3.0, 2.0], [3.0, 2.0]],
+                baseline: -2.0,
+                ink: Some(soil_scene::Ink::Primary),
+                rgb: None,
+                opacity: 0.5,
+            }),
+        }]);
+        let frame = render(&scene, 200, 120, Theme::default()).expect("render");
+        let lit = frame.rgba.chunks_exact(4).any(|pixel| pixel[2] > 100);
+        assert!(lit, "area should leave visible pixels");
     }
 
     #[test]

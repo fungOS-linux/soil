@@ -166,3 +166,21 @@ fn a_polyline_is_a_bounded_scene_primitive() {
     }]);
     scene.validate().expect("valid polyline");
 }
+
+#[test]
+fn an_area_is_a_bounded_scene_primitive() {
+    let scene = Scene::new(vec![Node {
+        id: "area".into(),
+        parent: None,
+        transition_ms: None,
+        transform: Transform::default(),
+        content: Content::Area(soil_scene::Area {
+            points: vec![[0.0, 0.0], [1.0, 1.0]],
+            baseline: -1.0,
+            ink: Some(Ink::Primary),
+            rgb: None,
+            opacity: 0.4,
+        }),
+    }]);
+    scene.validate().expect("valid area");
+}

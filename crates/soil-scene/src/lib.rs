@@ -255,6 +255,8 @@ pub enum Content {
     /// A GPU line strip. Points are local to the node transform: translation
     /// and scale place the strip, so a chart can emit one node per series.
     Polyline(Polyline),
+    /// A filled area between a polyline and a local baseline.
+    Area(Area),
     Shader(Shader),
 }
 
@@ -266,6 +268,7 @@ impl Content {
             Self::Text(text) => text.validate(),
             Self::Image(image) => image.validate(),
             Self::Polyline(polyline) => polyline.validate(),
+            Self::Area(area) => area.validate(),
             Self::Shader(shader) => shader.validate(),
         }
     }
@@ -346,6 +349,38 @@ impl Polyline {
         finite(self.opacity)?;
         if !(0.0..=1.0).contains(&self.opacity) {
             return Err(Error::invalid("polyline opacity must be 0..=1"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Area {
+    pub points: Vec<[f32; 2]>,
+    /// Local y the fill drops to.
+    pub baseline: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ink: Option<Ink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgb: Option<[u8; 3]>,
+    #[serde(default = "opaque")]
+    pub opacity: f32,
+}
+
+impl Area {
+    fn validate(&self) -> Result<(), Error> {
+        if self.points.len() < 2 || self.points.len() > 1_000_000 {
+            return Err(Error::invalid("area needs 2..=1,000,000 points"));
+        }
+        for point in &self.points {
+            finite(point[0])?;
+            finite(point[1])?;
+        }
+        finite(self.baseline)?;
+        finite(self.opacity)?;
+        if !(0.0..=1.0).contains(&self.opacity) {
+            return Err(Error::invalid("area opacity must be 0..=1"));
         }
         Ok(())
     }
