@@ -1,0 +1,11 @@
+// Notes reader Spore: local Markdown comes from soil:vfs, search from
+// soil:index, and links/backlinks from soil:graph when the host has mapped them.
+package fungos:notes@0.1.0;
+
+world notes {
+  import soil:vfs/vfs@1.0.0;
+  import soil:index/index@1.1.0;
+  import soil:graph/graph@0.1.0;
+
+  export run: func(args: list<string>) -> result<_, string>;
+}

@@ -1,0 +1,83 @@
+// Read-only graph queries over explicit record links and references.
+//
+// The graph is derived from records in host-approved books. A node or edge is
+// a locator; this contract never grants access to the target.
+package soil:graph@0.1.0;
+
+interface graph {
+  enum direction {
+    out,
+    in,
+    both,
+  }
+
+  enum error {
+    denied,
+    not-ready,
+    over-budget,
+    invalid,
+    stale,
+    io,
+    unsupported,
+  }
+
+  record edge {
+    /// Stable edge id, normally `<book>/<link-entity>`.
+    id: string,
+    source: string,
+    rel: string,
+    target: string,
+    role: option<string>,
+    title: option<string>,
+    book: string,
+  }
+
+  record reference {
+    kind: string,
+    id: string,
+    rel: option<string>,
+    title: option<string>,
+  }
+
+  record edge-page {
+    edges: list<edge>,
+    next: option<u64>,
+    generation: u64,
+  }
+
+  record reference-page {
+    references: list<reference>,
+    next: option<u64>,
+    generation: u64,
+  }
+
+  record graph-state {
+    ready: bool,
+    generation: u64,
+    edges: u64,
+    references: u64,
+  }
+
+  /// Query edges attached to `node`. Empty `rel` means every relationship.
+  neighbors: func(
+    node: string,
+    rel: option<string>,
+    direction: direction,
+    offset: u64,
+    limit: u32,
+  ) -> result<edge-page, error>;
+
+  /// Query external identifiers attached to `node`.
+  references: func(node: string, offset: u64, limit: u32) -> result<reference-page, error>;
+
+  state: func() -> result<graph-state, error>;
+  refresh: func() -> result<graph-state, error>;
+}
+
+world graph-host {
+  import graph;
+}
+
+world guest {
+  import graph;
+}

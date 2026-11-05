@@ -1,0 +1,57 @@
+# Notes Spore
+
+Status: **read-only reader slice, 2026-11-05.**
+
+A local-first Markdown notes Spore:
+
+```text
+VFS workspace -> soil:vfs
+search         -> soil:index
+backlinks      -> soil:graph
+UI             -> fungos.ui + fungos.action
+```
+
+The host owns the notes root, indexing, graph mapping, presentation and any
+future writes. The Spore only names workspace-relative paths.
+
+## Module actions
+
+```text
+tree [path]
+read <path>
+outline <path>
+links <path>
+search <text>
+backlinks <node>
+```
+
+All output is bounded JSON.
+
+## Reader UI
+
+The reader shows:
+
+- note tree
+- selected Markdown document
+- backlink rail
+- top action bar: Search, Present, Open
+
+The `notes.present` intent is reserved for the presenterm-style slide mode.
+
+## Preview
+
+```sh
+FUNGOS_SDK=/path/to/fungos-sdk \
+FUNGOS_MODULES=/tmp/notes-tend \
+/path/to/fungos-sdk/bin/tend ui/editor.lua \
+  --snapshot ui/snapshot.example.lua --app dev.fungos.notes --no-reload
+```
+
+## Build
+
+```sh
+cargo build --release --target wasm32-wasip2
+cp target/wasm32-wasip2/release/notes_spore.wasm module.wasm
+```
+
+Package with `soil-spore`.
