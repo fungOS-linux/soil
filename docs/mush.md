@@ -131,7 +131,15 @@ mkdir DIR...
 rmdir DIR...
 cat PATH
 write PATH [TEXT...]
-rm PATH...
+append PATH [TEXT...]
+touch PATH...
+head [-n N] PATH
+tail [-n N] PATH
+grep [-i] PATTERN PATH...
+wc [-l|-c] PATH...
+stat PATH
+tree [DIR]
+rm [-r] PATH...
 mv FROM TO
 cp FROM TO
 search QUERY
@@ -143,6 +151,26 @@ env
 set [KEY=VALUE]
 exit
 ```
+
+## Editing and inspection
+
+`write` replaces a file; `append` reads the current version and writes a new
+version with the appended line, preserving VFS history. `touch`, `head`, `tail`,
+`grep`, `wc`, `stat`, `tree` and recursive `rm -r` are implemented entirely over
+`soil:vfs` / `soil:vfs-mut`. There is still no host `$EDITOR` or process spawn.
+
+## Git
+
+Mush does **not** run `git` inside the Spore. The Spore has no process, PATH or
+network capability. The only git-aware path today is the operator overlay:
+
+```sh
+mush run op --root ~/fungos-node
+```
+
+which materializes the workspace, lets an external agent run host git, and
+applies the resulting diff back to VFS. A native `git` command would be a
+separate host action adapter, not a new Mush filesystem capability.
 
 ## Scripts
 

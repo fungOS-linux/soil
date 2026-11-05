@@ -164,6 +164,14 @@ impl Shell {
             "rmdir" => self.rmdir(&args),
             "cat" => self.cat(&args),
             "write" => self.write(&args),
+            "append" => self.append(&args),
+            "touch" => self.touch(&args),
+            "head" => self.head(&args),
+            "tail" => self.tail(&args),
+            "grep" => self.grep(&args),
+            "wc" => self.wc(&args),
+            "stat" => self.stat(&args),
+            "tree" => self.tree(&args),
             "rm" => self.rm(&args),
             "mv" => self.mv(&args),
             "cp" => self.cp(&args),
@@ -310,14 +318,288 @@ impl Shell {
         Ok(())
     }
 
-    fn rm(&mut self, args: &[String]) -> Result<(), String> {
+    fn append(&mut self, args: &[String]) -> Result<(), String> {
+        let Some(arg) = args.first() else {
+            return Err("append PATH [TEXT...]".into());
+        };
+        let path = self.resolve(arg)?;
+        let (mut bytes, version) = match vfs::stat(&path) {
+            Ok(entry) if entry.kind == Kind::Directory => {
+                return Err(format!("append: {} is a directory", self.display(&path)));
+            }
+            Ok(entry) => (self.read_file(&path)?, Some(entry.version)),
+            Err(_) => (Vec::new(), None),
+        };
+        if args.len() > 1 {
+            bytes.extend_from_slice(args[1..].join(" ").as_bytes());
+            bytes.push(b'\n');
+        }
+        let result = vfs_mut::write(&path, &bytes, media_type(&path), version)
+            .map_err(|error| format!("append {}: {error:?}", self.display(&path)))?;
+        self.out.push_str(&format!(
+            "appended {} v{} {}\n",
+            self.display(&path),
+            result.version,
+            result.content_id
+        ));
+        Ok(())
+    }
+
+    fn touch(&mut self, args: &[String]) -> Result<(), String> {
         if args.is_empty() {
-            return Err("rm PATH...".into());
+            return Err("touch PATH...".into());
         }
         for arg in args {
             let path = self.resolve(arg)?;
-            vfs_mut::remove(&path)
-                .map_err(|error| format!("rm {}: {error:?}", self.display(&path)))?;
+            if let Ok(entry) = vfs::stat(&path) {
+                if entry.kind == Kind::Directory {
+                    return Err(format!("touch: {} is a directory", self.display(&path)));
+                }
+                continue;
+            }
+            vfs_mut::write(&path, b"", media_type(&path), None)
+                .map_err(|error| format!("touch {}: {error:?}", self.display(&path)))?;
+        }
+        Ok(())
+    }
+
+    fn head(&mut self, args: &[String]) -> Result<(), String> {
+        self.head_tail(args, false)
+    }
+
+    fn tail(&mut self, args: &[String]) -> Result<(), String> {
+        self.head_tail(args, true)
+    }
+
+    fn head_tail(&mut self, args: &[String], tail: bool) -> Result<(), String> {
+        let name = if tail { "tail" } else { "head" };
+        let mut count = 10usize;
+        let mut path = None;
+        let mut index = 0;
+        while index < args.len() {
+            if args[index] == "-n" {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("{name} -n N PATH"));
+                };
+                count = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("{name}: invalid line count {value:?}"))?;
+                index += 2;
+            } else if let Some(value) = args[index].strip_prefix("-n") {
+                count = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("{name}: invalid line count {value:?}"))?;
+                index += 1;
+            } else if path.is_none() {
+                path = Some(args[index].as_str());
+                index += 1;
+            } else {
+                return Err(format!("{name} [-n N] PATH"));
+            }
+        }
+        let Some(path) = path else {
+            return Err(format!("{name} [-n N] PATH"));
+        };
+        let path = self.resolve(path)?;
+        let text = String::from_utf8_lossy(&self.read_file(&path)?).to_string();
+        let lines = text.lines().collect::<Vec<_>>();
+        let start = if tail {
+            lines.len().saturating_sub(count)
+        } else {
+            0
+        };
+        let end = if tail {
+            lines.len()
+        } else {
+            count.min(lines.len())
+        };
+        for line in &lines[start..end] {
+            self.out.push_str(line);
+            self.out.push('\n');
+        }
+        Ok(())
+    }
+
+    fn grep(&mut self, args: &[String]) -> Result<(), String> {
+        let mut ignore_case = false;
+        let mut index = 0;
+        while index < args.len() && args[index].starts_with('-') {
+            if args[index] == "-i" {
+                ignore_case = true;
+                index += 1;
+            } else {
+                return Err(format!("grep: unknown option {}", args[index]));
+            }
+        }
+        let Some(pattern) = args.get(index) else {
+            return Err("grep [-i] PATTERN PATH...".into());
+        };
+        if index + 1 >= args.len() {
+            return Err("grep [-i] PATTERN PATH...".into());
+        }
+        let needle = if ignore_case {
+            pattern.to_ascii_lowercase()
+        } else {
+            pattern.clone()
+        };
+        for arg in &args[index + 1..] {
+            let path = self.resolve(arg)?;
+            let text = String::from_utf8_lossy(&self.read_file(&path)?).to_string();
+            for (line_no, line) in text.lines().enumerate() {
+                let haystack = if ignore_case {
+                    line.to_ascii_lowercase()
+                } else {
+                    line.to_string()
+                };
+                if haystack.contains(&needle) {
+                    self.out.push_str(&format!(
+                        "{}:{}:{}\n",
+                        self.display(&path),
+                        line_no + 1,
+                        line
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn wc(&mut self, args: &[String]) -> Result<(), String> {
+        let mut lines_only = false;
+        let mut bytes_only = false;
+        let mut paths = Vec::new();
+        for arg in args {
+            match arg.as_str() {
+                "-l" => lines_only = true,
+                "-c" => bytes_only = true,
+                other => paths.push(other),
+            }
+        }
+        if paths.is_empty() {
+            return Err("wc [-l|-c] PATH...".into());
+        }
+        for arg in paths {
+            let path = self.resolve(arg)?;
+            let bytes = self.read_file(&path)?;
+            let lines = bytes.iter().filter(|byte| **byte == b'\n').count();
+            if lines_only && !bytes_only {
+                self.out
+                    .push_str(&format!("{lines}\t{}\n", self.display(&path)));
+            } else if bytes_only && !lines_only {
+                self.out
+                    .push_str(&format!("{}\t{}\n", bytes.len(), self.display(&path)));
+            } else {
+                self.out.push_str(&format!(
+                    "{lines}\t{}\t{}\n",
+                    bytes.len(),
+                    self.display(&path)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn stat(&mut self, args: &[String]) -> Result<(), String> {
+        let Some(arg) = args.first() else {
+            return Err("stat PATH".into());
+        };
+        if args.len() != 1 {
+            return Err("stat PATH".into());
+        }
+        let path = self.resolve(arg)?;
+        let entry = vfs::stat(&path).map_err(|error| format!("stat: {error:?}"))?;
+        self.out.push_str(&format!(
+            "path: {}\nkind: {}\nsize: {}\nversion: {}\ncontent: {}\nmedia: {}\nupdated: {}\n",
+            self.display(&entry.path),
+            if entry.kind == Kind::Directory {
+                "directory"
+            } else {
+                "file"
+            },
+            entry.size,
+            entry.version,
+            entry.content_id,
+            entry.media_type,
+            entry.updated_at_ms,
+        ));
+        Ok(())
+    }
+
+    fn tree(&mut self, args: &[String]) -> Result<(), String> {
+        let start = self.resolve(args.first().map(String::as_str).unwrap_or("."))?;
+        let mut stack = vec![(start.clone(), 0usize)];
+        let mut entries = 0usize;
+        while let Some((dir, depth)) = stack.pop() {
+            let mut offset = 0;
+            loop {
+                let page =
+                    vfs::ls(&dir, offset, 512).map_err(|error| format!("tree: {error:?}"))?;
+                for entry in page.entries {
+                    entries += 1;
+                    if entries > 5_000 {
+                        return Err("tree: entry limit exceeded".into());
+                    }
+                    self.out.push_str(&"  ".repeat(depth));
+                    self.out.push_str(&entry.name);
+                    if entry.kind == Kind::Directory {
+                        self.out.push('/');
+                        stack.push((entry.path, depth + 1));
+                    }
+                    self.out.push('\n');
+                }
+                match page.next {
+                    Some(next) if next > offset => offset = next,
+                    _ => break,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rm(&mut self, args: &[String]) -> Result<(), String> {
+        let recursive = args
+            .iter()
+            .any(|arg| arg == "-r" || arg == "-R" || arg == "-rf");
+        let paths = args
+            .iter()
+            .filter(|arg| !arg.starts_with('-'))
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return Err("rm [-r] PATH...".into());
+        }
+        for arg in paths {
+            let path = self.resolve(arg)?;
+            if recursive {
+                self.remove_recursive(&path)?;
+            } else {
+                vfs_mut::remove(&path)
+                    .map_err(|error| format!("rm {}: {error:?}", self.display(&path)))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_recursive(&mut self, path: &str) -> Result<(), String> {
+        let entry = vfs::stat(path).map_err(|error| format!("rm: {error:?}"))?;
+        if entry.kind == Kind::Directory {
+            let mut offset = 0;
+            let mut children = Vec::new();
+            loop {
+                let page = vfs::ls(path, offset, 512).map_err(|error| format!("rm: {error:?}"))?;
+                children.extend(page.entries.into_iter().map(|entry| entry.path));
+                match page.next {
+                    Some(next) if next > offset => offset = next,
+                    _ => break,
+                }
+            }
+            for child in children {
+                self.remove_recursive(&child)?;
+            }
+            vfs_mut::rmdir(path)
+                .map_err(|error| format!("rmdir {}: {error:?}", self.display(path)))?;
+        } else {
+            vfs_mut::remove(path)
+                .map_err(|error| format!("rm {}: {error:?}", self.display(path)))?;
         }
         Ok(())
     }
@@ -655,7 +937,15 @@ mush — a sandboxed VFS shell
   rmdir DIR...            remove empty directories
   cat PATH                print a file
   write PATH [TEXT...]    create/replace a file
-  rm PATH...              unlink files (blobs retained)
+  append PATH [TEXT...]   append a line, preserving history
+  touch PATH...           create empty files
+  head [-n N] PATH        first lines
+  tail [-n N] PATH        last lines
+  grep [-i] PAT TEXT...  search file contents
+  wc [-l|-c] PATH...      line/byte counts
+  stat PATH               file metadata
+  tree [DIR]              recursive listing
+  rm [-r] PATH...         unlink files or recursively remove a directory
   mv FROM TO              rename a file
   cp FROM TO              copy bytes to a new version
   search QUERY            fuzzy index search

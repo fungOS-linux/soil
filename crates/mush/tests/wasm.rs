@@ -64,6 +64,36 @@ fn wasm_spore_supports_mkdir_rmdir_and_files() {
     assert!(stdout.contains("/"), "{stdout}");
 }
 
+#[test]
+fn wasm_spore_supports_append_grep_wc_tree_and_recursive_rm() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg("mkdir docs\nwrite docs/a.md alpha\nappend docs/a.md beta\nhead -n 1 docs/a.md\ntail -n 1 docs/a.md\ngrep beta docs/a.md\nwc -l docs/a.md\ntree\nrm -r docs\ntree")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("alpha"), "{stdout}");
+    assert!(stdout.contains("beta"), "{stdout}");
+    assert!(stdout.contains("docs/a.md:2:beta"), "{stdout}");
+    assert!(stdout.contains("2\t/docs/a.md"), "{stdout}");
+    assert!(stdout.contains("docs/"), "{stdout}");
+    let vfs = Vfs::open(dir.path()).unwrap();
+    assert!(
+        vfs.file("docs").unwrap().is_none(),
+        "recursive rm left docs"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn run_op_applies_overlay_and_respects_gitignore() {
