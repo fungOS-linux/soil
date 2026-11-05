@@ -13,6 +13,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod shm;
+
 /// The schema this crate speaks. Bumped when a change is not additive.
 pub const SCENE_VERSION: u32 = 1;
 
@@ -167,6 +169,10 @@ pub struct Node {
     pub transform: Transform,
     #[serde(flatten)]
     pub content: Content,
+    /// Milliseconds to ease from this node's previous state. Absent means the
+    /// host's default; zero means snap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_ms: Option<u64>,
 }
 
 impl Node {

@@ -4086,8 +4086,9 @@ name = "soil-webgpu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64",
  "pollster",
+ "serde_json",
+ "soil-scene",
  "wasi-webgpu-wasmtime",
  "wasmtime",
  "wasmtime-wasi",

@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::Engine as _;
 use wasi_webgpu_wasmtime::reexports::{wgpu_core, wgpu_types};
 use wasi_webgpu_wasmtime::{WasiWebGpuCtx, WasiWebGpuCtxView, WasiWebGpuOptions};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -173,7 +172,6 @@ impl CanvasGpuPresenter for SocketPresenter {
             self.size.0,
             self.size.1
         );
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&frame.rgba);
         let revision = self.revision;
         self.revision = self.revision.saturating_add(1);
         let lease = format!(
@@ -182,9 +180,14 @@ impl CanvasGpuPresenter for SocketPresenter {
         );
         self.stream.write_all(lease.as_bytes())?;
         self.stream.write_all(b"\n")?;
+        let shared = soil_scene::shm::publish(frame.width, frame.height, revision, &frame.rgba)
+            .map_err(|error| anyhow::anyhow!("publish shared frame: {error}"))?;
         let message = format!(
-            r#"{{"kind":"gpu_frame","source_id":"{}","width":{},"height":{},"revision":{revision},"rgba":"{encoded}"}}"#,
-            self.source_id, frame.width, frame.height
+            r#"{{"kind":"gpu_frame_shm","source_id":"{}","path":{},"width":{},"height":{},"revision":{revision}}}"#,
+            self.source_id,
+            serde_json::to_string(&shared.name)?,
+            frame.width,
+            frame.height
         );
         self.stream.write_all(message.as_bytes())?;
         self.stream.write_all(b"\n")?;
@@ -414,7 +417,8 @@ mod tests {
         assert!(lines[0].contains(r#""kind":"hello""#));
         assert!(lines[1].contains(r#""kind":"present""#));
         assert!(lines[1].contains(r#""kind":"gpu_lease""#));
-        assert!(lines[2].contains(r#""kind":"gpu_frame""#));
+        assert!(lines[2].contains(r#""kind":"gpu_frame_shm""#));
+        assert!(lines[2].contains(r#""path":"/tmp/fungos-frame-"#));
         assert!(lines[2].contains(r#""revision":1"#));
     }
 

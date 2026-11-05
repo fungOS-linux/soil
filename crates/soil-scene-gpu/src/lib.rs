@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use fontdue::{Font, FontSettings};
+use std::collections::HashMap;
 use std::io::Read;
 use wgpu::util::DeviceExt;
 
@@ -64,6 +65,7 @@ struct Vertex {
 struct TextureVertex {
     pos: [f32; 2],
     uv: [f32; 2],
+    color: [f32; 4],
 }
 
 const RECT_SHADER: &str = r#"
@@ -89,20 +91,23 @@ const TEXT_SHADER: &str = r#"
 struct VertexIn {
   @location(0) pos: vec2<f32>,
   @location(1) uv: vec2<f32>,
+  @location(2) color: vec4<f32>,
 };
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
   @location(0) uv: vec2<f32>,
+  @location(1) color: vec4<f32>,
 };
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
-  return VertexOut(vec4<f32>(in.pos, 0.0, 1.0), in.uv);
+  return VertexOut(vec4<f32>(in.pos, 0.0, 1.0), in.uv, in.color);
 }
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-  return textureSample(tex, samp, in.uv);
+  let coverage = textureSample(tex, samp, in.uv).r;
+  return vec4<f32>(in.color.rgb, in.color.a * coverage);
 }
 "#;
 
@@ -196,7 +201,7 @@ pub fn render(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) 
             buffers: &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<TextureVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
             }],
             compilation_options: Default::default(),
         },
@@ -224,25 +229,25 @@ pub fn render(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) 
         usage: wgpu::BufferUsages::VERTEX,
     });
 
-    let (overlay, text_vertices) = text_overlay(scene, width, height, theme)?;
+    let (atlas, text_vertices) = text_atlas(scene, width, height, theme)?;
     let overlay_texture = device.create_texture_with_data(
         &queue,
         &wgpu::TextureDescriptor {
-            label: Some("soil-scene-gpu text overlay"),
+            label: Some("soil-scene-gpu text atlas"),
             size: wgpu::Extent3d {
-                width,
-                height,
+                width: ATLAS_WIDTH,
+                height: ATLAS_HEIGHT,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::R8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         },
         wgpu::util::TextureDataOrder::LayerMajor,
-        &overlay,
+        &atlas,
     );
     let overlay_view = overlay_texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -442,13 +447,117 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
     out
 }
 
-fn text_overlay(
+const ATLAS_WIDTH: u32 = 1024;
+const ATLAS_HEIGHT: u32 = 1024;
+
+struct Glyph {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    left: i32,
+    top: i32,
+    advance: f32,
+}
+
+struct Atlas {
+    data: Vec<u8>,
+    cursor_x: u32,
+    cursor_y: u32,
+    row_height: u32,
+    glyphs: HashMap<(char, u32), Option<Glyph>>,
+}
+
+impl Atlas {
+    fn new() -> Self {
+        Self {
+            data: vec![0u8; (ATLAS_WIDTH * ATLAS_HEIGHT) as usize],
+            cursor_x: 1,
+            cursor_y: 1,
+            row_height: 0,
+            glyphs: HashMap::new(),
+        }
+    }
+
+    fn glyph(&mut self, font: &mut Font, ch: char, size: f32) -> Option<Glyph> {
+        let key = (ch, size.round().max(1.0) as u32);
+        if let Some(glyph) = self.glyphs.get(&key) {
+            return glyph.as_ref().map(|glyph| Glyph {
+                x: glyph.x,
+                y: glyph.y,
+                width: glyph.width,
+                height: glyph.height,
+                left: glyph.left,
+                top: glyph.top,
+                advance: glyph.advance,
+            });
+        }
+        let (metrics, bitmap) = font.rasterize(ch, size);
+        let glyph = if metrics.width == 0 || metrics.height == 0 {
+            Some(Glyph {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                left: metrics.xmin,
+                top: metrics.height as i32 + metrics.ymin,
+                advance: metrics.advance_width,
+            })
+        } else {
+            let width = metrics.width as u32;
+            let height = metrics.height as u32;
+            if self.cursor_x + width + 1 > ATLAS_WIDTH {
+                self.cursor_x = 1;
+                self.cursor_y += self.row_height + 1;
+                self.row_height = 0;
+            }
+            if self.cursor_y + height + 1 > ATLAS_HEIGHT {
+                self.glyphs.insert(key, None);
+                return None;
+            }
+            let x = self.cursor_x;
+            let y = self.cursor_y;
+            for row in 0..height {
+                let src = (row * width) as usize;
+                let dst = ((y + row) * ATLAS_WIDTH + x) as usize;
+                self.data[dst..dst + width as usize]
+                    .copy_from_slice(&bitmap[src..src + width as usize]);
+            }
+            self.cursor_x += width + 1;
+            self.row_height = self.row_height.max(height);
+            Some(Glyph {
+                x,
+                y,
+                width,
+                height,
+                left: metrics.xmin,
+                top: metrics.height as i32 + metrics.ymin,
+                advance: metrics.advance_width,
+            })
+        };
+        self.glyphs.insert(
+            key,
+            glyph.as_ref().map(|glyph| Glyph {
+                x: glyph.x,
+                y: glyph.y,
+                width: glyph.width,
+                height: glyph.height,
+                left: glyph.left,
+                top: glyph.top,
+                advance: glyph.advance,
+            }),
+        );
+        glyph
+    }
+}
+
+fn text_atlas(
     scene: &soil_scene::Scene,
     width: u32,
     height: u32,
     theme: Theme,
 ) -> Result<(Vec<u8>, Vec<TextureVertex>)> {
-    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    let mut atlas = Atlas::new();
     let mut vertices = Vec::new();
     let mut font = load_font();
     for node in &scene.nodes {
@@ -463,50 +572,92 @@ fn text_overlay(
         let screen_x = (x + 4.0) / 8.0 * width as f32;
         let screen_y = (4.0 - y) / 8.0 * height as f32;
         let color = ink(theme, text.ink);
-        draw_text(
-            &mut rgba,
-            width,
-            height,
+        push_text_quads(
+            &mut atlas,
+            &mut vertices,
             font,
             text.text.as_str(),
             screen_x,
             screen_y,
             size,
             color,
+            width,
+            height,
         );
     }
-    // One full-frame textured quad. The overlay is composed on the CPU because
-    // text shaping/rasterization is still a host concern; the GPU owns the
-    // scene rectangles and the final composite.
-    if rgba.iter().any(|byte| *byte != 0) {
-        vertices.extend([
-            TextureVertex {
-                pos: [-1.0, 1.0],
-                uv: [0.0, 0.0],
-            },
-            TextureVertex {
-                pos: [1.0, 1.0],
-                uv: [1.0, 0.0],
-            },
-            TextureVertex {
-                pos: [1.0, -1.0],
-                uv: [1.0, 1.0],
-            },
-            TextureVertex {
-                pos: [-1.0, 1.0],
-                uv: [0.0, 0.0],
-            },
-            TextureVertex {
-                pos: [1.0, -1.0],
-                uv: [1.0, 1.0],
-            },
-            TextureVertex {
-                pos: [-1.0, -1.0],
-                uv: [0.0, 1.0],
-            },
-        ]);
+    Ok((atlas.data, vertices))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_text_quads(
+    atlas: &mut Atlas,
+    vertices: &mut Vec<TextureVertex>,
+    font: &mut Font,
+    text: &str,
+    mut x: f32,
+    y: f32,
+    size: f32,
+    color: [u8; 3],
+    width: u32,
+    height: u32,
+) {
+    let line_height = size * 1.25;
+    let start_x = x;
+    let mut baseline = y + font
+        .horizontal_line_metrics(size)
+        .map(|m| m.ascent)
+        .unwrap_or(size);
+    let rgba = [
+        color[0] as f32 / 255.0,
+        color[1] as f32 / 255.0,
+        color[2] as f32 / 255.0,
+        1.0,
+    ];
+    for ch in text.chars() {
+        if ch == '\n' {
+            baseline += line_height;
+            x = start_x;
+            continue;
+        }
+        let Some(glyph) = atlas.glyph(font, ch, size) else {
+            x += size * 0.5;
+            continue;
+        };
+        if glyph.width > 0 && glyph.height > 0 {
+            let x0 = x + glyph.left as f32;
+            let y0 = baseline - glyph.top as f32;
+            let x1 = x0 + glyph.width as f32;
+            let y1 = y0 + glyph.height as f32;
+            let (u0, v0) = (
+                glyph.x as f32 / ATLAS_WIDTH as f32,
+                glyph.y as f32 / ATLAS_HEIGHT as f32,
+            );
+            let (u1, v1) = (
+                (glyph.x + glyph.width) as f32 / ATLAS_WIDTH as f32,
+                (glyph.y + glyph.height) as f32 / ATLAS_HEIGHT as f32,
+            );
+            let (nx0, nx1) = (x0 / width as f32 * 2.0 - 1.0, x1 / width as f32 * 2.0 - 1.0);
+            let (ny0, ny1) = (
+                1.0 - y0 / height as f32 * 2.0,
+                1.0 - y1 / height as f32 * 2.0,
+            );
+            for (px, py, u, v) in [
+                (nx0, ny0, u0, v0),
+                (nx1, ny0, u1, v0),
+                (nx1, ny1, u1, v1),
+                (nx0, ny0, u0, v0),
+                (nx1, ny1, u1, v1),
+                (nx0, ny1, u0, v1),
+            ] {
+                vertices.push(TextureVertex {
+                    pos: [px, py],
+                    uv: [u, v],
+                    color: rgba,
+                });
+            }
+        }
+        x += glyph.advance;
     }
-    Ok((rgba, vertices))
 }
 
 fn load_font() -> Option<Font> {
@@ -532,69 +683,6 @@ fn load_font() -> Option<Font> {
     None
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_text(
-    rgba: &mut [u8],
-    width: u32,
-    height: u32,
-    font: &mut Font,
-    text: &str,
-    mut x: f32,
-    y: f32,
-    size: f32,
-    color: [u8; 3],
-) {
-    let line_height = size * 1.25;
-    let start_x = x;
-    let mut baseline = y + font
-        .horizontal_line_metrics(size)
-        .map(|m| m.ascent)
-        .unwrap_or(size);
-    for ch in text.chars() {
-        if ch == '\n' {
-            baseline += line_height;
-            x = start_x;
-            continue;
-        }
-        let (metrics, bitmap) = font.rasterize(ch, size);
-        let gx = x + metrics.xmin as f32;
-        let gy = baseline - (metrics.ymin + metrics.height as i32) as f32;
-        for row in 0..metrics.height {
-            for col in 0..metrics.width {
-                let coverage = bitmap[row * metrics.width + col];
-                if coverage == 0 {
-                    continue;
-                }
-                let px = (gx + col as f32).round() as i32;
-                let py = (gy + row as f32).round() as i32;
-                if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
-                    continue;
-                }
-                let index = ((py as u32 * width + px as u32) * 4) as usize;
-                let alpha = coverage as f32 / 255.0;
-                blend(rgba, index, color, alpha);
-            }
-        }
-        x += metrics.advance_width;
-    }
-}
-
-fn blend(rgba: &mut [u8], index: usize, color: [u8; 3], alpha: f32) {
-    let dst_a = rgba[index + 3] as f32 / 255.0;
-    let src_a = alpha.clamp(0.0, 1.0);
-    let out_a = src_a + dst_a * (1.0 - src_a);
-    if out_a <= f32::EPSILON {
-        return;
-    }
-    for channel in 0..3 {
-        let src = color[channel] as f32 / 255.0;
-        let dst = rgba[index + channel] as f32 / 255.0;
-        let out = (src * src_a + dst * dst_a * (1.0 - src_a)) / out_a;
-        rgba[index + channel] = (out * 255.0).round() as u8;
-    }
-    rgba[index + 3] = (out_a * 255.0).round() as u8;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,6 +692,7 @@ mod tests {
         let scene = soil_scene::Scene::new(vec![soil_scene::Node {
             id: "title".into(),
             parent: None,
+            transition_ms: None,
             transform: soil_scene::Transform {
                 translation: [-2.0, 1.0, 0.0],
                 rotation: [0.0; 3],
@@ -629,6 +718,7 @@ mod tests {
         let scene = soil_scene::Scene::new(vec![soil_scene::Node {
             id: "ground".into(),
             parent: None,
+            transition_ms: None,
             transform: soil_scene::Transform {
                 translation: [-4.0, -4.0, 0.0],
                 rotation: [0.0; 3],

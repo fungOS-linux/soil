@@ -2,6 +2,7 @@ use soil_scene::{Content, Image, Ink, Node, Present, Rect, RgbaFrame, Scene, Tex
 
 fn rect(id: &str) -> Node {
     Node {
+        transition_ms: None,
         id: id.into(),
         parent: None,
         transform: Transform::default(),
@@ -11,6 +12,7 @@ fn rect(id: &str) -> Node {
 
 fn text(id: &str, body: &str) -> Node {
     Node {
+        transition_ms: None,
         id: id.into(),
         parent: None,
         transform: Transform::default(),
@@ -81,6 +83,7 @@ fn an_asset_is_an_id_never_a_path() {
     let node = Node {
         id: "image".into(),
         parent: None,
+        transition_ms: None,
         transform: Transform::default(),
         content: Content::Image(Image {
             asset: "../../etc/passwd".into(),

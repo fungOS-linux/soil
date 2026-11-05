@@ -22,6 +22,7 @@ fn run() -> anyhow::Result<()> {
     let mut size = (1200, 900);
     let mut hold = false;
     let mut rgba_path = None;
+    let mut base64 = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--scene" => scene_path = args.next(),
@@ -29,6 +30,7 @@ fn run() -> anyhow::Result<()> {
             "--source-id" => source_id = args.next(),
             "--hold" => hold = true,
             "--rgba" => rgba_path = args.next(),
+            "--base64" => base64 = true,
             "--size" => {
                 let Some(value) = args.next() else {
                     anyhow::bail!("--size requires WxH");
@@ -56,7 +58,7 @@ fn run() -> anyhow::Result<()> {
     if let Some(path) = rgba_path {
         std::fs::write(path, &frame.rgba)?;
     }
-    present_frame(&socket, &source_id, &frame, hold)?;
+    present_frame(&socket, &source_id, &frame, hold, !base64)?;
     println!(
         "soil-scene-gpu: ok source={} {}x{} nodes={}",
         source_id,
@@ -67,7 +69,13 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn present_frame(socket: &str, source_id: &str, frame: &Frame, hold: bool) -> anyhow::Result<()> {
+fn present_frame(
+    socket: &str,
+    source_id: &str,
+    frame: &Frame,
+    hold: bool,
+    shared: bool,
+) -> anyhow::Result<()> {
     let mut stream = UnixStream::connect(socket)?;
     let hello = format!(
         r#"{{"kind":"hello","surface_id":"{source_id}","title":"{source_id}","width":{},"height":{}}}"#,
@@ -79,12 +87,24 @@ fn present_frame(socket: &str, source_id: &str, frame: &Frame, hold: bool) -> an
         frame.width, frame.height
     );
     writeln!(stream, "{lease}")?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&frame.rgba);
-    let message = format!(
-        r#"{{"kind":"gpu_frame","source_id":"{source_id}","width":{},"height":{},"revision":1,"rgba":"{encoded}"}}"#,
-        frame.width, frame.height
-    );
-    writeln!(stream, "{message}")?;
+    if shared {
+        let shared = soil_scene::shm::publish(frame.width, frame.height, 1, &frame.rgba)?;
+        let message = format!(
+            r#"{{"kind":"gpu_frame_shm","source_id":"{source_id}","path":{},"width":{},"height":{},"revision":{}}}"#,
+            serde_json::to_string(&shared.name)?,
+            frame.width,
+            frame.height,
+            shared.revision
+        );
+        writeln!(stream, "{message}")?;
+    } else {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&frame.rgba);
+        let message = format!(
+            r#"{{"kind":"gpu_frame","source_id":"{source_id}","width":{},"height":{},"revision":1,"rgba":"{encoded}"}}"#,
+            frame.width, frame.height
+        );
+        writeln!(stream, "{message}")?;
+    }
     stream.flush()?;
     if hold {
         std::thread::sleep(Duration::from_secs(60));
