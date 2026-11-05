@@ -34,6 +34,15 @@ surfaces = ["web", "native", "canvas"]
 
 [assets]
 "site-map" = { path = "assets/site-map.png", media_type = "image/png" }
+
+[[actions]]
+id = "mail.archive"
+title = "Archive"
+input = "mail/thread-ref@1"
+requires = ["soil:canvas"]
+callers = ["human", "agent"]
+expose = ["ui", "socket", "mcp", "dcp"]
+idempotent = true
 "#;
 
 fn fixture() -> PathBuf {
@@ -139,6 +148,31 @@ fn verify_rejects_a_modified_member() {
     let bytes = build_tar(&files);
 
     assert!(matches!(verify(&bytes), Err(Error::Lock(_))));
+}
+
+#[test]
+fn manifest_carries_the_action_registry() {
+    let manifest = Manifest::parse(MANIFEST).unwrap();
+    assert_eq!(manifest.actions.len(), 1);
+    let action = &manifest.actions[0];
+    assert_eq!(action.id, "mail.archive");
+    assert_eq!(action.input, "mail/thread-ref@1");
+    assert!(action.idempotent);
+}
+
+#[test]
+fn action_registry_rejects_duplicates_and_unknown_grants() {
+    let duplicate = MANIFEST.replace(
+        "id = \"mail.archive\"",
+        "id = \"mail.archive\"\n\n[[actions]]\nid = \"mail.archive\"\ntitle = \"Dup\"\ninput = \"x\"",
+    );
+    assert!(Manifest::parse(&duplicate).is_err());
+
+    let bad_grant = MANIFEST.replace(
+        "requires = [\"soil:canvas\"]",
+        "requires = [\"root\"]",
+    );
+    assert!(Manifest::parse(&bad_grant).is_err());
 }
 
 #[test]

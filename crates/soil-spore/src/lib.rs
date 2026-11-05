@@ -84,6 +84,70 @@ pub struct Manifest {
     /// Declared absences. Reviewed like grants: intent is written down.
     #[serde(default)]
     pub denied: BTreeMap<String, Vec<String>>,
+    /// Public actions this Spore implements. The action registry is package data,
+    /// not something the host or UI invents.
+    #[serde(default)]
+    pub actions: Vec<Action>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Action {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Named input contract. The Spore validates the actual payload.
+    pub input: String,
+    /// Capabilities the package needs to execute this action.
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// Resource patterns such as `account/*` or `inbox/*`.
+    #[serde(default)]
+    pub resources: Vec<String>,
+    #[serde(default = "default_callers")]
+    pub callers: Vec<Caller>,
+    #[serde(default)]
+    pub approval: Approval,
+    #[serde(default)]
+    pub idempotent: bool,
+    #[serde(default = "default_exposure")]
+    pub expose: Vec<Exposure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Caller {
+    Human,
+    Agent,
+    Automation,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Approval {
+    #[default]
+    Never,
+    Always,
+    Policy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Exposure {
+    Ui,
+    Socket,
+    Mcp,
+    Dcp,
+}
+
+fn default_callers() -> Vec<Caller> {
+    vec![Caller::Human]
+}
+
+fn default_exposure() -> Vec<Exposure> {
+    vec![Exposure::Ui]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -222,6 +286,50 @@ impl Manifest {
                 )));
             }
         }
+        let mut action_ids = std::collections::BTreeSet::new();
+        for action in &self.actions {
+            if !action_id(&action.id) || !action_ids.insert(action.id.as_str()) {
+                return Err(Error::Invalid(format!(
+                    "action id {:?} must be unique and dotted",
+                    action.id
+                )));
+            }
+            if action.title.trim().is_empty() || action.title.len() > 128 {
+                return Err(Error::Invalid(format!(
+                    "action {:?} needs a bounded title",
+                    action.id
+                )));
+            }
+            if action.input.trim().is_empty() || action.input.len() > 128 {
+                return Err(Error::Invalid(format!(
+                    "action {:?} needs an input contract",
+                    action.id
+                )));
+            }
+            for capability in &action.requires {
+                if !grants(capability) {
+                    return Err(Error::Invalid(format!(
+                        "action {:?} requires invalid capability {capability:?}",
+                        action.id
+                    )));
+                }
+            }
+            if action.callers.is_empty() || action.expose.is_empty() {
+                return Err(Error::Invalid(format!(
+                    "action {:?} needs callers and exposure",
+                    action.id
+                )));
+            }
+            for resource in &action.resources {
+                if resource.is_empty() || resource.len() > 128 || !resource.contains('/') {
+                    return Err(Error::Invalid(format!(
+                        "action {:?} has invalid resource {resource:?}",
+                        action.id
+                    )));
+                }
+            }
+        }
+
         for (name, asset) in &self.assets {
             if !identifier(name) {
                 return Err(Error::Invalid(format!("asset name {name:?}")));
@@ -264,6 +372,15 @@ fn version(value: &str) -> bool {
         && parts
             .iter()
             .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn action_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.contains('.')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-'
+        })
 }
 
 fn grants(value: &str) -> bool {
