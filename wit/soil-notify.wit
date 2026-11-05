@@ -3,7 +3,7 @@
 // A publisher emits a durable notification envelope. An inbox shows and acts on
 // it. Focus is a host-owned per-device policy; history is opt-in and separately
 // granted. No payload carries app identity, a URL, a credential or authority.
-package soil:notify@1.0.0;
+package soil:notify@1.1.0;
 
 interface types {
   enum priority {
@@ -161,10 +161,70 @@ interface cleanup {
   ) -> result<u32, error>;
 }
 
+interface ringer {
+  use types.{action, priority};
+
+  enum kind {
+    call,
+    doorbell,
+    intercom,
+    alarm,
+    timer,
+    pager,
+  }
+
+  enum phase {
+    ringing,
+    accepted,
+    declined,
+    ended,
+    missed,
+  }
+
+  enum error {
+    denied,
+    not-found,
+    not-ringing,
+    already-answered,
+    over-budget,
+    invalid,
+    io,
+    unavailable,
+  }
+
+  record ring {
+    id: string,
+    kind: kind,
+    source: string,
+    title: string,
+    priority: priority,
+    expires-at-ms: option<u64>,
+    actions: list<action>,
+  }
+
+  record state {
+    id: string,
+    phase: phase,
+    answered-by: option<string>,
+  }
+
+  resource subscription {
+    next: func(timeout-ms: u32) -> result<option<state>, error>;
+  }
+
+  incoming: func() -> result<subscription, error>;
+  accept: func(id: string) -> result<state, error>;
+  decline: func(id: string) -> result<state, error>;
+  end: func(id: string) -> result<state, error>;
+  mute: func(id: string) -> result<_, error>;
+  get-state: func(id: string) -> result<state, error>;
+}
+
 world guest {
   import publisher;
   import inbox;
   import focus;
   import history;
   import cleanup;
+  import ringer;
 }

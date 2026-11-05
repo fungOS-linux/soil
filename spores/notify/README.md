@@ -2,14 +2,12 @@
 
 Status: **tray and ringer contracts, 2026-11-05.**
 
-One Spore, two WITs:
+One Spore, one WIT package:
 
 ```text
 soil:notify
   publisher, inbox, focus, history, cleanup
-
-soil:ringer
-  calls, doorbell, intercom, alarm, timer, pager
+  ringer (calls, doorbell, intercom, alarm, timer, pager)
 ```
 
 The tray is durable/deferrable. The ringer is active and answerable. They share

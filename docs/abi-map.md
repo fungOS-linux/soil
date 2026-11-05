@@ -39,7 +39,7 @@ review map for what else exists and what is missing.
 | `wasi:audio@0.1.0` | audio sink | link `wasi:audio` | draft | Soil-maintained PCM sink; cpal host; no callbacks or device handles. [`docs/wasi-audio.md`](wasi-audio.md). |
 | `soil:mic@1` | audio capture | `soil:mic.capture` | yes | Bounded PCM chunks. Visible capture indicator; no background capture. Separate from playback so muting output never implies mic permission. |
 | `soil:camera@1` | camera capture | `soil:camera.capture` | yes | Still/low-rate frames only. Full-rate video belongs on `soil:stream`/producer path. No device paths or raw controls. |
-| `soil:input@1` | gamepad / remote / global input | `soil:input` | later | Canvas already owns focused keypad/remote input. This is only for global controllers/media keys when no Canvas surface is focused. |
+| `soil:input@1` | shared normalized input types | — | yes | Key, modifiers, pointer, scroll, text and focus types shared by Canvas, Terminal and imported surfaces. Types only; each surface keeps its own presentation grant. Canonical WIT: [`wit/soil-input.wit`](../wit/soil-input.wit). |
 | `soil:ble@1` | BLE radio | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | yes | Eight verbs, Soil-issued handles, typed errors, local lease (signed lease pending). Canonical WIT: [`wit/soil-ble.wit`](../wit/soil-ble.wit); host: [`crates/soil-ble-host`](../crates/soil-ble-host). |
 | `soil:stream@1` | Unibus stream | `soil:stream` plus kind/schema grants | yes | Bounded subscription resource; read/write/credit; no endpoints, producer ids, or tokens. |
 | `soil:view@1` | host-owned web/Spore/retained view | `soil:view`, optional `soil:view.capture` | yes | Target ids only; bounded open/act/observe/capture. Host owns the browser/Spore engine, pixels and capture buffer. Canonical WIT: [`wit/soil-view.wit`](../wit/soil-view.wit). |
@@ -57,8 +57,8 @@ review map for what else exists and what is missing.
 | `soil:inference@0.2` | host-mediated model inference | `soil:inference` | draft | Models, tool calls, attachments, non-streaming completion, and a polled SSE `completion-stream` resource. Host owns provider, endpoint, Geode credential, scrubbing, and transport. Canonical WIT: [`wit/soil-inference.wit`](../wit/soil-inference.wit). |
 | `soil:search@0.2` | global search | `soil:search` | draft | Host-composed files + records + future actions. Locators only, never authority. Host: [`crates/soil-search-host`](../crates/soil-search-host). |
 | `soil:time@1` | host monotonic clock | `soil:time` | yes | Monotonic milliseconds and host ticks only. No wall clock, sleep, or timer thread. Canonical WIT: [`wit/soil-time.wit`](../wit/soil-time.wit). |
-| `soil:notify@1` | host notification broker / UI | `soil:notify` + separately `history`, `cleanup`, `focus` | draft | Durable envelopes, per-device inbox state, host focus, opt-in history, scoped cleanup. Canonical WIT: [`wit/soil-notify.wit`](../wit/soil-notify.wit); host: [`crates/soil-notify-host`](../crates/soil-notify-host). |
-| `soil:ringer@1` | host ringer lifecycle | `soil:ringer` | draft | Active calls/doorbells/alarms with a one-device answer claim. Separate from notification history. Canonical WIT: [`wit/soil-ringer.wit`](../wit/soil-ringer.wit). |
+| `soil:notify@1.1` | host notification broker / UI + ringer | `soil:notify` plus separate `history`, `cleanup`, `focus`, `ringer` grants | draft | Durable envelopes, per-device inbox state, host focus, opt-in history, scoped cleanup, and the one-device ringer answer claim. Canonical WIT: [`wit/soil-notify.wit`](../wit/soil-notify.wit); host: [`crates/soil-notify-host`](../crates/soil-notify-host). |
+| `fungos:actions@1` | host action bus + presentation catalog | exact action id/version grants | draft | Granted catalog, bounded invocation, approval and idempotency receipts. Canvas presentation uses `fungos:actions/catalog`; execution still goes through `fungos:actions/actions`. Canonical WIT: [`wit/fungos-actions.wit`](../wit/fungos-actions.wit). |
 | `soil:display@1` | display enumeration/placement | — | no | Soil owns displays. Spore asks for a surface purpose, not a display id. |
 | `soil:net@1` | raw sockets/DNS | — | no | Use `soil:http`, `soil:api`, or `soil:stream`. No ambient sockets, DNS, redirects, or arbitrary hosts. |
 | `soil:process@1` | process spawn | — | no | A Spore is not a process manager. |
@@ -157,26 +157,16 @@ are independent.
 ### `soil:input@1`
 
 ```wit
-// Only for input that is not tied to a `soil:surface` window.
-// No raw keycodes; use named buttons/axes.
 package soil:input@1.0.0;
 
-interface input {
-  record event {
-    kind: string,          // button | axis | text | media
-    control: string,       // "a", "dpad-left", "play-pause"
-    value: f32,
-    generation: u64,
-    soil-time-ms: u64,
-  }
-
-  enum error { denied, not-ready, over-budget, closed }
-
-  open: func() -> result<input, error>;
-  poll: func(timeout-ms: u32) -> result<option<event>, error>;
-  close: func() -> result<_, error>;
+interface types {
+  // Shared key, modifiers, button, point, scroll, key-event and input types.
+  // Canvas, Terminal and soil:surface-import use the same vocabulary.
 }
 ```
+
+This package contains types only. It exposes no grant and no callable
+capability. Each surface keeps its own grant and verbs.
 
 ### `soil:api@1`
 

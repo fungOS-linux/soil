@@ -1,0 +1,110 @@
+// Host-mediated action bus for Spores.
+//
+// A Spore sees a granted action catalog and emits bounded invocations. The host
+// owns grants, approval, idempotency, credentials, routing, retries and audit.
+// Unibus adapters implement the actions; Spores never import Unibus or open a
+// connector-specific transport.
+package fungos:actions@1.0.0;
+
+interface actions {
+  enum effect {
+    read,
+    write,
+    external,
+  }
+
+  enum idempotency {
+    idempotent,
+    keyed,
+    unsafe,
+  }
+
+  enum approval {
+    none,
+    operator,
+    destructive,
+  }
+
+  record descriptor {
+    id: string,
+    version: u32,
+    summary: string,
+    effect: effect,
+    idempotency: idempotency,
+    approval: approval,
+    input-schema: string,
+    output-schema: string,
+    /// DCP lifecycle phases, when this action came from a DCP catalog.
+    phases: list<string>,
+    provider: option<string>,
+    catalog-revision: option<string>,
+    state-revision: option<string>,
+  }
+
+  record call {
+    action: string,
+    version: u32,
+    input: string,
+    idempotency-key: option<string>,
+  }
+
+  record receipt {
+    action: string,
+    version: u32,
+    output: string,
+    replayed: bool,
+  }
+
+  enum error {
+    denied,
+    unknown-action,
+    unsupported-version,
+    invalid,
+    approval-required,
+    unsafe-retry,
+    over-budget,
+    unavailable,
+    io,
+  }
+
+  catalog: func() -> result<list<descriptor>, error>;
+  invoke: func(call: call) -> result<receipt, error>;
+}
+
+
+/// Presentation projection of the granted action catalog.
+///
+/// This never grants execution. A caller may render a button or parameter form
+/// from this data, then invoke through `actions.invoke`.
+interface catalog {
+  use actions.{approval, effect, error, idempotency};
+
+  record action {
+    id: string,
+    label: string,
+    description: string,
+    shortcut: option<string>,
+    /// JSON Schema 2020-12 object for action arguments. An empty object means
+    /// this is a parameterless click action.
+    input-schema: string,
+    /// Host-computed fast path for rendering a button without parsing JSON.
+    requires-input: bool,
+    effect: effect,
+    idempotency: idempotency,
+    approval: approval,
+    available: bool,
+    reason: option<string>,
+    /// DCP lifecycle phases when this action came from a DCP catalog.
+    phases: list<string>,
+    /// DCP/provider identity and revision binding when available.
+    provider: option<string>,
+    catalog-revision: option<string>,
+    state-revision: option<string>,
+  }
+
+  list-actions: func() -> result<list<action>, error>;
+}
+
+world guest {
+  import actions;
+}

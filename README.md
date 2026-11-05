@@ -59,13 +59,22 @@ Principles:
 | [`soil:inference@0.2.0`](wit/soil-inference.wit) | `soil:inference` | WIT + models, tools, completion, SSE stream resource |
 | [`soil:search@0.2.0`](wit/soil-search.wit) | `soil:search` | WIT + files/records/graph host composition |
 | [`soil:graph@0.1.0`](wit/soil-graph.wit) | `soil:graph` | read-only edge/reference queries over records |
+| [`soil:input@1.0.0`](wit/soil-input.wit) | — | shared normalized input types for Canvas, Terminal and imported surfaces |
+| [`soil:notify@1.1.0`](wit/soil-notify.wit) | `soil:notify`, `soil:notify/ringer` | WIT + host broker + notify Spore; ringer is an interface, not a package |
+| [`fungos:actions@1.0.0`](wit/fungos-actions.wit) | exact action id/version grants | granted catalog + bounded invoke; Canvas uses the catalog projection |
+| [`soil:device@0.1.0`](wit/soil-device.wit) | `soil:device` | semantic battery/estimate/lid contracts; runtime uses core-Wasm lowering |
 | [`soil:ble@1.0.0`](wit/soil-ble.wit) | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | WIT + host + COLMI ring Spore |
 | [`soil:canvas@1.0.0`](wit/soil-canvas.wit) | `soil:canvas` | WIT + input normalizer + S22 runtime + Android JNI |
 | [`wasi:webgpu@0.3.0-rc.2`](crates/soil-webgpu/wit/deps/wasi-webgpu-0.3.0-rc.2/package.wit) | link `wasi:webgpu` | upstream WIT + host + compute fixture |
 | [`wasi:audio@0.1.0`](wit/wasi-audio.wit) | link `wasi:audio` | draft WIT + cpal host + tone fixture |
 
-`cargo test --workspace` parses every package and asserts its reviewed name,
-interface and functions, so an accidental ABI change fails the build.
+`cargo test -p soil-abi` parses every canonical package and asserts its reviewed
+name, interface and functions, so an accidental ABI change fails the build. See
+[`wit/README.md`](wit/README.md) for the canonical/contract/deferred split.
+
+Battery, estimate, lid and Canvas animation are semantic WIT but are lowered
+through a bounded core-Wasm ABI by the S22 runtime. See
+[`docs/abi-core-wasm.md`](docs/abi-core-wasm.md).
 
 The first host-backed capability is BLE: [`crates/soil-ble-host`](crates/soil-ble-host)
 runs the [`spores/colmi-ring`](spores/colmi-ring) protocol Spore against a real

@@ -56,8 +56,8 @@ The receipt is the durable answer.
 
 ## Canvas projection
 
-`soil:canvas/actions@1.0.0` exposes a presentation projection of the same
-granted catalog. It preserves DCP `input_schema`, phases and revisions so a
+`fungos:actions/catalog@1.0.0` exposes a presentation projection of the
+same granted catalog. It preserves DCP `input_schema`, phases and revisions so a
 Spore can build its own top bar or parameter form without opening a connector.
 See [Canvas action catalog](canvas-actions.md).
 

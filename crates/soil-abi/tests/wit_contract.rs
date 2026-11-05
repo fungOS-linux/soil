@@ -1,15 +1,24 @@
+use std::collections::BTreeMap;
+
 use soil_abi::CONTRACTS;
 use wit_parser::Resolve;
 
 #[test]
 fn every_capability_contract_parses_with_its_reviewed_package_name() {
+    let mut resolve = Resolve::default();
+    let mut packages = BTreeMap::new();
+
     for contract in CONTRACTS {
-        let mut resolve = Resolve::default();
         let id = resolve
             .push_str(contract.file, contract.source)
             .unwrap_or_else(|error| {
                 panic!("{} must be valid WIT: {error}", contract.file);
             });
+        packages.insert(contract.package, id);
+    }
+
+    for contract in CONTRACTS {
+        let id = packages[contract.package];
         let package = &resolve.packages[id];
         assert_eq!(
             package.name.to_string(),
@@ -38,8 +47,10 @@ fn every_capability_contract_parses_with_its_reviewed_package_name() {
 fn capability_packages_are_versioned_and_namespaced() {
     for contract in CONTRACTS {
         assert!(
-            contract.package.starts_with("soil:") || contract.package.starts_with("wasi:"),
-            "{} must stay in the soil or wasi namespace",
+            contract.package.starts_with("soil:")
+                || contract.package.starts_with("wasi:")
+                || contract.package.starts_with("fungos:"),
+            "{} must stay in the soil, wasi or fungos namespace",
             contract.file
         );
         assert!(

@@ -1,4 +1,36 @@
+// Semantic device capabilities.
+//
+// Runtime uses the documented bounded core-Wasm lowering, not component
+// canonical ABI. Battery is measured, estimate is model output, and lid is a
+// read-only switch observation. Grants remain per interface.
 package soil:device@0.1.0;
+
+/// Semantic interface. Runtime uses the documented core-Wasm lowering, not
+/// component canonical ABI. Tokens are invocation-scoped, single-use handles.
+interface battery {
+    enum availability { fresh, unknown, stale, denied }
+    record snapshot {
+        token: u64,
+        state: availability,
+        percent: option<u8>,
+        voltage-microvolts: option<u32>,
+    }
+    read: func() -> snapshot;
+    update-status: func(token: u64);
+}
+
+/// Model output, never measured SOC or kernel battery capacity. Runtime uses
+/// the documented bounded core-Wasm lowering, not component canonical ABI.
+interface estimate {
+    enum availability { fresh, unknown, stale, denied }
+    record observation {
+        token: u64,
+        state: availability,
+        percent: option<u8>,
+    }
+    read: func() -> observation;
+    update-status: func(token: u64);
+}
 
 /// Read-only lid capability. Host grants permission per guest; never grants
 /// raw device access, socket selection, display policy or input injection.

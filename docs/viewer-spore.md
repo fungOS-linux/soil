@@ -109,8 +109,9 @@ Rules:
 The viewer also imports:
 
 - `soil:surface@1` for its own retained controls/chrome and focused D-pad/OK/back.
-- `soil:input@1` for media keys that are not tied to a focused surface. A host
-  may map those keys directly into `soil:view` actions instead.
+- `soil:input@1` for shared normalized key/modifier types only. It has no global
+  input grant; media keys arrive through the focused Canvas surface or are
+  mapped by the host directly into `soil:view` actions.
 - `soil:storage@1` for the deck manifest and content-addressed assets.
 - `soil:time@1` for bounded polling and transitions.
 
@@ -220,8 +221,6 @@ receive the raw bitmap or a capture ring buffer.
 ## Open decisions
 
 - Whether capture belongs to `soil:view` or a separate `soil:screen` capability.
-- Whether `soil:input` should expose normalized media keys or keep them inside
-  `soil:view` actions.
 - Whether the host browser is Servo, WebView or the Canvas browser host on each
   target.
 - Whether the Fire TV shell keeps a persistent viewer Spore or starts one per

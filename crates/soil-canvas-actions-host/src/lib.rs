@@ -1,4 +1,4 @@
-//! Host binding for `soil:canvas/actions@1.0.0`.
+//! Host binding for the `fungos:actions/catalog@1.0.0` presentation projection.
 //!
 //! Canvas exposes the granted action catalog to a Spore. The host owns grants,
 //! approval, idempotency and routing; this adapter only projects the catalog.
@@ -7,15 +7,15 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use soil_actions_host::{ActionHost, Approval, CanvasAction, Effect, Idempotency};
+use soil_actions_host::{ActionHost, CanvasAction, Effect, Idempotency};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({ path: "wit", world: "actions-guest" });
 
-use soil::canvas::actions::{
-    self, Action, Confirmation, Effect as WitEffect, Idempotency as WitIdempotency,
+use fungos::actions::catalog::{
+    self, Action, Approval, Effect as WitEffect, Idempotency as WitIdempotency,
 };
 
 pub struct CanvasActionsRuntime {
@@ -34,7 +34,7 @@ impl CanvasActionsRuntime {
         Ok(Self { engine, linker })
     }
 
-    /// Run a component that imports `soil:canvas/actions` and exports
+    /// Run a component that imports `fungos:actions/catalog` and exports
     /// `run() -> result<u32, string>`.
     pub fn run(&self, bytes: &[u8], host: CanvasActionsHost) -> Result<u32> {
         let component = Component::new(&self.engine, bytes)?;
@@ -81,8 +81,8 @@ impl WasiView for CanvasActionsHost {
     }
 }
 
-impl actions::Host for CanvasActionsHost {
-    fn list_actions(&mut self) -> Result<Vec<Action>, actions::Failure> {
+impl catalog::Host for CanvasActionsHost {
+    fn list_actions(&mut self) -> Result<Vec<Action>, catalog::Error> {
         Ok(self
             .actions
             .canvas_actions()
@@ -94,7 +94,7 @@ impl actions::Host for CanvasActionsHost {
 
 /// Add the Canvas action catalog import to a component linker.
 pub fn add_to_linker(linker: &mut Linker<CanvasActionsHost>) -> Result<()> {
-    actions::add_to_linker::<CanvasActionsHost, HasSelf<CanvasActionsHost>>(linker, |host| host)?;
+    catalog::add_to_linker::<CanvasActionsHost, HasSelf<CanvasActionsHost>>(linker, |host| host)?;
     Ok(())
 }
 
@@ -116,10 +116,10 @@ fn project(action: CanvasAction) -> Action {
             Idempotency::Keyed => WitIdempotency::Keyed,
             Idempotency::Unsafe => WitIdempotency::Unsafe,
         },
-        confirmation: match action.confirmation {
-            Approval::None => Confirmation::None,
-            Approval::Operator => Confirmation::Required,
-            Approval::Destructive => Confirmation::Destructive,
+        approval: match action.confirmation {
+            soil_actions_host::Approval::None => Approval::None,
+            soil_actions_host::Approval::Operator => Approval::Operator,
+            soil_actions_host::Approval::Destructive => Approval::Destructive,
         },
         available: action.available,
         reason: action.reason,
@@ -139,7 +139,7 @@ mod tests {
     };
 
     use super::*;
-    use actions::Host as _;
+    use catalog::Host as _;
 
     struct NoopRouter;
 
@@ -156,7 +156,7 @@ mod tests {
             summary: id.into(),
             effect: Effect::Write,
             idempotency: Idempotency::Idempotent,
-            approval: Approval::None,
+            approval: soil_actions_host::Approval::None,
             input_schema: schema.into(),
             output_schema: "{}".into(),
             phases: vec!["commit".into()],

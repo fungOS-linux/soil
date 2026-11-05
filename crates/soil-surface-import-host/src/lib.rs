@@ -16,6 +16,7 @@ wasmtime::component::bindgen!({
     },
 });
 
+use soil::input::types::Key;
 use soil::surface_import::surface as api;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,7 +279,7 @@ fn input(event: api::Input) -> Input {
             Input::Scroll(event.delta_x, event.delta_y, internal_point(event.point))
         }
         api::Input::Key(event) => Input::Key(
-            event.name,
+            key_name(event.key),
             Modifiers {
                 shift: event.modifiers.shift,
                 control: event.modifiers.control,
@@ -289,6 +290,48 @@ fn input(event: api::Input) -> Input {
         ),
         api::Input::Text(text) => Input::Text(text),
         api::Input::Focus(focused) => Input::Focus(focused),
+    }
+}
+
+fn key_name(key: Key) -> String {
+    match key {
+        Key::Up => "up".into(),
+        Key::Down => "down".into(),
+        Key::Left => "left".into(),
+        Key::Right => "right".into(),
+        Key::Home => "home".into(),
+        Key::End => "end".into(),
+        Key::PageUp => "page-up".into(),
+        Key::PageDown => "page-down".into(),
+        Key::Insert => "insert".into(),
+        Key::Select => "select".into(),
+        Key::Back => "back".into(),
+        Key::Menu => "menu".into(),
+        Key::Info => "info".into(),
+        Key::Number(value) => value.to_string(),
+        Key::Star => "star".into(),
+        Key::Hash => "hash".into(),
+        Key::Call => "call".into(),
+        Key::EndCall => "end-call".into(),
+        Key::PushToTalk => "push-to-talk".into(),
+        Key::SoftLeft => "soft-left".into(),
+        Key::SoftRight => "soft-right".into(),
+        Key::PlayPause => "play-pause".into(),
+        Key::Rewind => "rewind".into(),
+        Key::FastForward => "fast-forward".into(),
+        Key::Next => "next".into(),
+        Key::Previous => "previous".into(),
+        Key::VolumeUp => "volume-up".into(),
+        Key::VolumeDown => "volume-down".into(),
+        Key::Mute => "mute".into(),
+        Key::FKey(value) => format!("f{value}"),
+        Key::Character(value) => value.to_string(),
+        Key::Backspace => "backspace".into(),
+        Key::Delete => "delete".into(),
+        Key::Tab => "tab".into(),
+        Key::Escape => "escape".into(),
+        Key::Enter => "enter".into(),
+        Key::Named(value) => value,
     }
 }
 

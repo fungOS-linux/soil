@@ -1,6 +1,6 @@
 # Canvas action catalog
 
-`soil:canvas/actions@1.0.0` exposes the host action catalog to a Spore without
+`fungos:actions/catalog@1.0.0` exposes the host action catalog to a Spore without
 granting another execution path.
 
 The host binding lives in
@@ -9,7 +9,7 @@ The host binding lives in
 the import through a real `wasm32-wasip2` component.
 
 ```wit
-list-actions: func() -> result<list<action>, failure>;
+list-actions: func() -> result<list<action>, error>;
 ```
 
 Each action carries enough for a custom top bar, command palette, or connector
@@ -18,7 +18,7 @@ script:
 - `id`, `label`, `description`, `shortcut`
 - `input-schema` — JSON Schema 2020-12 for arguments and ranges
 - `requires-input` — host-computed fast path for click vs form
-- `effect`, `idempotency`, `confirmation`
+- `effect`, `idempotency`, `approval`
 - `available`, `reason`
 - DCP `phases`, `provider`, `catalog-revision`, `state-revision`
 
@@ -34,7 +34,7 @@ A DCP action maps directly:
 | `input_schema` | `input-schema` |
 | `phases` | `phases` |
 | `safety.idempotent` | `idempotency` projection |
-| `safety.requires_final` / `confirmation_required` | `confirmation` |
+| `safety.requires_final` / `confirmation_required` | `approval` |
 | `availability.available` / `reason` | `available` / `reason` |
 | `provider.id` | `provider` |
 | `catalog_revision` | `catalog-revision` |
@@ -47,7 +47,7 @@ forms (`minimum`, `maximum`, `enum`, `pattern`, etc.).
 ## Invocation
 
 `list-actions` is a catalog projection. It does not grant execution. Invocation
-still goes through the host action router / `fungos:actions`, which rechecks the
-grant, approval, idempotency and DCP revision binding.
+still goes through `fungos:actions/actions.invoke`, which rechecks the grant,
+approval, idempotency and DCP revision binding.
 
 The SDK's `fungos.ui.action_bar_from_catalog` consumes the same shape.

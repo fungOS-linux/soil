@@ -71,31 +71,7 @@ interface surface {
     visible: bool,
   }
 
-  variant key {
-    enter,
-    escape,
-    tab,
-    backspace,
-    delete,
-    home,
-    end,
-    page-up,
-    page-down,
-    insert,
-    up,
-    down,
-    left,
-    right,
-    f-key(u8),
-    character(char),
-  }
-
-  record modifiers {
-    shift: bool,
-    control: bool,
-    alt: bool,
-    meta: bool,
-  }
+  use soil:input/types@1.0.0.{key, modifiers};
 
   record event {
     key: key,

@@ -345,15 +345,15 @@ impl ActionHost {
             }
         };
 
-        if let Some(key) = key {
-            if let Some(output) = self.idempotency.get(&call.action, call.version, key)? {
-                return Ok(ActionReceipt {
-                    action: call.action.clone(),
-                    version: call.version,
-                    output,
-                    replayed: true,
-                });
-            }
+        if let Some(key) = key
+            && let Some(output) = self.idempotency.get(&call.action, call.version, key)?
+        {
+            return Ok(ActionReceipt {
+                action: call.action.clone(),
+                version: call.version,
+                output,
+                replayed: true,
+            });
         }
 
         let output = self.router.invoke(descriptor, call)?;

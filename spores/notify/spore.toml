@@ -10,7 +10,7 @@ summary = "Notification tray, focus mode and shared ringer"
 [engine]
 soil = ">=0.1"
 target = "wasm32-wasip2"
-abi = { notify = "1.0.0", ringer = "1.0.0" }
+abi = { notify = "1.1.0" }
 
 [module]
 path = "module.wasm"
@@ -29,7 +29,7 @@ surfaces = ["canvas", "native", "web"]
 "soil:notify/focus" = "read and set per-device focus profiles"
 "soil:notify/history" = "read opt-in notification history"
 "soil:notify/cleanup" = "clear scoped notification sets"
-"soil:ringer/calls" = "receive and answer calls, doorbells, alarms and pages"
+"soil:notify/ringer" = "receive and answer calls, doorbells, alarms and pages"
 
 [denied]
 "soil:notify/publisher" = ["the tray does not publish notifications"]

@@ -23,7 +23,7 @@ configuration has been added.
 
 ## Core-Wasm lowering
 
-`wit/soil-estimate.wit` defines semantic types, not a component canonical ABI.
+`wit/soil-device.wit` defines semantic types, not a component canonical ABI.
 The runtime uses these explicit bounded imports:
 
 - `read(i32 ptr, i32 capacity) -> i32`: capacity exactly24, valid exported memory

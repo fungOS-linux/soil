@@ -59,51 +59,15 @@ interface surface {
     closed,
   }
 
-  record point {
-    // Normalized surface coordinates, 0..=1.
-    x: f32,
-    y: f32,
-  }
-
-  record modifiers {
-    shift: bool,
-    control: bool,
-    alt: bool,
-    meta: bool,
-  }
-
-  enum button {
-    primary,
-    secondary,
-    middle,
-  }
-
-  record pointer-button {
-    button: button,
-    pressed: bool,
-    point: point,
-  }
-
-  record scroll {
-    delta-x: f32,
-    delta-y: f32,
-    point: point,
-  }
-
-  record key {
-    name: string,
-    modifiers: modifiers,
-    pressed: bool,
-  }
-
-  variant input {
-    pointer-move(point),
-    pointer-button(pointer-button),
-    scroll(scroll),
-    key(key),
-    text(string),
-    focus(bool),
-  }
+  use soil:input/types@1.0.0.{
+    button,
+    input,
+    key-event,
+    modifiers,
+    point,
+    pointer-button,
+    scroll,
+  };
 
   /// Host-owned surface. The host may present, encode, or composite it; the
   /// Spore never receives a texture or native window handle.

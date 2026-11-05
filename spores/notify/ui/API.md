@@ -78,5 +78,5 @@ Uses the global `fungos.ui` profile and `apps["dev.fungos.notify"]`.
 
 None in Lua. Notifications come from `soil:notify/inbox`; focus from
 `soil:notify/focus`; history from `soil:notify/history`; cleanup from
-`soil:notify/cleanup`; active rings from `soil:ringer/calls`. History and focus
+`soil:notify/cleanup`; active rings from `soil:notify/ringer`. History and focus
 settings are differently granted from the live inbox.

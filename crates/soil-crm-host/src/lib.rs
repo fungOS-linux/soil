@@ -130,12 +130,7 @@ pub fn assign_company(
 }
 
 /// Remove an account-to-company relationship.
-pub fn unassign_company(
-    root: &Path,
-    book: &str,
-    account_id: &str,
-    company_id: &str,
-) -> Result<()> {
+pub fn unassign_company(root: &Path, book: &str, account_id: &str, company_id: &str) -> Result<()> {
     let mut store = Store::open(root, &root.join("device_id"))?;
     let id = account_company_id(account_id, company_id);
     let record = store
@@ -277,8 +272,10 @@ pub fn snapshot(root: &Path, book: &str, view: &str) -> Result<Value> {
     for (id, record) in companies {
         let mut company = company(record);
         company["id"] = Value::String(id.clone());
-        company["accounts"] = Value::Array(accounts_by_company.get(&id).cloned().unwrap_or_default());
-        company["projects"] = Value::Array(projects_by_company.get(&id).cloned().unwrap_or_default());
+        company["accounts"] =
+            Value::Array(accounts_by_company.get(&id).cloned().unwrap_or_default());
+        company["projects"] =
+            Value::Array(projects_by_company.get(&id).cloned().unwrap_or_default());
         company["opportunities"] = Value::Array(
             opportunities
                 .iter()
@@ -292,7 +289,9 @@ pub fn snapshot(root: &Path, book: &str, view: &str) -> Result<Value> {
     let mut unassigned = accounts
         .iter()
         .filter(|(id, _)| !assigned_accounts.contains(id.as_str()))
-        .map(|(id, record)| account_for_company(id, record, None, &contacts, &activities, &opportunities))
+        .map(|(id, record)| {
+            account_for_company(id, record, None, &contacts, &activities, &opportunities)
+        })
         .collect::<Vec<_>>();
     if !unassigned.is_empty() {
         unassigned.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
@@ -341,9 +340,7 @@ fn company_accounts(
                     .iter()
                     .filter(|project| {
                         project["accounts"].as_array().is_some_and(|accounts| {
-                            accounts
-                                .iter()
-                                .any(|account| account["id"] == account_id)
+                            accounts.iter().any(|account| account["id"] == account_id)
                         })
                     })
                     .cloned()
@@ -421,8 +418,7 @@ fn account_for_company(
             .filter(|opportunity| opportunity["account_id"] == id)
             .filter(|opportunity| match company_id {
                 Some(company_id) => {
-                    opportunity["company_id"] == company_id
-                        || opportunity["company_id"].is_null()
+                    opportunity["company_id"] == company_id || opportunity["company_id"].is_null()
                 }
                 None => opportunity["company_id"].is_null(),
             })
@@ -878,7 +874,13 @@ fn mock_records() -> Vec<(String, &'static str, Value)> {
             "customer",
             true,
         ),
-        ("p-harbor-intake", "a-harbor", "Harbor Dental", "customer", true),
+        (
+            "p-harbor-intake",
+            "a-harbor",
+            "Harbor Dental",
+            "customer",
+            true,
+        ),
     ];
     for (project_id, account_id, account_name, role, primary) in project_accounts {
         records.push((
@@ -979,8 +981,18 @@ fn mock_records() -> Vec<(String, &'static str, Value)> {
             "team",
         ),
     ];
-    for (id, company_id, project_id, account, token, kind, name, occurred, description, visibility) in
-        activities
+    for (
+        id,
+        company_id,
+        project_id,
+        account,
+        token,
+        kind,
+        name,
+        occurred,
+        description,
+        visibility,
+    ) in activities
     {
         records.push((
             id.into(),
@@ -1150,7 +1162,13 @@ mod tests {
         let book = "personal/test/crm";
         let mut store = Store::open(root.path(), &root.path().join("device_id")).unwrap();
         store
-            .put_record(book, "a-imported", ACCOUNT_SCHEMA, 1, json!({"name": "Imported Co"}))
+            .put_record(
+                book,
+                "a-imported",
+                ACCOUNT_SCHEMA,
+                1,
+                json!({"name": "Imported Co"}),
+            )
             .unwrap();
         let snapshot = snapshot(root.path(), book, "team").unwrap();
         let unassigned = company(&snapshot, "co-unassigned");

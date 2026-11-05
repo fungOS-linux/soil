@@ -20,7 +20,7 @@ socket and max age (CLI 1000ms); no guest device discovery or socket authority.
 HAL owns bounded parsing, transport deadlines, and provider-age + RTT + retention
 freshness through `RemoteBatterySample::snapshot`.
 
-`wit/soil-battery.wit` is the semantic contract. This implementation uses a
+`wit/soil-device.wit` is the semantic contract. This implementation uses a
 core-Wasm lowering, not component canonical ABI:
 
 - `read(i32 ptr, i32 capacity) -> i32`: capacity exactly 24; exported-memory

@@ -1,9 +1,8 @@
 //! Canonical Soil host capability contracts.
 //!
-//! Each `soil:*` package is a WIT contract under `wit/` plus a conformance
-//! test. This crate is the single place that embeds the contract sources, so a
-//! package rename, interface rename or dropped function fails `cargo test`
-//! rather than silently changing the ABI.
+//! Each package is a WIT contract under `wit/` plus a conformance test. This
+//! crate embeds the contract sources so a package rename, interface rename, or
+//! dropped function fails `cargo test` rather than silently changing the ABI.
 
 /// A canonical capability package and the interface functions it must expose.
 #[derive(Debug)]
@@ -18,8 +17,15 @@ pub struct Contract {
     pub interfaces: &'static [(&'static str, &'static [&'static str])],
 }
 
-/// Every package currently exposed to a Spore.
+/// Every canonical package under `wit/`, including contract-only and deferred
+/// surfaces. See `wit/README.md` for status.
 pub const CONTRACTS: &[Contract] = &[
+    Contract {
+        file: "wit/soil-input.wit",
+        source: include_str!("../../../wit/soil-input.wit"),
+        package: "soil:input@1.0.0",
+        interfaces: &[("types", &[])],
+    },
     Contract {
         file: "wit/soil-view.wit",
         source: include_str!("../../../wit/soil-view.wit"),
@@ -43,6 +49,12 @@ pub const CONTRACTS: &[Contract] = &[
         source: include_str!("../../../wit/soil-vfs.wit"),
         package: "soil:vfs@1.0.0",
         interfaces: &[("vfs", &["ls", "stat", "read"])],
+    },
+    Contract {
+        file: "wit/soil-vfs-mut.wit",
+        source: include_str!("../../../wit/soil-vfs-mut.wit"),
+        package: "soil:vfs-mut@0.1.0",
+        interfaces: &[("vfs-mut", &["write", "remove", "mkdir", "rmdir", "rename"])],
     },
     Contract {
         file: "wit/soil-index.wit",
@@ -69,7 +81,11 @@ pub const CONTRACTS: &[Contract] = &[
         file: "wit/soil-media.wit",
         source: include_str!("../../../wit/soil-media.wit"),
         package: "soil:media@0.1.0",
-        interfaces: &[("playback", &["open"]), ("encoded", &["open"]), ("image", &["open"])],
+        interfaces: &[
+            ("playback", &["open"]),
+            ("encoded", &["open"]),
+            ("image", &["open"]),
+        ],
     },
     Contract {
         file: "wit/soil-inference.wit",
@@ -94,12 +110,6 @@ pub const CONTRACTS: &[Contract] = &[
         source: include_str!("../../../wit/soil-graph.wit"),
         package: "soil:graph@0.1.0",
         interfaces: &[("graph", &["neighbors", "references", "state", "refresh"])],
-    },
-    Contract {
-        file: "wit/soil-unibus.wit",
-        source: include_str!("../../../wit/soil-unibus.wit"),
-        package: "soil:unibus@0.1.0",
-        interfaces: &[("bus", &["poll", "publish"])],
     },
     Contract {
         file: "wit/soil-appdata.wit",
@@ -165,5 +175,40 @@ pub const CONTRACTS: &[Contract] = &[
                 "next-event",
             ],
         )],
+    },
+    Contract {
+        file: "wit/soil-notify.wit",
+        source: include_str!("../../../wit/soil-notify.wit"),
+        package: "soil:notify@1.1.0",
+        interfaces: &[
+            ("publisher", &["publish", "update", "withdraw"]),
+            ("inbox", &["query", "subscribe", "dismiss", "act"]),
+            ("focus", &["get", "set", "clear"]),
+            ("history", &["query"]),
+            ("cleanup", &["clear"]),
+            (
+                "ringer",
+                &["incoming", "accept", "decline", "end", "mute", "get-state"],
+            ),
+        ],
+    },
+    Contract {
+        file: "wit/fungos-actions.wit",
+        source: include_str!("../../../wit/fungos-actions.wit"),
+        package: "fungos:actions@1.0.0",
+        interfaces: &[
+            ("actions", &["catalog", "invoke"]),
+            ("catalog", &["list-actions"]),
+        ],
+    },
+    Contract {
+        file: "wit/soil-device.wit",
+        source: include_str!("../../../wit/soil-device.wit"),
+        package: "soil:device@0.1.0",
+        interfaces: &[
+            ("battery", &["read", "update-status"]),
+            ("estimate", &["read", "update-status"]),
+            ("lid", &["read", "log-change"]),
+        ],
     },
 ];

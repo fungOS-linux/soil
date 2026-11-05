@@ -3,11 +3,11 @@
 package fungos:notify@0.1.0;
 
 world notify {
-  import soil:notify/inbox@1.0.0;
-  import soil:notify/focus@1.0.0;
-  import soil:notify/history@1.0.0;
-  import soil:notify/cleanup@1.0.0;
-  import soil:ringer/calls@1.0.0;
+  import soil:notify/inbox@1.1.0;
+  import soil:notify/focus@1.1.0;
+  import soil:notify/history@1.1.0;
+  import soil:notify/cleanup@1.1.0;
+  import soil:notify/ringer@1.1.0;
 
   export run: func(args: list<string>) -> result<_, string>;
 }

@@ -28,49 +28,7 @@ interface surface {
     backend,
   }
 
-  /// Host-normalized phone, remote and media keys. `number` is 0..=9.
-  /// The host validates the range; unsupported keys are dropped host-side.
-  variant key {
-    up,
-    down,
-    left,
-    right,
-    select,
-    back,
-    home,
-    menu,
-    info,
-    number(u8),
-    star,
-    hash,
-    call,
-    end-call,
-    push-to-talk,
-    soft-left,
-    soft-right,
-    play-pause,
-    rewind,
-    fast-forward,
-    next,
-    previous,
-    volume-up,
-    volume-down,
-    mute,
-    /// One printable Unicode scalar supplied by the host text system. This is
-    /// the layout/IME-correct path for A-Z, accents and non-ASCII scripts.
-    character(char),
-    backspace,
-    delete,
-    tab,
-    escape,
-  }
-
-  record modifiers {
-    shift: bool,
-    control: bool,
-    alt: bool,
-    meta: bool,
-  }
+  use soil:input/types@1.0.0.{key, modifiers};
 
   record event {
     key: key,
@@ -104,61 +62,3 @@ interface surface {
   close: func() -> result<_, failure>;
 }
 
-
-/// Host-composed action catalog for a Canvas surface.
-///
-/// This is a presentation projection of the host action router. DCP actions can
-/// be projected directly; `input-schema` is the provider's JSON Schema
-/// 2020-12 so a client can render parameter forms and ranges. The list never
-/// grants execution: invocation still goes through the host action router.
-interface actions {
-  use surface.{failure};
-
-  enum effect {
-    read,
-    write,
-    external,
-  }
-
-  enum idempotency {
-    idempotent,
-    keyed,
-    unsafe,
-  }
-
-  enum confirmation {
-    none,
-    required,
-    destructive,
-  }
-
-  record action {
-    id: string,
-    label: string,
-    description: string,
-    shortcut: option<string>,
-    /// JSON Schema 2020-12 object for action arguments. An empty object means
-    /// this is a parameterless click action.
-    input-schema: string,
-    /// Host-computed fast path for rendering a button without parsing JSON.
-    requires-input: bool,
-    effect: effect,
-    idempotency: idempotency,
-    confirmation: confirmation,
-    available: bool,
-    reason: option<string>,
-    /// DCP lifecycle phases when this action came from a DCP catalog.
-    phases: list<string>,
-    /// DCP/provider identity and revision binding when available.
-    provider: option<string>,
-    catalog-revision: option<string>,
-    state-revision: option<string>,
-  }
-
-  list-actions: func() -> result<list<action>, failure>;
-}
-
-world guest {
-  import surface;
-  import actions;
-}
