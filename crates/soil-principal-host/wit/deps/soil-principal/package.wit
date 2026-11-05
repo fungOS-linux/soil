@@ -1,0 +1,51 @@
+// Host-attested principal identity.
+//
+// Mycelium identity / OIDC is the source of truth. The host verifies the
+// token or device identity and exposes only this minimal projection. Tokens,
+// refresh credentials, raw claims and private keys never cross the boundary.
+//
+// A principal answers "who". It does not grant access; exact WIT grants and
+// book grants still decide what the caller may do and where.
+package soil:principal@0.1.0;
+
+interface principal {
+  enum kind {
+    human,
+    agent,
+    service,
+  }
+
+  enum error {
+    denied,
+    not-ready,
+    stale,
+    invalid,
+    unavailable,
+  }
+
+  record identity {
+    /// Stable subject id: OIDC `iss#sub` or a Mycelium principal id.
+    actor: string,
+    kind: kind,
+    /// Presentation only. Never an email address.
+    display-name: option<string>,
+    /// Host/device identity, stable for this device.
+    device: option<string>,
+    /// Team/org memberships used by the host to select books.
+    teams: list<string>,
+    /// Host-mapped roles, not raw OIDC groups.
+    roles: list<string>,
+    /// Changes on re-auth, team change, role change or device change.
+    generation: u64,
+  }
+
+  current: func() -> result<identity, error>;
+}
+
+world guest {
+  import principal;
+}
+
+world principal-host {
+  import principal;
+}

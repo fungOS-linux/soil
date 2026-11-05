@@ -46,6 +46,7 @@ Principles:
 
 | Package | Grant | Status |
 |---|---|---|
+| [`soil:principal@0.1.0`](wit/soil-principal.wit) | `soil:principal` | host-attested Mycelium/OIDC projection; actor, device, teams, roles |
 | [`soil:view@1.0.0`](wit/soil-view.wit) | `soil:view`, optional `soil:view.capture` | WIT + Viewer state machine |
 | [`soil:time@1.0.0`](wit/soil-time.wit) | `soil:time` | WIT |
 | [`soil:storage@1.0.0`](wit/soil-storage.wit) | `soil:storage.read`, optional `soil:storage.write` | WIT |

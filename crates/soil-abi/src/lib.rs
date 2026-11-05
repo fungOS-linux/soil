@@ -27,6 +27,12 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("types", &[])],
     },
     Contract {
+        file: "wit/soil-principal.wit",
+        source: include_str!("../../../wit/soil-principal.wit"),
+        package: "soil:principal@0.1.0",
+        interfaces: &[("principal", &["current"])],
+    },
+    Contract {
         file: "wit/soil-view.wit",
         source: include_str!("../../../wit/soil-view.wit"),
         package: "soil:view@1.0.0",

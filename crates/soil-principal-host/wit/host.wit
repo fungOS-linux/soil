@@ -1,0 +1,5 @@
+package soil:principal-host@0.1.0;
+
+world host {
+  import soil:principal/principal@0.1.0;
+}

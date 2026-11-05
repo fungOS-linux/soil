@@ -7,6 +7,7 @@ Mentions are stable locators embedded in text. They are not copied names.
 @[Budget](file:sheets/budget.xlsx)
 @[Pilot](record:personal/avery/crm#p-acme-pilot)
 @[Fix SSO](marbles://store/fpl/acme/ACME-42)
+@[Ada](principal:oidc:https://identity.example#subject-42)
 ```
 
 ## Resolve
@@ -17,7 +18,8 @@ the same token form. See [Global search](global-search.md).
 ## Persist
 
 Tasks are Marbles issues, not Soil records. Their canonical ref is the mention
-target. Soil stores only the graph link.
+target. A person is notifiable only when the target is a host-attested
+`principal:`. Soil stores only the graph link.
 
 One mention becomes one graph link in the source record's book:
 
