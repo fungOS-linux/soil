@@ -3398,15 +3398,13 @@ dependencies = [
  "ignore",
  "rand 0.9.5",
  "rustyline",
- "serde",
  "serde_json",
+ "soil-inference",
  "soil-scrub",
  "soil-vfs-host",
  "tempfile",
  "tiny_http",
- "toml 0.8.23",
  "ureq",
- "wait-timeout",
  "wasmtime",
  "wasmtime-wasi",
 ]
@@ -5311,6 +5309,33 @@ dependencies = [
  "url",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "soil-inference"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.8.23",
+ "wait-timeout",
+]
+
+[[package]]
+name = "soil-inference-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "soil-inference",
+ "soil-scrub",
+ "tempfile",
+ "tiny_http",
+ "ureq",
+ "wasmtime",
 ]
 
 [[package]]

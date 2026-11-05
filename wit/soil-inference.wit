@@ -1,0 +1,98 @@
+// Host-mediated language-model inference.
+//
+// The host owns provider selection, endpoint discovery, authentication, model
+// aliases, budgets, and transport. A Spore names a model and messages only.
+// Credentials and provider routes never cross this boundary.
+package soil:inference@0.1.0;
+
+interface inference {
+  enum role {
+    system,
+    user,
+    assistant,
+    tool,
+  }
+
+  record message {
+    role: role,
+    content: string,
+    name: option<string>,
+  }
+
+  record model {
+    id: string,
+    provider: string,
+    context-window: option<u32>,
+  }
+
+  record usage {
+    prompt-tokens: u32,
+    completion-tokens: u32,
+    total-tokens: u32,
+  }
+
+  record request {
+    model: string,
+    messages: list<message>,
+    max-output-tokens: option<u32>,
+    temperature: option<f32>,
+  }
+
+  record response {
+    model: string,
+    text: string,
+    finish-reason: option<string>,
+    usage: option<usage>,
+  }
+
+  record chunk {
+    /// Raw provider chunk. For OpenAI-compatible SSE this is the event payload.
+    data: list<u8>,
+    /// True on the final chunk; subsequent `next` calls return `done`.
+    done: bool,
+  }
+
+  enum error {
+    denied,
+    not-ready,
+    over-budget,
+    invalid,
+    unavailable,
+    auth,
+    io,
+    unsupported,
+  }
+
+  record inference-state {
+    ready: bool,
+    provider: string,
+    model: string,
+  }
+
+  /// Streaming response handle. The guest polls it at its own cadence.
+  resource completion-stream {
+    /// Read the next chunk. `none` means the timeout elapsed without data.
+    next: func(timeout-ms: u32) -> result<option<chunk>, error>;
+    cancel: func() -> result<_, error>;
+  }
+
+  /// List models visible to this host/profile.
+  models: func() -> result<list<model>, error>;
+
+  /// Non-streaming completion.
+  complete: func(request: request) -> result<response, error>;
+
+  /// Open a streaming completion. The returned resource is bounded by the host
+  /// session and must be cancelled or dropped when the guest is done.
+  open-stream: func(request: request) -> result<completion-stream, error>;
+
+  state: func() -> result<inference-state, error>;
+}
+
+world inference-host {
+  import inference;
+}
+
+world guest {
+  import inference;
+}

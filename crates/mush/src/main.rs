@@ -4,9 +4,7 @@
 //! VFS root, the `soil:vfs` / `soil:index` / `soil:vfs-mut` grants, and the
 //! line-oriented terminal.
 
-mod config;
 mod gateway;
-mod geode;
 mod mcp_gateway;
 mod overlay;
 
@@ -18,6 +16,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use rustyline::{DefaultEditor, error::ReadlineError};
+use soil_inference::{GeodeResolver, SoilConfig};
 use soil_vfs_host::{VfsHost, index, vfs, vfs_mut};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -287,8 +286,8 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     let profile = take_option(&mut args, "--inference-profile")
         .or_else(|| std::env::var("MUSH_INFERENCE_PROFILE").ok());
     let config = match config_path {
-        Some(path) => config::SoilConfig::load(&path)?,
-        None => config::SoilConfig::discover(root)?
+        Some(path) => SoilConfig::load(&path)?,
+        None => SoilConfig::discover(root)?
             .map(|(_, config)| config)
             .unwrap_or_default(),
     };
@@ -296,7 +295,7 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     if resolved.api_key.is_none()
         && let Some(credential) = &resolved.credential
     {
-        resolved.api_key = geode::GeodeResolver::new(config.geode.clone()).resolve(credential)?;
+        resolved.api_key = GeodeResolver::new(config.geode.clone()).resolve(credential)?;
     }
     if let Some(value) = take_option(&mut args, "--base-url") {
         resolved.base_url = Some(value);

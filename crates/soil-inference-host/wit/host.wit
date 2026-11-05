@@ -1,0 +1,5 @@
+package soil:inference-host@0.1.0;
+
+world host {
+  import soil:inference/inference@0.1.0;
+}
