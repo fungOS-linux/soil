@@ -60,6 +60,18 @@ pub const CONTRACTS: &[Contract] = &[
         )],
     },
     Contract {
+        file: "wit/soil-surface-import.wit",
+        source: include_str!("../../../wit/soil-surface-import.wit"),
+        package: "soil:surface-import@0.1.0",
+        interfaces: &[("surface", &["open"])],
+    },
+    Contract {
+        file: "wit/soil-media.wit",
+        source: include_str!("../../../wit/soil-media.wit"),
+        package: "soil:media@0.1.0",
+        interfaces: &[("playback", &["open"]), ("encoded", &["open"]), ("image", &["open"])],
+    },
+    Contract {
         file: "wit/soil-inference.wit",
         source: include_str!("../../../wit/soil-inference.wit"),
         package: "soil:inference@0.2.0",

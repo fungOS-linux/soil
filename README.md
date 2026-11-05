@@ -54,6 +54,8 @@ Principles:
 | [`soil:http@0.1.0`](wit/soil-http.wit) | `soil:http` | WIT + bounded host + direct transport proof |
 | [`soil:index@1.1.0`](wit/soil-index.wit) | `soil:index` | derived browse/search + explicit KNN; fast direct-child traversal |
 | [`soil:vfs-mut@0.1.0`](wit/soil-vfs-mut.wit) | `soil:vfs-mut` | separate write/mkdir/rmdir/rename grant |
+| [`soil:media@0.1.0`](wit/soil-media.wit) | `soil:media`, optional `soil:media-encoded` | host playback, encoded chunks, bounded image readback |
+| [`soil:surface-import@0.1.0`](wit/soil-surface-import.wit) | `soil:surface-import` | host-owned imported surfaces, damage events, normalized input |
 | [`soil:inference@0.2.0`](wit/soil-inference.wit) | `soil:inference` | WIT + models, tools, completion, SSE stream resource |
 | [`soil:search@0.2.0`](wit/soil-search.wit) | `soil:search` | WIT + files/records/graph host composition |
 | [`soil:graph@0.1.0`](wit/soil-graph.wit) | `soil:graph` | read-only edge/reference queries over records |

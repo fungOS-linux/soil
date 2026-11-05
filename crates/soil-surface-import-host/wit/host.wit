@@ -1,0 +1,5 @@
+package soil:surface-import-host@0.1.0;
+
+world host {
+  import soil:surface-import/surface@0.1.0;
+}

@@ -1,0 +1,159 @@
+// Host-mediated media sources.
+//
+// A Spore names a host-reviewed source id. It never receives a URL, Unibus
+// peer, API token, decoder handle, or raw socket. Playback is decoded and
+// presented by the host; encoded access is a separate grant.
+package soil:media@0.1.0;
+
+interface playback {
+  enum error {
+    denied,
+    unknown-source,
+    not-ready,
+    unsupported,
+    decode,
+    over-budget,
+    invalid,
+    closed,
+  }
+
+  enum state {
+    idle,
+    opening,
+    buffering,
+    playing,
+    paused,
+    ended,
+  }
+
+  record format {
+    container: option<string>,
+    video-codec: option<string>,
+    audio-codec: option<string>,
+    width: option<u32>,
+    height: option<u32>,
+    duration-ms: option<u64>,
+  }
+
+  record status {
+    state: state,
+    position-ms: u64,
+    duration-ms: option<u64>,
+    buffered-ms: option<u64>,
+    dropped-frames: u32,
+  }
+
+  variant event {
+    opened(format),
+    buffering,
+    playing,
+    paused,
+    position(u64),
+    format-changed(format),
+    discontinuity,
+    ended,
+  }
+
+  record open-options {
+    start-ms: option<u64>,
+    audio: bool,
+    video: bool,
+  }
+
+  /// Host-owned playback. The host owns demuxing, decode, A/V clock, audio
+  /// device, and presentation surface.
+  resource playback {
+    status: func() -> result<status, error>;
+    next: func(timeout-ms: u32) -> result<option<event>, error>;
+    play: func() -> result<_, error>;
+    pause: func() -> result<_, error>;
+    seek: func(position-ms: u64) -> result<_, error>;
+    close: func() -> result<_, error>;
+  }
+
+  open: func(source-id: string, options: open-options) -> result<playback, error>;
+}
+
+interface encoded {
+  enum error {
+    denied,
+    unknown-source,
+    not-ready,
+    unsupported,
+    over-budget,
+    invalid,
+    closed,
+  }
+
+  record chunk {
+    /// Encoded container/codec bytes. Bounded by the host.
+    data: list<u8>,
+    pts-ms: u64,
+    duration-ms: option<u64>,
+    keyframe: bool,
+    /// Codec configuration such as SPS/PPS, when it changes mid-stream.
+    codec-config: option<list<u8>>,
+    discontinuity: bool,
+  }
+
+  /// Explicit encoded access for recording, remuxing, transcoding, inspection,
+  /// or a codec the host cannot present. Not implied by playback.
+  resource encoded-stream {
+    next: func(timeout-ms: u32) -> result<option<chunk>, error>;
+    close: func() -> result<_, error>;
+  }
+
+  open: func(source-id: string) -> result<encoded-stream, error>;
+}
+
+interface image {
+  enum error {
+    denied,
+    unknown-source,
+    unsupported,
+    over-budget,
+    invalid,
+    closed,
+  }
+
+  record info {
+    width: u32,
+    height: u32,
+    media-type: string,
+  }
+
+  record rgba {
+    width: u32,
+    height: u32,
+    /// Tightly packed RGBA8, `width * height * 4` bytes.
+    data: list<u8>,
+  }
+
+  /// One decoded image. The host may downsample to satisfy the requested
+  /// bounds; the returned dimensions are authoritative.
+  resource image {
+    info: func() -> result<info, error>;
+    rgba: func(max-width: u32, max-height: u32) -> result<rgba, error>;
+    close: func() -> result<_, error>;
+  }
+
+  open: func(source-id: string) -> result<image, error>;
+}
+
+world media-host {
+  import playback;
+  import encoded;
+  import image;
+}
+
+world playback-guest {
+  import playback;
+}
+
+world encoded-guest {
+  import encoded;
+}
+
+world image-guest {
+  import image;
+}

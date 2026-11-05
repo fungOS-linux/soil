@@ -1,0 +1,7 @@
+package soil:media-host@0.1.0;
+
+world host {
+  import soil:media/playback@0.1.0;
+  import soil:media/encoded@0.1.0;
+  import soil:media/image@0.1.0;
+}

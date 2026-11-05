@@ -1,0 +1,126 @@
+// Host-owned imported surfaces.
+//
+// A surface is a native view, remote stream, decoded video, browser view, or
+// another Spore's render target. The host owns the pixels/texture and composes
+// them into Canvas. A Spore receives an opaque handle, metadata, damage, and
+// normalized input only.
+package soil:surface-import@0.1.0;
+
+interface surface {
+  enum kind {
+    native,
+    remote,
+    media,
+    spore,
+    retained,
+  }
+
+  enum error {
+    denied,
+    unknown-source,
+    not-ready,
+    unsupported,
+    over-budget,
+    invalid,
+    closed,
+    backend,
+  }
+
+  record info {
+    kind: kind,
+    width: u32,
+    height: u32,
+    scale: f32,
+    // Opaque names such as `srgb`, `linear`, `rec709`.
+    color-space: string,
+    // `opaque`, `premultiplied`, or `straight`.
+    alpha: string,
+  }
+
+  record rect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+  }
+
+  record frame {
+    id: u64,
+    pts-ms: u64,
+    damage: list<rect>,
+    keyframe: bool,
+  }
+
+  variant event {
+    resized(info),
+    frame(frame),
+    damaged(list<rect>),
+    idle,
+    closed,
+  }
+
+  record point {
+    // Normalized surface coordinates, 0..=1.
+    x: f32,
+    y: f32,
+  }
+
+  record modifiers {
+    shift: bool,
+    control: bool,
+    alt: bool,
+    meta: bool,
+  }
+
+  enum button {
+    primary,
+    secondary,
+    middle,
+  }
+
+  record pointer-button {
+    button: button,
+    pressed: bool,
+    point: point,
+  }
+
+  record scroll {
+    delta-x: f32,
+    delta-y: f32,
+    point: point,
+  }
+
+  record key {
+    name: string,
+    modifiers: modifiers,
+    pressed: bool,
+  }
+
+  variant input {
+    pointer-move(point),
+    pointer-button(pointer-button),
+    scroll(scroll),
+    key(key),
+    text(string),
+    focus(bool),
+  }
+
+  /// Host-owned surface. The host may present, encode, or composite it; the
+  /// Spore never receives a texture or native window handle.
+  resource surface {
+    info: func() -> result<info, error>;
+    next: func(timeout-ms: u32) -> result<option<event>, error>;
+    input: func(event: input) -> result<_, error>;
+    close: func() -> result<_, error>;
+  }
+
+  open: func(source-id: string) -> result<surface, error>;
+}
+
+world surface-import-host {
+  import surface;
+}
+
+world guest {
+  import surface;
+}

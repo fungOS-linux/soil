@@ -40,6 +40,21 @@ impl Frame {
     }
 }
 
+/// Host-owned imported surface layer.
+///
+/// A native or remote adapter uploads its current frame here. The layer is
+/// host-side only; it is not a Spore capability and no guest bytes pass through
+/// this path. Native GPU adapters should replace this software upload with a
+/// shared texture.
+#[derive(Clone)]
+pub struct SurfaceLayer {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub x: i32,
+    pub y: i32,
+}
+
 pub struct CanvasSurface {
     model_estimate: ModelEstimateView,
     model_estimate_enabled: bool,
@@ -60,6 +75,9 @@ pub struct CanvasSurface {
     height: u32,
     generation: u64,
     events: Vec<egui::Event>,
+    surface_layer: Option<SurfaceLayer>,
+    surface_texture: Option<egui::TextureHandle>,
+    surface_layer_dirty: bool,
 }
 impl CanvasSurface {
     /// Explicit opt-in demonstration; default owner Canvas remains unchanged.
@@ -102,6 +120,25 @@ impl CanvasSurface {
     pub fn set_aurora(&mut self, enabled: bool) {
         self.aurora = enabled;
     }
+    /// Host-only imported surface. Replaces the previous layer, or clears it
+    /// with `None`. Validation is bounded; the adapter owns the source pixels.
+    pub fn set_surface_layer(&mut self, layer: Option<SurfaceLayer>) -> Result<(), String> {
+        if let Some(layer) = &layer {
+            if layer.width == 0
+                || layer.height == 0
+                || layer.width > 4096
+                || layer.height > 4096
+                || layer.rgba.len() != (layer.width as usize * layer.height as usize * 4)
+            {
+                return Err("surface layer is empty, oversized, or not RGBA8".into());
+            }
+        }
+        self.surface_layer = layer;
+        self.surface_texture = None;
+        self.surface_layer_dirty = true;
+        Ok(())
+    }
+
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
         let snapshot = canvas_workspace_ui::demo::work();
         Self::with_snapshot(width, height, snapshot)
@@ -138,6 +175,9 @@ impl CanvasSurface {
             height,
             generation: 0,
             events: Vec::new(),
+            surface_layer: None,
+            surface_texture: None,
+            surface_layer_dirty: false,
         })
     }
     pub fn selected(&self) -> Option<&str> {
@@ -207,6 +247,30 @@ impl CanvasSurface {
             time: Some(self.frame_time_ms as f64 / 1000.0),
             ..Default::default()
         };
+        let surface = if let Some(layer) = &self.surface_layer {
+            if self.surface_texture.is_none() || self.surface_layer_dirty {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [layer.width as usize, layer.height as usize],
+                    &layer.rgba,
+                );
+                match &mut self.surface_texture {
+                    Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.surface_texture = Some(self.context.load_texture(
+                            "soil-surface-layer",
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+                self.surface_layer_dirty = false;
+            }
+            self.surface_texture
+                .as_ref()
+                .map(|texture| (texture.clone(), layer.x, layer.y, layer.width, layer.height))
+        } else {
+            None
+        };
         let output = self.context.run(input, |ctx| {
             if self.simple_jarvis {
                 // The simple-jarvis surface owns its own background/FX and must
@@ -248,6 +312,21 @@ impl CanvasSurface {
                     },
                 );
             });
+            if let Some((texture, x, y, width, height)) = &surface {
+                let painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("soil-surface-layer"),
+                ));
+                painter.image(
+                    texture.id(),
+                    egui::Rect::from_min_size(
+                        egui::pos2(*x as f32, *y as f32),
+                        egui::vec2(*width as f32, *height as f32),
+                    ),
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
         });
         let t1 = std::time::Instant::now();
         let jobs = self.context.tessellate(output.shapes, scale);
@@ -583,6 +662,40 @@ mod tests {
         plain.set_aurora(false);
         assert_eq!(plain_before.rgba, plain.present().unwrap().rgba);
     }
+    #[test]
+    fn host_surface_layer_is_composited_and_bounded() {
+        let width = 128u32;
+        let height = 128u32;
+        let mut surface = CanvasSurface::new(width, height).unwrap();
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[255, 0, 0, 255]);
+        }
+        surface
+            .set_surface_layer(Some(SurfaceLayer {
+                rgba,
+                width,
+                height,
+                x: 0,
+                y: 0,
+            }))
+            .unwrap();
+        let frame = surface.present().unwrap();
+        assert_eq!(&frame.rgba[..4], &[255, 0, 0, 255]);
+        assert!(
+            surface
+                .set_surface_layer(Some(SurfaceLayer {
+                    rgba: vec![0; 3],
+                    width: 2,
+                    height: 2,
+                    x: 0,
+                    y: 0,
+                }))
+                .is_err()
+        );
+        surface.set_surface_layer(None).unwrap();
+    }
+
     #[test]
     fn dimensions_remain_bounded() {
         assert!(CanvasSurface::new(128, 127).is_err());
