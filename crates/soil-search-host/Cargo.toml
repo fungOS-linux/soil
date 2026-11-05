@@ -15,6 +15,6 @@ serde_json = "1"
 wasmtime = { version = "50", features = ["anyhow"] }
 
 [dev-dependencies]
-fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "001a1dca542acdae6bfc9ba81679bf2948501976" }
+fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "b4a2403d501627cc90c16ff6e965f3cfd1490560" }
 serde_json = "1"
 tempfile = "3"

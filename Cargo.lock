@@ -1483,7 +1483,7 @@ dependencies = [
 [[package]]
 name = "fungos-vfs"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=001a1dca542acdae6bfc9ba81679bf2948501976#001a1dca542acdae6bfc9ba81679bf2948501976"
+source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=b4a2403d501627cc90c16ff6e965f3cfd1490560#b4a2403d501627cc90c16ff6e965f3cfd1490560"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2421,6 +2421,16 @@ name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
+name = "mush"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fungos-vfs",
+ "soil-vfs-host",
+ "tempfile",
+]
 
 [[package]]
 name = "naga"

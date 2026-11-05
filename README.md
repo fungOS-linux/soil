@@ -113,3 +113,7 @@ No sibling worktrees are required. See [dependency policy](docs/dependencies.md)
 ## Shell
 
 `soil shell` mounts a VFS through FUSE and starts an interactive shell. `soil rm` unlinks the namespace entry while retaining the content-addressed blob and history. See [Soil shell](docs/soil-shell.md).
+
+## Mush
+
+`mush` is the sandboxed shell over one VFS workspace: no host PATH, no subprocesses, workspace-relative paths, and `rm` as namespace unlink. See [Mush](docs/mush.md).
