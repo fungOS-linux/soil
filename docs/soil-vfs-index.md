@@ -1,6 +1,6 @@
 # `soil:vfs` and `soil:index`
 
-Status: **contract slice, 2026-11-04.**
+Status: **contract + persistent host index, 2026-11-04.**
 
 These two capabilities make a fast read-only file browser possible without
 giving a Spore a host filesystem path or a raw content provider.
@@ -48,6 +48,8 @@ stat before treating an entry as current.
   an empty result.
 - Text search is host-owned; snippets are bounded copies of host text, not a
   second content index.
+- The derived index is a cache. It lives beside the VFS metadata, never in the
+  `records` store, and can be deleted and rebuilt without user-data loss.
 
 ## Host mapping
 
@@ -60,6 +62,51 @@ The existing implementation seams are:
 - `crates/fungos-content`: CID-neutral `ContentId`, locators and derived index
   stub.
 
-A host adapter should map `list/stat/read` onto `fungos-vfs`, and
+A host adapter maps `list/stat/read` onto `fungos-vfs`, and
 `browse/search/status` onto a rebuildable SQLite/FTS5 index keyed by
 `ContentId`. It must not expose a provider CID as `content-id`.
+
+## Persistent host index
+
+`crates/soil-vfs-host` implements the first backend:
+
+```text
+<vfs-root>/.fungos/soil-index.sqlite3
+```
+
+or an explicit path with `VfsHost::open_with_index(root, index_path)`.
+
+Schema:
+
+```sql
+entries(path PK, content_id, media_type, size, version, hydration,
+        pinned, updated_at_ms, kind, child_count, text)
+chunks(chunk_id PK, path, content_id, ordinal, text)
+chunks_fts USING fts5(chunk_id UNINDEXED, path UNINDEXED, text)
+vectors(chunk_id, model, dimension, vector BLOB, norm)
+```
+
+- `entries` is the browse/stat view and the source of authoritative paths.
+- `chunks_fts` is the full-text tier; results return paths and bounded snippets.
+- `vectors` is an optional derived cache for a future embedding backend.
+- A source hash over VFS entry metadata avoids rebuilding on every open.
+- A VFS change bumps `generation`; a reopen with the same source reuses the
+  persisted generation.
+- Full-text search also promotes exact path matches, so Spotlight-style recall
+  does not bury a filename behind body text.
+
+Search behavior:
+
+| Mode | Backend |
+|---|---|
+| `substring` | in-memory entry/text scan |
+| `fuzzy` | in-memory path ranking |
+| `full-text` | SQLite FTS5 + exact path promotion |
+| `semantic` | `unsupported` until an embedding model is granted |
+
+Vector helpers currently store `f32` BLOBs and rank by brute-force cosine. That
+is the v1 baseline. If the workspace outgrows it, add `sqlite-vec`/HNSW/LanceDB
+behind the `IndexBackend` trait rather than changing `soil:index`.
+
+The index is local and never synced. Sync durable intent through `records` and
+content through VFS/Unibus, then rebuild the index per device.

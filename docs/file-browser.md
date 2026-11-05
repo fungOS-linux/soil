@@ -48,7 +48,9 @@ The default query should feel like grep/FZF, not like a chat prompt:
    results are weak; it is slower and less predictable.
 
 `soil:index.search` exposes `substring`, `fuzzy`, `full-text`, and `semantic`
-modes. The host can answer all of them from one rebuildable index. OCR and
+modes. The current host answers the first three from one rebuildable SQLite/FTS5
+index; `semantic` is an explicit `unsupported` until an embedding backend is
+granted. OCR and
 extracted text are derived fields, never authority; the file remains the
 `ContentId` plus bytes in `soil:vfs`.
 

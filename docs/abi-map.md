@@ -266,8 +266,8 @@ Any unsupported row is a named denial, not an empty success.
    [`docs/soil-webgpu.md`](soil-webgpu.md)) and draft `wasi:audio@0.1.0`
    (host + tone proof, [`docs/wasi-audio.md`](wasi-audio.md)). `stream` is
    design. `soil:surface` is deferred, not scheduled.
-3. **Next, highest value:** implement the `soil:vfs`/`soil:index` host adapter
-   over `fungos-vfs` and a small read-only file-browser Spore, then wire
+3. **Next, highest value:** build a small read-only file-browser Spore on the
+   now-implemented `soil:vfs`/`soil:index` host adapter, then wire
    `soil:canvas-input` into the S22/Fire TV hosts,
    finish the BLE gaps (signed lease, DIS `ring-id`, Unibus publish, Android
    JNI), then the host adapters and denial fixtures for `time` and `storage`,
