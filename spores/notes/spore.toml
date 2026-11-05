@@ -10,7 +10,7 @@ summary = "Local-first Markdown notes with search, links, outlines and presentat
 [engine]
 soil = ">=0.1"
 target = "wasm32-wasip2"
-abi = { vfs = "1.0.0", index = "1.1.0", graph = "0.1.0" }
+abi = { vfs = "1.0.0", vfs-mut = "0.1.0", index = "1.1.0", graph = "0.1.0" }
 
 [module]
 path = "module.wasm"
@@ -28,6 +28,7 @@ surfaces = ["canvas", "native", "web"]
 "soil:vfs" = "read Markdown notes from the host-approved workspace root"
 "soil:index" = "search indexed note paths and text"
 "soil:graph" = "read backlinks for host-mapped note nodes"
+"soil:vfs-mut" = "save notes with generation-checked workspace writes"
 
 [denied]
 "soil:http" = ["network access is a separate explicit host grant"]

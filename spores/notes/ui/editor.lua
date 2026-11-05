@@ -82,11 +82,64 @@ local function links(ctx, snapshot)
   return ui.column("notes-links", { width = 210, flex_shrink = 0, gap = 2 }, children)
 end
 
+local function presentation(ctx, snapshot)
+  local deck = snapshot.presentation or {}
+  local slides = deck.slides or {}
+  local index = math.max(1, math.min(#slides, tonumber(snapshot.slide_index) or 1))
+  local slide = slides[index] or { title = "Presentation", lines = {} }
+  local children = {
+    ui.text("present-title", slide.title or deck.title or "Presentation", {
+      size = 28,
+      height = 40,
+      ink = "primary",
+      wrap = true,
+    }),
+  }
+  for line_index, line in ipairs(slide.lines or {}) do
+    local text = tostring(line or "")
+    if text:sub(1, 2) == "# " then text = text:sub(3) end
+    ui.push(children, ui.text("present-line-" .. line_index, text, {
+      size = 15,
+      height = 24,
+      wrap = true,
+      ink = text == "" and "muted" or "text",
+    }))
+  end
+  local actions = {
+    ui.text("present-deck", deck.title or "Deck", { size = 10, ink = "muted" }),
+    ui.text("present-count", string.format("%d / %d", index, #slides), {
+      size = 10,
+      ink = "muted",
+    }),
+    { spacer = true },
+    { id = "previous", label = "Previous", disabled = index <= 1,
+      disabled_reason = index <= 1 and "First slide" or nil,
+      action = action.intent("notes.previous") },
+    { id = "next", label = "Next", disabled = index >= #slides,
+      disabled_reason = index >= #slides and "Last slide" or nil,
+      action = action.intent("notes.next") },
+    { id = "exit", label = "Exit", action = action.intent("notes.exit-present") },
+  }
+  local root = ui.column("notes-present", {
+    width = (ctx.viewport and ctx.viewport.width) or 1086,
+    height = (ctx.viewport and ctx.viewport.height) or 1569,
+    gap = 10,
+    padding = { top = 18, right = 54, bottom = 24, left = 54 },
+  }, {
+    ui.action_bar("present-actions", actions, { label = "Presentation actions" }),
+    ui.column("present-slide", { flex_grow = 1, gap = 8, padding = { top = 36 } }, children),
+  })
+  return root
+end
+
 function M.render(ctx)
   ctx = ctx or {}
   local snapshot = ctx.snapshot or {}
   local width = (ctx.viewport and ctx.viewport.width) or 1086
   local height = (ctx.viewport and ctx.viewport.height) or 1569
+  if snapshot.presentation then
+    return presentation(ctx, snapshot)
+  end
   local note = selected_note(snapshot)
   local actions = {
     ui.text("notes-title", "NOTES", { size = 10, ink = "muted" }),
@@ -99,6 +152,16 @@ function M.render(ctx)
     { id = "open", label = "Open", disabled = note == nil,
       disabled_reason = note == nil and "Select a note" or nil,
       action = note and action.intent("notes.open", { path = note.path }) or nil },
+    { id = "edit", label = "Edit", disabled = note == nil,
+      disabled_reason = note == nil and "Select a note" or nil,
+      action = note and action.intent("notes.edit", { path = note.path }) or nil },
+    { id = "save", label = "Save", disabled = not (snapshot.editor and snapshot.editor.dirty),
+      disabled_reason = not (snapshot.editor and snapshot.editor.dirty) and "No unsaved changes" or nil,
+      action = note and snapshot.editor and snapshot.editor.dirty and action.intent("notes.save", {
+        path = note.path,
+        expected_version = snapshot.editor.expected_version,
+        content = snapshot.editor.text or "",
+      }) or nil },
   }
   local root = ui.column("notes-root", {
     width = width,

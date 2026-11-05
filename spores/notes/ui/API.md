@@ -17,6 +17,14 @@ and no editor authority.
   document: Document?,
   backlinks: { Backlink }?,
   search: { query: string?, hits: { Hit }? }?,
+  editor: { text: string?, expected_version: integer?, dirty: boolean? }?,
+  presentation: { path: string?, title: string?, slides: { Slide }? }?,
+  slide_index: integer?,
+}
+
+Slide = {
+  title: string?,
+  lines: { string }?,
 }
 
 Note = {
@@ -60,6 +68,11 @@ Hit = {
 | `notes.open` | `{ path: string }` | note rail and toolbar |
 | `notes.search` | `{}` | toolbar |
 | `notes.present` | `{ path: string }` | toolbar |
+| `notes.edit` | `{ path: string }` | toolbar |
+| `notes.save` | `{ path: string, expected_version: integer?, content: string }` | toolbar |
+| `notes.previous` | `{}` | presentation bar |
+| `notes.next` | `{}` | presentation bar |
+| `notes.exit-present` | `{}` | presentation bar |
 
 The UI emits intents. Reading, indexing, presenting and any future writes are
 host-side.
@@ -80,7 +93,8 @@ are required yet.
 ## Stable ids
 
 `notes-root`, `notes-actions`, `notes-title`, `notes-root`, `notes-rail`,
-`notes-document`, `notes-links`, `notes-actions`.
+`notes-document`, `notes-links`, `notes-actions`, `notes-present`,
+`present-actions`, `present-slide`.
 
 ## Authority
 

@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use soil::graph::graph::{self, Direction};
 use soil::index::index::{self, Mode, Query};
 use soil::vfs::vfs::{self, Kind};
+use soil::vfs_mut::vfs_mut;
 
 const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
 const PAGE: u32 = 200;
@@ -45,6 +46,48 @@ impl Guest for Component {
                 let doc = document(path)?;
                 print_json("links", &links(&doc));
             }
+            "present" => {
+                let path = args
+                    .get(1)
+                    .ok_or_else(|| "usage: present <path>".to_string())?;
+                let doc = document(path)?;
+                print_json("presentation", &presentation(&doc));
+            }
+            "save" => {
+                let path = args
+                    .get(1)
+                    .ok_or_else(|| "usage: save <path> <version|new|auto> <content>".to_string())?;
+                let expected = args
+                    .get(2)
+                    .ok_or_else(|| "usage: save <path> <version|new|auto> <content>".to_string())?;
+                let content = args
+                    .get(3)
+                    .ok_or_else(|| "usage: save <path> <version|new|auto> <content>".to_string())?;
+                if content.len() > 4 * 1024 * 1024 {
+                    return Err("note content exceeds the write budget".into());
+                }
+                let expected_version = match expected.as_str() {
+                    "new" | "auto" => None,
+                    other => Some(
+                        other
+                            .parse::<u64>()
+                            .map_err(|_| "save: expected version must be an integer, new or auto".to_string())?,
+                    ),
+                };
+                let result = vfs_mut::write(
+                    path,
+                    content.as_bytes(),
+                    "text/markdown",
+                    expected_version,
+                )
+                .map_err(|error| format!("{error:?}"))?;
+                print_json("save", &json!({
+                    "path": result.path,
+                    "version": result.version,
+                    "content_id": result.content_id,
+                    "size": result.size,
+                }));
+            }
             "search" => {
                 let text = args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
                 if text.trim().is_empty() {
@@ -60,7 +103,7 @@ impl Guest for Component {
             }
             other => {
                 return Err(format!(
-                    "unknown action {other:?}; use tree, read, outline, links, search or backlinks"
+                    "unknown action {other:?}; use tree, read, outline, links, search, backlinks, present or save"
                 ))
             }
         }
@@ -124,6 +167,43 @@ fn document(path: &str) -> Result<Value, String> {
         "content_id": entry.content_id,
         "text": text,
     }))
+}
+
+fn presentation(document: &Value) -> Value {
+    let text = document.get("text").and_then(Value::as_str).unwrap_or_default();
+    let mut slides = Vec::new();
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.trim() == "---" {
+            if !lines.is_empty() {
+                slides.push(slide(&lines));
+                lines.clear();
+            }
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+    if !lines.is_empty() || slides.is_empty() {
+        slides.push(slide(&lines));
+    }
+    json!({
+        "path": document.get("path"),
+        "title": document.get("title"),
+        "slides": slides,
+    })
+}
+
+fn slide(lines: &[String]) -> Value {
+    let title = lines
+        .iter()
+        .find_map(|line| line.trim().strip_prefix("# ").map(str::trim))
+        .filter(|title| !title.is_empty())
+        .or_else(|| lines.iter().map(|line| line.trim()).find(|line| !line.is_empty()))
+        .unwrap_or("Untitled");
+    json!({
+        "title": title,
+        "lines": lines,
+    })
 }
 
 fn outline(document: &Value) -> Value {

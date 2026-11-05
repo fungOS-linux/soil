@@ -23,6 +23,8 @@ outline <path>
 links <path>
 search <text>
 backlinks <node>
+present <path>
+save <path> <version|new|auto> <content>
 ```
 
 All output is bounded JSON.
@@ -36,7 +38,8 @@ The reader shows:
 - backlink rail
 - top action bar: Search, Present, Open
 
-The `notes.present` intent is reserved for the presenterm-style slide mode.
+The `notes.present` intent opens the presenterm-style slide mode. The module
+splits Markdown on `---` and preserves headings per slide.
 
 ## Preview
 

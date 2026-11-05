@@ -6,6 +6,7 @@ world notes {
   import soil:vfs/vfs@1.0.0;
   import soil:index/index@1.1.0;
   import soil:graph/graph@0.1.0;
+  import soil:vfs-mut/vfs-mut@0.1.0;
 
   export run: func(args: list<string>) -> result<_, string>;
 }
