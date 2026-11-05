@@ -18,6 +18,7 @@ use discovery::{PeerIndex, ServiceIndex, SporeIndex};
 use fungos_records::{Record, Store};
 use git::GitIndex;
 use graph::GraphIndex;
+use soil_marbles::MarblesIndex;
 use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
 use tgrep::TgrepSource;
 use wasmtime::component::{HasSelf, Linker};
@@ -32,6 +33,15 @@ pub use soil::search::search as api;
 const MAX_PAGE: u32 = 512;
 const MAX_MENTIONS: u32 = 64;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrincipalCandidate {
+    pub actor: String,
+    pub display_name: Option<String>,
+    pub teams: Vec<String>,
+    pub roles: Vec<String>,
+    pub visibility: String,
+}
+
 pub struct SearchService {
     vfs: Option<VfsHost>,
     records: Option<Mutex<Store>>,
@@ -42,6 +52,8 @@ pub struct SearchService {
     spores: Option<SporeIndex>,
     peers: Option<PeerIndex>,
     services: Option<ServiceIndex>,
+    marbles: Option<MarblesIndex>,
+    principals: Vec<PrincipalCandidate>,
     generation: u64,
 }
 
@@ -62,6 +74,8 @@ impl SearchService {
             spores: None,
             peers: None,
             services: None,
+            marbles: None,
+            principals: Vec::new(),
             generation: 1,
         }
     }
@@ -150,6 +164,21 @@ impl SearchService {
         self
     }
 
+    /// Add a host-granted Marbles snapshot. The host decides store, company,
+    /// project scope and freshness; search never runs `mb` itself.
+    pub fn with_marbles(mut self, index: MarblesIndex) -> Self {
+        self.marbles = Some(index);
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
+    /// Add the current host-attested principal set to search and mentions.
+    pub fn with_principals(mut self, principals: Vec<PrincipalCandidate>) -> Self {
+        self.principals = principals;
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
     fn sources(&self) -> u32 {
         u32::from(self.vfs.is_some())
             + u32::from(self.records.is_some())
@@ -158,6 +187,8 @@ impl SearchService {
             + u32::from(self.spores.is_some())
             + u32::from(self.peers.is_some())
             + u32::from(self.services.is_some())
+            + u32::from(self.marbles.is_some())
+            + u32::from(!self.principals.is_empty())
     }
 
     fn snapshot(&self) -> search_api::SearchState {
@@ -183,6 +214,8 @@ impl SearchService {
                 search_api::Kind::Spore,
                 search_api::Kind::Peer,
                 search_api::Kind::Service,
+                search_api::Kind::Task,
+                search_api::Kind::Principal,
             ]
         } else {
             query.kinds.clone()
@@ -208,6 +241,12 @@ impl SearchService {
         }
         if kinds.contains(&search_api::Kind::Action) {
             hits.extend(self.action_hits(&query));
+        }
+        if kinds.contains(&search_api::Kind::Task) {
+            hits.extend(self.marbles_hits(&query));
+        }
+        if kinds.contains(&search_api::Kind::Principal) {
+            hits.extend(self.principal_hits(&query));
         }
         self.graph.enrich(&mut hits);
         hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
@@ -418,23 +457,75 @@ impl SearchService {
             candidates.extend(self.file_mentions(&text, limit)?);
         }
 
-        let Some(store) = self.records.as_ref() else {
-            return Ok(finish_mentions(candidates, limit));
-        };
-        let books: Vec<&str> = self.books.iter().map(String::as_str).collect();
-        let records = store
-            .lock()
-            .expect("records store poisoned")
-            .search_books(&books, &text, MAX_PAGE as usize)
-            .map_err(|_| search_api::Error::Io)?;
-        for (index, record) in records.into_iter().enumerate() {
-            let Some(kind) = mention_schema(&record.schema_id) else {
-                continue;
-            };
-            if !allow(kind) {
-                continue;
+        if let Some(store) = self.records.as_ref() {
+            let books: Vec<&str> = self.books.iter().map(String::as_str).collect();
+            let records = store
+                .lock()
+                .expect("records store poisoned")
+                .search_books(&books, &text, MAX_PAGE as usize)
+                .map_err(|_| search_api::Error::Io)?;
+            for (index, record) in records.into_iter().enumerate() {
+                let Some(kind) = mention_schema(&record.schema_id) else {
+                    continue;
+                };
+                if !allow(kind) {
+                    continue;
+                }
+                candidates.push(record_mention(record, kind, index));
             }
-            candidates.push(record_mention(record, kind, index));
+        }
+        if allow("task")
+            && let Some(marbles) = &self.marbles
+        {
+            for (issue, score) in marbles.search(&text, MAX_MENTIONS as usize) {
+                candidates.push(mention_api::Candidate {
+                    kind: "task".into(),
+                    token: marbles.canonical_ref(&issue),
+                    label: issue.title,
+                    subtitle: Some(format!("{} · {}", issue.project, issue.status)),
+                    schema: None,
+                    format: None,
+                    score,
+                    visibility: "team".into(),
+                });
+            }
+        }
+        if allow("principal") {
+            let needle = text.to_ascii_lowercase();
+            for (index, principal) in self.principals.iter().enumerate() {
+                let haystack = format!(
+                    "{} {} {} {}",
+                    principal.actor,
+                    principal.display_name.as_deref().unwrap_or_default(),
+                    principal.teams.join(" "),
+                    principal.roles.join(" ")
+                )
+                .to_ascii_lowercase();
+                if !haystack.contains(&needle) {
+                    continue;
+                }
+                candidates.push(mention_api::Candidate {
+                    kind: "principal".into(),
+                    token: format!("principal:{}", principal.actor),
+                    label: principal
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| principal.actor.clone()),
+                    subtitle: Some(
+                        principal
+                            .teams
+                            .iter()
+                            .chain(&principal.roles)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    ),
+                    schema: None,
+                    format: None,
+                    score: 950_000u32.saturating_sub(index as u32),
+                    visibility: principal.visibility.clone(),
+                });
+            }
         }
         candidates.retain(|candidate| allow(&candidate.kind));
 
@@ -482,6 +573,74 @@ impl SearchService {
                 }
             })
             .collect())
+    }
+
+    fn marbles_hits(&self, query: &search_api::Query) -> Vec<search_api::Hit> {
+        let Some(marbles) = &self.marbles else {
+            return Vec::new();
+        };
+        marbles
+            .search(&query.text, MAX_PAGE as usize)
+            .into_iter()
+            .map(|(issue, score)| search_api::Hit {
+                kind: search_api::Kind::Task,
+                id: marbles.canonical_ref(&issue),
+                title: issue.title,
+                subtitle: Some(format!(
+                    "{} · {} · p{}",
+                    issue.project, issue.status, issue.priority
+                )),
+                snippet: (!issue.description.is_empty()).then_some(issue.description),
+                score,
+                source: "marbles".into(),
+                updated_at_ms: Some(issue.updated_at.max(0) as u64 * 1000),
+                references: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn principal_hits(&self, query: &search_api::Query) -> Vec<search_api::Hit> {
+        let needle = query.text.to_ascii_lowercase();
+        self.principals
+            .iter()
+            .filter(|principal| {
+                principal.actor.to_ascii_lowercase().contains(&needle)
+                    || principal
+                        .display_name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(&needle)
+                    || principal
+                        .teams
+                        .iter()
+                        .chain(&principal.roles)
+                        .any(|value| value.to_ascii_lowercase().contains(&needle))
+            })
+            .enumerate()
+            .map(|(index, principal)| search_api::Hit {
+                kind: search_api::Kind::Principal,
+                id: format!("principal:{}", principal.actor),
+                title: principal
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| principal.actor.clone()),
+                subtitle: Some(
+                    principal
+                        .teams
+                        .iter()
+                        .chain(&principal.roles)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                ),
+                snippet: None,
+                score: 800_000u32.saturating_sub(index as u32),
+                source: "principal".into(),
+                updated_at_ms: None,
+                references: Vec::new(),
+            })
+            .collect()
     }
 
     fn record_hits(
@@ -1275,5 +1434,72 @@ surfaces = ["canvas"]
         assert_eq!(files[0].kind, "file");
         assert_eq!(files[0].format.as_deref(), Some("jpg"));
         assert_eq!(files[0].token, "file:photos/paris.jpg");
+    }
+
+    #[test]
+    fn one_search_includes_marbles_and_principals() {
+        let marbles = MarblesIndex::new(
+            "store",
+            "fpl",
+            vec![soil_marbles::Issue {
+                id: "ACME-42".into(),
+                title: "Fix SSO".into(),
+                description: "The SAML callback fails".into(),
+                status: "open".into(),
+                priority: 1,
+                project: "acme".into(),
+                updated_at: 1_700_000_000,
+                ..soil_marbles::Issue::default()
+            }],
+        );
+        let mut host = SearchService::new(None, None, vec![])
+            .with_marbles(marbles)
+            .with_principals(vec![PrincipalCandidate {
+                actor: "oidc:https://identity.example#user-42".into(),
+                display_name: Some("Avery".into()),
+                teams: vec!["fpl".into()],
+                roles: vec!["operator".into()],
+                visibility: "team".into(),
+            }]);
+
+        let tasks = host
+            .search(search_api::Query {
+                text: "sso".into(),
+                kinds: vec![search_api::Kind::Task],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(tasks.hits.len(), 1);
+        assert_eq!(tasks.hits[0].id, "marbles://store/fpl/acme/ACME-42");
+
+        let principals = host
+            .search(search_api::Query {
+                text: "avery".into(),
+                kinds: vec![search_api::Kind::Principal],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(principals.hits.len(), 1);
+        assert_eq!(
+            principals.hits[0].id,
+            "principal:oidc:https://identity.example#user-42"
+        );
+
+        let task_mentions = host.suggest("sso".into(), vec!["task".into()], 10).unwrap();
+        assert_eq!(task_mentions[0].kind, "task");
+        assert_eq!(task_mentions[0].token, "marbles://store/fpl/acme/ACME-42");
+
+        let principal_mentions = host
+            .suggest("avery".into(), vec!["principal".into()], 10)
+            .unwrap();
+        assert_eq!(principal_mentions[0].kind, "principal");
+        assert_eq!(
+            principal_mentions[0].token,
+            "principal:oidc:https://identity.example#user-42"
+        );
     }
 }

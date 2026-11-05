@@ -1,11 +1,13 @@
 # Global search
 
-`soil:search@0.4.0` is a host-composed discovery surface over the sources a
+`soil:search@0.5.0` is a host-composed discovery surface over the sources a
 host has already granted:
 
 ```text
 files        -> soil:index / soil:vfs
 records      -> soil:records books
+Marbles      -> host-granted issue snapshot
+principals   -> host-attested identity set
 repositories -> explicit local Git roots
 spores       -> explicit local Spore manifest roots
 peers        -> explicit `mycelium peers --json` snapshot
@@ -27,7 +29,8 @@ refresh()       -> search-state
 ```wit
 query {
   text,
-  kinds,       // file / record-entry / repository / spore / peer / service / action
+  kinds,       // file / record-entry / repository / spore / peer / service /
+              // action / task / principal
   mode,        // substring / fuzzy / full-text / semantic
   offset,
   limit,
@@ -62,7 +65,7 @@ suggest(text, kinds, limit) -> list<candidate>
 candidate {
   kind,        // person / account / company / project / task / opportunity /
               // activity / call / thread / message / document / sheet / slide /
-              // file
+              // file / principal
   token,       // record:<book>#<entity> or file:<path>
   label,
   subtitle,
@@ -96,8 +99,10 @@ fungos.slide/slide@1       -> slide
 fungos.slides/slide@1      -> slide
 ```
 
-Marbles issues are not records. A future host adapter supplies them as `task`
-candidates with a `marbles://...` canonical ref.
+Marbles issues are not records. The host adapter supplies them as `task`
+candidates with a `marbles://<store>/<company>/<project>/<issue>` canonical ref.
+Principals are supplied by the host as `principal:<actor>` candidates; they are
+not records either.
 
 Unknown schemas are not mentionable. Privacy follows the books the host opened:
 a team book yields projections, a private book yields private records.
@@ -115,6 +120,17 @@ file       everything else
 All VFS mentions use `visibility = workspace`. `format` carries the extension so
 a UI can choose the right icon without parsing the path.
 
+The inspection server can load host-granted sources:
+
+```sh
+soil-search-web \
+  --marbles-snapshot marbles.json \
+  --marbles-store store --marbles-company fpl \
+  --principals-snapshot principals.json
+```
+
+The autocomplete component is [Mention input](mention-input.md).
+
 Insert `token` into the document/task/record and persist a graph link:
 
 ```text
@@ -126,7 +142,8 @@ fungos.graph/link@1
 
 The label is resolved later. Never copy the display name into the mention.
 
-See [Mentions](mentions.md) for persistence and backlinks.
+See [Mentions](mentions.md) for persistence and backlinks, and
+[Mention input](mention-input.md) for the themable autocomplete component.
 
 The inspection server exposes the same resolver:
 

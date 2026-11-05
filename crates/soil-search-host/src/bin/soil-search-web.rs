@@ -37,6 +37,10 @@ struct Args {
     git_roots: Vec<PathBuf>,
     spore_roots: Vec<PathBuf>,
     mycelium_snapshot: Option<PathBuf>,
+    marbles_snapshot: Option<PathBuf>,
+    marbles_store: Option<String>,
+    marbles_company: Option<String>,
+    principals_snapshot: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -68,6 +72,20 @@ fn main() -> Result<()> {
     }
     if let Some(dir) = &args.mycelium_snapshot {
         service = service.with_mycelium_snapshot_dir(dir);
+    }
+    if let Some(path) = &args.marbles_snapshot {
+        service = service.with_marbles(soil_marbles::MarblesIndex::from_snapshot(
+            path,
+            args.marbles_store.as_deref().unwrap_or("store"),
+            args.marbles_company.as_deref().unwrap_or("fpl"),
+        )?);
+    }
+    if let Some(path) = &args.principals_snapshot {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read principal snapshot {}", path.display()))?;
+        let principals: Vec<soil_search_host::PrincipalCandidate> =
+            serde_json::from_slice(&bytes).context("parse principal snapshot")?;
+        service = service.with_principals(principals);
     }
     let sources = service.state().map(|state| state.sources).unwrap_or(0);
     let app = Arc::new(App {
@@ -267,6 +285,8 @@ fn kind_name(kind: api::Kind) -> &'static str {
         api::Kind::Peer => "peer",
         api::Kind::Service => "service",
         api::Kind::Action => "action",
+        api::Kind::Task => "task",
+        api::Kind::Principal => "principal",
     }
 }
 
@@ -281,6 +301,8 @@ fn parse_kinds(value: String) -> Vec<api::Kind> {
             "peer" => Some(api::Kind::Peer),
             "service" => Some(api::Kind::Service),
             "action" => Some(api::Kind::Action),
+            "task" => Some(api::Kind::Task),
+            "principal" => Some(api::Kind::Principal),
             _ => None,
         })
         .collect()
@@ -407,6 +429,23 @@ fn parse_args() -> Result<Option<Args>> {
             "--mycelium-snapshot" => {
                 args.mycelium_snapshot = Some(PathBuf::from(
                     iter.next().context("--mycelium-snapshot needs a value")?,
+                ));
+            }
+            "--marbles-snapshot" => {
+                args.marbles_snapshot = Some(PathBuf::from(
+                    iter.next().context("--marbles-snapshot needs a value")?,
+                ));
+            }
+            "--marbles-store" => {
+                args.marbles_store = Some(iter.next().context("--marbles-store needs a value")?);
+            }
+            "--marbles-company" => {
+                args.marbles_company =
+                    Some(iter.next().context("--marbles-company needs a value")?);
+            }
+            "--principals-snapshot" => {
+                args.principals_snapshot = Some(PathBuf::from(
+                    iter.next().context("--principals-snapshot needs a value")?,
                 ));
             }
             "-h" | "--help" => {

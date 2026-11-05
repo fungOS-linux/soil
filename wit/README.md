@@ -20,7 +20,7 @@ credential resolution stay in host adapters.
 | `soil:vfs-mut@0.1.0` | wired | separate mutation grant |
 | `soil:index@1.1.0` | wired | derived VFS browse/search/KNN |
 | `soil:records@0.1.0` | wired | durable schema-tagged records |
-| `soil:search@0.4.0` | wired | global derived search + typed mention resolver |
+| `soil:search@0.5.0` | wired | global derived search + typed mention resolver |
 | `soil:graph@0.1.0` | wired | read-only record links |
 | `soil:http@0.1.0` | wired | bounded host-mediated HTTP |
 | `soil:appdata@1.0.0` | contract | guest SDK exists; native host next |
