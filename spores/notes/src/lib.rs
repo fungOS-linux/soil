@@ -165,12 +165,16 @@ fn document(path: &str) -> Result<Value, String> {
         "size": entry.size,
         "version": entry.version,
         "content_id": entry.content_id,
+        "graph_node": graph_node(&entry.path),
         "text": text,
     }))
 }
 
 fn presentation(document: &Value) -> Value {
-    let text = document.get("text").and_then(Value::as_str).unwrap_or_default();
+    let text = document
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let mut slides = Vec::new();
     let mut lines = Vec::new();
     for line in text.lines() {
@@ -198,7 +202,12 @@ fn slide(lines: &[String]) -> Value {
         .iter()
         .find_map(|line| line.trim().strip_prefix("# ").map(str::trim))
         .filter(|title| !title.is_empty())
-        .or_else(|| lines.iter().map(|line| line.trim()).find(|line| !line.is_empty()))
+        .or_else(|| {
+            lines
+                .iter()
+                .map(|line| line.trim())
+                .find(|line| !line.is_empty())
+        })
         .unwrap_or("Untitled");
     json!({
         "title": title,
@@ -267,7 +276,8 @@ fn search(text: &str) -> Result<Value, String> {
 }
 
 fn backlinks(node: &str) -> Result<Value, String> {
-    let page = graph::neighbors(node, None, Direction::In, 0, 100)
+    let node = graph_node(node);
+    let page = graph::neighbors(&node, None, Direction::In, 0, 100)
         .map_err(|error| format!("{error:?}"))?;
     let edges = page
         .edges
@@ -283,6 +293,17 @@ fn backlinks(node: &str) -> Result<Value, String> {
         })
         .collect::<Vec<_>>();
     Ok(json!({ "node": node, "generation": page.generation, "edges": edges }))
+}
+
+/// Host graph nodes for files are `vfs:<workspace-path>`. The reader accepts a
+/// note path or an explicit locator, so callers do not have to know that mapping.
+fn graph_node(node: &str) -> String {
+    let node = node.trim();
+    if node.contains(':') && !node.starts_with('/') {
+        node.to_string()
+    } else {
+        format!("vfs:{}", node.trim_start_matches('/'))
+    }
 }
 
 fn title(path: &str, text: &str) -> String {

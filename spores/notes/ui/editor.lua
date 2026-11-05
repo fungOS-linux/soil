@@ -42,22 +42,44 @@ end
 
 local function document(ctx, snapshot)
   local note = snapshot.document or {}
-  local lines = {}
-  for index, line in ipairs(note.lines or {}) do
-    ui.push(lines, ui.text("note-line-" .. index, line.text or line, {
-      size = line.level and (18 - line.level) or 11,
-      height = line.level and 24 or 17,
-      ink = line.level and "primary" or "text",
-      wrap = true,
-    }))
+  local editor = snapshot.editor
+  local body
+  if editor then
+    body = ui.editor("note-editor", editor.text or "", {
+      label = "Note body",
+      placeholder = "Write Markdown…",
+      flex_grow = 1,
+      expected_version = editor.expected_version,
+      action = action.intent("notes.save", {
+        path = note.path,
+        expected_version = editor.expected_version,
+      }),
+    })
+  else
+    local lines = {}
+    for index, line in ipairs(note.lines or {}) do
+      ui.push(lines, ui.text("note-line-" .. index, line.text or line, {
+        size = line.level and (18 - line.level) or 11,
+        height = line.level and 24 or 17,
+        ink = line.level and "primary" or "text",
+        wrap = true,
+      }))
+    end
+    if #lines == 0 then
+      ui.push(lines, ui.text("note-empty", "Select a note.", { size = 12, ink = "muted" }))
+    end
+    body = ui.column("note-body", { flex_grow = 1, gap = 3 }, lines)
   end
-  if #lines == 0 then
-    ui.push(lines, ui.text("note-empty", "Select a note.", { size = 12, ink = "muted" }))
+  local path_children = {
+    ui.text("note-path", note.path or "", { size = 9, height = 16, ink = "muted", flex_grow = 1 }),
+  }
+  if editor and editor.dirty then
+    ui.push(path_children, ui.text("note-dirty", "UNSAVED", { size = 9, height = 16, ink = "warning" }))
   end
   return ui.column("notes-document", { flex_grow = 1, gap = 3 }, {
     ui.text("note-title", note.title or "Notes", { size = 22, height = 30, ink = "primary" }),
-    ui.text("note-path", note.path or "", { size = 9, height = 16, ink = "muted" }),
-    ui.column("note-body", { flex_grow = 1, gap = 3 }, lines),
+    ui.row("note-path-row", { height = 16, gap = 8 }, path_children),
+    body,
   })
 end
 
@@ -160,7 +182,6 @@ function M.render(ctx)
       action = note and snapshot.editor and snapshot.editor.dirty and action.intent("notes.save", {
         path = note.path,
         expected_version = snapshot.editor.expected_version,
-        content = snapshot.editor.text or "",
       }) or nil },
   }
   local root = ui.column("notes-root", {

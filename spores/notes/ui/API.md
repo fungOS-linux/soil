@@ -69,10 +69,15 @@ Hit = {
 | `notes.search` | `{}` | toolbar |
 | `notes.present` | `{ path: string }` | toolbar |
 | `notes.edit` | `{ path: string }` | toolbar |
-| `notes.save` | `{ path: string, expected_version: integer?, content: string }` | toolbar |
+| `notes.save` | `{ path: string, expected_version: integer? }` | toolbar / editor |
 | `notes.previous` | `{}` | presentation bar |
 | `notes.next` | `{}` | presentation bar |
 | `notes.exit-present` | `{}` | presentation bar |
+
+The editor is a `text_input` node. The host owns the edit buffer, selection,
+IME, dirty state and commit timing; the tree carries the initial value and the
+version guard. Saving uses the host's current buffer, not the stale snapshot
+text.
 
 The UI emits intents. Reading, indexing, presenting and any future writes are
 host-side.

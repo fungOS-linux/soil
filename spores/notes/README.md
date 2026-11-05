@@ -1,6 +1,6 @@
 # Notes Spore
 
-Status: **read-only reader slice, 2026-11-05.**
+Status: **reader + editor slice, 2026-11-05.**
 
 A local-first Markdown notes Spore:
 
@@ -36,7 +36,8 @@ The reader shows:
 - note tree
 - selected Markdown document
 - backlink rail
-- top action bar: Search, Present, Open
+- top action bar: Search, Present, Open, Edit, Save
+- multiline Markdown editor with a version guard and unsaved marker
 
 The `notes.present` intent opens the presenterm-style slide mode. The module
 splits Markdown on `---` and preserves headings per slide.
