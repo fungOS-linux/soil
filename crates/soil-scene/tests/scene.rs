@@ -162,6 +162,8 @@ fn a_polyline_is_a_bounded_scene_primitive() {
             rgb: None,
             width: 0.1,
             opacity: 1.0,
+            join: soil_scene::LineJoin::Miter,
+            miter_limit: 4.0,
         }),
     }]);
     scene.validate().expect("valid polyline");
@@ -183,4 +185,34 @@ fn an_area_is_a_bounded_scene_primitive() {
         }),
     }]);
     scene.validate().expect("valid area");
+}
+
+#[test]
+fn polyline_joins_are_validated() {
+    let base = soil_scene::Polyline {
+        points: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
+        ink: Some(Ink::Primary),
+        rgb: None,
+        width: 0.1,
+        opacity: 1.0,
+        join: soil_scene::LineJoin::Round,
+        miter_limit: 4.0,
+    };
+    let node = |content| Node {
+        id: "line".into(),
+        parent: None,
+        transition_ms: None,
+        transform: Transform::default(),
+        content,
+    };
+    Scene::new(vec![node(Content::Polyline(base.clone()))])
+        .validate()
+        .expect("round join");
+    let mut invalid = base;
+    invalid.miter_limit = 0.0;
+    assert!(
+        Scene::new(vec![node(Content::Polyline(invalid))])
+            .validate()
+            .is_err()
+    );
 }

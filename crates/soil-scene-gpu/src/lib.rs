@@ -451,9 +451,14 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                 let color = ink(theme, polyline.ink);
                 let alpha = polyline.opacity.clamp(0.0, 1.0);
                 let half = polyline.width * 0.5;
-                for pair in polyline.points.windows(2) {
-                    let (x1, y1) = (x + pair[0][0] * w, y + pair[0][1] * h);
-                    let (x2, y2) = (x + pair[1][0] * w, y + pair[1][1] * h);
+                let points: Vec<[f32; 2]> = polyline
+                    .points
+                    .iter()
+                    .map(|point| [x + point[0] * w, y + point[1] * h])
+                    .collect();
+                for pair in points.windows(2) {
+                    let [x1, y1] = pair[0];
+                    let [x2, y2] = pair[1];
                     let dx = x2 - x1;
                     let dy = y2 - y1;
                     let length = (dx * dx + dy * dy).sqrt();
@@ -472,11 +477,137 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                         alpha,
                     );
                 }
+                for index in 1..points.len().saturating_sub(1) {
+                    push_join(
+                        &mut out,
+                        points[index - 1],
+                        points[index],
+                        points[index + 1],
+                        half,
+                        polyline.join,
+                        polyline.miter_limit,
+                        color,
+                        alpha,
+                    );
+                }
             }
             _ => {}
         }
     }
     out
+}
+
+fn normalize(v: [f32; 2]) -> Option<[f32; 2]> {
+    let length = (v[0] * v[0] + v[1] * v[1]).sqrt();
+    if length <= f32::EPSILON {
+        None
+    } else {
+        Some([v[0] / length, v[1] / length])
+    }
+}
+
+fn push_triangle(
+    out: &mut Vec<Vertex>,
+    a: [f32; 2],
+    b: [f32; 2],
+    c: [f32; 2],
+    color: [u8; 3],
+    alpha: f32,
+) {
+    let rgba = [
+        color[0] as f32 / 255.0,
+        color[1] as f32 / 255.0,
+        color[2] as f32 / 255.0,
+        alpha.clamp(0.0, 1.0),
+    ];
+    for point in [a, b, c] {
+        out.push(Vertex {
+            pos: [point[0] / 4.0, point[1] / 4.0],
+            color: rgba,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_join(
+    out: &mut Vec<Vertex>,
+    previous: [f32; 2],
+    vertex: [f32; 2],
+    next: [f32; 2],
+    half: f32,
+    join: soil_scene::LineJoin,
+    miter_limit: f32,
+    color: [u8; 3],
+    alpha: f32,
+) {
+    let Some(d0) = normalize([vertex[0] - previous[0], vertex[1] - previous[1]]) else {
+        return;
+    };
+    let Some(d1) = normalize([next[0] - vertex[0], next[1] - vertex[1]]) else {
+        return;
+    };
+    let cross = d0[0] * d1[1] - d0[1] * d1[0];
+    if cross.abs() <= 0.0001 {
+        return;
+    }
+    // Left-hand normal of each segment. The outer side of the turn is the
+    // opposite sign to the turn direction.
+    let side = if cross > 0.0 { -1.0 } else { 1.0 };
+    let n0 = [-d0[1] * side, d0[0] * side];
+    let n1 = [-d1[1] * side, d1[0] * side];
+    let p0 = [vertex[0] + n0[0] * half, vertex[1] + n0[1] * half];
+    let p1 = [vertex[0] + n1[0] * half, vertex[1] + n1[1] * half];
+
+    match join {
+        soil_scene::LineJoin::Round => {
+            let start = n0[1].atan2(n0[0]);
+            let end = n1[1].atan2(n1[0]);
+            let mut delta = end - start;
+            while delta > std::f32::consts::PI {
+                delta -= std::f32::consts::TAU;
+            }
+            while delta < -std::f32::consts::PI {
+                delta += std::f32::consts::TAU;
+            }
+            let steps = ((delta.abs() * half / 1.5).ceil() as usize).clamp(2, 32);
+            let mut last = p0;
+            for step in 1..=steps {
+                let angle = start + delta * step as f32 / steps as f32;
+                let point = [
+                    vertex[0] + angle.cos() * half,
+                    vertex[1] + angle.sin() * half,
+                ];
+                push_triangle(out, vertex, last, point, color, alpha);
+                last = point;
+            }
+            let _ = p1;
+        }
+        soil_scene::LineJoin::Bevel => {
+            push_triangle(out, vertex, p0, p1, color, alpha);
+        }
+        soil_scene::LineJoin::Miter => {
+            let Some(direction) = normalize([n0[0] + n1[0], n0[1] + n1[1]]) else {
+                push_triangle(out, vertex, p0, p1, color, alpha);
+                return;
+            };
+            let cosine = direction[0] * n0[0] + direction[1] * n0[1];
+            let miter_length = if cosine > 0.0001 {
+                half / cosine
+            } else {
+                f32::INFINITY
+            };
+            if miter_length <= miter_limit * half {
+                let tip = [
+                    vertex[0] + direction[0] * miter_length,
+                    vertex[1] + direction[1] * miter_length,
+                ];
+                push_triangle(out, vertex, p0, tip, color, alpha);
+                push_triangle(out, vertex, tip, p1, color, alpha);
+            } else {
+                push_triangle(out, vertex, p0, p1, color, alpha);
+            }
+        }
+    }
 }
 
 fn push_quad(
@@ -816,6 +947,8 @@ mod tests {
                 rgb: None,
                 width: 0.1,
                 opacity: 1.0,
+                join: soil_scene::LineJoin::Miter,
+                miter_limit: 4.0,
             }),
         }]);
         let frame = render(&scene, 200, 120, Theme::default()).expect("render");

@@ -332,6 +332,24 @@ pub struct Polyline {
     pub width: f32,
     #[serde(default = "opaque")]
     pub opacity: f32,
+    #[serde(default)]
+    pub join: LineJoin,
+    /// Miter joins longer than `miter_limit * width` fall back to a bevel.
+    #[serde(default = "default_miter_limit")]
+    pub miter_limit: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LineJoin {
+    #[default]
+    Miter,
+    Round,
+    Bevel,
+}
+
+fn default_miter_limit() -> f32 {
+    4.0
 }
 
 impl Polyline {
@@ -345,6 +363,9 @@ impl Polyline {
         }
         if !self.width.is_finite() || self.width <= 0.0 {
             return Err(Error::invalid("polyline width must be positive"));
+        }
+        if !self.miter_limit.is_finite() || self.miter_limit <= 0.0 {
+            return Err(Error::invalid("polyline miter_limit must be positive"));
         }
         finite(self.opacity)?;
         if !(0.0..=1.0).contains(&self.opacity) {
