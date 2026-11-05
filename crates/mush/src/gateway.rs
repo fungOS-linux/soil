@@ -4,7 +4,11 @@
 //! the Soil-resolved upstream, and returns the model response. The upstream
 //! credential never enters Operator's environment.
 
-use std::{io::Read, thread};
+use std::{
+    io::Read,
+    sync::{Arc, Mutex},
+    thread,
+};
 
 use anyhow::{Context, Result};
 use rand::Rng;
@@ -16,7 +20,13 @@ pub struct Gateway {
     pub token: String,
 }
 
-pub fn start(upstream: String, upstream_key: Option<String>, scrub: bool) -> Result<Gateway> {
+pub type SharedScrubber = Arc<Mutex<Scrubber>>;
+
+pub fn start(
+    upstream: String,
+    upstream_key: Option<String>,
+    scrubber: Option<SharedScrubber>,
+) -> Result<Gateway> {
     let server = Server::http("127.0.0.1:0").map_err(|error| anyhow::anyhow!("{error}"))?;
     let address = server
         .server_addr()
@@ -27,14 +37,13 @@ pub fn start(upstream: String, upstream_key: Option<String>, scrub: bool) -> Res
     thread::Builder::new()
         .name("soil-inference-gateway".into())
         .spawn(move || {
-            let mut scrubber = scrub.then(Scrubber::new);
             for request in server.incoming_requests() {
                 if let Err(error) = handle(
                     request,
                     &upstream,
                     upstream_key.as_deref(),
                     &session_token,
-                    scrubber.as_mut(),
+                    scrubber.as_ref(),
                 ) {
                     eprintln!("soil inference: {error:#}");
                 }
@@ -52,7 +61,7 @@ fn handle(
     upstream: &str,
     upstream_key: Option<&str>,
     token: &str,
-    scrubber: Option<&mut Scrubber>,
+    scrubber: Option<&SharedScrubber>,
 ) -> Result<()> {
     let path = request.url().to_string();
     if !path.starts_with("/v1/") && path != "/v1" {
@@ -67,7 +76,8 @@ fn handle(
         .take(32 * 1024 * 1024)
         .read_to_end(&mut body)?;
     let body = if let Some(scrubber) = scrubber {
-        scrub_request(&body, scrubber)
+        let mut scrubber = scrubber.lock().expect("scrubber poisoned");
+        scrub_request(&body, &mut scrubber)
     } else {
         body
     };
@@ -242,7 +252,7 @@ mod tests {
         let gateway = start(
             format!("http://{address}"),
             Some("upstream-secret".into()),
-            true,
+            Some(Arc::new(Mutex::new(Scrubber::new()))),
         )
         .unwrap();
         let response = ureq::post(&format!("{}/chat/completions", gateway.base_url))
@@ -269,7 +279,12 @@ mod tests {
                 .unwrap();
         });
 
-        let gateway = start(format!("http://{address}"), None, true).unwrap();
+        let gateway = start(
+            format!("http://{address}"),
+            None,
+            Some(Arc::new(Mutex::new(Scrubber::new()))),
+        )
+        .unwrap();
         let response = ureq::post(&format!("{}/chat/completions", gateway.base_url))
             .set("authorization", &format!("Bearer {}", gateway.token))
             .send_string(r#"{"stream":true}"#)

@@ -57,17 +57,22 @@ model = "laya"
 [operator.mcp]
 url = "http://127.0.0.1:8792/mcp"
 token_env = "UNIBUS_MCP_TOKEN"
+
+# Only these tools may receive restored scrubbed values.
+allowed_tools = ["records_upsert", "mail_send"]
 ```
 
-This maps to Operator's MCP bridge:
+This maps to Operator's MCP bridge through a loopback MCP gateway:
 
 ```text
-EDGERUNNER_MCP_URL
-EDGERUNNER_MCP_TOKEN
+EDGERUNNER_MCP_URL=http://127.0.0.1:<port>/mcp
+EDGERUNNER_MCP_TOKEN=<ephemeral MCP session token>
 ```
 
-Tools exposed by `unibus-mcp`/DCP therefore appear as `mcp__<server>__<tool>`
-inside Operator. The endpoint is host-selected; Operator does not discover it.
+Operator does not receive the upstream `unibus-mcp` token.
+
+Tools exposed by `unibus-mcp`/DCP appear as `mcp__<server>__<tool>` inside
+Operator. The endpoint and upstream credential are host-selected.
 
 ## Geode adapter
 
@@ -101,10 +106,28 @@ streams the upstream response, including SSE
 ```
 
 The request is scrubbed before it leaves the host. The response is passed
-through as a stream because the model only ever saw placeholders. Tool-result
-scrubbing still belongs at the tool boundary.
+through as a stream because the model only ever saw placeholders.
 
-Disable it explicitly:
+## MCP tool boundary
+
+When `operator.mcp.url` is configured, `mush run op` also starts a loopback MCP
+gateway:
+
+```text
+Operator -> MCP gateway -> unibus-mcp / DCP
+```
+
+On `tools/call`:
+
+- only names in `allowed_tools` may restore scrubbed values
+- restored values are written only into the tool arguments
+- non-allowed tools receive placeholders unchanged
+- the tool result is scrubbed before it returns to the model
+
+The upstream MCP token is injected by the gateway and never appears in
+Operator's environment.
+
+Disable the inference gateway explicitly:
 
 ```sh
 mush run op --no-gateway

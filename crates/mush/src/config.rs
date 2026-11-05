@@ -59,6 +59,9 @@ pub struct McpConfig {
     pub url: Option<String>,
     pub url_env: Option<String>,
     pub token_env: Option<String>,
+    /// Tool names allowed to restore scrubbed values at the MCP boundary.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -83,6 +86,7 @@ pub struct ResolvedOperator {
     pub model: Option<String>,
     pub mcp_url: Option<String>,
     pub mcp_token: Option<String>,
+    pub mcp_allowed_tools: Vec<String>,
 }
 
 impl SoilConfig {
@@ -161,6 +165,7 @@ impl SoilConfig {
                 .token_env
                 .as_deref()
                 .and_then(|name| std::env::var(name).ok()),
+            mcp_allowed_tools: self.operator.mcp.allowed_tools.clone(),
         })
     }
 }

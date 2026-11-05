@@ -7,6 +7,7 @@
 mod config;
 mod gateway;
 mod geode;
+mod mcp_gateway;
 mod overlay;
 
 use std::{
@@ -317,9 +318,10 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     args.retain(|arg| arg != "--keep" && arg != "--no-apply" && arg != "--no-gateway");
     let mut base_url = resolved.base_url.clone();
     let mut api_key = resolved.api_key.clone();
+    let scrubber = std::sync::Arc::new(std::sync::Mutex::new(soil_scrub::Scrubber::new()));
     let _gateway = if !no_gateway {
         if let Some(upstream) = base_url.clone() {
-            let gateway = gateway::start(upstream, api_key.clone(), true)?;
+            let gateway = gateway::start(upstream, api_key.clone(), Some(scrubber.clone()))?;
             eprintln!("mush: inference gateway {}", gateway.base_url);
             base_url = Some(gateway.base_url.clone());
             api_key = Some(gateway.token.clone());
@@ -327,6 +329,23 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
         } else {
             None
         }
+    } else {
+        None
+    };
+    let mut mcp_url = resolved.mcp_url.clone();
+    let mut mcp_token = resolved.mcp_token.clone();
+    let _mcp_gateway = if let Some(upstream) = mcp_url.clone() {
+        let gateway = mcp_gateway::start(
+            upstream,
+            mcp_token.clone(),
+            None,
+            Some(scrubber.clone()),
+            resolved.mcp_allowed_tools.clone(),
+        )?;
+        eprintln!("mush: mcp gateway {}", gateway.url);
+        mcp_url = Some(gateway.url.clone());
+        mcp_token = Some(gateway.token.clone());
+        Some(gateway)
     } else {
         None
     };
@@ -350,10 +369,10 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     if let Some(model) = &resolved.model {
         command.env("OPERATOR_MODEL", model);
     }
-    if let Some(mcp_url) = &resolved.mcp_url {
+    if let Some(mcp_url) = &mcp_url {
         command.env("EDGERUNNER_MCP_URL", mcp_url);
     }
-    if let Some(token) = &resolved.mcp_token {
+    if let Some(token) = &mcp_token {
         command.env("EDGERUNNER_MCP_TOKEN", token);
     }
     if let Some(prompt) = prompt {
