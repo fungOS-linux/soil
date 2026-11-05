@@ -24,7 +24,9 @@ portable input normalizer is
 - **GPU work is not a second UI channel.** Canvas owns its own rendering. A Spore
   may use the separately granted upstream `wasi:webgpu` for offscreen compute or
   render, but its pixels still have to reach Canvas through a host-owned target;
-  it never gets a window or swapchain.
+  it never gets a window or swapchain. A Spore-owned GPU renderer observes
+  `soil:canvas.state` for extent, scale and theme, then presents the completed
+  texture through `soil:canvas-gpu`; Canvas owns the window and final composite.
 
 Revisit `soil:surface` only when one of these is real:
 
@@ -43,9 +45,15 @@ Revisit `soil:surface` only when one of these is real:
 | `input(generation, key)` | Deliver one normalized event. A stale generation is refused. |
 | `close()` | Release the grant; later calls return `closed`. |
 
-`state` carries `generation`, host-selected `width`/`height`/`scale`, `focused`
-and `visible`. The generation increases on target/navigation/focus/visibility
-changes, so a late input cannot move the owner backwards.
+`state` carries `generation`, host-selected `width`/`height`/`scale`, `focused`,
+`visible`, and the host-resolved `theme`. The generation increases on
+target/navigation/focus/visibility/theme changes, so a late input or repaint
+cannot move the owner backwards.
+
+Theme is data, not a callback: mode, background/surface/text/muted/primary/
+success/warning/danger/info colors, and the logical type/radius scale. A
+Spore-owned renderer can therefore draw with the owner's actual theme instead of
+hard-coding colors or trying to sample the framebuffer.
 
 Failure taxonomy: `denied`, `not-ready`, `stale`, `over-budget`, `invalid`,
 `closed`, `backend`. There is no placeholder success and no raw error text.

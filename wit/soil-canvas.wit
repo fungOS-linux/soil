@@ -65,6 +65,42 @@ interface surface {
     escape,
   }
 
+  record rgb {
+    r: u8,
+    g: u8,
+    b: u8,
+  }
+
+  enum theme-mode {
+    light,
+    dark,
+  }
+
+  /// Theme tokens the host has already resolved. A Spore-owned renderer reads
+  /// these instead of guessing colors from a screenshot or hard-coding its own.
+  record theme {
+    mode: theme-mode,
+    background: rgb,
+    surface: rgb,
+    text: rgb,
+    muted: rgb,
+    primary: rgb,
+    success: rgb,
+    warning: rgb,
+    danger: rgb,
+    info: rgb,
+    /// Type scale in logical pixels.
+    micro: f32,
+    small: f32,
+    body: f32,
+    large: f32,
+    title: f32,
+    display: f32,
+    hero: f32,
+    space-two: f32,
+    radius: f32,
+  }
+
   record modifiers {
     shift: bool,
     control: bool,
@@ -86,6 +122,9 @@ interface surface {
     scale: f32,
     focused: bool,
     visible: bool,
+    /// The host's current theme. Present on every observation so a GPU-rendered
+    /// surface can repaint when the owner theme changes without reading pixels.
+    theme: theme,
   }
 
   /// Present into the space the host granted.
