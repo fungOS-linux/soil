@@ -405,7 +405,7 @@ header .spacer { flex: 1; }
   border-radius: 8px; padding: 6px 11px;
 }
 .button:hover { border-color: #3b4c5c; }
-main { display: grid; grid-template-columns: minmax(240px, 340px) 1fr; height: calc(100vh - 59px); }
+main { display: grid; grid-template-columns: minmax(210px, 280px) 1fr; height: calc(100vh - 59px); }
 aside { border-right: 1px solid var(--line); min-height: 0; display: flex; flex-direction: column; }
 .search { padding: 14px 14px 8px; }
 input {
@@ -459,7 +459,7 @@ pre {
   padding: 14px; color: #b9c7d1; max-height: 420px; overflow: auto;
 }
 .meta { color: var(--muted); font-size: 11px; margin-top: 22px; display: flex; flex-wrap: wrap; gap: 8px 18px; }
-@media (max-width: 620px) {
+@media (max-width: 460px) {
   main { grid-template-columns: 1fr; height: auto; }
   aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 48vh; }
   .detail { padding: 24px 18px 70px; }
