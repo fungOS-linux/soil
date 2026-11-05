@@ -196,6 +196,12 @@ fn hit_json(hit: api::Hit) -> Value {
         "score": hit.score,
         "source": hit.source,
         "updated_at_ms": hit.updated_at_ms,
+        "references": hit.references.into_iter().map(|reference| json!({
+            "kind": reference.kind,
+            "id": reference.id,
+            "rel": reference.rel,
+            "title": reference.title,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -411,6 +417,10 @@ input:focus, select:focus { border-color: var(--accent-2); box-shadow: 0 0 0 3px
 .kind.spore { color: #d8a8ff; border-color: rgba(216, 168, 255, 0.3); }
 .title { font-weight: 600; overflow-wrap: anywhere; }
 .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.refs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.ref { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 12px; }
+.ref b { color: var(--accent-2); font-weight: 600; }
+.ref i { color: var(--muted); font-style: normal; }
 .snip { color: #b9c7d1; font-size: 13px; margin-top: 8px; overflow-wrap: anywhere; }
 .meta { color: var(--muted); font-size: 11px; margin-top: 9px; display: flex; gap: 12px; flex-wrap: wrap; }
 .empty { color: var(--muted); text-align: center; margin: 11vh 0; }
@@ -487,6 +497,18 @@ function renderHits() {
     card.append(head);
     if (hit.subtitle) card.append(el("div", "sub", hit.subtitle));
     if (hit.snippet) card.append(el("div", "snip", hit.snippet));
+    if (hit.references && hit.references.length) {
+      const refs = el("div", "refs");
+      for (const reference of hit.references) {
+        const chip = el("span", "ref");
+        chip.append(el("b", null, reference.kind));
+        if (reference.rel) chip.append(el("i", null, " " + reference.rel + " "));
+        chip.append(el("span", null, reference.title || reference.id));
+        chip.title = reference.id;
+        refs.append(chip);
+      }
+      card.append(refs);
+    }
     const meta = el("div", "meta");
     meta.append(el("span", null, hit.source), el("span", null, hit.id));
     if (hit.updated_at_ms) meta.append(el("span", null, new Date(hit.updated_at_ms).toLocaleString()));

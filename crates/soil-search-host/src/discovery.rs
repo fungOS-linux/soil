@@ -361,14 +361,9 @@ impl ServiceIndex {
     }
 }
 
-fn search_entries<T: Searchable>(
-    entries: &[T],
-    query: &str,
-    limit: usize,
-    base_score: u32,
-) -> Vec<(T, u32)>
+fn search_entries<T>(entries: &[T], query: &str, limit: usize, base_score: u32) -> Vec<(T, u32)>
 where
-    T: Clone,
+    T: Searchable + Clone,
 {
     let needle = query.to_lowercase();
     let mut hits = Vec::new();

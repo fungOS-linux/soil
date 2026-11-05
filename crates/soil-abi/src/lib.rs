@@ -62,8 +62,14 @@ pub const CONTRACTS: &[Contract] = &[
     Contract {
         file: "wit/soil-search.wit",
         source: include_str!("../../../wit/soil-search.wit"),
-        package: "soil:search@0.1.0",
+        package: "soil:search@0.2.0",
         interfaces: &[("search", &["search", "state", "refresh"])],
+    },
+    Contract {
+        file: "wit/soil-http.wit",
+        source: include_str!("../../../wit/soil-http.wit"),
+        package: "soil:http@0.1.0",
+        interfaces: &[("http", &["fetch"])],
     },
     Contract {
         file: "wit/soil-unibus.wit",
@@ -85,7 +91,15 @@ pub const CONTRACTS: &[Contract] = &[
             ("directory", &["targets", "get"]),
             (
                 "session",
-                &["open-shell", "read", "write", "resize", "status", "close", "exec"],
+                &[
+                    "open-shell",
+                    "read",
+                    "write",
+                    "resize",
+                    "status",
+                    "close",
+                    "exec",
+                ],
             ),
         ],
     },
@@ -93,7 +107,10 @@ pub const CONTRACTS: &[Contract] = &[
         file: "wit/soil-terminal.wit",
         source: include_str!("../../../wit/soil-terminal.wit"),
         package: "soil:terminal@0.1.0",
-        interfaces: &[("surface", &["open", "present", "next-input", "observe", "close"])],
+        interfaces: &[(
+            "surface",
+            &["open", "present", "next-input", "observe", "close"],
+        )],
     },
     Contract {
         file: "wit/soil-canvas.wit",

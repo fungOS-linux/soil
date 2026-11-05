@@ -43,17 +43,18 @@ review map for what else exists and what is missing.
 | `soil:ble@1` | BLE radio | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | yes | Eight verbs, Soil-issued handles, typed errors, local lease (signed lease pending). Canonical WIT: [`wit/soil-ble.wit`](../wit/soil-ble.wit); host: [`crates/soil-ble-host`](../crates/soil-ble-host). |
 | `soil:stream@1` | Unibus stream | `soil:stream` plus kind/schema grants | yes | Bounded subscription resource; read/write/credit; no endpoints, producer ids, or tokens. |
 | `soil:view@1` | host-owned web/Spore/retained view | `soil:view`, optional `soil:view.capture` | yes | Target ids only; bounded open/act/observe/capture. Host owns the browser/Spore engine, pixels and capture buffer. Canonical WIT: [`wit/soil-view.wit`](../wit/soil-view.wit). |
+| `soil:http@0.1` | bounded host-mediated HTTP | `soil:http` | draft | GET/HEAD, host origin allowlist, bounded bodies, opaque credential handles. Direct transport runs; Iroh/Mycelium routing is a host transport seam. Canonical WIT: [`wit/soil-http.wit`](../wit/soil-http.wit). |
 | `soil:api@1` | authenticated upstream API | `soil:api` plus service/operation grant | yes | Host-mediated request/response. Soil holds the credential and mints/brokers delegated tokens; the Spore never sees them. |
 | `soil:storage@1` | content-addressed assets | `soil:storage.read`, optional `soil:storage.write` | yes | CIDs, never paths. Read-only cache by default. Canonical WIT: [`wit/soil-storage.wit`](../wit/soil-storage.wit). |
 | `soil:vfs@1` | workspace namespace and bounded reads | `soil:vfs` | yes | Canonical workspace-relative paths, `ContentId`, paged listing and range reads. No host paths or providers. Canonical WIT: [`wit/soil-vfs.wit`](../wit/soil-vfs.wit). |
 | `soil:appdata@1` | private app storage | `soil:appdata` | yes | Local and per-user/per-app synced key-value storage. Opaque bytes, quota-bounded, not indexed or shareable. Canonical WIT: [`wit/soil-appdata.wit`](../wit/soil-appdata.wit). |
 | `soil:records@0.1` | durable records | `soil:records` read/write/sync | draft | Schema-tagged entries, tombstones, scan/changes/apply. Host adapter: [`crates/soil-records-host`](../crates/soil-records-host); guest SDK: [`crates/soil-sdk-records`](../crates/soil-sdk-records). |
 | `soil:index@1` | derived browse/search index | `soil:index` | yes | Rebuildable, generationed, returns paths and snippets; never authority. Canonical WIT: [`wit/soil-index.wit`](../wit/soil-index.wit). |
-| `soil:search@0.1` | global search | `soil:search` | draft | Host-composed files + records + future actions. Locators only, never authority. Host: [`crates/soil-search-host`](../crates/soil-search-host). |
+| `soil:search@0.2` | global search | `soil:search` | draft | Host-composed files + records + future actions. Locators only, never authority. Host: [`crates/soil-search-host`](../crates/soil-search-host). |
 | `soil:time@1` | host monotonic clock | `soil:time` | yes | Monotonic milliseconds and host ticks only. No wall clock, sleep, or timer thread. Canonical WIT: [`wit/soil-time.wit`](../wit/soil-time.wit). |
 | `soil:notify@1` | host notification UI | `soil:notify` | later | Rate-limited, user-visible. Never a background toast loop. |
 | `soil:display@1` | display enumeration/placement | — | no | Soil owns displays. Spore asks for a surface purpose, not a display id. |
-| `soil:net@1` | raw sockets/DNS | — | no | Use `soil:api` or `soil:stream`. No ambient HTTP, redirects, or arbitrary hosts. |
+| `soil:net@1` | raw sockets/DNS | — | no | Use `soil:http`, `soil:api`, or `soil:stream`. No ambient sockets, DNS, redirects, or arbitrary hosts. |
 | `soil:process@1` | process spawn | — | no | A Spore is not a process manager. |
 | `soil:secrets@1` | secret storage | — | no | Host injects credentials for `soil:api`; wasm never reads secrets. |
 | `soil:compute@1` | GPU compute | — | no (v1) | Requires a different buffer/kernel/queue model. Add only with a concrete workload and hard budgets. |
@@ -281,7 +282,7 @@ Any unsupported row is a named denial, not an empty success.
 
 ## Non-goals for v1
 
-- raw sockets or arbitrary HTTP
+- raw sockets, DNS, or ambient HTTP; use bounded `soil:http` or `soil:api`
 - filesystem paths or directory traversal
 - raw keycodes or display enumeration
 - process spawning

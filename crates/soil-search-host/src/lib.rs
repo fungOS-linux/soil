@@ -7,6 +7,7 @@
 
 mod discovery;
 mod git;
+mod graph;
 mod tgrep;
 
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,7 @@ use anyhow::Context;
 use discovery::{PeerIndex, ServiceIndex, SporeIndex};
 use fungos_records::{Record, Store};
 use git::GitIndex;
+use graph::GraphIndex;
 use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
 use tgrep::TgrepSource;
 use wasmtime::component::{HasSelf, Linker};
@@ -31,6 +33,7 @@ pub struct SearchService {
     vfs: Option<VfsHost>,
     records: Option<Mutex<Store>>,
     books: Vec<String>,
+    graph: GraphIndex,
     git: Option<GitIndex>,
     tgrep: Option<TgrepSource>,
     spores: Option<SporeIndex>,
@@ -41,10 +44,16 @@ pub struct SearchService {
 
 impl SearchService {
     pub fn new(vfs: Option<VfsHost>, records: Option<Store>, books: Vec<String>) -> Self {
+        let records = records.map(Mutex::new);
+        let graph = records
+            .as_ref()
+            .map(|store| GraphIndex::build(&store.lock().expect("records store poisoned"), &books))
+            .unwrap_or_default();
         Self {
             vfs,
-            records: records.map(Mutex::new),
+            records,
             books,
+            graph,
             git: None,
             tgrep: None,
             spores: None,
@@ -197,6 +206,7 @@ impl SearchService {
         if kinds.contains(&search_api::Kind::Action) {
             hits.extend(self.action_hits(&query));
         }
+        self.graph.enrich(&mut hits);
         hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
         let start = usize::try_from(query.offset).unwrap_or(usize::MAX);
         let total = hits.len();
@@ -234,6 +244,7 @@ impl SearchService {
                     score: 1_000_000,
                     source: "tgrep".into(),
                     updated_at_ms: None,
+                    references: Vec::new(),
                 })
                 .collect());
         }
@@ -268,6 +279,7 @@ impl SearchService {
                 score: hit.score,
                 source: "vfs".into(),
                 updated_at_ms: None,
+                references: Vec::new(),
             })
             .collect())
     }
@@ -292,6 +304,7 @@ impl SearchService {
                 score,
                 source: "git".into(),
                 updated_at_ms: None,
+                references: Vec::new(),
             })
             .collect()
     }
@@ -312,6 +325,7 @@ impl SearchService {
                 score,
                 source: format!("spore:{}", entry.root),
                 updated_at_ms: None,
+                references: Vec::new(),
             })
             .collect()
     }
@@ -332,6 +346,7 @@ impl SearchService {
                 score,
                 source: "mycelium:peers".into(),
                 updated_at_ms: entry.updated_at_ms,
+                references: Vec::new(),
             })
             .collect()
     }
@@ -352,6 +367,7 @@ impl SearchService {
                 score,
                 source: "mycelium:services".into(),
                 updated_at_ms: entry.updated_at_ms,
+                references: Vec::new(),
             })
             .collect()
     }
@@ -371,6 +387,7 @@ impl SearchService {
                 score,
                 source: "git".into(),
                 updated_at_ms: None,
+                references: Vec::new(),
             })
             .collect()
     }
@@ -426,6 +443,7 @@ fn record_hit(record: Record, needle: &str, index: usize) -> search_api::Hit {
         score: 900_000u32.saturating_sub(index as u32),
         source: format!("records:{}", record.book_id),
         updated_at_ms: Some(record.updated_hlc),
+        references: Vec::new(),
     }
 }
 
@@ -454,6 +472,13 @@ impl search_api::Host for SearchService {
         if let Some(vfs) = self.vfs.as_mut() {
             vfs.refresh_index().map_err(|_| search_api::Error::Io)?;
         }
+        self.graph = self
+            .records
+            .as_ref()
+            .map(|store| {
+                GraphIndex::build(&store.lock().expect("records store poisoned"), &self.books)
+            })
+            .unwrap_or_default();
         if let Some(git) = self.git.as_mut() {
             git.refresh();
         }
@@ -767,6 +792,78 @@ surfaces = ["canvas"]
         assert_eq!(page.hits.len(), 1);
         assert_eq!(page.hits[0].kind, search_api::Kind::RecordEntry);
         assert_eq!(page.hits[0].title, "Ada Lovelace");
+    }
+
+    #[test]
+    fn record_hits_carry_graph_links_and_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = seed_records(&dir.path().join("records"));
+        let book = "personal/avery/contacts";
+        store
+            .put_record(
+                book,
+                "soil",
+                "fungos.project/project",
+                1,
+                serde_json::json!({
+                    "title": "Soil",
+                    "status": "active"
+                }),
+            )
+            .unwrap();
+        store
+            .put_record(
+                book,
+                "link-soil-repo",
+                crate::graph::LINK_SCHEMA,
+                1,
+                serde_json::json!({
+                    "from": "soil",
+                    "rel": "references",
+                    "to": "repository:fungOS-linux/soil",
+                    "title": "Soil repository",
+                    "role": "primary"
+                }),
+            )
+            .unwrap();
+        store
+            .put_record(
+                book,
+                "ref-soil-crate",
+                crate::graph::REFERENCE_SCHEMA,
+                1,
+                serde_json::json!({
+                    "node": "soil",
+                    "scheme": "purl",
+                    "value": "pkg:cargo/soil@0.1.0",
+                    "title": "Soil crate"
+                }),
+            )
+            .unwrap();
+
+        let mut host = SearchService::new(None, Some(store), vec![book.into()]);
+        let page = host
+            .search(search_api::Query {
+                text: "Soil".into(),
+                kinds: vec![search_api::Kind::RecordEntry],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        let project = page
+            .hits
+            .iter()
+            .find(|hit| hit.id == format!("{book}/soil"))
+            .expect("project hit");
+        assert!(project.references.iter().any(|reference| {
+            reference.kind == "repository"
+                && reference.id == "repository:fungOS-linux/soil"
+                && reference.rel.as_deref() == Some("references")
+        }));
+        assert!(project.references.iter().any(|reference| {
+            reference.kind == "purl" && reference.id == "pkg:cargo/soil@0.1.0"
+        }));
     }
 
     #[test]

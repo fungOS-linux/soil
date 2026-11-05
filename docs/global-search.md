@@ -1,6 +1,6 @@
 # Global search
 
-`soil:search@0.1.0` is a host-composed discovery surface over the sources a
+`soil:search@0.2.0` is a host-composed discovery surface over the sources a
 host has already granted:
 
 ```text
@@ -44,6 +44,7 @@ hit {
   score,
   source,
   updated-at-ms,
+  references, // bounded graph references attached to this hit
 }
 ```
 
@@ -58,6 +59,8 @@ hit {
 - a host-granted `mycelium peers --json` snapshot
 - a host-granted Mycelium/Unibus service catalog snapshot
 - optional Microsoft `tgrep` regex search over an explicit root or VFS mount
+- graph links and references from `fungos.graph/link@1` and
+  `fungos.graph/reference@1` in the approved records books
 
 Results are merged by score, then title, and paginated. `refresh` rebuilds the
 VFS index and advances the search generation.
@@ -99,6 +102,8 @@ action source returns no hits rather than inventing one.
 - Search never grants access. It can only search sources the host opened.
 - Search is local and never syncs an index.
 - Record text is read from the materialized `fungos-records` view.
+- Graph references are derived from approved books only. A reference is a
+  locator, not an access grant; see [graph.md](graph.md).
 - Git search reads repository name, relative id, branch, and a credential-
   stripped origin URL. It never runs Git or reads working-tree bytes.
 - Spore search reads manifests only, not module bytes or asset contents.

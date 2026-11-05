@@ -4,7 +4,7 @@
 // `soil:vfs`, records from `soil:records`, and actions from their owning host
 // capability. A hit is a locator plus display metadata; the caller fetches the
 // authoritative object through the source capability.
-package soil:search@0.1.0;
+package soil:search@0.2.0;
 
 interface search {
   enum kind {
@@ -44,6 +44,17 @@ interface search {
     limit: u32,
   }
 
+  /// A typed graph reference attached to a hit. This is discovery metadata,
+  /// not an access grant or a fetched object.
+  record reference {
+    /// `record`, `repository`, `file`, or an external scheme such as `purl`.
+    kind: string,
+    id: string,
+    /// Relationship label, e.g. `references`, `depends_on`, `works_at`.
+    rel: option<string>,
+    title: option<string>,
+  }
+
   record hit {
     kind: kind,
     /// Source-local locator: a VFS path, `book/entity`, or action id.
@@ -56,6 +67,9 @@ interface search {
     /// Source identity, e.g. `vfs` or `records:personal/avery/contacts`.
     source: string,
     updated-at-ms: option<u64>,
+    /// Bounded graph references attached to this hit. Empty when the host has
+    /// no graph index for the object.
+    references: list<reference>,
   }
 
   record page {
