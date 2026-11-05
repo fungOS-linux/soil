@@ -253,9 +253,10 @@ fn vfs_error(error: VfsError) -> vfs::Error {
         VfsError::InvalidPath(_) => vfs::Error::Invalid,
         VfsError::ReadOnly => vfs::Error::Denied,
         VfsError::Io(_) | VfsError::Sql(_) | VfsError::Transport(_) => vfs::Error::Io,
-        VfsError::InvalidContentId(_) | VfsError::Conflict { .. } | VfsError::Leased { .. } => {
-            vfs::Error::Io
-        }
+        VfsError::InvalidContentId(_)
+        | VfsError::Conflict { .. }
+        | VfsError::AlreadyExists(_)
+        | VfsError::Leased { .. } => vfs::Error::Io,
         VfsError::RoleMismatch { .. } => vfs::Error::Denied,
     }
 }
