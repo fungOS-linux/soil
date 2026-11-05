@@ -43,17 +43,21 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn new(font: &Font, point_size: f32, scale: f32) -> Self {
+        // Everything is measured at the *device* size. Measuring the advance at
+        // the point size and then multiplying by the scale applies the display
+        // scale twice, which is how a 15pt cell became 30pt tall and left a
+        // screen of text with gaps you could park a car in.
         let px_size = point_size * scale;
-        let advance = font.metrics('M', point_size).advance_width.max(1.0);
+        let advance = font.metrics('M', px_size).advance_width.max(1.0);
         let height = font
             .horizontal_line_metrics(px_size)
             .map(|line| line.new_line_size)
-            .unwrap_or(point_size * 1.6);
+            .unwrap_or(px_size * 1.6);
         Self {
             // Whole device pixels: a fractional advance makes every other column
             // drift by a subpixel, which in a column of text is glaring.
-            cell_w: (advance * scale).round().max(1.0) as u32,
-            cell_h: (height * scale).round().max(1.0) as u32,
+            cell_w: advance.round().max(1.0) as u32,
+            cell_h: height.round().max(1.0) as u32,
             px_size,
             ascent: font
                 .horizontal_line_metrics(px_size)

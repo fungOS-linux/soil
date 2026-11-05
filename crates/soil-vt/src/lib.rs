@@ -14,6 +14,8 @@
 //! process and its output; Canvas owns pixels. A `Snapshot` is plain data so it
 //! can cross a WIT boundary unchanged.
 
+pub mod host;
+
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::terminal::{Options, Terminal};
 

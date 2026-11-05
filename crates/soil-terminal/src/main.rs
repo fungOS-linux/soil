@@ -98,6 +98,12 @@ struct Options {
     title: Option<String>,
     text: Option<String>,
     command: Vec<String>,
+    /// Write one frame to a PNG and exit. The point is evidence: the same
+    /// painter that fills the window fills this, so a screenshot of a dump is a
+    /// screenshot of the renderer.
+    dump: Option<String>,
+    dump_cols: u16,
+    dump_rows: u16,
 }
 
 fn parse() -> Options {
@@ -106,6 +112,9 @@ fn parse() -> Options {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--title" => options.title = args.next(),
+            "--dump" => options.dump = args.next(),
+            "--cols" => options.dump_cols = args.next().and_then(|v| v.parse().ok()).unwrap_or(100),
+            "--rows" => options.dump_rows = args.next().and_then(|v| v.parse().ok()).unwrap_or(30),
             "--text" => options.text = args.next(),
             "--command" => {
                 options.command = args.by_ref().collect();
@@ -480,8 +489,54 @@ impl ApplicationHandler for App {
     }
 }
 
+/// Render one snapshot to a PNG. Shared metrics matter: the dump must use the
+/// same faces, cell size, and painter as the window or it proves nothing.
+fn dump(options: &Options, path: &str) {
+    let faces = load_faces();
+    let metrics = Metrics::new(&faces.regular, FONT_SIZE, 2.0);
+    let cols = options.dump_cols.max(1);
+    let rows = options.dump_rows.max(1);
+    let mut session = Session::new(cols, rows, 1_000).expect("terminal");
+    if let Some(text) = options.text.as_ref() {
+        let bytes = if text == "-" {
+            let mut buffer = Vec::new();
+            let _ = std::io::stdin().read_to_end(&mut buffer);
+            buffer
+        } else {
+            std::fs::read(text).unwrap_or_default()
+        };
+        session.write(&bytes);
+    }
+    let snapshot = session.snapshot().expect("snapshot");
+    let width = cols as u32 * metrics.cell_w;
+    let height = rows as u32 * metrics.cell_h;
+    let mut buffer = vec![0u32; (width * height) as usize];
+    render::paint(&snapshot, &faces, &metrics, width, height, &mut buffer);
+    render::paint_cursor(&snapshot, &faces, &metrics, width, height, &mut buffer, true);
+
+    let file = std::fs::File::create(path).expect("create dump");
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("png header");
+    let mut rgba = Vec::with_capacity(buffer.len() * 4);
+    for pixel in buffer {
+        let (r, g, b) = (
+            (pixel >> 16 & 0xff) as u8,
+            (pixel >> 8 & 0xff) as u8,
+            (pixel & 0xff) as u8,
+        );
+        rgba.extend_from_slice(&[r, g, b, 0xff]);
+    }
+    writer.write_image_data(&rgba).expect("png data");
+}
+
 fn main() {
     let options = parse();
+    if let Some(path) = options.dump.clone() {
+        dump(&options, &path);
+        return;
+    }
     let event_loop = EventLoop::new().expect("event loop");
     // Redraw on demand: a terminal that repaints 60 times a second for a
     // blinking cursor burns a laptop battery for nothing.
