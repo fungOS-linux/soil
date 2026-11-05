@@ -54,7 +54,13 @@ Results are merged by score, then title, and paginated. `refresh` rebuilds the
 VFS index and advances the search generation.
 
 The host supplies the filesystem root and the approved book list. A Spore does
-not choose a path, book, provider, or source. Requesting `action` without an
+not choose a path, book, provider, or source. Semantic file search is enabled
+only when the host attaches an embedding provider:
+
+```rust
+let search = SearchService::open(vfs_root, records_root, books)?
+    .with_embeddings(Arc::new(Model2VecEmbedder::potion_base_8m()?))?;
+``` Requesting `action` without an
 action source returns no hits rather than inventing one.
 
 ## Ranking

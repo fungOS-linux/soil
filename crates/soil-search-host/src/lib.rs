@@ -5,11 +5,11 @@
 //! bounded page. It does not grant access: the host supplies the roots and
 //! approved books.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use fungos_records::{Record, Store};
-use soil_vfs_host::{VfsHost, index};
+use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
 use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit", world: "search-host" });
@@ -35,6 +35,18 @@ impl SearchService {
             books,
             generation: 1,
         }
+    }
+
+    /// Enable semantic file search with the host-selected embedding provider.
+    pub fn with_embeddings(
+        mut self,
+        embeddings: Arc<dyn EmbeddingProvider>,
+    ) -> anyhow::Result<Self> {
+        if let Some(vfs) = self.vfs.take() {
+            self.vfs = Some(vfs.with_embeddings(embeddings)?);
+        }
+        self.generation = self.generation.saturating_add(1);
+        Ok(self)
     }
 
     pub fn open(
@@ -249,6 +261,50 @@ mod tests {
             )
             .unwrap();
         store
+    }
+
+    struct FakeEmbeddings;
+
+    impl EmbeddingProvider for FakeEmbeddings {
+        fn model_id(&self) -> &str {
+            "fake:global"
+        }
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    if text.to_lowercase().contains("trip") {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.0, 1.0]
+                    }
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn semantic_file_search_uses_the_host_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_vfs(dir.path());
+        let vfs = VfsHost::open(dir.path()).unwrap();
+        let mut host = SearchService::new(Some(vfs), None, vec![])
+            .with_embeddings(Arc::new(FakeEmbeddings))
+            .unwrap();
+        let page = host
+            .search(search_api::Query {
+                text: "trip".into(),
+                kinds: vec![search_api::Kind::File],
+                mode: Some(search_api::Mode::Semantic),
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].id, "notes/greece.txt");
     }
 
     #[test]
