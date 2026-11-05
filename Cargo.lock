@@ -5296,6 +5296,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-canvas-actions-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "soil-actions-host",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "soil-canvas-input"
 version = "0.1.0"
 

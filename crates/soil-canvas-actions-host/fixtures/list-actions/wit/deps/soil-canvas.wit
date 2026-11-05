@@ -1,0 +1,164 @@
+// Canvas is the cross-platform owner: window, compositor, layout, theme,
+// rendering and input lifecycle stay in the host. A Spore is logic/data and
+// asks the granted Canvas surface to present or to receive normalized input.
+//
+// Limits (host-enforced):
+// - one granted surface per Spore; the host selects extent and display
+// - one present and one input per invocation; no per-frame callback
+// - input is a bounded semantic key or one printable Unicode scalar, never a
+//   raw keycode, scan code or device event
+// - no pixels, framebuffer, DRM handle, window handle, path or clock
+package soil:canvas@1.0.0;
+
+interface surface {
+  enum failure {
+    /// The Spore has no Canvas grant.
+    denied,
+    /// The owner surface is not ready to present or accept input.
+    not-ready,
+    /// The supplied generation is older than the current owner state.
+    stale,
+    /// A present/input/frame budget was exceeded.
+    over-budget,
+    /// Malformed argument; no raw keycodes are accepted.
+    invalid,
+    /// The surface was closed by the host or the Spore.
+    closed,
+    /// The Canvas owner or platform presenter failed.
+    backend,
+  }
+
+  /// Host-normalized phone, remote and media keys. `number` is 0..=9.
+  /// The host validates the range; unsupported keys are dropped host-side.
+  variant key {
+    up,
+    down,
+    left,
+    right,
+    select,
+    back,
+    home,
+    menu,
+    info,
+    number(u8),
+    star,
+    hash,
+    call,
+    end-call,
+    push-to-talk,
+    soft-left,
+    soft-right,
+    play-pause,
+    rewind,
+    fast-forward,
+    next,
+    previous,
+    volume-up,
+    volume-down,
+    mute,
+    /// One printable Unicode scalar supplied by the host text system. This is
+    /// the layout/IME-correct path for A-Z, accents and non-ASCII scripts.
+    character(char),
+    backspace,
+    delete,
+    tab,
+    escape,
+  }
+
+  record modifiers {
+    shift: bool,
+    control: bool,
+    alt: bool,
+    meta: bool,
+  }
+
+  record event {
+    key: key,
+    modifiers: modifiers,
+  }
+
+  record state {
+    /// Increases on target/navigation/focus/visibility changes.
+    generation: u64,
+    /// Host-selected logical extent; the Spore never chooses a display.
+    width: u32,
+    height: u32,
+    scale: f32,
+    focused: bool,
+    visible: bool,
+  }
+
+  /// Render the granted owner surface. The host retains the pixels.
+  present: func() -> result<state, failure>;
+
+  /// Read the current owner state without presenting.
+  observe: func() -> result<state, failure>;
+
+  /// Deliver one normalized event. `generation` must match the state the
+  /// caller last observed; a stale generation is refused, never reordered.
+  /// Text arrives as `character`; raw keycodes and platform scan codes never
+  /// cross this boundary.
+  input: func(generation: u64, event: event) -> result<state, failure>;
+
+  /// Release the grant. Further calls return `closed`.
+  close: func() -> result<_, failure>;
+}
+
+
+/// Host-composed action catalog for a Canvas surface.
+///
+/// This is a presentation projection of the host action router. DCP actions can
+/// be projected directly; `input-schema` is the provider's JSON Schema
+/// 2020-12 so a client can render parameter forms and ranges. The list never
+/// grants execution: invocation still goes through the host action router.
+interface actions {
+  use surface.{failure};
+
+  enum effect {
+    read,
+    write,
+    external,
+  }
+
+  enum idempotency {
+    idempotent,
+    keyed,
+    unsafe,
+  }
+
+  enum confirmation {
+    none,
+    required,
+    destructive,
+  }
+
+  record action {
+    id: string,
+    label: string,
+    description: string,
+    shortcut: option<string>,
+    /// JSON Schema 2020-12 object for action arguments. An empty object means
+    /// this is a parameterless click action.
+    input-schema: string,
+    /// Host-computed fast path for rendering a button without parsing JSON.
+    requires-input: bool,
+    effect: effect,
+    idempotency: idempotency,
+    confirmation: confirmation,
+    available: bool,
+    reason: option<string>,
+    /// DCP lifecycle phases when this action came from a DCP catalog.
+    phases: list<string>,
+    /// DCP/provider identity and revision binding when available.
+    provider: option<string>,
+    catalog-revision: option<string>,
+    state-revision: option<string>,
+  }
+
+  list-actions: func() -> result<list<action>, failure>;
+}
+
+world guest {
+  import surface;
+  import actions;
+}

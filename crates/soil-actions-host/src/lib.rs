@@ -166,8 +166,7 @@ impl ActionGrants {
 /// Durable idempotency receipts. Keyed actions replay the stored output instead
 /// of invoking the adapter twice.
 pub struct IdempotencyStore {
-    db: Connection,
-    lock: Mutex<()>,
+    db: Mutex<Connection>,
 }
 
 impl IdempotencyStore {
@@ -187,10 +186,7 @@ impl IdempotencyStore {
              );",
         )
         .map_err(|error| ActionError::Io(format!("initialize idempotency store: {error}")))?;
-        Ok(Self {
-            db,
-            lock: Mutex::new(()),
-        })
+        Ok(Self { db: Mutex::new(db) })
     }
 
     pub fn in_memory() -> Result<Self, ActionError> {
@@ -207,40 +203,35 @@ impl IdempotencyStore {
              );",
         )
         .map_err(|error| ActionError::Io(format!("initialize idempotency store: {error}")))?;
-        Ok(Self {
-            db,
-            lock: Mutex::new(()),
-        })
+        Ok(Self { db: Mutex::new(db) })
     }
 
     fn get(&self, action: &str, version: u32, key: &str) -> Result<Option<String>, ActionError> {
-        let _guard = self
-            .lock
+        let db = self
+            .db
             .lock()
             .map_err(|_| ActionError::Io("idempotency lock poisoned".into()))?;
-        self.db
-            .query_row(
-                "SELECT output FROM action_receipts
+        db.query_row(
+            "SELECT output FROM action_receipts
                  WHERE action_id=?1 AND version=?2 AND idempotency_key=?3",
-                params![action, version as i64, key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|error| ActionError::Io(format!("read idempotency receipt: {error}")))
+            params![action, version as i64, key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| ActionError::Io(format!("read idempotency receipt: {error}")))
     }
 
     fn put(&self, action: &str, version: u32, key: &str, output: &str) -> Result<(), ActionError> {
-        let _guard = self
-            .lock
+        let db = self
+            .db
             .lock()
             .map_err(|_| ActionError::Io("idempotency lock poisoned".into()))?;
-        self.db
-            .execute(
-                "INSERT OR REPLACE INTO action_receipts
+        db.execute(
+            "INSERT OR REPLACE INTO action_receipts
                  (action_id,version,idempotency_key,output,created_hlc) VALUES(?1,?2,?3,?4,?5)",
-                params![action, version as i64, key, output, now_ms() as i64],
-            )
-            .map_err(|error| ActionError::Io(format!("write idempotency receipt: {error}")))?;
+            params![action, version as i64, key, output, now_ms() as i64],
+        )
+        .map_err(|error| ActionError::Io(format!("write idempotency receipt: {error}")))?;
         Ok(())
     }
 }

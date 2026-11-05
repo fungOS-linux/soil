@@ -3,6 +3,11 @@
 `soil:canvas/actions@1.0.0` exposes the host action catalog to a Spore without
 granting another execution path.
 
+The host binding lives in
+[`crates/soil-canvas-actions-host`](../crates/soil-canvas-actions-host). It links
+`list-actions` to `ActionHost::canvas_actions()`. The included guest fixture calls
+the import through a real `wasm32-wasip2` component.
+
 ```wit
 list-actions: func() -> result<list<action>, failure>;
 ```
