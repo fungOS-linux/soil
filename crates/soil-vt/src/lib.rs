@@ -16,6 +16,8 @@
 
 pub mod host;
 
+pub use host::Host;
+
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::terminal::{Options, Terminal};
 

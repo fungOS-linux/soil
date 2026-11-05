@@ -35,6 +35,11 @@ enum Command {
 }
 
 /// The host's end of a terminal.
+///
+/// Cloning is cheap and shares the same emulator: two views of one session (a
+/// window and a mirror) should show the same screen, and a host that had to be
+/// moved could not be stored in a document.
+#[derive(Clone)]
 pub struct Host {
     commands: Sender<Command>,
     latest: Arc<Mutex<Snapshot>>,
