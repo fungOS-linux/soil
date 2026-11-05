@@ -1,17 +1,19 @@
-//! Read-only Markdown notes Spore.
+//! Local-first Markdown notes Spore.
 //!
-//! The host owns the notes root, index, graph and content transport. This Spore
-//! names workspace-relative paths and returns bounded JSON for the host/UI.
+//! Notes are just workspace files: `soil:vfs` reads/writes them, `soil:index`
+//! searches them, and backlinks are derived by scanning the same notes root.
+//! There is no notes host and no notes-specific WIT.
 
 wit_bindgen::generate!({ path: "wit", world: "notes", generate_all });
 
 use serde_json::{json, Value};
-use soil::graph::graph::{self, Direction};
 use soil::index::index::{self, Mode, Query};
 use soil::vfs::vfs::{self, Kind};
 use soil::vfs_mut::vfs_mut;
 
 const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
+const NOTES_ROOT: &str = "notes";
+const MAX_BACKLINK_NOTES: usize = 2_000;
 const PAGE: u32 = 200;
 
 struct Component;
@@ -74,8 +76,9 @@ impl Guest for Component {
                             .map_err(|_| "save: expected version must be an integer, new or auto".to_string())?,
                     ),
                 };
+                let path = resolve_note(path)?;
                 let result = vfs_mut::write(
-                    path,
+                    &path,
                     content.as_bytes(),
                     "text/markdown",
                     expected_version,
@@ -112,10 +115,11 @@ impl Guest for Component {
 }
 
 fn tree(parent: &str) -> Result<Value, String> {
+    let parent = resolve_note(parent)?;
     let mut entries = Vec::new();
     let mut offset = 0u64;
     loop {
-        let page = vfs::ls(parent, offset, PAGE).map_err(|error| format!("{error:?}"))?;
+        let page = vfs::ls(&parent, offset, PAGE).map_err(|error| format!("{error:?}"))?;
         for entry in page.entries {
             entries.push(json!({
                 "path": entry.path,
@@ -139,10 +143,25 @@ fn tree(parent: &str) -> Result<Value, String> {
 }
 
 fn document(path: &str) -> Result<Value, String> {
-    let entry = vfs::stat(path).map_err(|error| format!("{error:?}"))?;
+    let path = resolve_note(path)?;
+    let entry = vfs::stat(&path).map_err(|error| format!("{error:?}"))?;
     if matches!(entry.kind, Kind::Directory) {
         return Err(format!("{path} is a directory"));
     }
+    let text = read_text(&entry.path)?;
+    Ok(json!({
+        "path": entry.path,
+        "title": title(&entry.path, &text),
+        "media_type": entry.media_type,
+        "size": entry.size,
+        "version": entry.version,
+        "content_id": entry.content_id,
+        "graph_node": note_node(&entry.path),
+        "text": text,
+    }))
+}
+
+fn read_text(path: &str) -> Result<String, String> {
     let mut bytes = Vec::new();
     let mut offset = 0u64;
     loop {
@@ -157,17 +176,7 @@ fn document(path: &str) -> Result<Value, String> {
             break;
         }
     }
-    let text = String::from_utf8_lossy(&bytes).to_string();
-    Ok(json!({
-        "path": entry.path,
-        "title": title(path, &text),
-        "media_type": entry.media_type,
-        "size": entry.size,
-        "version": entry.version,
-        "content_id": entry.content_id,
-        "graph_node": graph_node(&entry.path),
-        "text": text,
-    }))
+    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 fn presentation(document: &Value) -> Value {
@@ -255,7 +264,7 @@ fn search(text: &str) -> Result<Value, String> {
     let page = index::search(&Query {
         text: text.into(),
         mode: Some(Mode::FullText),
-        parent: None,
+        parent: Some(NOTES_ROOT.into()),
         media_type_prefix: Some("text/".into()),
         offset: 0,
         limit: 50,
@@ -276,34 +285,151 @@ fn search(text: &str) -> Result<Value, String> {
 }
 
 fn backlinks(node: &str) -> Result<Value, String> {
-    let node = graph_node(node);
-    let page = graph::neighbors(&node, None, Direction::In, 0, 100)
-        .map_err(|error| format!("{error:?}"))?;
-    let edges = page
-        .edges
-        .into_iter()
-        .map(|edge| {
-            json!({
-                "source": edge.source,
-                "target": edge.target,
-                "rel": edge.rel,
-                "title": edge.title,
-                "book": edge.book,
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(json!({ "node": node, "generation": page.generation, "edges": edges }))
+    let target = resolve_note_node(node)?;
+    let mut stack = vec![NOTES_ROOT.to_string()];
+    let mut edges = Vec::new();
+    let mut examined = 0usize;
+    while let Some(parent) = stack.pop() {
+        let mut offset = 0u64;
+        loop {
+            let page = vfs::ls(&parent, offset, PAGE).map_err(|error| format!("{error:?}"))?;
+            for entry in page.entries {
+                if matches!(entry.kind, Kind::Directory) {
+                    stack.push(entry.path);
+                    continue;
+                }
+                if !is_markdown(&entry.path) {
+                    continue;
+                }
+                examined += 1;
+                if examined > MAX_BACKLINK_NOTES {
+                    return Err("backlink scan exceeds the notes budget".into());
+                }
+                let text = read_text(&entry.path)?;
+                for link in wiki_links(&entry.path, &text)? {
+                    if link.0 == target {
+                        edges.push(json!({
+                            "source": note_node(&entry.path),
+                            "target": note_node(&target),
+                            "rel": "links",
+                            "title": link.1,
+                        }));
+                    }
+                }
+            }
+            match page.next {
+                Some(next) => offset = next,
+                None => break,
+            }
+        }
+    }
+    edges.sort_by(|left, right| {
+        left["source"]
+            .as_str()
+            .cmp(&right["source"].as_str())
+            .then_with(|| left["title"].as_str().cmp(&right["title"].as_str()))
+    });
+    edges.dedup();
+    Ok(json!({ "node": note_node(&target), "edges": edges }))
 }
 
-/// Host graph nodes for files are `vfs:<workspace-path>`. The reader accepts a
-/// note path or an explicit locator, so callers do not have to know that mapping.
-fn graph_node(node: &str) -> String {
+/// Resolve a note path or explicit `vfs:` locator to the canonical note path.
+fn resolve_note_node(node: &str) -> Result<String, String> {
     let node = node.trim();
-    if node.contains(':') && !node.starts_with('/') {
-        node.to_string()
+    if let Some(path) = node.strip_prefix("vfs:") {
+        resolve_note(path)
     } else {
-        format!("vfs:{}", node.trim_start_matches('/'))
+        resolve_note(node)
     }
+}
+
+fn note_node(path: &str) -> String {
+    format!("vfs:{}", path.trim_start_matches('/'))
+}
+
+/// Resolve a workspace-relative note path under `NOTES_ROOT`. Absolute paths
+/// and `..` escapes are refused.
+fn resolve_note(path: &str) -> Result<String, String> {
+    let raw = path.trim();
+    if raw.starts_with('/') {
+        return Err(format!("note path must be workspace-relative: {raw}"));
+    }
+    let mut parts = Vec::new();
+    for part in raw.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(format!("note path escapes the notes root: {raw}"));
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    let path = parts.join("/");
+    if path.is_empty() {
+        return Ok(NOTES_ROOT.into());
+    }
+    if path == NOTES_ROOT || path.starts_with(&format!("{NOTES_ROOT}/")) {
+        Ok(path)
+    } else {
+        Ok(format!("{NOTES_ROOT}/{path}"))
+    }
+}
+
+fn is_markdown(path: &str) -> bool {
+    matches!(
+        path.rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "md" | "markdown" | "mdx"
+    )
+}
+
+/// Parse `[[target]]` / `[[target|label]]`, resolving targets under the notes
+/// root and adding `.md` when absent. Returns `(target_path, label)`.
+fn wiki_links(source: &str, markdown: &str) -> Result<Vec<(String, Option<String>)>, String> {
+    let mut links = Vec::new();
+    let mut rest = markdown;
+    while let Some(start) = rest.find("[[") {
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find("]]") else { break };
+        let inner = &rest[..end];
+        rest = &rest[end + 2..];
+        let (target, label) = match inner.split_once('|') {
+            Some((target, label)) => (target.trim(), Some(label.trim())),
+            None => (inner.trim(), None),
+        };
+        if target.is_empty()
+            || target.starts_with('#')
+            || target.contains("://")
+            || target.len() > 512
+        {
+            continue;
+        }
+        let target = target.split('#').next().unwrap_or(target).trim();
+        if target.is_empty() {
+            continue;
+        }
+        let target = resolve_note(target)?;
+        let target = if is_markdown(&target) {
+            target
+        } else {
+            format!("{target}.md")
+        };
+        if target != source {
+            links.push((
+                target,
+                label.filter(|label| !label.is_empty()).map(str::to_owned),
+            ));
+        }
+        if links.len() >= 512 {
+            break;
+        }
+    }
+    Ok(links)
 }
 
 fn title(path: &str, text: &str) -> String {

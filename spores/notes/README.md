@@ -7,12 +7,14 @@ A local-first Markdown notes Spore:
 ```text
 VFS workspace -> soil:vfs
 search         -> soil:index
-backlinks      -> soil:graph
+backlinks      -> scan the same notes root
 UI             -> fungos.ui + fungos.action
 ```
 
-The host owns the notes root, indexing, graph mapping, presentation and any
-future writes. The Spore only names workspace-relative paths.
+The Spore treats `notes/` as its root and only names workspace-relative paths.
+It owns link extraction and backlink scanning itself; there is no notes-specific
+host or WIT. `soil:vfs` remains the storage boundary and `soil:index` the search
+boundary.
 
 ## Module actions
 
@@ -29,7 +31,7 @@ save <path> <version|new|auto> <content>
 
 All output is bounded JSON.
 
-## Reader UI
+## Editor and backlinks
 
 The reader shows:
 

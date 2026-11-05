@@ -1,20 +1,19 @@
 # Notes
 
-Status: **reader + editor + host link projection, 2026-11-05.**
+Status: **reader + editor + Spore-side backlinks, 2026-11-05.**
 
 ```text
 dev.fungos.notes Spore
   tree/read/outline/links/search/present/save
   reader rail + Markdown editor + presentation mode
+  [[wiki-link]] extraction and backlink scan
 
-soil:vfs / soil:index / soil:graph / soil:vfs-mut
-  host-owned workspace, index, graph and writes
-
-soil-notes-host
-  notes-root mapping, path escape rejection
-  [[wiki-link]] extraction
-  fungos.graph/link projection and backlink queries
+soil:vfs / soil:index / soil:vfs-mut
+  host-owned workspace, search index and writes
 ```
+
+There is no notes-specific host or WIT. Notes are workspace files under the
+Spore's `notes/` root.
 
 ## Editor
 
@@ -25,9 +24,18 @@ copy of the text.
 
 ## Backlinks
 
-The Spore accepts a note path or an explicit graph locator. A path is mapped to
-`vfs:<path>` before querying `soil:graph`. `soil-notes-host` writes one
-`fungos.graph/link` record per source/target pair when notes are indexed.
+The Spore resolves note paths under `notes/`, scans Markdown files in that root,
+and parses `[[target]]` / `[[target|label]]` links. Backlinks are returned as
+graph-shaped edges with `vfs:<path>` locators:
+
+```json
+{
+  "source": "vfs:notes/welcome.md",
+  "target": "vfs:notes/projects/soil.md",
+  "rel": "links",
+  "title": "optional label"
+}
+```
 
 ## Present
 

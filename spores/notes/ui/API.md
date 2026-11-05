@@ -104,5 +104,5 @@ are required yet.
 ## Authority
 
 None in Lua. The logic module reads the host-approved notes root through
-`soil:vfs`, search through `soil:index`, and backlinks through `soil:graph`.
+`soil:vfs`, search through `soil:index`, and backlinks by scanning the notes root.
 The UI never names a host path or transport.
