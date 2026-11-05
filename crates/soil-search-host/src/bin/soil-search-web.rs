@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use fungos_records::Store;
 use serde_json::{Value, json};
 use soil_search_host::api::Host as _;
+use soil_search_host::mention_api::Host as _;
 use soil_search_host::{SearchService, api};
 use soil_vfs_host::VfsHost;
 
@@ -158,6 +159,45 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
                 ),
             }
         }
+        "/api/suggest" => {
+            let text = query_param(query, "q").unwrap_or_default();
+            if text.trim().is_empty() {
+                return respond_json(
+                    &mut stream,
+                    "200 OK",
+                    &json!({"query": "", "candidates": []}),
+                );
+            }
+            let kinds = query_param(query, "kinds")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|kind| !kind.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let limit = query_param(query, "limit")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(10)
+                .clamp(1, 64);
+            let result = {
+                let mut service = app.service.lock().expect("search service poisoned");
+                service.suggest(text, kinds, limit)
+            };
+            match result {
+                Ok(candidates) => respond_json(
+                    &mut stream,
+                    "200 OK",
+                    &json!({
+                        "candidates": candidates.into_iter().map(mention_json).collect::<Vec<_>>(),
+                    }),
+                ),
+                Err(error) => respond_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &json!({"error": format!("{error:?}")}),
+                ),
+            }
+        }
         "/api/refresh" => {
             let state = {
                 let mut service = app.service.lock().expect("search service poisoned");
@@ -202,6 +242,18 @@ fn hit_json(hit: api::Hit) -> Value {
             "rel": reference.rel,
             "title": reference.title,
         })).collect::<Vec<_>>(),
+    })
+}
+
+fn mention_json(candidate: soil_search_host::mention_api::Candidate) -> Value {
+    json!({
+        "kind": candidate.kind,
+        "token": candidate.token,
+        "label": candidate.label,
+        "subtitle": candidate.subtitle,
+        "schema": candidate.schema,
+        "score": candidate.score,
+        "visibility": candidate.visibility,
     })
 }
 

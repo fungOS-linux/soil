@@ -1,6 +1,6 @@
 # Global search
 
-`soil:search@0.2.0` is a host-composed discovery surface over the sources a
+`soil:search@0.3.0` is a host-composed discovery surface over the sources a
 host has already granted:
 
 ```text
@@ -46,6 +46,65 @@ hit {
   updated-at-ms,
   references, // bounded graph references attached to this hit
 }
+```
+
+
+## Typed mentions
+
+`soil:search/mentions` is the `@` autocomplete resolver. It returns typed
+candidates with a stable locator token:
+
+```wit
+suggest(text, kinds, limit) -> list<candidate>
+```
+
+```wit
+candidate {
+  kind,        // person / account / company / project / task / opportunity /
+              // activity / call / thread / message / file
+  token,       // record:<book>#<entity> or file:<path>
+  label,
+  subtitle,
+  schema,      // record schema when the candidate came from records
+  score,
+  visibility,  // team / private / workspace
+}
+```
+
+Records are mapped by schema:
+
+```text
+fungos.crm/account@1       -> account
+fungos.crm/company@1       -> company
+fungos.crm/contact@1       -> person
+fungos.crm/project@1       -> project
+fungos.crm/task@1          -> task
+fungos.crm/opportunity@1   -> opportunity
+fungos.crm/activity@1      -> activity
+fungos.crm/call@1          -> call
+fungos.mail/thread@1       -> thread
+fungos.mail/message@1      -> message
+```
+
+Unknown schemas are not mentionable. Privacy follows the books the host opened:
+a team book yields projections, a private book yields private records. Files
+come from the VFS index with `visibility = workspace`.
+
+Insert `token` into the document/task/record and persist a graph link:
+
+```text
+fungos.graph/link@1
+  rel: mentions
+  source: record:<book>#<document-or-task>
+  target: record:<book>#c-ada
+```
+
+The label is resolved later. Never copy the display name into the mention.
+
+The inspection server exposes the same resolver:
+
+```text
+GET /api/suggest?q=ada&kinds=person,account&limit=10
 ```
 
 ## Host behavior

@@ -10,6 +10,7 @@ mod git;
 pub mod graph;
 mod tgrep;
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
@@ -23,11 +24,13 @@ use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit/search.wit", world: "search-host" });
 
+pub use soil::search::mentions as mention_api;
 use soil::search::search as search_api;
 
 pub use soil::search::search as api;
 
 const MAX_PAGE: u32 = 512;
+const MAX_MENTIONS: u32 = 64;
 
 pub struct SearchService {
     vfs: Option<VfsHost>,
@@ -392,6 +395,89 @@ impl SearchService {
             .collect()
     }
 
+    fn mention_candidates(
+        &mut self,
+        text: String,
+        kinds: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<mention_api::Candidate>, search_api::Error> {
+        if text.trim().is_empty() || limit == 0 || limit > MAX_MENTIONS {
+            return Err(search_api::Error::Invalid);
+        }
+        let kinds = kinds
+            .into_iter()
+            .map(|kind| kind.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>();
+        let allow = |kind: &str| kinds.is_empty() || kinds.contains(kind);
+        let mut candidates = Vec::new();
+
+        if allow("file") {
+            candidates.extend(self.file_mentions(&text, limit)?);
+        }
+
+        let Some(store) = self.records.as_ref() else {
+            return Ok(finish_mentions(candidates, limit));
+        };
+        let books: Vec<&str> = self.books.iter().map(String::as_str).collect();
+        let records = store
+            .lock()
+            .expect("records store poisoned")
+            .search_books(&books, &text, MAX_PAGE as usize)
+            .map_err(|_| search_api::Error::Io)?;
+        for (index, record) in records.into_iter().enumerate() {
+            let Some(kind) = mention_schema(&record.schema_id) else {
+                continue;
+            };
+            if !allow(kind) {
+                continue;
+            }
+            candidates.push(record_mention(record, kind, index));
+        }
+
+        Ok(finish_mentions(candidates, limit))
+    }
+
+    fn file_mentions(
+        &mut self,
+        text: &str,
+        limit: u32,
+    ) -> Result<Vec<mention_api::Candidate>, search_api::Error> {
+        let Some(vfs) = self.vfs.as_mut() else {
+            return Ok(Vec::new());
+        };
+        use soil_vfs_host::index::Host as _;
+        let page = vfs
+            .search(index::Query {
+                text: text.to_string(),
+                mode: Some(index::Mode::Fuzzy),
+                parent: None,
+                media_type_prefix: None,
+                offset: 0,
+                limit: limit.min(MAX_MENTIONS),
+            })
+            .map_err(index_error)?;
+        Ok(page
+            .hits
+            .into_iter()
+            .map(|hit| {
+                let label = hit.path.rsplit('/').next().unwrap_or(&hit.path).to_string();
+                let subtitle = hit
+                    .path
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent.to_string());
+                mention_api::Candidate {
+                    kind: "file".into(),
+                    token: format!("file:{}", hit.path),
+                    label,
+                    subtitle,
+                    schema: None,
+                    score: hit.score,
+                    visibility: "workspace".into(),
+                }
+            })
+            .collect())
+    }
+
     fn record_hits(
         &mut self,
         query: &search_api::Query,
@@ -412,6 +498,90 @@ impl SearchService {
             .map(|(index, record)| record_hit(record, &needle, index))
             .collect())
     }
+}
+
+fn mention_schema(schema: &str) -> Option<&'static str> {
+    match schema {
+        "fungos.crm/company@1" => Some("company"),
+        "fungos.crm/account@1" => Some("account"),
+        "fungos.crm/contact@1" | "fungos.contacts/contact" => Some("person"),
+        "fungos.crm/project@1" => Some("project"),
+        "fungos.crm/task@1" => Some("task"),
+        "fungos.crm/opportunity@1" => Some("opportunity"),
+        "fungos.crm/activity@1" => Some("activity"),
+        "fungos.crm/call@1" => Some("call"),
+        "fungos.mail/thread@1" => Some("thread"),
+        "fungos.mail/message@1" => Some("message"),
+        _ => None,
+    }
+}
+
+fn record_mention(record: Record, kind: &str, index: usize) -> mention_api::Candidate {
+    let fields = &record.fields;
+    let label = ["display_name", "name", "title", "subject", "headline"]
+        .iter()
+        .find_map(|key| fields.get(key).and_then(serde_json::Value::as_str))
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&record.entity_id)
+        .to_string();
+    mention_api::Candidate {
+        kind: kind.to_string(),
+        token: format!("record:{}#{}", record.book_id, record.entity_id),
+        label,
+        subtitle: mention_subtitle(kind, fields),
+        schema: Some(record.schema_id.clone()),
+        score: 900_000u32.saturating_sub(index as u32),
+        visibility: fields
+            .get("visibility")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("private")
+            .to_string(),
+    }
+}
+
+fn mention_subtitle(kind: &str, fields: &serde_json::Value) -> Option<String> {
+    match kind {
+        "person" => text_field(fields, "title")
+            .or_else(|| text_field(fields, "account_name"))
+            .or_else(|| text_field(fields, "contact_token")),
+        "account" | "company" => fields
+            .get("domains")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|domains| domains.first())
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| text_field(fields, "industry")),
+        "project" => text_field(fields, "status").or_else(|| text_field(fields, "kind")),
+        "task" => text_field(fields, "status").or_else(|| text_field(fields, "due_at")),
+        "thread" => text_field(fields, "channel"),
+        "message" => text_field(fields, "sender_name").or_else(|| text_field(fields, "sender")),
+        "call" => text_field(fields, "direction").or_else(|| text_field(fields, "status")),
+        _ => None,
+    }
+}
+
+fn text_field(fields: &serde_json::Value, key: &str) -> Option<String> {
+    fields
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn finish_mentions(
+    mut candidates: Vec<mention_api::Candidate>,
+    limit: u32,
+) -> Vec<mention_api::Candidate> {
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    let mut seen = BTreeSet::new();
+    candidates.retain(|candidate| seen.insert(candidate.token.clone()));
+    candidates.truncate(limit as usize);
+    candidates
 }
 
 fn record_hit(record: Record, needle: &str, index: usize) -> search_api::Hit {
@@ -496,17 +666,30 @@ impl search_api::Host for SearchService {
     }
 }
 
+impl mention_api::Host for SearchService {
+    fn suggest(
+        &mut self,
+        text: String,
+        kinds: Vec<String>,
+        limit: u32,
+    ) -> Result<Vec<mention_api::Candidate>, search_api::Error> {
+        SearchService::mention_candidates(self, text, kinds, limit)
+    }
+}
+
 pub fn add_to_linker<T>(linker: &mut Linker<T>) -> anyhow::Result<()>
 where
-    T: search_api::Host + 'static,
+    T: search_api::Host + mention_api::Host + 'static,
 {
     search_api::add_to_linker::<T, HasSelf<T>>(linker, |state| state)?;
+    mention_api::add_to_linker::<T, HasSelf<T>>(linker, |state| state)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::soil::search::mentions::Host as _;
     use crate::soil::search::search::Host as _;
     use fungos_vfs::Vfs;
 
@@ -890,5 +1073,97 @@ surfaces = ["canvas"]
         assert!(page.hits.is_empty());
         let after = host.refresh().unwrap().generation;
         assert_eq!(after, before + 1);
+    }
+
+    #[test]
+    fn mention_suggestions_are_typed_and_schema_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = "personal/avery/crm";
+        let mut store = Store::open(dir.path(), &dir.path().join("device_id")).unwrap();
+        store
+            .put_record(
+                book,
+                "a-acme",
+                "fungos.crm/account@1",
+                1,
+                serde_json::json!({
+                    "name": "Acme Robotics",
+                    "domains": ["acme.example"],
+                    "visibility": "team"
+                }),
+            )
+            .unwrap();
+        store
+            .put_record(
+                book,
+                "c-ada",
+                "fungos.crm/contact@1",
+                1,
+                serde_json::json!({
+                    "name": "Ada Lovelace",
+                    "title": "CTO",
+                    "contact_token": "t-ada",
+                    "visibility": "team"
+                }),
+            )
+            .unwrap();
+        store
+            .put_record(
+                book,
+                "p-acme-pilot",
+                "fungos.crm/project@1",
+                1,
+                serde_json::json!({
+                    "name": "Acme pilot",
+                    "status": "active",
+                    "visibility": "team"
+                }),
+            )
+            .unwrap();
+        store
+            .put_record(
+                book,
+                "x-not-mentionable",
+                "dev.fungos/unknown@1",
+                1,
+                serde_json::json!({"name": "Ada Mystery"}),
+            )
+            .unwrap();
+
+        let mut host = SearchService::new(None, Some(store), vec![book.into()]);
+        let all = host.suggest("ada".into(), vec![], 10).unwrap();
+        let person = all
+            .iter()
+            .find(|candidate| candidate.kind == "person")
+            .expect("person candidate");
+        assert_eq!(person.token, format!("record:{book}#c-ada"));
+        assert_eq!(person.schema.as_deref(), Some("fungos.crm/contact@1"));
+        assert_eq!(person.visibility, "team");
+        assert!(all.iter().all(|candidate| candidate.kind != "record"));
+        assert!(
+            all.iter()
+                .all(|candidate| !candidate.token.contains("x-not-mentionable"))
+        );
+
+        let accounts = host
+            .suggest("acme".into(), vec!["account".into()], 10)
+            .unwrap();
+        assert!(accounts.iter().all(|candidate| candidate.kind == "account"));
+        assert_eq!(accounts[0].token, format!("record:{book}#a-acme"));
+    }
+
+    #[test]
+    fn mention_suggestions_include_workspace_files() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_vfs(dir.path());
+        let records = tempfile::tempdir().unwrap();
+        let mut host = SearchService::open(dir.path(), records.path(), vec![]).unwrap();
+        let files = host
+            .suggest("greece".into(), vec!["file".into()], 5)
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].kind, "file");
+        assert_eq!(files[0].token, "file:notes/greece.txt");
+        assert_eq!(files[0].visibility, "workspace");
     }
 }

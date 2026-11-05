@@ -66,7 +66,7 @@ grants access; inaccessible targets remain unresolved locators.
 
 ## Search integration
 
-`soil:search@0.2.0` adds a bounded `references` list to every hit:
+`soil:search@0.3.0` adds a bounded `references` list to every hit:
 
 ```wit
 record reference {
