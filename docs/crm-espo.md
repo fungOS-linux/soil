@@ -88,6 +88,8 @@ cargo run -p soil-crm-espo -- sync --dry-run --full
 - Espo `deleted` rows become records tombstones.
 - Imported contacts create private `account-contact` assignments. The importer
   never creates a team projection.
+- Imported accounts have no `account-company` link unless one is added after the
+  import. They appear under the `Unassigned` brand group until then.
 - A failed page aborts before the state file is advanced.
 - Records are written to one book; multiple collections can be added later by
   the host mapping.

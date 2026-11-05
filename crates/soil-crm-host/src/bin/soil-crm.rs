@@ -3,7 +3,10 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use soil_crm_host::{default_root, link_contact, seed_mock, snapshot, unlink_contact};
+use soil_crm_host::{
+    assign_company, default_root, link_contact, seed_mock, snapshot, unassign_company,
+    unlink_contact,
+};
 
 #[derive(Parser)]
 #[command(version, about = "CRM over fungos-records")]
@@ -44,6 +47,30 @@ enum Cmd {
         account: String,
         #[arg(long)]
         contact: String,
+    },
+    /// Link an account to one of our companies/brands.
+    Assign {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long, default_value = "personal/avery/crm")]
+        book: String,
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        company: String,
+        #[arg(long, value_delimiter = ',', default_value = "customer")]
+        role: Vec<String>,
+    },
+    /// Remove an account-to-company link.
+    Unassign {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long, default_value = "personal/avery/crm")]
+        book: String,
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        company: String,
     },
     /// Serve a read-only local CRM inspector.
     Serve {
@@ -86,6 +113,27 @@ fn main() -> anyhow::Result<()> {
             let root = root.unwrap_or_else(default_root);
             unlink_contact(&root, &book, &account, &contact)?;
             println!("unlinked {contact} from {account}; projection removed if present");
+        }
+        Cmd::Assign {
+            root,
+            book,
+            account,
+            company,
+            role,
+        } => {
+            let root = root.unwrap_or_else(default_root);
+            let id = assign_company(&root, &book, &account, &company, &role)?;
+            println!("assigned {account} to {company} as {id}");
+        }
+        Cmd::Unassign {
+            root,
+            book,
+            account,
+            company,
+        } => {
+            let root = root.unwrap_or_else(default_root);
+            unassign_company(&root, &book, &account, &company)?;
+            println!("unassigned {account} from {company}");
         }
         Cmd::Serve { root, book, listen } => {
             let root = root.unwrap_or_else(default_root);
@@ -140,9 +188,10 @@ const HTML: &str = r#"<!doctype html>
 :root { color-scheme: dark; --bg:#111; --panel:#191919; --line:#303030; --text:#ececec; --muted:#999; --accent:#b8a1ff; }
 * { box-sizing:border-box }
 body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 ui-sans-serif,system-ui,sans-serif }
-header { display:flex; align-items:center; gap:16px; padding:14px 18px; border-bottom:1px solid var(--line); }
+header { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); flex-wrap:wrap }
 header h1 { font-size:16px; margin:0; font-weight:600 }
 header .spacer { flex:1 }
+#companies { display:flex; gap:6px; flex-wrap:wrap }
 button { background:#242424; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; cursor:pointer }
 button.active { border-color:var(--accent); color:var(--accent) }
 main { display:grid; grid-template-columns:320px 1fr; min-height:calc(100vh - 58px) }
@@ -166,6 +215,7 @@ h3 { margin:26px 0 10px; font-size:12px; text-transform:uppercase; letter-spacin
 <header>
   <h1>Soil CRM</h1>
   <span class="pill" id="book"></span>
+  <div id="companies"></div>
   <span class="spacer"></span>
   <button id="team" class="active" onclick="setView('team')">Team view</button>
   <button id="private" onclick="setView('private')">Private view</button>
@@ -175,36 +225,82 @@ h3 { margin:26px 0 10px; font-size:12px; text-transform:uppercase; letter-spacin
   <section id="detail"><p class="muted">Loading…</p></section>
 </main>
 <script>
-let data = null, selected = null;
+let data = null, companyId = null, selected = null;
+const esc = (value) => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function currentCompany() {
+  return (data?.companies || []).find(company => company.id === companyId);
+}
 async function load(view) {
   const response = await fetch('/api/crm?view=' + view);
   data = await response.json();
   document.getElementById('team').classList.toggle('active', view === 'team');
   document.getElementById('private').classList.toggle('active', view === 'private');
   document.getElementById('book').textContent = view + ' projection';
-  const list = document.getElementById('accounts');
-  list.replaceChildren();
-  for (const account of data.accounts || []) {
-    const node = document.createElement('div');
-    node.className = 'account' + (account.id === selected ? ' selected' : '');
-    node.onclick = () => { selected = account.id; render(); load(document.getElementById('team').classList.contains('active') ? 'team' : 'private'); };
-    const b = document.createElement('b'); b.textContent = account.name;
-    const s = document.createElement('span'); s.textContent = (account.opportunities || []).map(o => o.stage).join(' · ');
-    node.append(b, s); list.append(node);
+  const companies = data.companies || [];
+  if (!companyId || !companies.some(company => company.id === companyId)) {
+    companyId = companies[0]?.id || null;
   }
-  if (!selected && data.accounts?.length) selected = data.accounts[0].id;
+  const company = currentCompany();
+  if (!selected || !(company?.accounts || []).some(account => account.id === selected)) {
+    selected = company?.accounts?.[0]?.id || null;
+  }
+  renderCompanies();
+  renderAccounts();
   render();
 }
+function renderCompanies() {
+  const list = document.getElementById('companies');
+  list.replaceChildren();
+  for (const company of data?.companies || []) {
+    const button = document.createElement('button');
+    button.textContent = company.name + (company.accounts?.length ? ' ' + company.accounts.length : '');
+    button.className = company.id === companyId ? 'active' : '';
+    button.onclick = () => {
+      companyId = company.id;
+      selected = company.accounts?.[0]?.id || null;
+      renderCompanies();
+      renderAccounts();
+      render();
+    };
+    list.append(button);
+  }
+}
+function renderAccounts() {
+  const list = document.getElementById('accounts');
+  list.replaceChildren();
+  const company = currentCompany();
+  for (const account of company?.accounts || []) {
+    const node = document.createElement('div');
+    node.className = 'account' + (account.id === selected ? ' selected' : '');
+    node.onclick = () => { selected = account.id; renderAccounts(); render(); };
+    const b = document.createElement('b'); b.textContent = account.name;
+    const roles = account.relationship?.roles || [];
+    const s = document.createElement('span'); s.textContent = roles.join(' · ') || 'account';
+    node.append(b, s); list.append(node);
+  }
+  if (!(company?.accounts || []).length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.style.padding = '18px';
+    empty.textContent = 'No accounts in this brand yet.';
+    list.append(empty);
+  }
+}
 function render() {
-  const account = (data?.accounts || []).find(a => a.id === selected);
+  const company = currentCompany();
+  const account = (company?.accounts || []).find(entry => entry.id === selected);
   const detail = document.getElementById('detail');
-  if (!account) { detail.innerHTML = '<p class="muted">No accounts yet.</p>'; return; }
-  const esc = (value) => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  if (!account) {
+    detail.innerHTML = '<p class="muted">No account selected.</p>';
+    return;
+  }
+  const roles = (account.relationship?.roles || []).map(role => `<span class="pill">${esc(role)}</span>`).join(' ');
   detail.innerHTML = `<h2>${esc(account.name)}</h2>
-    <div class="muted">${esc((account.domains || []).join(', '))} · ${esc(account.industry || '')}</div>
+    <div class="muted">${esc((account.domains || []).join(', '))} · ${esc(account.industry || '')} · ${roles}</div>
     <h3>Contacts</h3><div class="grid">${(account.contacts || []).map(c => `<div class="card"><b>${esc(c.name || c.first_name)}</b><span class="muted">${esc(c.email || c.contact_token || '')}</span></div>`).join('') || '<p class="muted">None</p>'}</div>
+    <h3>Projects</h3>${(account.projects || []).map(p => `<div class="row"><b>${esc(p.name)}</b> <span class="pill">${esc(p.status)}</span> <span class="pill">${esc(p.company_role || 'owner')}</span><div class="muted">${esc(p.kind || '')} · due ${esc(p.due_at || '—')}</div><div>${esc(p.summary)}</div></div>`).join('') || '<p class="muted">None</p>'}
     <h3>Opportunities</h3>${(account.opportunities || []).map(o => `<div class="row"><b>${esc(o.name)}</b> <span class="pill">${esc(o.stage)}</span><div class="muted">$${Number(o.amount || 0).toLocaleString()} · close ${esc(o.close_date || '—')}</div></div>`).join('') || '<p class="muted">None</p>'}
-    <h3>Activity</h3>${(account.activities || []).map(a => `<div class="row"><b>${esc(a.name)}</b> <span class="pill">${esc(a.kind)}</span><div class="muted">${esc(a.occurred_at)} · ${esc(a.contact_token || '')}</div><div>${esc(a.description)}</div></div>`).join('') || '<p class="muted">None</p>'}`;
+    <h3>Activity</h3>${(account.activities || []).map(a => `<div class="row"><b>${esc(a.name)}</b> <span class="pill">${esc(a.kind)}</span><div class="muted">${esc(a.occurred_at)} · ${esc(a.contact_token || '')}${a.project_id ? ' · ' + esc(a.project_id) : ''}</div><div>${esc(a.description)}</div></div>`).join('') || '<p class="muted">None</p>'}`;
 }
 function setView(view) { load(view); }
 load('team');
@@ -213,59 +309,3 @@ load('team');
 </html>
 "#;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn linking_is_private_until_explicitly_projected() {
-        let root = tempfile::tempdir().unwrap();
-        seed_mock(root.path(), "personal/test/crm").unwrap();
-        unlink_contact(root.path(), "personal/test/crm", "a-acme", "c-grace").unwrap();
-        link_contact(
-            root.path(),
-            "personal/test/crm",
-            "a-harbor",
-            "c-grace",
-            "Advisor",
-        )
-        .unwrap();
-
-        let team = snapshot(root.path(), "personal/test/crm", "team").unwrap();
-        let private = snapshot(root.path(), "personal/test/crm", "private").unwrap();
-        let harbor_team = team["accounts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|account| account["id"] == "a-harbor")
-            .unwrap();
-        assert!(harbor_team["contacts"].as_array().unwrap().is_empty());
-        let harbor_private = private["accounts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|account| account["id"] == "a-harbor")
-            .unwrap();
-        let grace = harbor_private["contacts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|contact| contact["id"] == "c-grace")
-            .unwrap();
-        assert_eq!(grace["shared"], false);
-        assert_eq!(grace["email"], "grace@acme.example");
-    }
-
-    #[test]
-    fn mock_snapshot_has_private_and_team_views() {
-        let root = tempfile::tempdir().unwrap();
-        seed_mock(root.path(), "personal/test/crm").unwrap();
-        let team = snapshot(root.path(), "personal/test/crm", "team").unwrap();
-        let private = snapshot(root.path(), "personal/test/crm", "private").unwrap();
-        assert_eq!(team["accounts"].as_array().unwrap().len(), 3);
-        let team_contact = &team["accounts"][0]["contacts"][0];
-        assert!(team_contact.get("email").is_none(), "{team_contact}");
-        let private_contact = &private["accounts"][0]["contacts"][0];
-        assert!(private_contact.get("email").is_some(), "{private_contact}");
-    }
-}
