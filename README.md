@@ -42,6 +42,7 @@ Principles:
 | [`soil:records@0.1.0`](wit/soil-records.wit) | `soil:records` read/write/sync | WIT + generic/contacts host + guest SDK |
 | [`soil:ble@1.0.0`](wit/soil-ble.wit) | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | WIT + host + COLMI ring Spore |
 | [`soil:canvas@1.0.0`](wit/soil-canvas.wit) | `soil:canvas` | WIT + input normalizer + S22 runtime + Android JNI |
+| [`soil-layout`](docs/soil-layout.md) | host crate | Taffy-backed, text-measured layout for Canvas and future guest UI trees |
 | [`wasi:webgpu@0.3.0-rc.2`](crates/soil-webgpu/wit/deps/wasi-webgpu-0.3.0-rc.2/package.wit) | link `wasi:webgpu` | upstream WIT + host + compute fixture |
 | [`wasi:audio@0.1.0`](wit/wasi-audio.wit) | link `wasi:audio` | draft WIT + cpal host + tone fixture |
 

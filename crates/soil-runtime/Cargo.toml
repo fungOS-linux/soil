@@ -8,7 +8,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 viewer-spore = { path = "../viewer-spore" }
-fungos-device-hal = { path = "../../../fungos/.worktrees/device-hal" }
+fungos-device-hal = { path = "../../../fungos" }
 s22-canvas-surface = { path = "../../../../reversal/.worktrees/s22-gpu-ui/cat-s22/tools/canvas-surface" }
 wasmtime = { version = "50", default-features = false, features = ["anyhow", "cranelift", "runtime", "std"] }
 fpl-gfx = { path = "../../../../fpl/gfx/.worktrees/s22-software", default-features = false }

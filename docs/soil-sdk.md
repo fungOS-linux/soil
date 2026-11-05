@@ -136,3 +136,7 @@ cargo run -p wasi-audio-wasmtime -- crates/wasi-audio-wasmtime/fixtures/tone.was
 - `webgpu` — optional wgpu-shaped helper
 
 Each feature should have a real consumer before it lands.
+
+## Host layout
+
+[`soil-layout`](soil-layout.md) is the first host-side component layout crate: a serializable Taffy tree, a host-supplied `TextMeasurer`, and absolute rectangles. It is not a WIT capability until a real Wasm consumer exists.
