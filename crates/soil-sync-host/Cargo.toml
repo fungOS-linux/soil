@@ -8,12 +8,16 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "2cb20ef53b4fa47e66aa0fea8a3d13c3c25be8c3" }
-tokio = { version = "1", features = ["rt", "macros", "sync"] }
-unibus = { git = "https://github.com/fungOS-linux/unibus.git", rev = "89f7e5eda8426c13d6e7d71a433b0d82d2c37392" }
-unibus-iroh = { git = "https://github.com/fungOS-linux/unibus.git", rev = "89f7e5eda8426c13d6e7d71a433b0d82d2c37392", features = ["transport"] }
+clap = { version = "4", features = ["derive"] }
+iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
+ed25519-dalek = "2.2"
+fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "650f413ff82b7b56a30c51472a2920a22a7a5858" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+unibus = { git = "https://github.com/fungOS-linux/unibus.git", rev = "8bf8f79" }
+unibus-iroh = { git = "https://github.com/fungOS-linux/unibus.git", rev = "8bf8f79", features = ["transport", "fleet-identity"] }
+mycelium-peer-protocol = { git = "https://github.com/ajmwagar/mycelium.git", rev = "83a8cf8a818c29db84845eba8128477f38ab39ca" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
-iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
-serde_json = "1"
 tempfile = "3"

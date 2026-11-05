@@ -113,12 +113,15 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
+    use ed25519_dalek::SigningKey;
     use iroh::{Endpoint, endpoint::presets};
+    use mycelium_peer_protocol::{AccessRecord, AccessStatement};
     use unibus::{
         DirectSessionClaims, DirectSessionError, DirectSessionVerifier, Envelope, IrohPeerEndpoint,
-        Message, PeerBinding,
+        Message, PeerAccessPolicy, PeerBinding,
     };
     use unibus_iroh::PEER_ALPN;
+    use unibus_iroh::grant::{GrantVerifier, Permit, TrustDocument, permit_scope};
     use unibus_iroh::transport::{IrohListener, IrohTransport, SessionConfig};
 
     use super::*;
@@ -160,6 +163,20 @@ mod tests {
             local_producer: producer.into(),
             allowed_relays: BTreeSet::new(),
             access_policy: None,
+            endpoint_identity: None,
+        }
+    }
+
+    fn grant_config(producer: &str, verifier: Arc<GrantVerifier>) -> SessionConfig {
+        let verifier_dyn: Arc<dyn DirectSessionVerifier> = verifier.clone();
+        let policy: Arc<dyn PeerAccessPolicy> = verifier;
+        SessionConfig {
+            verifier: verifier_dyn,
+            audience: "test".into(),
+            installation_id: "test".into(),
+            local_producer: producer.into(),
+            allowed_relays: BTreeSet::new(),
+            access_policy: Some(policy),
             endpoint_identity: None,
         }
     }
@@ -251,6 +268,138 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.pulled, 1);
         assert_eq!(outcome.pushed, 0);
+        assert_eq!(
+            client
+                .list("personal/avery/contacts", None, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        task.abort();
+        a.close().await;
+        b.close().await;
+    }
+
+    #[tokio::test]
+    async fn records_sync_over_mycelium_signed_grant() {
+        let a = endpoint().await;
+        let b = endpoint().await;
+        let now = now_s();
+        let permit = Permit {
+            audience: "test".into(),
+            installation: "test".into(),
+            initiator: PeerBinding {
+                producer_id: "records.macbook".into(),
+                key_binding: format!("iroh:{}", a.id()),
+                candidates: vec![],
+            },
+            responder: PeerBinding {
+                producer_id: "records.studio".into(),
+                key_binding: format!("iroh:{}", b.id()),
+                candidates: vec![],
+            },
+            kinds: vec![
+                "records.sync.pull.v1".into(),
+                "records.sync.ops.v1".into(),
+                "records.sync.push.v1".into(),
+                "records.sync.ack.v1".into(),
+                "records.sync.error.v1".into(),
+            ],
+            max_payload_bytes: 1024 * 1024,
+        };
+        let scope = permit_scope(&permit).unwrap();
+        let signer = SigningKey::from_bytes(&[41; 32]);
+        let grant = AccessRecord::sign(
+            &signer,
+            AccessStatement::Grant {
+                grant_id: "records-test".into(),
+                principal: "records-test".into(),
+                serial: 1,
+                roles: vec![],
+                scopes: vec![scope],
+                unix_users: vec![],
+                ssh_public_keys: vec![],
+                oidc_audiences: vec![],
+                oidc_ssh_key_exchange: false,
+                not_before: now - 60,
+                not_after: now + 600,
+            },
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let trust_path = dir.path().join("trust.json");
+        std::fs::write(
+            &trust_path,
+            serde_json::to_vec(&TrustDocument {
+                grant: grant.clone(),
+                revocations: vec![],
+                permit,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let verifier = Arc::new(
+            GrantVerifier::new(trust_path, BTreeSet::from([grant.signer.clone()])).unwrap(),
+        );
+        let assertion = verifier.assertion(now).unwrap();
+
+        let candidate = PeerCandidate {
+            peer_id: "records.studio".into(),
+            site: None,
+            endpoints: vec![],
+            iroh_endpoints: vec![IrohPeerEndpoint {
+                endpoint_id: b.id().to_string(),
+                direct_addresses: b.addr().ip_addrs().copied().collect(),
+                relay_urls: vec![],
+            }],
+            expires_at_unix_s: now + 60,
+        };
+        let mut server = Store::open(
+            &dir.path().join("studio"),
+            &dir.path().join("studio-device"),
+        )
+        .unwrap();
+        let mut client =
+            Store::open(&dir.path().join("neo"), &dir.path().join("neo-device")).unwrap();
+        server
+            .put_record(
+                "personal/avery/contacts",
+                "grace",
+                "fungos.contacts/contact",
+                1,
+                serde_json::json!({"display_name": "Grace Hopper"}),
+            )
+            .unwrap();
+
+        let listener =
+            IrohListener::new(b.clone(), grant_config("records.studio", verifier.clone()));
+        let host = RecordPeerHost::new(
+            listener,
+            server,
+            PeerEndpoint {
+                installation_id: "test".into(),
+                producer_id: "records.studio".into(),
+            },
+        );
+        let task = tokio::spawn(host.run());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let transport = IrohTransport::new(a.clone(), grant_config("records.macbook", verifier));
+        let outcome = sync_records_with_transport(
+            &transport,
+            &candidate,
+            &assertion,
+            &mut client,
+            "personal/avery/contacts",
+            &PeerEndpoint {
+                installation_id: "test".into(),
+                producer_id: "records.macbook".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.pulled, 1);
         assert_eq!(
             client
                 .list("personal/avery/contacts", None, 10)

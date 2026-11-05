@@ -1,7 +1,8 @@
 # Shared peer sync and Spore opt-in
 
-Status: **shared Iroh peer host, 2026-11-05.** A real encrypted Iroh
-`unibus/peer/1` loopback test syncs records through the shared host.
+Status: **live Iroh cutover, 2026-11-05.** Records sync over
+`unibus/peer/1` with a Mycelium-signed access grant. The SSH-forwarded TCP hub
+is disabled but retained as an explicit rollback path.
 
 ## One session, many application kinds
 
@@ -55,12 +56,19 @@ the Spore. A Spore cannot silently opt into a new network path.
 
 The host can enable sync for one or more approved books while constructing the
 `soil:records` adapter. Geode adds its own `geode.*` handler to the same router.
-The test suite performs a real encrypted Iroh round trip between two endpoints,
-then pulls and applies a contact record over `unibus/peer/1`.
+The test suite performs real encrypted Iroh round trips, including one whose
+session comes only from a Mycelium-signed access grant and local permit.
 
-The remaining production input is the Mycelium/fpl-auth `SessionConfig`: endpoint
-identity, trusted session verifier, audience, installation and allowed kinds.
-The host deliberately does not accept a permissive JSON session assertion.
+There is no separate Unibus session issuer. The retained trust document is a
+Mycelium `AccessRecord` grant signed by an existing Mycelium access key. Its
+scope commits to both Iroh endpoint keys, producers, audience, installation,
+message kinds, and payload bound. `GrantVerifier` synthesizes a short-lived
+session from that signed permit; a copied session JSON cannot widen it. The host
+deliberately does not accept a permissive JSON session assertion.
+
+`soil-sync` is the runnable host. See
+[`crates/soil-sync-host/README.md`](../crates/soil-sync-host/README.md) for key
+generation, permit issuance, config, and the live service layout.
 
 The host owns:
 
