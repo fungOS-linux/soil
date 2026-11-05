@@ -72,3 +72,21 @@ sibling worktrees that are not present in this checkout
 (`fpl/gfx .worktrees/s22-software`, `reversal .worktrees/s22-gpu-ui`). That is
 someone's work in progress, not something to delete; re-include both when the
 paths exist.
+
+## Showing a diagnostic
+
+A failed Lua module, a boot log, a traceback — these are terminal output, not
+paragraphs. `soil-terminal` can therefore be pointed at text instead of a
+program:
+
+```sh
+soil-terminal --title "Canvas · field-notes" --text /tmp/canvas-error.txt
+soil-terminal --title "soil" --text -        # from stdin
+```
+
+The text is fed through the same emulator a program writes to, so colour codes
+and cursor movement in a traceback render the way the tool that produced them
+intended, and an error looks the same whether it is on a wall or in a log.
+
+A host that fails to load something should hand the failure to this rather than
+inventing an error panel: one place to read errors, one renderer to trust.
