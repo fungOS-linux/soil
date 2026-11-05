@@ -52,6 +52,28 @@ mkdir notes
 
 The file is VFS content, not a host dotfile.
 
+## Interactive editing
+
+When stdin is a terminal, Mush uses `rustyline`:
+
+```text
+↑ / ↓        previous / next command
+Ctrl-R       reverse history search
+Ctrl-S       forward history search
+Ctrl-A / E   line start / end
+Ctrl-W       delete previous word
+Alt-B / F    move by word
+```
+
+History is stored at `<vfs-root>/.fungos/mush-history` by default:
+
+```sh
+mush --root ~/fungos-node --history ~/.local/state/mush/history
+```
+
+`MUSH_HISTORY` overrides the path. Non-interactive input still uses a plain
+line loop.
+
 ## Commands
 
 ```text

@@ -5,11 +5,12 @@
 //! line-oriented terminal.
 
 use std::{
-    io::{self, BufRead, Write},
-    path::PathBuf,
+    io::{self, BufRead, IsTerminal, Write},
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
+use rustyline::{DefaultEditor, error::ReadlineError};
 use soil_vfs_host::{VfsHost, index, vfs, vfs_mut};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -176,6 +177,10 @@ fn run() -> Result<()> {
         .unwrap_or_else(|| "xterm-256color".into());
     let script = take_option(&mut args, "--script");
     let command = take_option(&mut args, "--command");
+    let history = take_option(&mut args, "--history")
+        .or_else(|| std::env::var("MUSH_HISTORY").ok())
+        .map(|value| expand_home(&value))
+        .unwrap_or_else(|| root.join(".fungos/mush-history"));
     let bytes =
         std::fs::read(&wasm).with_context(|| format!("read Mush component {}", wasm.display()))?;
     let mut runtime = Runtime::open(&root, &bytes, &term)?;
@@ -197,6 +202,46 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
+    if io::stdin().is_terminal() {
+        run_interactive(&mut runtime, &history)
+    } else {
+        run_lines(&mut runtime)
+    }
+}
+
+fn run_interactive(runtime: &mut Runtime, history: &Path) -> Result<()> {
+    let mut editor = DefaultEditor::new()?;
+    let _ = editor.load_history(history);
+    loop {
+        let prompt = runtime.prompt()?;
+        match editor.readline(&prompt) {
+            Ok(line) => {
+                let line = line.trim_end_matches(['\r', '\n']);
+                if !line.trim().is_empty() {
+                    let _ = editor.add_history_entry(line);
+                }
+                let response = runtime.execute(line)?;
+                print!("{}", response.output);
+                io::stdout().flush()?;
+                if response.exit {
+                    break;
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!();
+            }
+            Err(ReadlineError::Eof) => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if let Some(parent) = history.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = editor.save_history(history);
+    Ok(())
+}
+
+fn run_lines(runtime: &mut Runtime) -> Result<()> {
     let stdin = io::stdin();
     loop {
         print!("{}", runtime.prompt()?);

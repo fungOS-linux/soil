@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+rustyline = "17"
 fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "bcd2bc682662467d1371a2c9f8436e08934132d9" }
 soil-vfs-host = { path = "../soil-vfs-host" }
 wasmtime = { version = "50", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std"] }
