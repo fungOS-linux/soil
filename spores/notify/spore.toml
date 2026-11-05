@@ -1,0 +1,36 @@
+schema = 1
+
+[spore]
+id = "dev.fungos.notify"
+name = "notify"
+version = "0.1.0"
+license = "Apache-2.0 OR MIT"
+summary = "Notification tray, focus mode and shared ringer"
+
+[engine]
+soil = ">=0.1"
+target = "wasm32-wasip2"
+abi = { notify = "1.0.0", ringer = "1.0.0" }
+
+[module]
+path = "module.wasm"
+
+[ui]
+entry = "ui/tray.lua"
+jit = true
+hot_reload = true
+
+[launch]
+default = "canvas"
+surfaces = ["canvas", "native", "web"]
+
+[grants]
+"soil:notify/inbox" = "read and act on the notification tray"
+"soil:notify/focus" = "read and set per-device focus profiles"
+"soil:notify/history" = "read opt-in notification history"
+"soil:notify/cleanup" = "clear scoped notification sets"
+"soil:ringer/calls" = "receive and answer calls, doorbells, alarms and pages"
+
+[denied]
+"soil:notify/publisher" = ["the tray does not publish notifications"]
+"soil:http" = ["network access is a separate explicit grant"]

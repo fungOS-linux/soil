@@ -1,0 +1,170 @@
+// Host-mediated notifications, focus, history and cleanup.
+//
+// A publisher emits a durable notification envelope. An inbox shows and acts on
+// it. Focus is a host-owned per-device policy; history is opt-in and separately
+// granted. No payload carries app identity, a URL, a credential or authority.
+package soil:notify@1.0.0;
+
+interface types {
+  enum priority {
+    passive,
+    active,
+    urgent,
+  }
+
+  enum error {
+    denied,
+    not-ready,
+    invalid,
+    over-budget,
+    stale,
+    io,
+    unsupported,
+  }
+
+  record action {
+    id: string,
+    label: string,
+    destructive: bool,
+  }
+
+  record context {
+    summary: option<string>,
+    entities: list<string>,
+    topics: list<string>,
+    urgency-hint: option<priority>,
+  }
+}
+
+interface publisher {
+  use types.{action, context, error, priority};
+
+  record notification {
+    title: string,
+    body: string,
+    category: string,
+    thread: option<string>,
+    group-key: option<string>,
+    expires-at-ms: option<u64>,
+    priority-hint: option<priority>,
+    sensitive: bool,
+    actions: list<action>,
+    context: option<context>,
+  }
+
+  publish: func(notification: notification) -> result<string, error>;
+  update: func(id: string, notification: notification) -> result<_, error>;
+  withdraw: func(id: string) -> result<_, error>;
+}
+
+interface inbox {
+  use types.{action, error, priority};
+
+  record item {
+    id: string,
+    app-id: string,
+    title: string,
+    body: string,
+    category: string,
+    thread: option<string>,
+    group-key: option<string>,
+    priority: priority,
+    posted-at-ms: u64,
+    read: bool,
+    held: bool,
+    sensitive: bool,
+    actions: list<action>,
+    summary: option<string>,
+  }
+
+  record filter {
+    apps: list<string>,
+    categories: list<string>,
+    include-held: bool,
+    include-read: bool,
+    offset: u64,
+    limit: u32,
+  }
+
+  record page {
+    items: list<item>,
+    next: option<u64>,
+  }
+
+  resource subscription {
+    next: func(timeout-ms: u32) -> result<option<item>, error>;
+  }
+
+  query: func(filter: filter) -> result<page, error>;
+  subscribe: func() -> result<subscription, error>;
+  dismiss: func(id: string) -> result<_, error>;
+  act: func(id: string, action-id: string) -> result<_, error>;
+}
+
+interface focus {
+  use types.{error, priority};
+
+  record profile {
+    mode: string,
+    until-ms: option<u64>,
+    allow-apps: list<string>,
+    allow-categories: list<string>,
+    allow-threads: list<string>,
+    breakthrough: list<string>,
+    rollup-held: bool,
+  }
+
+  get: func() -> result<option<profile>, error>;
+  set: func(profile: profile) -> result<_, error>;
+  clear: func() -> result<_, error>;
+}
+
+interface history {
+  use types.{error, priority};
+
+  record entry {
+    id: string,
+    app-id: string,
+    title: string,
+    body: string,
+    priority: priority,
+    posted-at-ms: u64,
+    dismissed-at-ms: option<u64>,
+  }
+
+  record page {
+    entries: list<entry>,
+    next: option<u64>,
+  }
+
+  query: func(offset: u64, limit: u32) -> result<page, error>;
+}
+
+interface cleanup {
+  use types.{error};
+
+  enum scope {
+    read,
+    shown,
+    held,
+    all,
+    older-than,
+    app,
+    category,
+    archive,
+  }
+
+  clear: func(
+    scope: scope,
+    value: option<string>,
+    older-than-ms: option<u64>,
+  ) -> result<u32, error>;
+}
+
+world guest {
+  import publisher;
+  import inbox;
+  import focus;
+  import history;
+  import cleanup;
+}
