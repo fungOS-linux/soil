@@ -84,7 +84,8 @@ impl Snapshot {
         if x >= self.cols || y >= self.rows {
             return None;
         }
-        self.cells.get(usize::from(y) * usize::from(self.cols) + usize::from(x))
+        self.cells
+            .get(usize::from(y) * usize::from(self.cols) + usize::from(x))
     }
 
     /// The visible text of a row, trimmed. Useful for tests and for a status
@@ -216,16 +217,12 @@ impl Session {
         let cols = self.cols();
         let rows = self.rows();
         let title = self.terminal.title().unwrap_or_default().to_owned();
-        let cursor = self
-            .terminal
-            .is_cursor_visible()
-            .unwrap_or(false)
-            .then(|| {
-                (
-                    self.terminal.cursor_x().unwrap_or(0),
-                    self.terminal.cursor_y().unwrap_or(0),
-                )
-            });
+        let cursor = self.terminal.is_cursor_visible().unwrap_or(false).then(|| {
+            (
+                self.terminal.cursor_x().unwrap_or(0),
+                self.terminal.cursor_y().unwrap_or(0),
+            )
+        });
 
         let mut cells = vec![Cell::default(); usize::from(cols) * usize::from(rows)];
         {

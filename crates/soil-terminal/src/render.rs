@@ -120,7 +120,11 @@ pub fn paint(
                     if tx < 0 || ty < 0 || tx >= width as i32 || ty >= height as i32 {
                         continue;
                     }
-                    blend(&mut buffer[ty as usize * width as usize + tx as usize], (fr, fg_g, fb), *alpha);
+                    blend(
+                        &mut buffer[ty as usize * width as usize + tx as usize],
+                        (fr, fg_g, fb),
+                        *alpha,
+                    );
                 }
             }
             advance += glyph.advance_width;
@@ -161,7 +165,10 @@ pub fn paint_cursor(
     let Some((cx, cy)) = snapshot.cursor else {
         return;
     };
-    let (px, py) = (u32::from(cx) * metrics.cell_w, u32::from(cy) * metrics.cell_h);
+    let (px, py) = (
+        u32::from(cx) * metrics.cell_w,
+        u32::from(cy) * metrics.cell_h,
+    );
     if px + metrics.cell_w > width || py + metrics.cell_h > height {
         return;
     }
@@ -187,7 +194,11 @@ pub fn paint_cursor(
             if tx < 0 || ty < 0 || tx >= width as i32 || ty >= height as i32 {
                 continue;
             }
-            blend(&mut buffer[ty as usize * width as usize + tx as usize], (0, 0, 0), *alpha);
+            blend(
+                &mut buffer[ty as usize * width as usize + tx as usize],
+                (0, 0, 0),
+                *alpha,
+            );
         }
     }
 }
@@ -244,8 +255,6 @@ fn blend(pixel: &mut u32, fg: (u8, u8, u8), alpha: u8) {
     let (br, bg, bb) = unpack(*pixel);
     let a = u32::from(alpha);
     let inv = 255 - a;
-    let mix = |back: u8, front: u8| -> u32 {
-        (u32::from(back) * inv + u32::from(front) * a) / 255
-    };
+    let mix = |back: u8, front: u8| -> u32 { (u32::from(back) * inv + u32::from(front) * a) / 255 };
     *pixel = (mix(br, fg.0) << 16) | (mix(bg, fg.1) << 8) | mix(bb, fg.2);
 }

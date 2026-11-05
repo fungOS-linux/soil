@@ -40,9 +40,7 @@ pub fn key(logical_key: &Key, modifiers: ModifiersState) -> Vec<u8> {
     };
     // Ctrl-A..Ctrl-Z map onto 0x01..0x1a, which is still how every shell and
     // editor receives them.
-    if ctrl
-        && let Some(ch) = text.chars().next()
-    {
+    if ctrl && let Some(ch) = text.chars().next() {
         let lower = ch.to_ascii_lowercase();
         if lower.is_ascii_lowercase() {
             return vec![(lower as u8) & 0x1f];

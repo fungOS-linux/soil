@@ -3783,6 +3783,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-scene"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "soil-sdk"
 version = "0.1.0"
 dependencies = [

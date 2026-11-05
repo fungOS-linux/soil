@@ -79,7 +79,15 @@ pub const CONTRACTS: &[Contract] = &[
             ("directory", &["targets", "get"]),
             (
                 "session",
-                &["open-shell", "read", "write", "resize", "status", "close", "exec"],
+                &[
+                    "open-shell",
+                    "read",
+                    "write",
+                    "resize",
+                    "status",
+                    "close",
+                    "exec",
+                ],
             ),
         ],
     },
@@ -87,13 +95,22 @@ pub const CONTRACTS: &[Contract] = &[
         file: "wit/soil-terminal.wit",
         source: include_str!("../../../wit/soil-terminal.wit"),
         package: "soil:terminal@0.1.0",
-        interfaces: &[("surface", &["open", "present", "next-input", "observe", "close"])],
+        interfaces: &[(
+            "surface",
+            &["open", "present", "next-input", "observe", "close"],
+        )],
     },
     Contract {
         file: "wit/soil-canvas.wit",
         source: include_str!("../../../wit/soil-canvas.wit"),
         package: "soil:canvas@1.0.0",
         interfaces: &[("surface", &["present", "observe", "input", "close"])],
+    },
+    Contract {
+        file: "wit/soil-scene.wit",
+        source: include_str!("../../../wit/soil-scene.wit"),
+        package: "soil:scene@1.0.0",
+        interfaces: &[("payload", &["supports", "budget"])],
     },
     Contract {
         file: "wit/wasi-audio.wit",

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/soil-abi", "crates/soil-layout", "crates/soil-ble-host", "crates/soil-canvas-input", "crates/soil-webgpu", "crates/soil-process", "crates/cpal-soil", "crates/fungos-content", "crates/soil-vfs-host", "crates/wasi-audio-wasmtime", "crates/soil-sdk", "crates/soil-sdk-audio", "crates/soil-sdk-codec", "crates/soil-sdk-appdata", "crates/soil-sdk-records", "crates/viewer-spore", "crates/soil-spore", "crates/soil-records-host", "crates/soil-vt", "crates/soil-terminal"]
+members = ["crates/soil-abi", "crates/soil-layout", "crates/soil-ble-host", "crates/soil-canvas-input", "crates/soil-webgpu", "crates/soil-process", "crates/cpal-soil", "crates/fungos-content", "crates/soil-vfs-host", "crates/wasi-audio-wasmtime", "crates/soil-sdk", "crates/soil-sdk-audio", "crates/soil-sdk-codec", "crates/soil-sdk-appdata", "crates/soil-sdk-records", "crates/viewer-spore", "crates/soil-spore", "crates/soil-scene", "crates/soil-records-host", "crates/soil-vt", "crates/soil-terminal"]
 # soil-runtime and soil-android depend on sibling worktrees that are not present
 # in this checkout (fpl/gfx .worktrees/s22-software, reversal .worktrees/s22-gpu-ui),
 # so the whole workspace cannot resolve while they are members. Excluded rather

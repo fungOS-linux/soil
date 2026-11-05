@@ -9,7 +9,7 @@ mod encode;
 mod render;
 
 use std::io::{Read, Write};
-use std::sync::mpsc::{TryRecvError, channel, Receiver};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -56,7 +56,10 @@ const FONT_CANDIDATES: &[&str] = &[
 fn read_font(candidates: &[&str]) -> Option<Vec<u8>> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     for candidate in candidates {
-        let path = match (&home, candidate.starts_with("Library") || candidate.starts_with('.')) {
+        let path = match (
+            &home,
+            candidate.starts_with("Library") || candidate.starts_with('.'),
+        ) {
             (Some(home), true) => home.join(candidate),
             _ => std::path::PathBuf::from("/").join(candidate),
         };
@@ -213,16 +216,14 @@ impl Terminal {
     }
 }
 
-
 struct App {
     options: Options,
     /// Backing-store scale, so a 15pt cell is 15pt on a Retina display too.
     scale: f32,
     window: Option<std::sync::Arc<Window>>,
     context: Option<softbuffer::Context<winit::event_loop::OwnedDisplayHandle>>,
-    surface: Option<
-        softbuffer::Surface<winit::event_loop::OwnedDisplayHandle, std::sync::Arc<Window>>,
-    >,
+    surface:
+        Option<softbuffer::Surface<winit::event_loop::OwnedDisplayHandle, std::sync::Arc<Window>>>,
     /// The emulator: what the bytes mean.
     terminal: Option<Session>,
     /// The process: the pty it runs on, and the bytes it produces.
@@ -379,12 +380,12 @@ impl ApplicationHandler for App {
             .unwrap_or_else(|| "Soil terminal".into());
         let window = std::sync::Arc::new(
             event_loop
-            .create_window(
-                Window::default_attributes()
-                    .with_title(title)
-                    .with_inner_size(LogicalSize::new(960.0, 600.0)),
-            )
-            .expect("window"),
+                .create_window(
+                    Window::default_attributes()
+                        .with_title(title)
+                        .with_inner_size(LogicalSize::new(960.0, 600.0)),
+                )
+                .expect("window"),
         );
         let context = softbuffer::Context::new(event_loop.owned_display_handle())
             .expect("softbuffer context");
@@ -433,12 +434,7 @@ impl ApplicationHandler for App {
         self.window = Some(window);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 self.kill();
@@ -512,7 +508,15 @@ fn dump(options: &Options, path: &str) {
     let height = rows as u32 * metrics.cell_h;
     let mut buffer = vec![0u32; (width * height) as usize];
     render::paint(&snapshot, &faces, &metrics, width, height, &mut buffer);
-    render::paint_cursor(&snapshot, &faces, &metrics, width, height, &mut buffer, true);
+    render::paint_cursor(
+        &snapshot,
+        &faces,
+        &metrics,
+        width,
+        height,
+        &mut buffer,
+        true,
+    );
 
     let file = std::fs::File::create(path).expect("create dump");
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);

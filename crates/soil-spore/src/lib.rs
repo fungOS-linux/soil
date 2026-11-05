@@ -292,9 +292,7 @@ impl Manifest {
             }
             let hex = presentation.color.trim_start_matches('#');
             if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(Error::Invalid(
-                    "presentation.color must be #rrggbb".into(),
-                ));
+                return Err(Error::Invalid("presentation.color must be #rrggbb".into()));
             }
         }
         for (name, asset) in &self.assets {
@@ -818,10 +816,11 @@ mod chrome_tests {
         assert_eq!(ok.chrome.as_ref().unwrap().regions, vec!["dock"]);
         assert_eq!(ok.presentation.as_ref().unwrap().badge, "D");
 
-        let missing = Manifest::parse(&manifest(
-            "[chrome]\nregions = [\"dock\"]\n",
-        ));
-        assert!(missing.is_err(), "a region with no source is a hole in the shell");
+        let missing = Manifest::parse(&manifest("[chrome]\nregions = [\"dock\"]\n"));
+        assert!(
+            missing.is_err(),
+            "a region with no source is a hole in the shell"
+        );
 
         let unknown = Manifest::parse(&manifest(
             "[chrome]\nregions = [\"statusbar\"]\n[chrome.sources]\nstatusbar = \"ui/x.lua\"\n",

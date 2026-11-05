@@ -88,8 +88,14 @@ interface surface {
     visible: bool,
   }
 
-  /// Render the granted owner surface. The host retains the pixels.
-  present: func() -> result<state, failure>;
+  /// Present into the space the host granted.
+  ///
+  /// `document` is a versioned payload from `soil-scene`: a scene the host
+  /// rasterizes, an RGBA frame the Spore rendered, or a lease on a GPU texture.
+  /// It is bytes rather than a WIT type on purpose -- a new node kind must not
+  /// rebuild every Spore that draws. The host validates it and refuses anything
+  /// it cannot present, naming the reason.
+  present: func(document: list<u8>) -> result<state, failure>;
 
   /// Read the current owner state without presenting.
   observe: func() -> result<state, failure>;

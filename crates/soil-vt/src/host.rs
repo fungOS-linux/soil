@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 
-use crate::{Snapshot, Session};
+use crate::{Session, Snapshot};
 
 enum Command {
     Write(Vec<u8>),
@@ -200,7 +200,10 @@ mod tests {
             if (0..snapshot.rows).any(|y| snapshot.row_text(y).contains(needle)) {
                 return snapshot;
             }
-            assert!(Instant::now() < deadline, "timed out waiting for {needle:?}");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {needle:?}"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }
