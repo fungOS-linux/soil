@@ -34,6 +34,11 @@ interface actions {
     approval: approval,
     input-schema: string,
     output-schema: string,
+    /// DCP lifecycle phases, when this action came from a DCP catalog.
+    phases: list<string>,
+    provider: option<string>,
+    catalog-revision: option<string>,
+    state-revision: option<string>,
   }
 
   record call {

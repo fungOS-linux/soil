@@ -50,6 +50,43 @@ pub struct ActionDescriptor {
     pub approval: Approval,
     pub input_schema: String,
     pub output_schema: String,
+    /// DCP lifecycle phases, when the adapter came from a DCP catalog.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<String>,
+    /// DCP/provider identity and revision binding, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_revision: Option<String>,
+}
+
+/// Canvas-facing projection of a granted action. It is a presentation shape,
+/// not a second grant: invocation still goes through [`ActionHost::invoke`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanvasAction {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcut: Option<String>,
+    pub input_schema: String,
+    pub requires_input: bool,
+    pub effect: Effect,
+    pub idempotency: Idempotency,
+    pub confirmation: Approval,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +293,31 @@ impl ActionHost {
             .collect()
     }
 
+    /// Canvas/DCP action-bar projection. Parameterless actions are clickable;
+    /// parameterized actions retain their JSON Schema for host-rendered forms.
+    pub fn canvas_actions(&self) -> Vec<CanvasAction> {
+        self.catalog()
+            .into_iter()
+            .map(|descriptor| CanvasAction {
+                id: descriptor.id,
+                label: descriptor.summary.clone(),
+                description: descriptor.summary,
+                shortcut: None,
+                requires_input: schema_has_parameters(&descriptor.input_schema),
+                input_schema: descriptor.input_schema,
+                effect: descriptor.effect,
+                idempotency: descriptor.idempotency,
+                confirmation: descriptor.approval,
+                available: true,
+                reason: None,
+                phases: descriptor.phases,
+                provider: descriptor.provider,
+                catalog_revision: descriptor.catalog_revision,
+                state_revision: descriptor.state_revision,
+            })
+            .collect()
+    }
+
     pub fn invoke(&self, call: &ActionCall) -> Result<ActionReceipt, ActionError> {
         if call.action.len() > 128
             || call.action.trim().is_empty()
@@ -317,6 +379,21 @@ impl ActionHost {
     }
 }
 
+fn schema_has_parameters(schema: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(schema) else {
+        return true;
+    };
+    let properties = value
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|properties| !properties.is_empty());
+    let required = value
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|required| !required.is_empty());
+    properties || required
+}
+
 fn validate_descriptor(descriptor: &ActionDescriptor) -> Result<(), ActionError> {
     if descriptor.id.trim().is_empty()
         || descriptor.id.len() > 128
@@ -368,6 +445,10 @@ mod tests {
             approval,
             input_schema: "{}".into(),
             output_schema: "{}".into(),
+            phases: Vec::new(),
+            provider: None,
+            catalog_revision: None,
+            state_revision: None,
         }
     }
 
@@ -447,6 +528,45 @@ mod tests {
             .unwrap_err(),
             ActionError::UnsafeRetry
         );
+    }
+
+    #[test]
+    fn canvas_projection_distinguishes_click_from_parameter_actions() {
+        let router = Arc::new(FakeRouter {
+            calls: AtomicUsize::new(0),
+        });
+        let mut grants = ActionGrants::default();
+        grants.allow("unibus.lights.on", 1);
+        grants.allow("unibus.lights.level", 1);
+        let host = ActionHost::new(
+            [
+                descriptor("unibus.lights.on", Idempotency::Idempotent, Approval::None),
+                ActionDescriptor {
+                    input_schema: r#"{"type":"object","properties":{"level":{"type":"integer","minimum":0,"maximum":100}}}"#.into(),
+                    ..descriptor(
+                        "unibus.lights.level",
+                        Idempotency::Keyed,
+                        Approval::None,
+                    )
+                },
+            ],
+            grants,
+            router,
+            IdempotencyStore::in_memory().unwrap(),
+        )
+        .unwrap();
+        let actions = host.canvas_actions();
+        let click = actions
+            .iter()
+            .find(|action| action.id == "unibus.lights.on")
+            .unwrap();
+        let parameter = actions
+            .iter()
+            .find(|action| action.id == "unibus.lights.level")
+            .unwrap();
+        assert!(!click.requires_input);
+        assert!(parameter.requires_input);
+        assert!(parameter.input_schema.contains("maximum"));
     }
 
     #[test]

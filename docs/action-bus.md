@@ -54,6 +54,13 @@ The receipt is the durable answer.
   operator-driven, non-retrying run.
 - The action catalog returned to a Spore is already filtered by local grants.
 
+## Canvas projection
+
+`soil:canvas/actions@1.0.0` exposes a presentation projection of the same
+granted catalog. It preserves DCP `input_schema`, phases and revisions so a
+Spore can build its own top bar or parameter form without opening a connector.
+See [Canvas action catalog](canvas-actions.md).
+
 ## Elmers
 
 The Elmers Spore imports `fungos:actions`. Its UI emits workflow actions as

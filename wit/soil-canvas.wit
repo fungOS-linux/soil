@@ -103,3 +103,62 @@ interface surface {
   /// Release the grant. Further calls return `closed`.
   close: func() -> result<_, failure>;
 }
+
+
+/// Host-composed action catalog for a Canvas surface.
+///
+/// This is a presentation projection of the host action router. DCP actions can
+/// be projected directly; `input-schema` is the provider's JSON Schema
+/// 2020-12 so a client can render parameter forms and ranges. The list never
+/// grants execution: invocation still goes through the host action router.
+interface actions {
+  use surface.{failure};
+
+  enum effect {
+    read,
+    write,
+    external,
+  }
+
+  enum idempotency {
+    idempotent,
+    keyed,
+    unsafe,
+  }
+
+  enum confirmation {
+    none,
+    required,
+    destructive,
+  }
+
+  record action {
+    id: string,
+    label: string,
+    description: string,
+    shortcut: option<string>,
+    /// JSON Schema 2020-12 object for action arguments. An empty object means
+    /// this is a parameterless click action.
+    input-schema: string,
+    /// Host-computed fast path for rendering a button without parsing JSON.
+    requires-input: bool,
+    effect: effect,
+    idempotency: idempotency,
+    confirmation: confirmation,
+    available: bool,
+    reason: option<string>,
+    /// DCP lifecycle phases when this action came from a DCP catalog.
+    phases: list<string>,
+    /// DCP/provider identity and revision binding when available.
+    provider: option<string>,
+    catalog-revision: option<string>,
+    state-revision: option<string>,
+  }
+
+  list-actions: func() -> result<list<action>, failure>;
+}
+
+world guest {
+  import surface;
+  import actions;
+}
