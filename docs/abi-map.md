@@ -303,3 +303,7 @@ Any unsupported row is a named denial, not an empty success.
 Resolved: `soil:time` is a grant, not an always-available primitive. Both
 `monotonic-ms` and `tick` return `denied` without `soil:time`; hosts must not
 silently provide an ambient clock.
+
+## Host layout
+
+[`soil-layout`](soil-layout.md) is the first host-side component layout crate: a serializable Taffy tree, a host-supplied `TextMeasurer`, and absolute rectangles. It is not a WIT capability until a real Wasm consumer exists.
