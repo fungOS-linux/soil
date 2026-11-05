@@ -108,6 +108,24 @@ streams the upstream response, including SSE
 The request is scrubbed before it leaves the host. The response is passed
 through as a stream because the model only ever saw placeholders.
 
+## Operator Spore transport
+
+Native Operator still receives a loopback gateway URL and ephemeral key. When
+Operator is compiled as a Spore, the same Provider implementation selects
+`soil:inference` instead of HTTP:
+
+```text
+native Operator  -> loopback gateway -> Bifrost
+Operator Spore   -> soil:inference host -> Bifrost
+```
+
+The Spore never receives `BIFROST_BASE_URL`, the upstream key, the service
+snapshot path, or the Geode handle. It names a model, messages, and tools.
+
+The host still owns scrubbing, credentials, provider selection, and transport.
+The Operator Spore transport does not expose `umie/prepare` or embeddings; those
+return `unsupported` rather than opening a second inference path.
+
 ## MCP tool boundary
 
 When `operator.mcp.url` is configured, `mush run op` also starts a loopback MCP
@@ -150,8 +168,12 @@ mush run op --inference-profile umie --base-url http://127.0.0.1:8096 --model la
 ## Boundaries
 
 - Soil chooses the provider, endpoint, model alias, MCP route, and credential.
-- Operator sees a base URL and an opaque gateway/session key, never Geode.
-- The loopback gateway already provides request/response scrubbing and upstream
-  credential injection. Token budgets, true SSE streaming, provider failover,
-  and UMIE alias mapping are next.
+- A native Operator sees a base URL and an opaque gateway/session key, never
+  Geode.
+- A Spore Operator sees only `soil:inference`; the host supplies the route and
+  credential.
+- The loopback gateway provides request/response scrubbing and upstream
+  credential injection. The Spore host provides the same boundary without a
+  loopback socket. Token budgets, provider failover, and UMIE alias mapping are
+  next.
 - `unibus-mcp`/DCP is the tool transport; no host `PATH` discovery is required.

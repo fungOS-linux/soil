@@ -1,9 +1,9 @@
 // Host-mediated language-model inference.
 //
 // The host owns provider selection, endpoint discovery, authentication, model
-// aliases, budgets, and transport. A Spore names a model and messages only.
+// aliases, budgets, and transport. A Spore names a model, messages, and tools.
 // Credentials and provider routes never cross this boundary.
-package soil:inference@0.1.0;
+package soil:inference@0.2.0;
 
 interface inference {
   enum role {
@@ -13,10 +13,39 @@ interface inference {
     tool,
   }
 
+  record tool-call {
+    id: string,
+    name: string,
+    /// JSON object encoded as a string, exactly as the model emitted it.
+    arguments: string,
+  }
+
+  record tool {
+    name: string,
+    description: string,
+    /// JSON Schema object encoded as a string.
+    parameters: string,
+  }
+
+  record attachment {
+    name: string,
+    mime-type: string,
+    data: list<u8>,
+    /// Host-extracted text for documents that the provider cannot read directly.
+    extracted-text: option<string>,
+  }
+
   record message {
     role: role,
-    content: string,
+    content: option<string>,
     name: option<string>,
+    tool-call-id: option<string>,
+    /// Assistant tool calls. Empty for non-assistant messages.
+    tool-calls: list<tool-call>,
+    /// Image/document attachments. Hosts encode these as provider content parts.
+    attachments: list<attachment>,
+    /// Optional provider reasoning trace. Hosts may omit it on request.
+    reasoning: option<string>,
   }
 
   record model {
@@ -34,13 +63,16 @@ interface inference {
   record request {
     model: string,
     messages: list<message>,
+    tools: list<tool>,
     max-output-tokens: option<u32>,
     temperature: option<f32>,
+    /// Opaque provider cache-affinity hint. Hosts may ignore it.
+    prompt-cache-key: option<string>,
   }
 
   record response {
     model: string,
-    text: string,
+    message: message,
     finish-reason: option<string>,
     usage: option<usage>,
   }
