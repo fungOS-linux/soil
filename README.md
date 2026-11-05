@@ -26,6 +26,10 @@ RSS/Atom items from `soil:records`, keeps its private settings in
 `soil:appdata`, and leaves fetching to a host-side poller with a dotfile feed
 list.
 
+Spores do not import Unibus or Iroh. The host owns the shared
+`unibus/peer/1` session, and application sync protocols are message kinds on
+that session. See [Shared peer sync](docs/peer-sync.md).
+
 Principles:
 
 - **No ambient authority.** A Spore runs against exactly the imports its signed
