@@ -5,12 +5,14 @@
 //! bounded page. It does not grant access: the host supplies the roots and
 //! approved books.
 
+mod discovery;
 mod git;
 mod tgrep;
 
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
+use discovery::{PeerIndex, ServiceIndex, SporeIndex};
 use fungos_records::{Record, Store};
 use git::GitIndex;
 use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
@@ -31,6 +33,9 @@ pub struct SearchService {
     books: Vec<String>,
     git: Option<GitIndex>,
     tgrep: Option<TgrepSource>,
+    spores: Option<SporeIndex>,
+    peers: Option<PeerIndex>,
+    services: Option<ServiceIndex>,
     generation: u64,
 }
 
@@ -42,6 +47,9 @@ impl SearchService {
             books,
             git: None,
             tgrep: None,
+            spores: None,
+            peers: None,
+            services: None,
             generation: 1,
         }
     }
@@ -92,11 +100,52 @@ impl SearchService {
         self
     }
 
+    /// Add explicit local Spore package roots. The host grants these; a Spore
+    /// cannot discover or add a root.
+    pub fn with_spore_roots(mut self, roots: Vec<std::path::PathBuf>) -> Self {
+        self.spores = Some(SporeIndex::new(roots));
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
+    /// Load an explicit `mycelium peers --json` snapshot. The host chooses the
+    /// file; search never talks to the daemon or opens a network connection.
+    pub fn with_mycelium_peers(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.peers = Some(PeerIndex::load(path.into()));
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
+    /// Load an explicit Mycelium/Unibus service catalog snapshot, e.g.
+    /// `mycelium services --json` or `unibus-services ... --json`.
+    pub fn with_service_catalog(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.services = Some(ServiceIndex::load(path.into()));
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
+    /// Load `peers.json` and/or `services.json` from one host-granted directory.
+    pub fn with_mycelium_snapshot_dir(mut self, dir: impl AsRef<std::path::Path>) -> Self {
+        let dir = dir.as_ref();
+        let peers = dir.join("peers.json");
+        if peers.is_file() {
+            self = self.with_mycelium_peers(peers);
+        }
+        let services = dir.join("services.json");
+        if services.is_file() {
+            self = self.with_service_catalog(services);
+        }
+        self
+    }
+
     fn sources(&self) -> u32 {
         u32::from(self.vfs.is_some())
             + u32::from(self.records.is_some())
             + u32::from(self.git.is_some())
             + u32::from(self.tgrep.is_some())
+            + u32::from(self.spores.is_some())
+            + u32::from(self.peers.is_some())
+            + u32::from(self.services.is_some())
     }
 
     fn snapshot(&self) -> search_api::SearchState {
@@ -119,6 +168,9 @@ impl SearchService {
                 search_api::Kind::File,
                 search_api::Kind::RecordEntry,
                 search_api::Kind::Repository,
+                search_api::Kind::Spore,
+                search_api::Kind::Peer,
+                search_api::Kind::Service,
             ]
         } else {
             query.kinds.clone()
@@ -132,6 +184,15 @@ impl SearchService {
         }
         if kinds.contains(&search_api::Kind::Repository) {
             hits.extend(self.git_hits(&query));
+        }
+        if kinds.contains(&search_api::Kind::Spore) {
+            hits.extend(self.spore_hits(&query));
+        }
+        if kinds.contains(&search_api::Kind::Peer) {
+            hits.extend(self.peer_hits(&query));
+        }
+        if kinds.contains(&search_api::Kind::Service) {
+            hits.extend(self.service_hits(&query));
         }
         if kinds.contains(&search_api::Kind::Action) {
             hits.extend(self.action_hits(&query));
@@ -235,6 +296,66 @@ impl SearchService {
             .collect()
     }
 
+    fn spore_hits(&self, query: &search_api::Query) -> Vec<search_api::Hit> {
+        let Some(spores) = &self.spores else {
+            return Vec::new();
+        };
+        spores
+            .search(&query.text, MAX_PAGE as usize)
+            .into_iter()
+            .map(|(entry, score)| search_api::Hit {
+                kind: search_api::Kind::Spore,
+                id: entry.id,
+                title: entry.name,
+                subtitle: Some(format!("{} · {}", entry.version, entry.target)),
+                snippet: (!entry.summary.is_empty()).then_some(entry.summary),
+                score,
+                source: format!("spore:{}", entry.root),
+                updated_at_ms: None,
+            })
+            .collect()
+    }
+
+    fn peer_hits(&self, query: &search_api::Query) -> Vec<search_api::Hit> {
+        let Some(peers) = &self.peers else {
+            return Vec::new();
+        };
+        peers
+            .search(&query.text, MAX_PAGE as usize)
+            .into_iter()
+            .map(|(entry, score)| search_api::Hit {
+                kind: search_api::Kind::Peer,
+                id: entry.id,
+                title: entry.title,
+                subtitle: Some(entry.subtitle),
+                snippet: entry.snippet,
+                score,
+                source: "mycelium:peers".into(),
+                updated_at_ms: entry.updated_at_ms,
+            })
+            .collect()
+    }
+
+    fn service_hits(&self, query: &search_api::Query) -> Vec<search_api::Hit> {
+        let Some(services) = &self.services else {
+            return Vec::new();
+        };
+        services
+            .search(&query.text, MAX_PAGE as usize)
+            .into_iter()
+            .map(|(entry, score)| search_api::Hit {
+                kind: search_api::Kind::Service,
+                id: entry.id,
+                title: entry.title,
+                subtitle: Some(entry.subtitle),
+                snippet: entry.snippet,
+                score,
+                source: "mycelium:services".into(),
+                updated_at_ms: entry.updated_at_ms,
+            })
+            .collect()
+    }
+
     fn action_hits(&self, query: &search_api::Query) -> Vec<search_api::Hit> {
         let Some(git) = &self.git else {
             return Vec::new();
@@ -284,10 +405,16 @@ fn record_hit(record: Record, needle: &str, index: usize) -> search_api::Hit {
         .filter(|value| !value.is_empty())
         .unwrap_or(&record.entity_id)
         .to_string();
-    let body = fields.to_string();
-    let snippet = body.to_lowercase().find(needle).map(|position| {
-        let start = position.saturating_sub(40);
-        let end = (position + needle.len() + 80).min(body.len());
+    let body = fields.to_string().to_lowercase();
+    let snippet = body.find(needle).map(|position| {
+        let mut start = position.saturating_sub(40);
+        while !body.is_char_boundary(start) {
+            start = start.saturating_sub(1);
+        }
+        let mut end = (position + needle.len() + 80).min(body.len());
+        while end < body.len() && !body.is_char_boundary(end) {
+            end += 1;
+        }
         body[start..end].to_string()
     });
     search_api::Hit {
@@ -329,6 +456,15 @@ impl search_api::Host for SearchService {
         }
         if let Some(git) = self.git.as_mut() {
             git.refresh();
+        }
+        if let Some(spores) = self.spores.as_mut() {
+            spores.refresh();
+        }
+        if let Some(peers) = self.peers.as_mut() {
+            peers.refresh();
+        }
+        if let Some(services) = self.services.as_mut() {
+            services.refresh();
         }
         self.generation = self.generation.saturating_add(1);
         Ok(self.snapshot())
@@ -473,6 +609,127 @@ printf '%s\n' '{"type":"match","data":{"path":{"text":"/repo/src/main.rs"},"line
         assert_eq!(page.hits[0].kind, search_api::Kind::Repository);
         assert_eq!(page.hits[0].id, "fpl/dock");
         assert_eq!(page.hits[0].title, "dock");
+    }
+
+    #[test]
+    fn searches_opt_in_spore_manifests() {
+        let dir = tempfile::tempdir().unwrap();
+        let spore = dir.path().join("markdown");
+        std::fs::create_dir_all(&spore).unwrap();
+        std::fs::write(
+            spore.join("spore.toml"),
+            r#"schema = 1
+[spore]
+id = "dev.fungos.markdown"
+name = "markdown"
+version = "0.1.0"
+license = "MIT"
+summary = "Markdown reader with a Canvas UI"
+[engine]
+soil = ">=0.1"
+target = "wasm32-wasip2"
+[module]
+path = "module.wasm"
+[ui]
+entry = "ui/editor.lua"
+[launch]
+default = "canvas"
+surfaces = ["canvas"]
+[grants]
+"soil:canvas" = "present the editor"
+"#,
+        )
+        .unwrap();
+        let mut host =
+            SearchService::new(None, None, vec![]).with_spore_roots(vec![dir.path().to_path_buf()]);
+        let page = host
+            .search(search_api::Query {
+                text: "markdown".into(),
+                kinds: vec![search_api::Kind::Spore],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].kind, search_api::Kind::Spore);
+        assert_eq!(page.hits[0].title, "markdown");
+        assert!(page.hits[0].id.starts_with("dev.fungos."));
+    }
+
+    #[test]
+    fn searches_mycelium_peer_and_service_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let peers = dir.path().join("peers.json");
+        std::fs::write(
+            &peers,
+            serde_json::json!([{
+                "origin": "studio-origin",
+                "last_seen": 1_700_000_000u64,
+                "hello": {
+                    "node_id": "studio-origin",
+                    "hostname": "studio",
+                    "site": "lab",
+                    "platform": "Darwin",
+                    "architecture": "aarch64",
+                    "daemon_version": "0.1.0",
+                    "capabilities": ["unibus-viewer", "ssh"]
+                }
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let services = dir.path().join("services.json");
+        std::fs::write(
+            &services,
+            serde_json::json!({
+                "schema_version": 2,
+                "observations": [{
+                    "schema_version": 2,
+                    "service_id": "unibus/viewer",
+                    "observed_at": 1_700_000_000u64,
+                    "expires_at": 1_700_000_300u64,
+                    "value": {
+                        "kind": "unibus",
+                        "endpoints": ["http://studio.local:7411"],
+                        "protocols": ["dcp"],
+                        "formats": [],
+                        "attributes": {"node_label": "studio"}
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut host = SearchService::new(None, None, vec![])
+            .with_mycelium_peers(&peers)
+            .with_service_catalog(&services);
+
+        let page = host
+            .search(search_api::Query {
+                text: "studio".into(),
+                kinds: vec![search_api::Kind::Peer],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].kind, search_api::Kind::Peer);
+        assert_eq!(page.hits[0].title, "studio");
+
+        let page = host
+            .search(search_api::Query {
+                text: "unibus".into(),
+                kinds: vec![search_api::Kind::Service],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].kind, search_api::Kind::Service);
+        assert_eq!(page.hits[0].id, "unibus/viewer");
     }
 
     #[test]

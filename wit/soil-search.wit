@@ -11,6 +11,9 @@ interface search {
     file,
     record-entry,
     repository,
+    spore,
+    peer,
+    service,
     action,
   }
 
