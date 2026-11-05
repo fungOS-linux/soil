@@ -90,3 +90,18 @@ intended, and an error looks the same whether it is on a wall or in a log.
 
 A host that fails to load something should hand the failure to this rather than
 inventing an error panel: one place to read errors, one renderer to trust.
+
+## Colour, weight, and the kitty protocol
+
+| Question | Answer |
+|---|---|
+| 24-bit colour | Yes. `libghostty-vt` reports `Some(rgb)` per cell for both foreground and background; the renderer honours it and falls back to the theme only when a cell asks for nothing. |
+| Bold | Yes, and as a real face. `cell.bold` selects the Bold cut of the same family rather than smearing the regular one, which is what makes fake bold unreadable at small sizes. |
+| Underline | Yes, drawn across the whole cell so underlined blanks stay visible. |
+| Italic | Reported by the emulator, not drawn yet: needs the italic face loaded alongside regular and bold. |
+| Kitty keyboard | **Not negotiated yet.** The emulator tracks the flags (`kitty_keyboard_flags()`), and `libghostty-vt::key::Encoder` will encode against them — including `set_options_from_terminal(&terminal)`, which is the call that makes the protocol automatic. The current encoder is a portable subset (arrows, home/end, ctrl-keys, alt-prefix), which every TUI understands but which cannot negotiate. |
+| Kitty graphics | No. Out of scope for a text grid; it needs an image pipeline. |
+
+Switching input to the library encoder is the next step and it removes the
+hand-rolled table entirely: one source of truth for how a key becomes bytes,
+including the kitty, modifyOtherKeys, and macOS-option-as-alt behaviours.
