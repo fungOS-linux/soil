@@ -1,6 +1,7 @@
 //! Render a captured `soil_scene` and present it to Canvas as a GPU lease.
 
-use std::io::Write;
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, SystemTime};
 
@@ -24,6 +25,7 @@ fn run() -> anyhow::Result<()> {
     let mut watch = false;
     let mut fps = 30u32;
     let mut rgba_path = None;
+    let mut input_out = None;
     let mut base64 = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -40,6 +42,7 @@ fn run() -> anyhow::Result<()> {
                 fps = fps.clamp(1, 120);
             }
             "--rgba" => rgba_path = args.next(),
+            "--input-out" => input_out = args.next(),
             "--base64" => base64 = true,
             "--size" => {
                 let Some(value) = args.next() else {
@@ -69,6 +72,12 @@ fn run() -> anyhow::Result<()> {
     }
 
     let mut stream = UnixStream::connect(&socket)?;
+    if let Some(path) = input_out {
+        let reader = stream.try_clone()?;
+        std::thread::Builder::new()
+            .name("soil-scene-input".into())
+            .spawn(move || read_inputs(reader, path))?;
+    }
     send_hello(&mut stream, &source_id, &frame)?;
     send_frame(&mut stream, &source_id, &frame, revision, !base64)?;
     stream.flush()?;
@@ -123,6 +132,26 @@ fn run() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_secs(60));
     }
     Ok(())
+}
+
+fn read_inputs(stream: UnixStream, path: String) {
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let kind = message.get("kind").and_then(|value| value.as_str());
+        if !matches!(kind, Some("pointer" | "scroll" | "key")) {
+            continue;
+        }
+        let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
+            continue;
+        };
+        if writeln!(file, "{line}").is_err() {
+            break;
+        }
+    }
 }
 
 fn modified(path: &str) -> Option<SystemTime> {
