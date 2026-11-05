@@ -6,11 +6,19 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = ["model2vec"]
+model2vec = ["dep:model2vec-rs"]
+remote = ["dep:serde_json", "dep:ureq"]
+
 [dependencies]
 anyhow = "1"
 blake3 = "1"
 fungos-vfs = { path = "../../../fungos-vfs" }
+model2vec-rs = { version = "0.4", default-features = false, features = ["fancy-regex", "hf-hub"], optional = true }
 rusqlite = { version = "0.41", features = ["bundled"] }
+serde_json = { version = "1", optional = true }
+ureq = { version = "2", features = ["json"], optional = true }
 wasmtime = { version = "50", features = ["anyhow"] }
 
 [dev-dependencies]

@@ -102,11 +102,22 @@ Search behavior:
 | `substring` | in-memory entry/text scan |
 | `fuzzy` | in-memory path ranking |
 | `full-text` | SQLite FTS5 + exact path promotion |
-| `semantic` | `unsupported` until an embedding model is granted |
+| `semantic` | opt-in host embedding provider + vector search |
 
-Vector helpers currently store `f32` BLOBs and rank by brute-force cosine. That
-is the v1 baseline. If the workspace outgrows it, add `sqlite-vec`/HNSW/LanceDB
-behind the `IndexBackend` trait rather than changing `soil:index`.
+Vector helpers store `f32` BLOBs and rank by brute-force cosine. That is the v1
+baseline. If the workspace outgrows it, add `sqlite-vec`/HNSW/LanceDB behind the
+`IndexBackend` trait rather than changing `soil:index`.
+
+Semantic indexing is opt-in:
+
+```rust
+let host = VfsHost::open(root)?
+    .with_embeddings(Arc::new(Model2VecEmbedder::potion_base_8m()?))?;
+```
+
+The default local model is `minishlab/potion-base-8M` (256 dimensions). Without a
+provider, `semantic` remains an explicit `unsupported`. A remote provider is
+available behind the `remote` feature for host-owned HTTP, not a Spore import.
 
 The index is local and never synced. Sync durable intent through `records` and
 content through VFS/Unibus, then rebuild the index per device.

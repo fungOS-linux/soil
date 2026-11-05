@@ -3,6 +3,7 @@
 //! The host owns canonical paths, the VFS namespace, hydration and the derived
 //! index. A Spore sees only the capability contracts.
 
+mod embeddings;
 mod indexer;
 
 use std::sync::{Arc, Mutex};
@@ -13,6 +14,11 @@ use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit", world: "host" });
 
+pub use embeddings::EmbeddingProvider;
+#[cfg(feature = "model2vec")]
+pub use embeddings::Model2VecEmbedder;
+#[cfg(feature = "remote")]
+pub use embeddings::RemoteEmbeddingProvider;
 use indexer::{IndexBackend, Node, NodeKind, SqliteIndex};
 use soil::index::index;
 use soil::vfs::vfs;
@@ -43,6 +49,7 @@ pub struct VfsHost {
     vfs: Arc<Mutex<Vfs>>,
     hydrator: Option<Arc<dyn ContentHydrator>>,
     index: Arc<Mutex<Box<dyn IndexBackend>>>,
+    embeddings: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl VfsHost {
@@ -81,6 +88,7 @@ impl VfsHost {
             vfs: Arc::new(Mutex::new(vfs)),
             hydrator: None,
             index: Arc::new(Mutex::new(Box::new(index))),
+            embeddings: None,
         })
     }
 
@@ -89,11 +97,124 @@ impl VfsHost {
         self
     }
 
+    /// Opt in to semantic indexing with an explicit host-selected provider.
+    pub fn with_embeddings(
+        mut self,
+        embeddings: Arc<dyn EmbeddingProvider>,
+    ) -> anyhow::Result<Self> {
+        self.embeddings = Some(embeddings);
+        self.refresh_embeddings()?;
+        Ok(self)
+    }
+
     pub fn refresh_index(&self) -> anyhow::Result<index::IndexState> {
-        let mut vfs = self.vfs.lock().expect("vfs poisoned");
-        let mut index = self.index.lock().expect("index poisoned");
-        index.refresh(&mut vfs)?;
-        Ok(index.state())
+        {
+            let mut vfs = self.vfs.lock().expect("vfs poisoned");
+            let mut index = self.index.lock().expect("index poisoned");
+            index.refresh(&mut vfs)?;
+        }
+        self.refresh_embeddings()?;
+        Ok(self.index_read().state())
+    }
+
+    fn refresh_embeddings(&self) -> anyhow::Result<()> {
+        let Some(provider) = &self.embeddings else {
+            return Ok(());
+        };
+        let model = provider.model_id();
+        loop {
+            let chunks = {
+                let index = self.index_read();
+                index.missing_chunks(model, 64)?
+            };
+            if chunks.is_empty() {
+                break;
+            }
+            let texts: Vec<_> = chunks.iter().map(|(_, text)| text.clone()).collect();
+            let vectors = provider.embed(&texts)?;
+            if vectors.len() != chunks.len() {
+                anyhow::bail!(
+                    "embedding provider returned {} vectors for {} chunks",
+                    vectors.len(),
+                    chunks.len()
+                );
+            }
+            let mut index = self.index.lock().expect("index poisoned");
+            for ((chunk_id, _), vector) in chunks.iter().zip(vectors) {
+                if vector.len() != provider.dimension() {
+                    anyhow::bail!(
+                        "embedding dimension {} does not match model {}",
+                        vector.len(),
+                        provider.dimension()
+                    );
+                }
+                index.put_vector(chunk_id, model, &vector)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn semantic_search(&self, query: &index::Query) -> Result<index::Page, index::Error> {
+        let Some(provider) = &self.embeddings else {
+            return Err(index::Error::Unsupported);
+        };
+        let vector = provider
+            .embed(std::slice::from_ref(&query.text))
+            .map_err(index_error)?
+            .into_iter()
+            .next()
+            .ok_or(index::Error::Io)?;
+        let parent = query
+            .parent
+            .as_deref()
+            .map(normalize_parent)
+            .transpose()
+            .map_err(|_| index::Error::Invalid)?;
+        let index = self.index_read();
+        let raw = index
+            .semantic_search(provider.model_id(), &vector, MAX_PAGE as usize * 4)
+            .map_err(index_error)?;
+        let mut hits = Vec::new();
+        for (path, score) in raw {
+            let Some(node) = index.entry(&path) else {
+                continue;
+            };
+            if let Some(parent) = &parent {
+                let start = if parent.is_empty() {
+                    0
+                } else {
+                    parent.len() + 1
+                };
+                let rest = path.get(start..).unwrap_or_default();
+                let direct = path.starts_with(parent) && !rest.contains('/');
+                if !direct {
+                    continue;
+                }
+            }
+            if let Some(prefix) = &query.media_type_prefix
+                && !node.entry.media_type.starts_with(prefix)
+            {
+                continue;
+            }
+            hits.push(index::Hit {
+                path,
+                score: (score.max(0.0) * 1_000_000.0) as u32,
+                snippet: Some(node.text.chars().take(160).collect()),
+                matched_by: Some(index::MatchSource::Embedding),
+            });
+        }
+        hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
+        let start = usize::try_from(query.offset).unwrap_or(usize::MAX);
+        let page = hits
+            .into_iter()
+            .skip(start)
+            .take(query.limit as usize)
+            .collect();
+        Ok(index::Page {
+            hits: page,
+            next: None,
+            generation: index.state().generation,
+        })
     }
 
     fn index_read(&self) -> std::sync::MutexGuard<'_, Box<dyn IndexBackend>> {
@@ -274,6 +395,9 @@ impl index::Host for VfsHost {
     }
 
     fn search(&mut self, query: index::Query) -> Result<index::Page, index::Error> {
+        if query.mode == Some(index::Mode::Semantic) {
+            return self.semantic_search(&query);
+        }
         self.index_read().search(&query)
     }
 
@@ -438,6 +562,52 @@ mod tests {
             })
             .unwrap();
         assert_eq!(page.hits[0].path, "notes/new.txt");
+    }
+
+    struct FakeEmbeddings;
+
+    impl EmbeddingProvider for FakeEmbeddings {
+        fn model_id(&self) -> &str {
+            "fake:test"
+        }
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    if text.to_lowercase().contains("trip") {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.0, 1.0]
+                    }
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn semantic_search_uses_the_host_embedding_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path());
+        let mut host = VfsHost::open(dir.path())
+            .unwrap()
+            .with_embeddings(Arc::new(FakeEmbeddings))
+            .unwrap();
+        let page = host
+            .search(index::Query {
+                text: "trip".into(),
+                mode: Some(index::Mode::Semantic),
+                parent: None,
+                media_type_prefix: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].path, "notes.txt");
+        assert_eq!(page.hits[0].matched_by, Some(index::MatchSource::Embedding));
     }
 
     #[test]

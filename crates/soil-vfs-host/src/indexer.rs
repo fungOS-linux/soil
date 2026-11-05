@@ -35,6 +35,14 @@ pub(crate) trait IndexBackend: Send {
     fn search(&self, query: &index::Query) -> Result<index::Page, index::Error>;
     fn entry(&self, path: &str) -> Option<&Node>;
     fn nodes(&self) -> &BTreeMap<String, Node>;
+    fn missing_chunks(&self, model: &str, limit: usize) -> anyhow::Result<Vec<(String, String)>>;
+    fn put_vector(&mut self, chunk_id: &str, model: &str, vector: &[f32]) -> anyhow::Result<()>;
+    fn semantic_search(
+        &self,
+        model: &str,
+        query: &[f32],
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, f32)>>;
 }
 
 #[derive(Clone)]
@@ -197,7 +205,6 @@ impl SqliteIndex {
 
     /// Persist one vector for a current chunk. Vectors are derived cache data,
     /// never authority and never synced by `records`.
-    #[allow(dead_code)]
     pub(crate) fn put_vector(
         &mut self,
         chunk_id: &str,
@@ -224,8 +231,7 @@ impl SqliteIndex {
 
     /// Brute-force cosine search. This is the v1 baseline; `sqlite-vec`, HNSW
     /// or LanceDB can be added behind [`IndexBackend`] when scale requires it.
-    #[allow(dead_code)]
-    pub(crate) fn vector_search(
+    fn vector_search(
         &self,
         model: &str,
         query: &[f32],
@@ -236,7 +242,7 @@ impl SqliteIndex {
             return Ok(Vec::new());
         }
         let mut statement = self.db.prepare(
-            "SELECT vectors.chunk_id,vectors.dimension,vectors.vector,vectors.norm
+            "SELECT chunks.path,vectors.dimension,vectors.vector,vectors.norm
              FROM vectors JOIN chunks ON chunks.chunk_id=vectors.chunk_id
              WHERE vectors.model=?1",
         )?;
@@ -250,7 +256,7 @@ impl SqliteIndex {
         })?;
         let mut hits = Vec::new();
         for row in rows {
-            let (chunk_id, dimension, bytes, norm) = row?;
+            let (path, dimension, bytes, norm) = row?;
             if dimension != query.len() || bytes.len() != dimension * 4 {
                 continue;
             }
@@ -266,7 +272,7 @@ impl SqliteIndex {
                 dot += value * stored;
             }
             if norm > 0.0 {
-                hits.push((chunk_id, dot / (query_norm * norm)));
+                hits.push((path, dot / (query_norm * norm)));
             }
         }
         hits.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -606,6 +612,34 @@ impl IndexBackend for SqliteIndex {
     fn nodes(&self) -> &BTreeMap<String, Node> {
         &self.nodes
     }
+
+    fn missing_chunks(&self, model: &str, limit: usize) -> anyhow::Result<Vec<(String, String)>> {
+        let mut statement = self.db.prepare(
+            "SELECT chunks.chunk_id,chunks.text FROM chunks
+             WHERE NOT EXISTS(
+               SELECT 1 FROM vectors
+               WHERE vectors.chunk_id=chunks.chunk_id AND vectors.model=?1
+             )
+             ORDER BY chunks.path,chunks.ordinal LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![model, limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn put_vector(&mut self, chunk_id: &str, model: &str, vector: &[f32]) -> anyhow::Result<()> {
+        SqliteIndex::put_vector(self, chunk_id, model, vector)
+    }
+
+    fn semantic_search(
+        &self,
+        model: &str,
+        query: &[f32],
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, f32)>> {
+        self.vector_search(model, query, limit)
+    }
 }
 
 fn build_nodes(vfs: &mut Vfs, entries: &[FileEntry]) -> BTreeMap<String, Node> {
@@ -843,7 +877,7 @@ mod tests {
         index.put_vector("a", "test-model", &[1.0, 0.0]).unwrap();
         index.put_vector("b", "test-model", &[0.0, 1.0]).unwrap();
         let hits = index.vector_search("test-model", &[0.9, 0.1], 2).unwrap();
-        assert_eq!(hits[0].0, "a");
+        assert_eq!(hits[0].0, "a.txt");
         assert!(hits[0].1 > hits[1].1);
     }
 }
