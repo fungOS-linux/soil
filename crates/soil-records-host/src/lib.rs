@@ -1,9 +1,8 @@
-//! Contacts records host for `soil:records`.
+//! Host adapter for `soil:records`.
 //!
-//! This adapter exposes one `fungos-records` book as one `soil:records`
-//! collection. Local CRUD and scan are implemented. Remote `changes`/`apply`
-//! currently return `unsupported`; the native Unibus provider remains the sync
-//! path.
+//! This exposes one `fungos-records` book as one `soil:records` collection.
+//! CRUD, scan, materialized changes, and revision/origin `apply` are local
+//! operations; peer transport remains the native `records.sync.*` provider.
 
 use std::sync::Mutex;
 
@@ -13,22 +12,60 @@ use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit", world: "records-host" });
 
-use soil::records::records as records;
+use soil::records::records;
 
 const MAX_PAGE: u32 = 512;
 const CONTACT_SCHEMA: &str = "fungos.contacts/contact";
 
-pub struct ContactsRecordsHost {
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SchemaPolicy {
+    Any,
+    Exact(String),
+    Contact,
+}
+
+pub struct RecordsBookHost {
     store: Mutex<Store>,
     book: String,
     collection: String,
+    schema: SchemaPolicy,
 }
 
-impl ContactsRecordsHost {
+impl RecordsBookHost {
+    /// Accept any non-empty schema in this collection.
     pub fn open(
         root: impl AsRef<std::path::Path>,
         book: impl Into<String>,
         collection: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        Self::open_with_policy(root, book, collection, SchemaPolicy::Any)
+    }
+
+    /// Require every entry to carry this schema id.
+    pub fn open_with_schema(
+        root: impl AsRef<std::path::Path>,
+        book: impl Into<String>,
+        collection: impl Into<String>,
+        schema: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        Self::open_with_policy(root, book, collection, SchemaPolicy::Exact(schema.into()))
+    }
+
+    /// Contact-specific host: schema `fungos.contacts/contact` and vCard-shaped
+    /// body validation.
+    pub fn open_contacts(
+        root: impl AsRef<std::path::Path>,
+        book: impl Into<String>,
+        collection: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        Self::open_with_policy(root, book, collection, SchemaPolicy::Contact)
+    }
+
+    fn open_with_policy(
+        root: impl AsRef<std::path::Path>,
+        book: impl Into<String>,
+        collection: impl Into<String>,
+        schema: SchemaPolicy,
     ) -> anyhow::Result<Self> {
         let root = root.as_ref();
         let device = root.join("device_id");
@@ -37,7 +74,48 @@ impl ContactsRecordsHost {
             store: Mutex::new(store),
             book: book.into(),
             collection: collection.into(),
+            schema,
         })
+    }
+
+    fn schema_name(&self) -> Option<&str> {
+        match &self.schema {
+            SchemaPolicy::Any => None,
+            SchemaPolicy::Exact(schema) => Some(schema),
+            SchemaPolicy::Contact => Some(CONTACT_SCHEMA),
+        }
+    }
+
+    fn check_schema(&self, schema: &str) -> Result<(), records::Error> {
+        if schema.is_empty() {
+            return Err(records::Error::Invalid);
+        }
+        if let Some(expected) = self.schema_name()
+            && schema != expected
+        {
+            return Err(records::Error::Invalid);
+        }
+        Ok(())
+    }
+
+    fn validate_body(
+        &self,
+        schema: &str,
+        body: &[u8],
+    ) -> Result<serde_json::Value, records::Error> {
+        if body.is_empty() {
+            return Err(records::Error::Invalid);
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(body).map_err(|_| records::Error::Invalid)?;
+        if !value.is_object() {
+            return Err(records::Error::Invalid);
+        }
+        if self.schema == SchemaPolicy::Contact || schema == CONTACT_SCHEMA {
+            let _: Contact =
+                serde_json::from_value(value.clone()).map_err(|_| records::Error::Invalid)?;
+        }
+        Ok(value)
     }
 
     fn key(&self, key: &records::Key) -> Result<String, records::Error> {
@@ -57,19 +135,14 @@ impl ContactsRecordsHost {
             schema: record.schema_id,
             revision: record.updated_hlc,
             updated_at_ms: record.updated_hlc,
-            origin: self
-                .store
-                .lock()
-                .expect("records store poisoned")
-                .device_id
-                .clone(),
+            origin: record.origin,
             deleted: record.deleted,
             body,
         }
     }
 }
 
-impl records::Host for ContactsRecordsHost {
+impl records::Host for RecordsBookHost {
     fn get(&mut self, key: records::Key) -> Result<records::Entry, records::Error> {
         let id = self.key(&key)?;
         let record = {
@@ -115,51 +188,103 @@ impl records::Host for ContactsRecordsHost {
             .into_iter()
             .map(|record| self.entry(record))
             .collect();
-        Ok(records::Page { entries: page, next })
+        Ok(records::Page {
+            entries: page,
+            next,
+        })
     }
 
     fn upsert(&mut self, entry: records::Entry) -> Result<records::Entry, records::Error> {
         let id = self.key(&entry.key)?;
-        if entry.schema != CONTACT_SCHEMA || entry.body.is_empty() {
-            return Err(records::Error::Invalid);
-        }
-        let body: serde_json::Value =
-            serde_json::from_slice(&entry.body).map_err(|_| records::Error::Invalid)?;
-        // Refuse arbitrary bodies that do not project to a contact.
-        let _: Contact = serde_json::from_value(body.clone()).map_err(|_| records::Error::Invalid)?;
+        self.check_schema(&entry.schema)?;
+        let body = self.validate_body(&entry.schema, &entry.body)?;
         let mut store = self.store.lock().expect("records store poisoned");
         store
-            .append(&self.book, &id, "contact.put", body)
+            .put_record(&self.book, &id, &entry.schema, 1, body)
             .map_err(|_| records::Error::Io)?;
-        let record = store
-            .get(&self.book, &id)
-            .map_err(|_| records::Error::Io)?;
+        let record = store.get(&self.book, &id).map_err(|_| records::Error::Io)?;
         drop(store);
         Ok(self.entry(record))
     }
 
     fn delete(&mut self, key: records::Key) -> Result<(), records::Error> {
         let id = self.key(&key)?;
+        let schema = self.schema_name().unwrap_or("unknown/record").to_string();
         let mut store = self.store.lock().expect("records store poisoned");
         store
-            .append(&self.book, &id, "contact.delete", serde_json::Value::Null)
+            .delete_record(&self.book, &id, &schema, 1)
             .map_err(|_| records::Error::Io)?;
         Ok(())
     }
 
     fn changes(
         &mut self,
-        _since: Option<String>,
-        _limit: u32,
+        since: Option<String>,
+        limit: u32,
     ) -> Result<records::Page, records::Error> {
-        Err(records::Error::Unsupported)
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(records::Error::OverBudget);
+        }
+        let records = {
+            let store = self.store.lock().expect("records store poisoned");
+            store
+                .scan_changes(&self.book, since.as_deref(), limit as usize + 1)
+                .map_err(|_| records::Error::Invalid)?
+        };
+        let mut entries: Vec<_> = records.into_iter().collect();
+        let next = if entries.len() > limit as usize {
+            entries.truncate(limit as usize);
+            entries
+                .last()
+                .map(|record| format!("{}:{}", record.updated_hlc, record.entity_id))
+        } else {
+            None
+        };
+        let entries = entries
+            .into_iter()
+            .map(|record| self.entry(record))
+            .collect();
+        Ok(records::Page { entries, next })
     }
 
     fn apply(
         &mut self,
-        _entries: Vec<records::Entry>,
+        entries: Vec<records::Entry>,
     ) -> Result<records::ApplyResult, records::Error> {
-        Err(records::Error::Unsupported)
+        let mut result = records::ApplyResult {
+            applied: 0,
+            skipped: 0,
+        };
+        let mut store = self.store.lock().expect("records store poisoned");
+        for entry in entries {
+            let id = self.key(&entry.key)?;
+            self.check_schema(&entry.schema)?;
+            let fields = if entry.deleted {
+                serde_json::json!({})
+            } else {
+                self.validate_body(&entry.schema, &entry.body)?
+            };
+            let applied = store
+                .apply_entry(
+                    &self.book,
+                    fungos_records::RecordEntry {
+                        entity_id: &id,
+                        schema_id: &entry.schema,
+                        schema_version: 1,
+                        fields,
+                        deleted: entry.deleted,
+                        revision: entry.revision,
+                        origin: &entry.origin,
+                    },
+                )
+                .map_err(|_| records::Error::Io)?;
+            if applied {
+                result.applied += 1;
+            } else {
+                result.skipped += 1;
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -207,18 +332,123 @@ mod tests {
     }
 
     #[test]
+    fn generic_collection_accepts_any_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = RecordsBookHost::open(dir.path(), "personal/test/mail", "message").unwrap();
+        let entry = records::Entry {
+            key: records::Key {
+                collection: "message".into(),
+                id: "msg-1".into(),
+            },
+            schema: "fungos.mail/message@1".into(),
+            revision: 0,
+            updated_at_ms: 0,
+            origin: String::new(),
+            deleted: false,
+            body: serde_json::to_vec(&serde_json::json!({"subject": "hello"})).unwrap(),
+        };
+        let stored = host.upsert(entry).unwrap();
+        assert_eq!(stored.schema, "fungos.mail/message@1");
+        assert_eq!(
+            host.get(records::Key {
+                collection: "message".into(),
+                id: "msg-1".into(),
+            })
+            .unwrap()
+            .key
+            .id,
+            "msg-1"
+        );
+    }
+
+    #[test]
+    fn changes_paginate_tombstones_and_apply_across_hosts() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let mut source =
+            RecordsBookHost::open_contacts(source_dir.path(), "personal/test/contacts", "contact")
+                .unwrap();
+        let mut target =
+            RecordsBookHost::open_contacts(target_dir.path(), "personal/test/contacts", "contact")
+                .unwrap();
+        source.upsert(contact("ada")).unwrap();
+        source.upsert(contact("grace")).unwrap();
+
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = source.changes(cursor.clone(), 1).unwrap();
+            seen.extend(page.entries.iter().map(|entry| entry.key.id.clone()));
+            cursor = page.next;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(seen, ["ada", "grace"]);
+
+        let all = source.changes(None, 10).unwrap();
+        let applied = target.apply(all.entries).unwrap();
+        assert_eq!(applied.applied, 2);
+        assert_eq!(applied.skipped, 0);
+        assert_eq!(
+            target
+                .get(records::Key {
+                    collection: "contact".into(),
+                    id: "ada".into()
+                })
+                .unwrap()
+                .key
+                .id,
+            "ada"
+        );
+
+        source
+            .delete(records::Key {
+                collection: "contact".into(),
+                id: "ada".into(),
+            })
+            .unwrap();
+        let changes = source.changes(None, 10).unwrap();
+        assert!(
+            changes
+                .entries
+                .iter()
+                .any(|entry| entry.key.id == "ada" && entry.deleted)
+        );
+        let applied = target.apply(changes.entries).unwrap();
+        assert_eq!(applied.applied, 1);
+        let page = target.scan("contact".into(), None, 10).unwrap();
+        assert_eq!(page.entries.len(), 1);
+    }
+
+    #[test]
     fn upsert_get_scan_and_delete() {
         let dir = tempfile::tempdir().unwrap();
-        let mut host = ContactsRecordsHost::open(dir.path(), "personal/test/contacts", "contact").unwrap();
+        let mut host =
+            RecordsBookHost::open_contacts(dir.path(), "personal/test/contacts", "contact")
+                .unwrap();
         let inserted = host.upsert(contact("ada")).unwrap();
         assert_eq!(inserted.revision, inserted.updated_at_ms);
-        assert_eq!(host.get(records::Key { collection: "contact".into(), id: "ada".into() }).unwrap().key.id, "ada");
+        assert_eq!(
+            host.get(records::Key {
+                collection: "contact".into(),
+                id: "ada".into()
+            })
+            .unwrap()
+            .key
+            .id,
+            "ada"
+        );
 
         let page = host.scan("contact".into(), None, 10).unwrap();
         assert_eq!(page.entries.len(), 1);
         assert!(page.next.is_none());
 
-        host.delete(records::Key { collection: "contact".into(), id: "ada".into() }).unwrap();
+        host.delete(records::Key {
+            collection: "contact".into(),
+            id: "ada".into(),
+        })
+        .unwrap();
         let page = host.scan("contact".into(), None, 10).unwrap();
         assert!(page.entries.is_empty());
     }

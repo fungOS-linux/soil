@@ -99,9 +99,9 @@ impl soil_sdk::records::Record for Contact {
 }
 ```
 
-`crates/soil-records-host` exposes one `fungos-records` contact book as this
-collection. `changes`/`apply` are `unsupported` in the Spore host for now; the
-native Unibus provider is still the sync path.
+`crates/soil-records-host` exposes one `fungos-records` book as this collection.
+Local CRUD, `changes`, and revision/origin `apply` are available; native
+`records.sync.*` remains the peer transport.
 
 ## Proof
 

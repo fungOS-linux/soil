@@ -28,15 +28,30 @@ collection name, schema, body encoding, and domain meaning.
 ## Contacts host
 
 `crates/soil-records-host` adapts one `fungos-records` book as one
-`soil:records` collection:
+`soil:records` collection.
+
+Generic:
 
 ```rust
-let host = ContactsRecordsHost::open(
+let host = RecordsBookHost::open(
+    "~/.local/share/fungos/records",
+    "personal/avery/mail",
+    "message",
+)?;
+```
+
+Contacts:
+
+```rust
+let host = RecordsBookHost::open_contacts(
     "~/.local/share/fungos/records",
     "personal/avery/contacts",
     "contact",
 )?;
 ```
+
+`open_with_schema` requires one exact schema; `open` accepts any non-empty
+schema; `open_contacts` additionally validates the vCard-shaped contact body.
 
 Implemented:
 
@@ -44,15 +59,18 @@ Implemented:
 - `scan`
 - `upsert`
 - `delete`
-- contact schema validation
+- `changes`
+- `apply`
+- materialized revision/origin LWW
 
-Currently `changes` and `apply` return `unsupported`; the native
-`records.sync.*` Unibus provider remains the sync path. Moving sync into the
-Spore-facing contract is a later step.
+`changes` is a materialized change feed over `(updated-at-ms, id)`, including
+tombstones. `apply` writes remote entries through the records op log using the
+remote revision as HLC and the remote origin as the device. Equal revisions are
+ordered lexicographically by origin.
 
 The host returns `revision = updated-at-ms = op HLC` and
-`origin = local device id` for local writes. Both records are tombstones:
-deleted entries disappear from `scan` but remain in the local op log.
+`origin = op device id` for local writes. Deleted entries disappear from
+`scan` but remain in `changes` and the local op log.
 
 ## Guest SDK
 
