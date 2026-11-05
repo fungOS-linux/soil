@@ -129,6 +129,10 @@ No sibling worktrees are required. See [dependency policy](docs/dependencies.md)
 
 `soil shell` mounts a VFS through FUSE and starts an interactive shell. `soil rm` unlinks the namespace entry while retaining the content-addressed blob and history. See [Soil shell](docs/soil-shell.md).
 
+## Scrubber
+
+`soil-scrub` is a local reversible redactor for prompts, tool calls, and tool output. It uses keyed session tokens, not hashes, and restores values only for explicitly scoped host tools. See [Scrubber](docs/scrubber.md).
+
 ## Mush
 
 `mush` is now a Wasm Spore over `soil:vfs`, `soil:index`, and `soil:vfs-mut`: no host PATH, no subprocesses, workspace-relative paths, `.mushrc`, `PWD`/`OLDPWD`, `TERM`, `mkdir`, `rmdir`, and `rm` as namespace unlink. See [Mush](docs/mush.md).
