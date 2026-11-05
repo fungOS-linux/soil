@@ -123,7 +123,17 @@ pub struct Presentation {
 
 /// Regions a Spore may claim. An unlisted name is a typo or a claim the host
 /// cannot honour, and both are better refused at install than discovered later.
-pub const CHROME_REGIONS: [&str; 5] = ["top-bar", "dock", "launcher", "switcher", "control-center"];
+pub const CHROME_REGIONS: [&str; 7] = [
+    "top-bar",
+    "dock",
+    "launcher",
+    "switcher",
+    "control-center",
+    // Transient surfaces: the shell's own voice. Kept as regions rather than
+    // windows so the host still owns where they appear and when they dismiss.
+    "notifications",
+    "attention",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
