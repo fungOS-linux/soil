@@ -1,0 +1,71 @@
+// Host-mediated action bus for Spores.
+//
+// A Spore sees a granted action catalog and emits bounded invocations. The host
+// owns grants, approval, idempotency, credentials, routing, retries and audit.
+// Unibus adapters implement the actions; Spores never import Unibus or open a
+// connector-specific transport.
+package fungos:actions@1.0.0;
+
+interface actions {
+  enum effect {
+    read,
+    write,
+    external,
+  }
+
+  enum idempotency {
+    idempotent,
+    keyed,
+    unsafe,
+  }
+
+  enum approval {
+    none,
+    operator,
+    destructive,
+  }
+
+  record descriptor {
+    id: string,
+    version: u32,
+    summary: string,
+    effect: effect,
+    idempotency: idempotency,
+    approval: approval,
+    input-schema: string,
+    output-schema: string,
+  }
+
+  record call {
+    action: string,
+    version: u32,
+    input: string,
+    idempotency-key: option<string>,
+  }
+
+  record receipt {
+    action: string,
+    version: u32,
+    output: string,
+    replayed: bool,
+  }
+
+  enum error {
+    denied,
+    unknown-action,
+    unsupported-version,
+    invalid,
+    approval-required,
+    unsafe-retry,
+    over-budget,
+    unavailable,
+    io,
+  }
+
+  catalog: func() -> result<list<descriptor>, error>;
+  invoke: func(call: call) -> result<receipt, error>;
+}
+
+world guest {
+  import actions;
+}

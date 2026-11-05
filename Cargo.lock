@@ -5263,6 +5263,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-actions-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "soil-android"
 version = "0.1.0"
 dependencies = [
