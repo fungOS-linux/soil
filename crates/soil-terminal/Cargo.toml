@@ -10,7 +10,7 @@ description = "A standalone terminal window: Soil's VT, no compositor."
 soil-vt = { path = "../soil-vt" }
 winit = "0.30"
 softbuffer = "0.4"
-font8x8 = "0.3"
+fontdue = "0.9"
 
 [lints]
 workspace = true

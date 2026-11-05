@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
-use font8x8::UnicodeFonts;
+use fontdue::{Font, FontSettings};
 use soil_vt::Session;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -20,9 +20,50 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
-/// Logical pixels per cell. 8x8 glyphs at 2x are legible on a normal display
-/// and keep the arithmetic exact: cell count is a division, not an estimate.
-const CELL: u32 = 16;
+/// Point size the grid is laid out at. The cell is derived from the font's own
+/// advance, so the column count is always exactly what the font can fit.
+const FONT_SIZE: f32 = 15.0;
+
+/// The face, in preference order. Someone with a Nerd Font installed asked for
+/// it; anyone else gets the system's own monospaced face rather than a bitmap.
+const FONT_CANDIDATES: &[&str] = &[
+    "Library/Fonts/Fira Code Regular Nerd Font Complete Mono.otf",
+    "Library/Fonts/FiraCodeNerdFontMono-Regular.ttf",
+    "Library/Fonts/Fira Code Regular Nerd Font Complete.otf",
+    "Library/Fonts/FiraCode-Regular.ttf",
+    ".local/share/fonts/FiraCodeNerdFontMono-Regular.ttf",
+    "usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf",
+];
+
+fn load_font() -> (Font, f32, f32) {
+    let mut bytes = None;
+    if let Some(path) = std::env::var_os("SOIL_TERMINAL_FONT") {
+        bytes = std::fs::read(path).ok();
+    }
+    if bytes.is_none() {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        for candidate in FONT_CANDIDATES {
+            let path = match (&home, candidate.starts_with("Library") || candidate.starts_with('.'))
+            {
+                (Some(home), true) => home.join(candidate),
+                _ => std::path::PathBuf::from("/").join(candidate),
+            };
+            if let Ok(read) = std::fs::read(&path) {
+                bytes = Some(read);
+                break;
+            }
+        }
+    }
+    let font = bytes
+        .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
+        .expect("a terminal needs a font: set SOIL_TERMINAL_FONT to a .ttf or .otf");
+    // Cell geometry comes from the font: advance is the column width, and the
+    // line box is ascent + descent, so a row is as tall as the face says.
+    let probe = font.metrics('M', FONT_SIZE);
+    let advance = probe.advance_width.max(1.0).round();
+    let height = (probe.height as f32).max(FONT_SIZE).ceil();
+    (font, advance, height)
+}
 
 /// A program's output, tagged so the UI thread can tell "more bytes" from "the
 /// program exited" without polling.
@@ -66,6 +107,8 @@ fn parse() -> Options {
 #[derive(Default)]
 struct App {
     options: Options,
+    /// Backing-store scale, so a 15pt cell is 15pt on a Retina display too.
+    scale: f32,
     window: Option<std::sync::Arc<Window>>,
     context: Option<softbuffer::Context<winit::event_loop::OwnedDisplayHandle>>,
     surface: Option<
@@ -77,6 +120,9 @@ struct App {
     output: Option<Receiver<Output>>,
     modifiers: ModifiersState,
     dirty: bool,
+    font: Option<Font>,
+    cell_w: f32,
+    cell_h: f32,
 }
 
 fn spawn(command: &[String]) -> (Child, ChildStdin, Receiver<Output>) {
@@ -124,10 +170,13 @@ fn spawn(command: &[String]) -> (Child, ChildStdin, Receiver<Output>) {
 }
 
 impl App {
-    fn grid_size(size: PhysicalSize<u32>) -> (u16, u16) {
+    fn grid_size(&self, size: PhysicalSize<u32>) -> (u16, u16) {
+        let scale = self.scale;
+        let cell_w = (self.cell_w * scale).max(1.0);
+        let cell_h = (self.cell_h * scale).max(1.0);
         (
-            (size.width / CELL).max(1) as u16,
-            (size.height / CELL).max(1) as u16,
+            ((size.width as f32 / cell_w).floor().max(1.0)) as u16,
+            ((size.height as f32 / cell_h).floor().max(1.0)) as u16,
         )
     }
 
@@ -139,7 +188,7 @@ impl App {
     }
 
     fn resize_terminal(&mut self, size: PhysicalSize<u32>) {
-        let (cols, rows) = Self::grid_size(size);
+        let (cols, rows) = self.grid_size(size);
         if let Some(terminal) = self.terminal.as_mut()
             && (terminal.cols() != cols || terminal.rows() != rows)
         {
@@ -175,10 +224,11 @@ impl App {
     }
 
     fn draw(&mut self) {
-        let (Some(surface), Some(terminal), Some(window)) = (
+        let (Some(surface), Some(terminal), Some(window), Some(font)) = (
             self.surface.as_mut(),
             self.terminal.as_mut(),
             self.window.as_ref(),
+            self.font.as_ref(),
         ) else {
             return;
         };
@@ -190,63 +240,99 @@ impl App {
             return;
         };
         let width = size.width as usize;
-        // The window is the authority on size; the grid may be one cell behind
-        // for a frame, which is better than drawing outside the buffer.
-        buffer.fill(0x0010_1014);
+
+        // Cells are whole device pixels so a column is never half a pixel wide:
+        // a fractional advance would make every other column drift, which is
+        // the one thing a terminal must never do.
+        let scale = if self.scale > 0.0 { self.scale } else { 1.0 };
+        let cell_w = (self.cell_w * scale).round().max(1.0) as u32;
+        let cell_h = (self.cell_h * scale).round().max(1.0) as u32;
+        let px_size = FONT_SIZE * scale;
+        let ascent = font
+            .horizontal_line_metrics(px_size)
+            .map(|metrics| metrics.ascent)
+            .unwrap_or(px_size * 0.8);
+
+        // A terminal is a program's canvas, not a themed surface: black ground,
+        // and the palette is whatever the program asks for.
+        buffer.fill(0x0000_0000);
 
         for (index, cell) in snapshot.cells.iter().enumerate() {
             let x = (index % usize::from(snapshot.cols)) as u32;
             let y = (index / usize::from(snapshot.cols)) as u32;
-            let (px, py) = (x * CELL, y * CELL);
-            if px + CELL > size.width || py + CELL > size.height {
+            let (px, py) = (x * cell_w, y * cell_h);
+            if px + cell_w > size.width || py + cell_h > size.height {
                 continue;
             }
             let (fg, bg) = resolve(cell);
-            for dy in 0..CELL {
-                for dx in 0..CELL {
-                    let pixel = &mut buffer[(py + dy) as usize * width + (px + dx) as usize];
-                    *pixel = bg;
+            let (fr, fg_g, fb) = unpack(fg);
+            for dy in 0..cell_h {
+                for dx in 0..cell_w {
+                    buffer[(py + dy) as usize * width + (px + dx) as usize] = bg;
                 }
             }
-            let mut drawn = 0u32;
+            if cell.text.is_empty() {
+                continue;
+            }
+            let mut advance = 0.0f32;
             for ch in cell.text.chars() {
-                if ch == ' ' {
-                    drawn += 1;
+                if ch == '\u{200b}' {
                     continue;
                 }
-                let glyph = font8x8::BASIC_FONTS.get(ch).or_else(|| font8x8::BASIC_FONTS.get('?'));
-                let Some(glyph) = glyph else { continue };
-                for (row_index, row) in glyph.iter().enumerate() {
-                    for col in 0..8 {
-                        if row & (1 << col) == 0 {
+                let (metrics, coverage) = font.rasterize(ch, px_size);
+                let base_y = py as f32 + ascent;
+                let origin_x = px as f32 + advance + metrics.xmin as f32;
+                let origin_y = base_y - metrics.ymin as f32 - metrics.height as f32;
+                for (row, line) in coverage.chunks(metrics.width.max(1)).enumerate() {
+                    for (col, alpha) in line.iter().enumerate() {
+                        if *alpha == 0 {
                             continue;
                         }
-                        // 2x scale: an 8x8 glyph becomes 16x16 and fills the cell.
-                        for sy in 0..2 {
-                            for sx in 0..2 {
-                                let target_y = py + row_index as u32 * 2 + sy;
-                                let target_x = px + drawn * CELL + col * 2 + sx;
-                                if target_x < size.width && target_y < size.height {
-                                    buffer[target_y as usize * width + target_x as usize] = fg;
-                                }
-                            }
+                        let tx = origin_x as i32 + col as i32;
+                        let ty = origin_y as i32 + row as i32;
+                        if tx < 0 || ty < 0 || tx >= size.width as i32 || ty >= size.height as i32 {
+                            continue;
                         }
+                        let pixel = &mut buffer[ty as usize * width + tx as usize];
+                        blend(pixel, (fr, fg_g, fb), *alpha);
                     }
                 }
-                drawn += 1;
+                advance += metrics.advance_width;
             }
         }
 
-        // Cursor last: it is an overlay, not a glyph, so it can invert whatever
-        // is already there without re-shaping the cell.
+        // A block caret, filled and then the character punched out on top: it
+        // has to be visible without hiding what is under it.
         if let Some((cx, cy)) = snapshot.cursor {
-            let (px, py) = (u32::from(cx) * CELL, u32::from(cy) * CELL);
-            for dy in 0..CELL {
-                for dx in 0..CELL {
+            let (px, py) = (u32::from(cx) * cell_w, u32::from(cy) * cell_h);
+            let caret = 0x00d0_d0d0;
+            for dy in 0..cell_h {
+                for dx in 0..cell_w {
                     let (x, y) = (px + dx, py + dy);
                     if x < size.width && y < size.height {
-                        let pixel = &mut buffer[y as usize * width + x as usize];
-                        *pixel = !*pixel & 0x00ff_ffff;
+                        buffer[y as usize * width + x as usize] = caret;
+                    }
+                }
+            }
+            if let Some(cell) = snapshot.cell(cx, cy)
+                && let Some(ch) = cell.text.chars().next()
+            {
+                let (metrics, coverage) = font.rasterize(ch, px_size);
+                let base_y = py as f32 + ascent;
+                let origin_x = px as f32 + metrics.xmin as f32;
+                let origin_y = base_y - metrics.ymin as f32 - metrics.height as f32;
+                for (row, line) in coverage.chunks(metrics.width.max(1)).enumerate() {
+                    for (col, alpha) in line.iter().enumerate() {
+                        if *alpha == 0 {
+                            continue;
+                        }
+                        let tx = origin_x as i32 + col as i32;
+                        let ty = origin_y as i32 + row as i32;
+                        if tx < 0 || ty < 0 || tx >= size.width as i32 || ty >= size.height as i32 {
+                            continue;
+                        }
+                        let pixel = &mut buffer[ty as usize * width + tx as usize];
+                        blend(pixel, (0, 0, 0), *alpha);
                     }
                 }
             }
@@ -256,12 +342,31 @@ impl App {
     }
 }
 
+fn unpack(color: u32) -> (u8, u8, u8) {
+    (
+        (color >> 16 & 0xff) as u8,
+        (color >> 8 & 0xff) as u8,
+        (color & 0xff) as u8,
+    )
+}
+
+/// Alpha-blend one coverage sample of `fg` into a packed pixel.
+fn blend(pixel: &mut u32, fg: (u8, u8, u8), alpha: u8) {
+    let (br, bg, bb) = unpack(*pixel);
+    let a = u32::from(alpha);
+    let inv = 255 - a;
+    let mix = |back: u8, front: u8| -> u32 {
+        (u32::from(back) * inv + u32::from(front) * a) / 255
+    };
+    *pixel = (mix(br, fg.0) << 16) | (mix(bg, fg.1) << 8) | mix(bb, fg.2);
+}
+
 /// A cell's colours as ARGB for `softbuffer`. The terminal's explicit colour
 /// wins; otherwise the theme's default pair, which keeps a terminal themed
 /// while still honouring a program that asked for something specific.
 fn resolve(cell: &soil_vt::Cell) -> (u32, u32) {
-    let default_fg = 0x00e6_e6ea;
-    let default_bg = 0x0010_1014;
+    let default_fg = 0x00d0_d0d0;
+    let default_bg = 0x0000_0000;
     let (mut fg, mut bg) = match (cell.fg, cell.bg) {
         (Some(fg), Some(bg)) => (rgb(fg), rgb(bg)),
         (Some(fg), None) => (rgb(fg), default_bg),
@@ -311,7 +416,14 @@ impl ApplicationHandler for App {
             .expect("softbuffer context");
         let surface =
             softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
-        let (cols, rows) = Self::grid_size(window.inner_size());
+        self.scale = window.scale_factor() as f32;
+        if self.font.is_none() {
+            let (font, cell_w, cell_h) = load_font();
+            self.font = Some(font);
+            self.cell_w = cell_w;
+            self.cell_h = cell_h;
+        }
+        let (cols, rows) = self.grid_size(window.inner_size());
         self.terminal = Some(Session::new(cols, rows, 10_000).expect("terminal"));
 
         if let Some(path) = self.options.text.clone() {
@@ -372,6 +484,14 @@ impl ApplicationHandler for App {
                 }
                 self.resize_terminal(size);
                 self.dirty = true;
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(window) = self.window.as_ref() {
+                    self.scale = window.scale_factor() as f32;
+                    let size = window.inner_size();
+                    self.resize_terminal(size);
+                    self.dirty = true;
+                }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
