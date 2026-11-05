@@ -12,7 +12,7 @@ use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit", world: "records-host" });
 
-use soil::records::records;
+pub use soil::records::records;
 
 const MAX_PAGE: u32 = 512;
 const CONTACT_SCHEMA: &str = "fungos.contacts/contact";
@@ -76,6 +76,62 @@ impl RecordsBookHost {
             collection: collection.into(),
             schema,
         })
+    }
+
+    pub fn book_id(&self) -> &str {
+        &self.book
+    }
+
+    pub fn collection_name(&self) -> &str {
+        &self.collection
+    }
+
+    /// Scan one page through the same `soil:records` path used by a Spore.
+    pub fn scan_entries(
+        &mut self,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> anyhow::Result<(Vec<records::Entry>, Option<String>)> {
+        let page = <Self as records::Host>::scan(
+            self,
+            self.collection.clone(),
+            cursor.map(str::to_owned),
+            limit,
+        )
+        .map_err(host_error)?;
+        Ok((page.entries, page.next))
+    }
+
+    /// Read one entry through the same `soil:records` path used by a Spore.
+    pub fn get_entry(&mut self, id: &str) -> anyhow::Result<Option<records::Entry>> {
+        let key = records::Key {
+            collection: self.collection.clone(),
+            id: id.to_owned(),
+        };
+        match <Self as records::Host>::get(self, key) {
+            Ok(entry) => Ok(Some(entry)),
+            Err(records::Error::NotFound) => Ok(None),
+            Err(error) => Err(host_error(error)),
+        }
+    }
+
+    /// Scan every live entry, bounded so a bad cursor cannot spin forever.
+    pub fn scan_all(&mut self, max: usize) -> anyhow::Result<Vec<records::Entry>> {
+        let mut entries = Vec::new();
+        let mut cursor = None;
+        loop {
+            let (page, next) = self.scan_entries(cursor.as_deref(), MAX_PAGE)?;
+            entries.extend(page);
+            if entries.len() >= max {
+                entries.truncate(max);
+                break;
+            }
+            match next {
+                Some(next) if Some(next.as_str()) != cursor.as_deref() => cursor = Some(next),
+                _ => break,
+            }
+        }
+        Ok(entries)
     }
 
     fn schema_name(&self) -> Option<&str> {
@@ -284,6 +340,10 @@ impl records::Host for RecordsBookHost {
         }
         Ok(result)
     }
+}
+
+fn host_error(error: records::Error) -> anyhow::Error {
+    anyhow::anyhow!("soil:records {error:?}")
 }
 
 pub fn add_to_linker<T>(linker: &mut Linker<T>) -> anyhow::Result<()>

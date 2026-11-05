@@ -107,3 +107,34 @@ let page = contacts.scan(None, 50)?;
 - `soil:records` is not `soil:vfs`: records own metadata/body; large blobs stay
   in VFS/storage.
 - The host never lets a Spore choose a book, app id, SQL table, or host path.
+
+## Browser inspector
+
+`soil-records-web` is a small read-only loopback UI over the contact host. It
+opens the same SQLite book as `records` and reads through `RecordsBookHost`, so
+it exercises the `soil:records` path a Spore uses rather than querying SQLite
+directly.
+
+```sh
+cargo run -p soil-records-host --bin soil-records-web -- \
+  --book personal/avery/contacts \
+  --collection contact \
+  --listen 127.0.0.1:8787
+```
+
+Then open <http://127.0.0.1:8787/>. It shows the contact list with search,
+per-contact detail, address/email/phone/URL labels, the raw vCard, record
+revision/origin metadata, and a `.vcf` export.
+
+Endpoints:
+
+```text
+GET /                  HTML inspector
+GET /api/records       JSON entries, optional ?q= search
+GET /api/records/{id}  one JSON entry
+GET /api/export.vcf    live contact cards as vCard
+GET /health            liveness
+```
+
+The server is read-only, binds to loopback by default, and is an inspection
+tool, not the eventual synced application surface.
