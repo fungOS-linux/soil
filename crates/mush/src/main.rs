@@ -5,6 +5,7 @@
 //! line-oriented terminal.
 
 mod config;
+mod gateway;
 mod overlay;
 
 use std::{
@@ -306,7 +307,23 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     let prompt = take_option(&mut args, "--prompt");
     let keep = args.iter().any(|arg| arg == "--keep");
     let no_apply = args.iter().any(|arg| arg == "--no-apply");
-    args.retain(|arg| arg != "--keep" && arg != "--no-apply");
+    let no_gateway = args.iter().any(|arg| arg == "--no-gateway");
+    args.retain(|arg| arg != "--keep" && arg != "--no-apply" && arg != "--no-gateway");
+    let mut base_url = resolved.base_url.clone();
+    let mut api_key = resolved.api_key.clone();
+    let _gateway = if !no_gateway {
+        if let Some(upstream) = base_url.clone() {
+            let gateway = gateway::start(upstream, api_key.clone(), true)?;
+            eprintln!("mush: inference gateway {}", gateway.base_url);
+            base_url = Some(gateway.base_url.clone());
+            api_key = Some(gateway.token.clone());
+            Some(gateway)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let overlay = overlay::Overlay::materialize(root)?;
     let workspace = overlay.path().to_path_buf();
     eprintln!("mush: overlay {}", workspace.display());
@@ -318,10 +335,10 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     if let Some(provider) = &resolved.provider {
         command.env("MUSH_INFERENCE_PROVIDER", provider);
     }
-    if let Some(base_url) = &resolved.base_url {
+    if let Some(base_url) = &base_url {
         command.env("BIFROST_BASE_URL", base_url);
     }
-    if let Some(api_key) = &resolved.api_key {
+    if let Some(api_key) = &api_key {
         command.env("BIFROST_API_KEY", api_key);
     }
     if let Some(model) = &resolved.model {

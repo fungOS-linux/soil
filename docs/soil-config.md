@@ -41,8 +41,9 @@ Resolution:
 - `api_key_env` reads a host environment variable.
 - `credential = "geode://NAME"` currently resolves through `GEODE_NAME`; the
   native Geode resolver will replace this bridge.
-- Operator receives `BIFROST_BASE_URL`, `BIFROST_API_KEY`, and
-  `OPERATOR_MODEL`; it never receives the service catalog path or Geode handle.
+- Operator receives a loopback `BIFROST_BASE_URL`, an ephemeral
+  `BIFROST_API_KEY`, and `OPERATOR_MODEL`; it never receives the upstream key,
+  service catalog path, or Geode handle.
 
 ## Operator and MCP
 
@@ -66,6 +67,29 @@ EDGERUNNER_MCP_TOKEN
 Tools exposed by `unibus-mcp`/DCP therefore appear as `mcp__<server>__<tool>`
 inside Operator. The endpoint is host-selected; Operator does not discover it.
 
+## Loopback gateway
+
+`mush run op` starts a loopback OpenAI-compatible gateway by default. It:
+
+```text
+accepts Operator's /v1 requests
+validates the ephemeral session token
+scrubs request JSON with soil-scrub
+injects the upstream credential
+forwards to the resolved UMIE endpoint
+scrubs the response before returning it
+```
+
+The gateway currently buffers the upstream response body, so SSE responses are
+returned after completion rather than token-by-token. True streaming is the
+next gateway increment.
+
+Disable it explicitly:
+
+```sh
+mush run op --no-gateway
+```
+
 ## Use
 
 ```sh
@@ -84,6 +108,7 @@ mush run op --inference-profile umie --base-url http://127.0.0.1:8096 --model la
 
 - Soil chooses the provider, endpoint, model alias, MCP route, and credential.
 - Operator sees a base URL and an opaque gateway/session key, never Geode.
-- A future loopback inference gateway can add request redaction, token budgets,
-  provider failover, and UMIE model alias mapping without changing Operator.
+- The loopback gateway already provides request/response scrubbing and upstream
+  credential injection. Token budgets, true SSE streaming, provider failover,
+  and UMIE alias mapping are next.
 - `unibus-mcp`/DCP is the tool transport; no host `PATH` discovery is required.

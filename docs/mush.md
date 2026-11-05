@@ -94,6 +94,7 @@ Options:
 --base-url URL         override the resolved inference endpoint
 --model NAME           override the resolved model alias
 --mcp-url URL          override the unibus-mcp bridge endpoint
+--no-gateway           send Operator directly to the resolved endpoint
 --prompt TEXT          use a one-shot operator run
 --no-apply             show the diff and discard the overlay
 --keep                 keep the materialized overlay directory
