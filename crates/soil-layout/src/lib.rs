@@ -398,7 +398,7 @@ pub fn solve(
     .map_err(|error| LayoutError::Taffy(error.to_string()))?;
 
     let mut nodes = Vec::new();
-    collect(&tree, taffy_root, None, &root, &mut nodes)?;
+    collect(&tree, taffy_root, None, &root, 0.0, 0.0, &mut nodes)?;
     let layout = tree
         .layout(taffy_root)
         .map_err(|error| LayoutError::Taffy(error.to_string()))?;
@@ -511,11 +511,15 @@ fn collect(
     id: taffy::NodeId,
     parent: Option<&str>,
     source: &Node,
+    origin_x: f32,
+    origin_y: f32,
     out: &mut Vec<PlacedNode>,
 ) -> Result<(), LayoutError> {
     let layout = tree
         .layout(id)
         .map_err(|error| LayoutError::Taffy(error.to_string()))?;
+    let x = origin_x + layout.location.x;
+    let y = origin_y + layout.location.y;
     let kind = match &source.kind {
         NodeKind::Container => PlacedKind::Container,
         NodeKind::Text { text, style } => PlacedKind::Text {
@@ -529,8 +533,8 @@ fn collect(
         id: source.id.clone(),
         parent: parent.map(str::to_owned),
         rect: Rect {
-            x: layout.location.x,
-            y: layout.location.y,
+            x,
+            y,
             width: layout.size.width,
             height: layout.size.height,
         },
@@ -540,7 +544,7 @@ fn collect(
         .children(id)
         .map_err(|error| LayoutError::Taffy(error.to_string()))?;
     for (child_source, child_id) in source.children.iter().zip(child_ids) {
-        collect(tree, child_id, Some(&source.id), child_source, out)?;
+        collect(tree, child_id, Some(&source.id), child_source, x, y, out)?;
     }
     Ok(())
 }
@@ -750,6 +754,30 @@ mod tests {
         assert_eq!(node.layout.direction, Direction::Row);
         assert_eq!(node.layout.gap, 4.0);
         assert_eq!(node.layout.align_items, Align::Stretch);
+    }
+
+    #[test]
+    fn child_rectangles_are_absolute() {
+        let tree = container(
+            "root",
+            LayoutStyle::default().padding(Edges::all(10.0)),
+            vec![container(
+                "nested",
+                LayoutStyle::default().padding(Edges::all(5.0)),
+                vec![text("inner", "hello")],
+            )],
+        );
+        let result = solve(&tree, Size::new(200.0, 200.0), &mut MockMeasurer::default()).unwrap();
+        let nested = result
+            .nodes
+            .iter()
+            .find(|node| node.id == "nested")
+            .unwrap();
+        let inner = result.nodes.iter().find(|node| node.id == "inner").unwrap();
+        assert_eq!(nested.rect.x, 10.0);
+        assert_eq!(nested.rect.y, 10.0);
+        assert_eq!(inner.rect.x, 15.0);
+        assert_eq!(inner.rect.y, 15.0);
     }
 
     #[test]
