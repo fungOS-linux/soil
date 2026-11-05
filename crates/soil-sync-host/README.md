@@ -40,7 +40,8 @@ soil-sync permit \
   --responder-endpoint <studio-iroh-endpoint-id> \
   --not-after <unix-seconds>
 
-soil-sync serve --config ~/.config/fungos/soil-sync/records-studio.json
+soil-sync run --config ~/.config/fungos/soil-sync/records-studio.json
+# Debug/manual only:
 soil-sync sync --config ~/.config/fungos/soil-sync/records-macbook.json \
   --peer records.studio --book personal/avery/contacts
 ```
@@ -48,12 +49,29 @@ soil-sync sync --config ~/.config/fungos/soil-sync/records-macbook.json \
 `issuers` in the config are the explicit public keys of the Mycelium access
 issuer set. They are never accepted from a connecting peer.
 
+`run` is the normal mode. It configures the host-owned book list, serves
+`unibus/peer/1`, watches a durable per-peer outbox, and runs anti-entropy.
+
+Local records writes commit locally first. The same SQLite transaction appends
+the op, projects it, and inserts outbox rows for configured peers. A background
+dispatcher pushes pending ops over the shared peer session. Failed pushes stay
+in the outbox with a retry time; periodic vector exchange repairs lost acks,
+partitions, and concurrent writes. Remote-applied ops are never echoed.
+
+```json
+{
+  "books": ["personal/avery/contacts"],
+  "sync_interval_secs": 300,
+  "push_poll_ms": 500
+}
+```
+
 ## Live deployment
 
 The current qualification uses a direct Iroh address over the tailnet:
 
 - studio binds `100.108.9.93:18793`
-- macbook binds `100.120.101.5:0`
+- macbook binds `100.120.101.5:18794`
 - macbook reads studio's endpoint id and direct address from its config
 
 Studio runs `soil-sync serve` under `dev.fungos.records-iroh`. The old

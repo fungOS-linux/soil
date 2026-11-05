@@ -438,6 +438,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "btleplug"
 version = "0.11.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1917,7 +1927,7 @@ dependencies = [
 [[package]]
 name = "fungos-records"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/records.git?rev=650f413ff82b7b56a30c51472a2920a22a7a5858#650f413ff82b7b56a30c51472a2920a22a7a5858"
+source = "git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db#adc88b242957e5ee9b82d7e98f36d92a051635db"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2171,6 +2181,19 @@ dependencies = [
  "khronos_api",
  "log",
  "xml-rs",
+]
+
+[[package]]
+name = "globset"
+version = "0.4.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f98b0d85522dc0a824cfebbc9594ff4a9b289c568bea0370319dfbdf20ccdd2d"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -2607,6 +2630,22 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "ignore"
+version = "0.4.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "484be5657551d7868d67587df967fb4fcbe9d266a761cc855aaa148fda0b3cc7"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
 ]
 
 [[package]]
@@ -3344,6 +3383,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fungos-vfs",
+ "ignore",
  "rustyline",
  "soil-vfs-host",
  "tempfile",
@@ -5375,7 +5415,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ed25519-dalek 2.2.0",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=650f413ff82b7b56a30c51472a2920a22a7a5858)",
+ "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
  "iroh",
  "mycelium-peer-protocol",
  "serde",

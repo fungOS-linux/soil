@@ -54,7 +54,12 @@ enum Cmd {
     EndpointId { key: PathBuf },
     /// Create a retained Mycelium-signed session permit.
     Permit(PermitArgs),
-    /// Serve records over one `unibus/peer/1` endpoint.
+    /// Serve records and run outbox push plus anti-entropy.
+    Run {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Serve records over one `unibus/peer/1` endpoint without scheduling.
     Serve {
         #[arg(long)]
         config: PathBuf,
@@ -120,6 +125,13 @@ struct SyncConfig {
     #[serde(default)]
     allowed_relays: Vec<String>,
     records_root: PathBuf,
+    /// Books owned by this host. Local writes to these books enter the outbox.
+    #[serde(default)]
+    books: Vec<String>,
+    #[serde(default = "default_sync_interval")]
+    sync_interval_secs: u64,
+    #[serde(default = "default_push_poll")]
+    push_poll_ms: u64,
     #[serde(default)]
     peers: Vec<PeerConfig>,
 }
@@ -134,6 +146,14 @@ struct PeerConfig {
 
 fn default_bind_addr() -> String {
     "0.0.0.0:0".into()
+}
+
+fn default_sync_interval() -> u64 {
+    300
+}
+
+fn default_push_poll() -> u64 {
+    500
 }
 
 fn main() {
@@ -151,6 +171,7 @@ fn run() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Permit(args) => permit(args),
+        Cmd::Run { config } => tokio::runtime::Runtime::new()?.block_on(run_peer(config)),
         Cmd::Serve { config } => tokio::runtime::Runtime::new()?.block_on(serve(config)),
         Cmd::Sync { config, peer, book } => {
             tokio::runtime::Runtime::new()?.block_on(sync(config, &peer, &book))
@@ -240,6 +261,194 @@ fn permit(args: PermitArgs) -> anyhow::Result<()> {
     println!("scope={scope}");
     println!("trust={}", args.out.display());
     Ok(())
+}
+
+async fn run_peer(config_path: PathBuf) -> anyhow::Result<()> {
+    let config = Arc::new(read_config(&config_path)?);
+    if config.books.is_empty() {
+        eprintln!("soil-sync: no books configured; serve-only");
+    }
+    let verifier = make_verifier(&config)?;
+    let endpoint = bind_endpoint(&config).await?;
+    // The session handler and the dispatcher use separate SQLite connections.
+    // A single shared mutex would deadlock when both sides push concurrently:
+    // each dispatcher would hold its store while waiting for the peer handler.
+    let host_store = Arc::new(tokio::sync::Mutex::new(Store::open(
+        &config.records_root,
+        &config.records_root.join("device_id"),
+    )?));
+    let dispatch_store = Store::open(&config.records_root, &config.records_root.join("device_id"))?;
+    {
+        let peers = config
+            .peers
+            .iter()
+            .map(|peer| peer.producer_id.clone())
+            .collect::<Vec<_>>();
+        for book in &config.books {
+            dispatch_store.set_sync_peers(book, &peers)?;
+        }
+    }
+    let dispatch_store = Arc::new(tokio::sync::Mutex::new(dispatch_store));
+    let listener = IrohListener::new(endpoint.clone(), session_config(&config, verifier.clone()));
+    let host = RecordPeerHost::from_shared(
+        listener,
+        host_store,
+        PeerEndpoint {
+            installation_id: config.installation_id.clone(),
+            producer_id: config.local_producer.clone(),
+        },
+    );
+    let transport = IrohTransport::new(endpoint.clone(), session_config(&config, verifier.clone()));
+    eprintln!("soil-sync: producer={}", config.local_producer);
+    eprintln!(
+        "soil-sync: endpoint_id={} books={:?} peers={:?}",
+        endpoint.id(),
+        config.books,
+        config
+            .peers
+            .iter()
+            .map(|peer| peer.producer_id.as_str())
+            .collect::<Vec<_>>()
+    );
+    for address in endpoint.addr().ip_addrs() {
+        eprintln!("soil-sync: direct_address={address}");
+    }
+    let server = tokio::spawn(host.run());
+    let supervisor = tokio::spawn(supervise(
+        Arc::clone(&config),
+        dispatch_store,
+        transport,
+        verifier,
+    ));
+    let result = tokio::try_join!(
+        async { server.await.map_err(anyhow::Error::from)? },
+        async { supervisor.await.map_err(anyhow::Error::from)? },
+    );
+    endpoint.close().await;
+    result?;
+    Ok(())
+}
+
+async fn supervise(
+    config: Arc<SyncConfig>,
+    store: Arc<tokio::sync::Mutex<Store>>,
+    transport: IrohTransport,
+    verifier: Arc<GrantVerifier>,
+) -> anyhow::Result<()> {
+    let poll = std::time::Duration::from_millis(config.push_poll_ms.max(100));
+    let interval = std::time::Duration::from_secs(config.sync_interval_secs.max(5));
+    let mut ticker = tokio::time::interval(poll);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_anti_entropy = 0u64;
+    loop {
+        ticker.tick().await;
+        let now = now_ms();
+        let mut due = false;
+        for book in &config.books {
+            for peer in &config.peers {
+                let store = store.lock().await;
+                let pending = store.pending_outbox(book, &peer.producer_id, now, 1)?;
+                due |= !pending.is_empty();
+            }
+        }
+        let anti_entropy = now.saturating_sub(last_anti_entropy)
+            >= interval.as_millis().min(u64::MAX as u128) as u64;
+        if due || anti_entropy {
+            for book in &config.books {
+                for peer in &config.peers {
+                    sync_one(&config, &store, &transport, &verifier, book, peer).await;
+                }
+            }
+            if anti_entropy {
+                last_anti_entropy = now_ms();
+            }
+        }
+    }
+}
+
+async fn sync_one(
+    config: &SyncConfig,
+    store: &Arc<tokio::sync::Mutex<Store>>,
+    transport: &IrohTransport,
+    verifier: &GrantVerifier,
+    book: &str,
+    peer: &PeerConfig,
+) {
+    let pending = {
+        let store = store.lock().await;
+        match store.pending_outbox(book, &peer.producer_id, u64::MAX, 1000) {
+            Ok(pending) => pending,
+            Err(error) => {
+                eprintln!("soil-sync: outbox {book}/{}: {error}", peer.producer_id);
+                return;
+            }
+        }
+    };
+    let assertion = match verifier.assertion(now_s()) {
+        Ok(assertion) => assertion,
+        Err(error) => {
+            eprintln!("soil-sync: permit {book}/{}: {error}", peer.producer_id);
+            return;
+        }
+    };
+    let candidate = candidate_for(config, peer, now_s());
+    let result = {
+        let mut store = store.lock().await;
+        sync_records_with_transport(
+            transport,
+            &candidate,
+            &assertion,
+            &mut store,
+            book,
+            &PeerEndpoint {
+                installation_id: config.installation_id.clone(),
+                producer_id: config.local_producer.clone(),
+            },
+        )
+        .await
+    };
+    let store = store.lock().await;
+    match result {
+        Ok(outcome) => {
+            if let Err(error) = store.ack_outbox(book, &peer.producer_id, &pending) {
+                eprintln!("soil-sync: ack outbox {book}/{}: {error}", peer.producer_id);
+            }
+            if outcome.pulled != 0 || outcome.pushed != 0 {
+                eprintln!(
+                    "soil-sync: {book}/{} pulled={} pushed={}",
+                    peer.producer_id, outcome.pulled, outcome.pushed
+                );
+            }
+        }
+        Err(error) => {
+            if let Err(defer) =
+                store.defer_outbox(book, &peer.producer_id, &pending, now_ms() + 5_000)
+            {
+                eprintln!(
+                    "soil-sync: defer outbox {book}/{}: {defer}",
+                    peer.producer_id
+                );
+            }
+            eprintln!(
+                "soil-sync: sync {book}/{} failed: {error:#}",
+                peer.producer_id
+            );
+        }
+    }
+}
+
+fn candidate_for(_config: &SyncConfig, peer: &PeerConfig, now: u64) -> PeerCandidate {
+    PeerCandidate {
+        peer_id: peer.producer_id.clone(),
+        site: None,
+        endpoints: vec![],
+        iroh_endpoints: vec![IrohPeerEndpoint {
+            endpoint_id: peer.endpoint_id.clone(),
+            direct_addresses: peer.direct_addresses.clone(),
+            relay_urls: vec![],
+        }],
+        expires_at_unix_s: now + 60,
+    }
 }
 
 async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
@@ -378,10 +587,14 @@ fn load_access_key(path: &Path) -> anyhow::Result<SigningKey> {
 }
 
 fn now_s() -> u64 {
+    now_ms() / 1000
+}
+
+fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_millis() as u64
 }
 
 fn hex(bytes: &[u8]) -> String {

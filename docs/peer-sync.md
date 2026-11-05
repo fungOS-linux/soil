@@ -66,9 +66,14 @@ message kinds, and payload bound. `GrantVerifier` synthesizes a short-lived
 session from that signed permit; a copied session JSON cannot widen it. The host
 deliberately does not accept a permissive JSON session assertion.
 
-`soil-sync` is the runnable host. See
-[`crates/soil-sync-host/README.md`](../crates/soil-sync-host/README.md) for key
-generation, permit issuance, config, and the live service layout.
+`soil-sync run` is the normal host mode: serve, durable outbox push, and
+periodic vector anti-entropy. Local writes commit first and enqueue per-peer
+outbox rows in the same SQLite transaction. Failed pushes remain durable with
+backoff; remote-applied ops are not echoed. `soil-sync sync` remains a debug
+escape hatch, not the normal operating mode.
+
+See [`crates/soil-sync-host/README.md`](../crates/soil-sync-host/README.md) for
+key generation, permit issuance, config, and the live service layout.
 
 The host owns:
 

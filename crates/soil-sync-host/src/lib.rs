@@ -26,9 +26,18 @@ pub struct RecordPeerHost {
 
 impl RecordPeerHost {
     pub fn new(listener: IrohListener, store: Store, endpoint: PeerEndpoint) -> Self {
+        Self::from_shared(listener, Arc::new(Mutex::new(store)), endpoint)
+    }
+
+    /// Share one store with a write-path dispatcher and anti-entropy task.
+    pub fn from_shared(
+        listener: IrohListener,
+        store: Arc<Mutex<Store>>,
+        endpoint: PeerEndpoint,
+    ) -> Self {
         Self {
             listener,
-            store: Arc::new(Mutex::new(store)),
+            store,
             endpoint,
         }
     }
