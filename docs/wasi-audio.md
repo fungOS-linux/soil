@@ -54,11 +54,66 @@ GPU-style test gate:
 cargo test -p wasi-audio-wasmtime --test tone -- --ignored --nocapture
 ```
 
+## Isochrone sink
+
+`wasi:audio` output can be routed to an Isochrone UDP destination instead of a
+local device. The guest still writes ordinary PCM; the host packetizes it as
+48 kHz stereo L24 and sends one RTP packet per millisecond.
+
+```rust
+let host = WasiAudioHost::with_isochrone(IsochroneConfig {
+    bind: "0.0.0.0:0".parse()?,
+    destination: "192.168.20.13:50040".parse()?,
+    ssrc: 0x536f_696c,
+});
+```
+
+The same configuration is available from the harness:
+
+```sh
+wasi-audio COMPONENT.wasm \
+  --isochrone-destination 192.168.20.13:50040 \
+  --isochrone-bind 0.0.0.0:0 \
+  --isochrone-ssrc 1399813484
+```
+
+or from a host-owned JSON file:
+
+```json
+{
+  "bind": "0.0.0.0:0",
+  "destination": "192.168.20.13:50040",
+  "ssrc": 1399813484
+}
+```
+
+```sh
+wasi-audio COMPONENT.wasm --isochrone-config /etc/soil/audio.json
+```
+
+Isochrone does not mix inside Soil. Each source sends to a sink port; the
+designated receiver combines streams:
+
+```text
+Studio Soil  -> 192.168.20.13:50040
+Neo Soil     -> 192.168.20.13:50041
+Rsspotify    -> local sink input / another stream
+                         |
+                  home-pi receive-mix
+                         |
+                   hardware_dmixer
+```
+
+The final config comes from Mycelium service discovery. Soil receives a
+destination identity, not a device selection from the guest.
+
 ## Limits
 
 - PCM output only. No capture, graph, effects or AudioWorklet.
 - f32 interleaved only; the host converts to the device format.
 - No per-Spore mixer, quota, or device-selection policy yet.
+- Isochrone output is fixed at 48 kHz stereo L24 in this slice; other formats
+  return `unsupported` rather than being silently converted.
 - `cpal` is host-side. There is no guest `cpal`, `rodio`, or `kira` adapter yet.
 - No browser WebAudio path; this is the non-browser WASI contract.
 - Android/Fire TV qualification is still needed; cpal's AAudio backend is the

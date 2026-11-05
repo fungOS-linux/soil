@@ -10,6 +10,10 @@ publish = false
 anyhow = "1"
 cpal = "0.18"
 rtrb = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+isochrone = { git = "https://github.com/ajmwagar/isochrone.git", rev = "934e1c99f594ea6bd122cf745ee6ab899bab53d9" }
+isochrone-core = { git = "https://github.com/ajmwagar/isochrone.git", rev = "934e1c99f594ea6bd122cf745ee6ab899bab53d9" }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 wasmtime = { version = "50", default-features = false, features = [
     "anyhow",

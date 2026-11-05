@@ -5,6 +5,7 @@
 //! device handle crosses the component boundary.
 
 use std::{
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -13,6 +14,9 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+use isochrone::UdpSender;
+use isochrone_core::{Encoding, StreamFormat};
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -31,9 +35,18 @@ wasmtime::component::bindgen!({
 
 use wasi::audio::playback;
 
+/// Host-selected Isochrone destination. The guest never sees this.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct IsochroneConfig {
+    pub bind: SocketAddr,
+    pub destination: SocketAddr,
+    pub ssrc: u32,
+}
+
 pub struct WasiAudioHost {
     table: ResourceTable,
     wasi: WasiCtx,
+    isochrone: Option<IsochroneConfig>,
 }
 
 impl WasiAudioHost {
@@ -41,6 +54,17 @@ impl WasiAudioHost {
         Self {
             table: ResourceTable::new(),
             wasi: WasiCtxBuilder::new().build(),
+            isochrone: None,
+        }
+    }
+
+    /// Route every `wasi:audio` output to an Isochrone UDP sink. The sink is
+    /// responsible for combining source streams; a Soil guest only writes PCM.
+    pub fn with_isochrone(config: IsochroneConfig) -> Self {
+        Self {
+            table: ResourceTable::new(),
+            wasi: WasiCtxBuilder::new().build(),
+            isochrone: Some(config),
         }
     }
 }
@@ -58,13 +82,52 @@ pub struct Output {
     underruns: Arc<AtomicU64>,
     stop: Option<Sender<()>>,
     thread: Option<JoinHandle<()>>,
+    isochrone: Option<IsochroneSink>,
     closed: bool,
 }
 
+struct IsochroneSink {
+    sender: UdpSender,
+    channels: usize,
+    frames_per_packet: usize,
+    pending: Vec<f32>,
+}
+
 impl Output {
-    fn open(format: playback::Format) -> Result<Self, playback::Error> {
+    fn open(
+        format: playback::Format,
+        isochrone: Option<&IsochroneConfig>,
+    ) -> Result<Self, playback::Error> {
         if !(8_000..=192_000).contains(&format.sample_rate) || !(1..=8).contains(&format.channels) {
             return Err(playback::Error::Invalid);
+        }
+        if let Some(config) = isochrone {
+            if format.sample_rate != 48_000 || format.channels != 2 {
+                return Err(playback::Error::Unsupported);
+            }
+            let stream = StreamFormat {
+                sample_rate_hz: 48_000,
+                channels: 2,
+                encoding: Encoding::L24,
+                frames_per_packet: 48,
+            };
+            let sender = UdpSender::connect(config.bind, config.destination, stream, config.ssrc)
+                .map_err(|_| playback::Error::Backend)?;
+            return Ok(Self {
+                producer: None,
+                format,
+                capacity_samples: 0,
+                underruns: Arc::new(AtomicU64::new(0)),
+                stop: None,
+                thread: None,
+                isochrone: Some(IsochroneSink {
+                    sender,
+                    channels: 2,
+                    frames_per_packet: 48,
+                    pending: Vec::with_capacity(96 * 4),
+                }),
+                closed: false,
+            });
         }
         let channels = usize::from(format.channels);
         let capacity_samples = (format.sample_rate as usize * channels / 4).max(1024);
@@ -103,11 +166,13 @@ impl Output {
             underruns,
             stop: Some(stop_tx),
             thread: Some(thread),
+            isochrone: None,
             closed: false,
         })
     }
 
     fn stop(&mut self) {
+        self.isochrone = None;
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
@@ -119,6 +184,9 @@ impl Output {
     }
 
     fn queued_frames(&self) -> usize {
+        if let Some(sink) = &self.isochrone {
+            return sink.pending.len() / sink.channels;
+        }
         self.producer.as_ref().map_or(0, |producer| {
             (self.capacity_samples - producer.slots()) / usize::from(self.format.channels)
         })
@@ -194,7 +262,7 @@ impl WasiView for WasiAudioHost {
 
 impl playback::Host for WasiAudioHost {
     fn open(&mut self, format: playback::Format) -> Result<Resource<Output>, playback::Error> {
-        let output = Output::open(format)?;
+        let output = Output::open(format, self.isochrone.as_ref())?;
         self.table
             .push(output)
             .map_err(|_| playback::Error::OverBudget)
@@ -225,6 +293,17 @@ impl playback::HostOutput for WasiAudioHost {
         if !frames.len().is_multiple_of(channels) {
             return Err(playback::Error::Invalid);
         }
+        if let Some(sink) = output.isochrone.as_mut() {
+            sink.pending.extend_from_slice(&frames);
+            let packet_samples = sink.frames_per_packet * sink.channels;
+            while sink.pending.len() >= packet_samples {
+                let packet: Vec<f32> = sink.pending.drain(..packet_samples).collect();
+                sink.sender
+                    .send(&packet)
+                    .map_err(|_| playback::Error::Backend)?;
+            }
+            return Ok((frames.len() / channels) as u32);
+        }
         let producer = output.producer.as_mut().ok_or(playback::Error::Closed)?;
         let mut accepted = 0;
         for frame in frames.chunks_exact(channels) {
@@ -248,6 +327,9 @@ impl playback::HostOutput for WasiAudioHost {
             .map_err(|_| playback::Error::Closed)?;
         if output.closed {
             return Err(playback::Error::Closed);
+        }
+        if output.isochrone.is_some() {
+            return Ok(());
         }
         let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms.min(2_000)));
         while output.queued_frames() > 0 {
@@ -318,10 +400,14 @@ impl AudioRuntime {
     }
 
     pub fn run_component(&self, bytes: &[u8]) -> Result<u32> {
+        self.run_component_with_host(bytes, WasiAudioHost::new())
+    }
+
+    pub fn run_component_with_host(&self, bytes: &[u8], host: WasiAudioHost) -> Result<u32> {
         let component = Component::new(&self.engine, bytes)
             .map_err(anyhow::Error::from)
             .context("compile audio component")?;
-        let mut store = Store::new(&self.engine, WasiAudioHost::new());
+        let mut store = Store::new(&self.engine, host);
         let instance = Audio::instantiate(&mut store, &component, &self.linker)
             .map_err(anyhow::Error::from)
             .context("instantiate audio component")?;
