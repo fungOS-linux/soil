@@ -102,6 +102,9 @@ Options:
 ```
 
 Inference and MCP configuration comes from [Soil config](soil-config.md).
+SSE responses stream through the host inference gateway; request JSON is
+scrubbed and upstream credentials are resolved through the configured Geode
+adapter.
 `unibus-mcp`/DCP tools arrive through Operator's MCP bridge; no host PATH is
 exposed.
 

@@ -6,6 +6,7 @@
 
 mod config;
 mod gateway;
+mod geode;
 mod overlay;
 
 use std::{
@@ -291,6 +292,11 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
             .unwrap_or_default(),
     };
     let mut resolved = config.resolve(profile.as_deref())?;
+    if resolved.api_key.is_none()
+        && let Some(credential) = &resolved.credential
+    {
+        resolved.api_key = geode::GeodeResolver::new(config.geode.clone()).resolve(credential)?;
+    }
     if let Some(value) = take_option(&mut args, "--base-url") {
         resolved.base_url = Some(value);
     }

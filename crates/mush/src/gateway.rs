@@ -52,7 +52,7 @@ fn handle(
     upstream: &str,
     upstream_key: Option<&str>,
     token: &str,
-    mut scrubber: Option<&mut Scrubber>,
+    scrubber: Option<&mut Scrubber>,
 ) -> Result<()> {
     let path = request.url().to_string();
     if !path.starts_with("/v1/") && path != "/v1" {
@@ -66,7 +66,7 @@ fn handle(
         .as_reader()
         .take(32 * 1024 * 1024)
         .read_to_end(&mut body)?;
-    let body = if let Some(scrubber) = scrubber.as_deref_mut() {
+    let body = if let Some(scrubber) = scrubber {
         scrub_request(&body, scrubber)
     } else {
         body
@@ -112,15 +112,26 @@ fn handle(
         .header("content-type")
         .unwrap_or("application/json")
         .to_string();
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(32 * 1024 * 1024)
-        .read_to_end(&mut bytes)?;
-    if let Some(scrubber) = scrubber {
-        bytes = scrub_request(&bytes, scrubber);
+    let mut headers = Vec::new();
+    if let Ok(header) = Header::from_bytes("content-type", content_type.as_bytes()) {
+        headers.push(header);
     }
-    respond(request, status, &content_type, &bytes)
+    if let Ok(header) = Header::from_bytes("cache-control", b"no-cache") {
+        headers.push(header);
+    }
+    // Stream the upstream body directly. The request was scrubbed before it
+    // left the host, so the model never has a real secret to echo. Keeping the
+    // reader unbuffered preserves SSE token-by-token delivery.
+    let stream = Response::new(
+        StatusCode(status),
+        headers,
+        response.into_reader(),
+        None,
+        None,
+    )
+    .with_chunked_threshold(0);
+    request.respond(stream)?;
+    Ok(())
 }
 
 fn respond(
@@ -239,6 +250,33 @@ mod tests {
             .send_string(r#"{"messages":[{"role":"user","content":"mail ada@example.com"}]}"#)
             .unwrap();
         assert_eq!(response.status(), 200);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn streams_sse_bodies_without_buffering_into_json() {
+        let upstream = Server::http("127.0.0.1:0").unwrap();
+        let address = upstream.server_addr().to_ip().unwrap();
+        let server = thread::spawn(move || {
+            let request = upstream.recv().unwrap();
+            request
+                .respond(
+                    Response::from_string(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                    )
+                    .with_header(Header::from_bytes("content-type", "text/event-stream").unwrap()),
+                )
+                .unwrap();
+        });
+
+        let gateway = start(format!("http://{address}"), None, true).unwrap();
+        let response = ureq::post(&format!("{}/chat/completions", gateway.base_url))
+            .set("authorization", &format!("Bearer {}", gateway.token))
+            .send_string(r#"{"stream":true}"#)
+            .unwrap();
+        let mut body = String::new();
+        response.into_reader().read_to_string(&mut body).unwrap();
+        assert!(body.contains("data:") && body.contains("\"content\":\"hi\""));
         server.join().unwrap();
     }
 

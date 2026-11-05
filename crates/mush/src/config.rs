@@ -18,6 +18,8 @@ pub struct SoilConfig {
     pub inference: InferenceConfig,
     #[serde(default)]
     pub operator: OperatorConfig,
+    #[serde(default)]
+    pub geode: GeodeConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -59,12 +61,25 @@ pub struct McpConfig {
     pub token_env: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct GeodeConfig {
+    /// Native command that implements `get NAME` on stdout.
+    pub command: Option<PathBuf>,
+    #[serde(default = "default_geode_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn default_geode_timeout() -> u64 {
+    5_000
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ResolvedOperator {
     pub provider: Option<String>,
     pub operator_bin: Option<String>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
+    pub credential: Option<String>,
     pub model: Option<String>,
     pub mcp_url: Option<String>,
     pub mcp_token: Option<String>,
@@ -117,17 +132,13 @@ impl SoilConfig {
         };
         let api_key = profile
             .and_then(|profile| profile.api_key_env.as_deref())
-            .and_then(|name| std::env::var(name).ok())
-            .or_else(|| {
-                profile
-                    .and_then(|profile| profile.credential.as_deref())
-                    .and_then(resolve_contract)
-            });
+            .and_then(|name| std::env::var(name).ok());
         Ok(ResolvedOperator {
             provider: profile.and_then(|profile| profile.provider.clone()),
             operator_bin: self.operator.operator_bin.clone(),
             base_url,
             api_key,
+            credential: profile.and_then(|profile| profile.credential.clone()),
             model: profile
                 .and_then(|profile| profile.model.clone())
                 .or_else(|| self.operator.model.clone()),
@@ -152,18 +163,6 @@ impl SoilConfig {
                 .and_then(|name| std::env::var(name).ok()),
         })
     }
-}
-
-fn resolve_contract(value: &str) -> Option<String> {
-    if let Some(name) = value.strip_prefix("env:") {
-        return std::env::var(name).ok();
-    }
-    if let Some(name) = value.strip_prefix("geode://") {
-        // Geode is host-owned. Until the resolver is linked, only an explicit
-        // environment bridge is accepted.
-        return std::env::var(format!("GEODE_{}", name.to_ascii_uppercase())).ok();
-    }
-    Some(expand_contract(value))
 }
 
 fn expand_contract(value: &str) -> String {

@@ -21,6 +21,7 @@ soil-scrub = { path = "../soil-scrub" }
 tiny_http = "0.12"
 toml = "0.8"
 ureq = { version = "2", features = ["json"] }
+wait-timeout = "0.2"
 fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "bcd2bc682662467d1371a2c9f8436e08934132d9" }
 soil-vfs-host = { path = "../soil-vfs-host" }
 tempfile = "3"
