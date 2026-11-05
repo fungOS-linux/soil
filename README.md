@@ -21,6 +21,11 @@ presentation viewer for web, signed Spores and retained scenes, with normalized
 remote actions and bounded host capture. It is designed for the existing Canvas
 Fire TV app first, then the extracted Soil runtime.
 
+A second spike is the [Feeds Spore](docs/feeds-spore.md): a reader that consumes
+RSS/Atom items from `soil:records`, keeps its private settings in
+`soil:appdata`, and leaves fetching to a host-side poller with a dotfile feed
+list.
+
 Principles:
 
 - **No ambient authority.** A Spore runs against exactly the imports its signed
