@@ -3532,6 +3532,18 @@ name = "soil-canvas-input"
 version = "0.1.0"
 
 [[package]]
+name = "soil-http-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
+ "ureq",
+ "url",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "soil-process"
 version = "0.1.0"
 dependencies = [

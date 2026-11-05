@@ -1,34 +1,44 @@
-//! Feed reader Spore spike.
+//! Feed scraper/reader Spore.
 //!
-//! This Spore does not fetch the network. A host-side poller writes feed items
-//! into `soil:records`; the Spore owns the reader policy and its private
-//! settings in `soil:appdata`. The config key is Spore-scoped by the host, so
-//! no app id or dotfile path is supplied here.
+//! HTTP transport is host-mediated by `soil:http`: the host owns the origin
+//! allowlist, budgets, TLS, routing, and credential material. The Spore owns
+//! feed URLs, parsing, and the records projection. Settings come from
+//! `soil:appdata`; items land in `soil:records`.
 
 wit_bindgen::generate!({ path: "wit", world: "feeds-reader", generate_all });
 
 use serde::{Deserialize, Serialize};
 use soil::appdata::appdata::{self, Scope};
-use soil::records::records;
+use soil::http::http::{self, Header, Method, Request};
+use soil::records::records::{self, Entry, Key};
 
 const CONFIG_KEY: &str = "feeds/config.json";
 const DEFAULT_COLLECTION: &str = "feed";
+const ITEM_SCHEMA: &str = "fungos.feeds/item";
+const MAX_FEED_BYTES: u32 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Config {
-    /// Host-mapped records collection. The host still owns the book.
     collection: String,
     limit: u32,
-    /// Reserved for a future UI; currently documentation for the reader.
     title: String,
+    feeds: Vec<FeedConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FeedConfig {
+    url: String,
+    #[serde(default)]
+    credential: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             collection: DEFAULT_COLLECTION.into(),
-            limit: 50,
+            limit: 100,
             title: "Feeds".into(),
+            feeds: Vec::new(),
         }
     }
 }
@@ -50,25 +60,103 @@ impl Guest for Component {
                 store
                     .set(CONFIG_KEY, &bytes)
                     .map_err(|error| format!("write default config: {error:?}"))?;
-                println!("seeded {CONFIG_KEY}: {config:?}");
+                println!("seeded {CONFIG_KEY}; add feed URLs to this AppData key");
                 config
             }
         };
 
-        let page = records::scan(&config.collection, None, config.limit.max(1).min(256))
-            .map_err(|error| format!("{error:?}"))?;
-        println!("{} · collection={}", config.title, config.collection);
-        if page.entries.is_empty() {
-            println!("no items yet; run `records import-rss` on the host");
+        if config.feeds.is_empty() {
+            println!("{} · no feeds configured", config.title);
+            return Ok(());
         }
-        for entry in page.entries {
-            let body: serde_json::Value =
-                serde_json::from_slice(&entry.body).unwrap_or(serde_json::Value::Null);
-            let title = body["title"].as_str().unwrap_or(&entry.key.id);
-            let published = body["published"].as_str().unwrap_or("");
-            let link = body["link"].as_str().unwrap_or("");
-            println!("{published}\t{title}\t{link}");
+
+        for feed in &config.feeds {
+            let count = match fetch_feed(feed, &config.collection, config.limit) {
+                Ok(count) => count,
+                Err(error) => {
+                    println!("{}: {error}", feed.url);
+                    continue;
+                }
+            };
+            println!("{}: {count} items", feed.url);
         }
         Ok(())
     }
+}
+
+fn fetch_feed(feed: &FeedConfig, collection: &str, limit: u32) -> Result<usize, String> {
+    let response = http::fetch(&Request {
+        url: feed.url.clone(),
+        method: Method::Get,
+        headers: vec![Header {
+            name: "accept".into(),
+            value: "application/rss+xml, application/atom+xml, application/xml, text/xml, */*".into(),
+        }],
+        credential: feed.credential.clone(),
+        max_bytes: MAX_FEED_BYTES,
+        timeout_ms: 20_000,
+    })
+    .map_err(|error| format!("http {error:?}"))?;
+    if response.status >= 400 {
+        return Err(format!("http status {}", response.status));
+    }
+    let parsed = feed_rs::parser::parse(response.body.as_slice())
+        .map_err(|error| format!("parse: {error}"))?;
+    let feed_title = parsed.title.as_ref().map(|title| title.content.clone());
+    let mut count = 0;
+    for entry in parsed.entries.into_iter().take(limit.max(1) as usize) {
+        let link = entry.links.first().map(|link| link.href.clone());
+        let uid = if entry.id.trim().is_empty() {
+            link.clone().unwrap_or_default()
+        } else {
+            entry.id.clone()
+        };
+        if uid.is_empty() {
+            continue;
+        }
+        let id = format!(
+            "feed-{}",
+            blake3::hash(format!("{}\0{uid}", feed.url).as_bytes()).to_hex()
+        );
+        let authors: Vec<String> = entry
+            .authors
+            .iter()
+            .filter_map(|person| person.name.clone().or_else(|| person.email.clone()))
+            .collect();
+        let categories: Vec<String> = entry
+            .categories
+            .iter()
+            .map(|category| category.term.clone())
+            .filter(|term| !term.is_empty())
+            .collect();
+        let body = serde_json::json!({
+            "feed_url": feed.url,
+            "feed_title": feed_title,
+            "title": entry.title.as_ref().map(|title| title.content.clone()).unwrap_or_default(),
+            "link": link,
+            "summary": entry.summary.as_ref().map(|summary| summary.content.clone()).unwrap_or_default(),
+            "content": entry.content.as_ref().and_then(|content| content.body.clone()).unwrap_or_default(),
+            "authors": authors,
+            "categories": categories,
+            "published": entry.published.map(|date| date.to_rfc3339()),
+            "updated": entry.updated.map(|date| date.to_rfc3339()),
+            "uid": uid,
+        });
+        let body = serde_json::to_vec(&body).map_err(|error| format!("encode: {error}"))?;
+        records::upsert(&Entry {
+            key: Key {
+                collection: collection.to_string(),
+                id,
+            },
+            schema: ITEM_SCHEMA.into(),
+            revision: 0,
+            updated_at_ms: 0,
+            origin: String::new(),
+            deleted: false,
+            body,
+        })
+        .map_err(|error| format!("records {error:?}"))?;
+        count += 1;
+    }
+    Ok(count)
 }

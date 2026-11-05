@@ -1,0 +1,6 @@
+package soil:http-get@0.1.0;
+
+world get {
+  import soil:http/http@0.1.0;
+  export run: func(args: list<string>) -> result<_, string>;
+}

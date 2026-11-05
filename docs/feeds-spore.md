@@ -12,9 +12,10 @@ host feed poller  ->  fungos-records book  ->  soil:records  ->  Feeds Spore
 settings          ->  soil:appdata (private, synced)
 ```
 
-The Spore deliberately has **no network capability**. A Spore that fetched RSS
-URLs itself would need a new ambient network authority. Fetching belongs to a
-host-side poller or an explicit future `soil:http` capability.
+The first Spore spike reads feed items from `soil:records`. The newer scraper
+spike adds `soil:http`: the Spore can request a user-configured feed URL, but
+the host still owns the origin allowlist, TLS, budgets, credential handle and
+transport route. It never gets a socket, DNS API, or credential bytes.
 
 Spike files:
 
@@ -31,6 +32,19 @@ records sync-feeds --config ~/.config/fungos/feeds.toml
 
 The Spore names a collection (`feed`), not a book. The host maps that collection
 to an approved records book, so the Spore still cannot choose a store.
+
+## HTTP and routing
+
+The scraper Spore imports `soil:http` and fetches configured feed URLs through
+the host. The host owns the origin allowlist, TLS, redirects, response cap,
+deadline, credential handle, and transport route. The first transport is direct
+`ureq`; an Iroh/Mycelium transport is a host-side `HttpTransport` implementation
+that can prefer a service/peer path and use DNS only as policy-permitted
+fallback. The Spore never chooses the route.
+
+Credential handles are opaque strings in the AppData config. A host
+`CredentialProvider` resolves them; Geode is the intended store. Tokens never
+enter Wasm memory.
 
 ## AppData config
 

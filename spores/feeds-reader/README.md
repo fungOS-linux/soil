@@ -1,24 +1,27 @@
 # Feeds reader Spore spike
 
-This is the reader half of the RSS spike.
+This is the scraper/reader RSS spike.
 
 ```text
-host feed poller  ->  fungos-records book  ->  soil:records  ->  this Spore
-                                          \-> soil:search
-settings          ->  soil:appdata (private, synced)
+soil:http fetch  ->  feed parser  ->  soil:records  ->  soil:search
+settings         ->  soil:appdata (private, synced)
 ```
 
-The Spore deliberately has **no network capability**. A Spore that scraped URLs
-directly would need a new ambient network grant. Fetching belongs to a host-side
-poller or an explicit future `soil:http` capability.
+The Spore imports `soil:http`, `soil:records`, and `soil:appdata`. It never sees
+a socket, DNS API, TLS stack, proxy setting, or credential bytes. The host owns
+the origin allowlist, budgets, credential handle resolution (Geode), and route
+selection (direct or Iroh/Mycelium).
 
 Config is a JSON key in the Spore's synced AppData:
 
 ```json
 {
   "collection": "feed",
-  "limit": 50,
-  "title": "Feeds"
+  "limit": 100,
+  "title": "Feeds",
+  "feeds": [
+    { "url": "https://blog.rust-lang.org/feed.xml", "credential": null }
+  ]
 }
 ```
 

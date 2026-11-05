@@ -10,7 +10,7 @@ summary = "Reader Spore for RSS/Atom items stored in records"
 [engine]
 soil = ">=0.1"
 target = "wasm32-wasip2"
-abi = { appdata = "1.0.0", records = "0.1.0" }
+abi = { appdata = "1.0.0", records = "0.1.0", http = "0.1.0" }
 
 [module]
 path = "module.wasm"
@@ -26,4 +26,5 @@ surfaces = ["canvas", "native", "web"]
 
 [grants]
 "soil:appdata" = "read/write the private reader settings"
-"soil:records" = "read feed items from the host-mapped collection"
+"soil:records" = "read/write feed items in the host-mapped collection"
+"soil:http" = "fetch user-approved feed URLs"
