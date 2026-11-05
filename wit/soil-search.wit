@@ -100,8 +100,8 @@ interface mentions {
   use search.{error};
 
   record candidate {
-    /// person, account, company, project, task, opportunity, thread, message,
-    /// call, file, or record.
+    /// person, account, company, project, task, opportunity, activity, call,
+    /// thread, message, document, file, or record.
     kind: string,
     /// Stable locator: `record:<book>#<entity>` or `file:<path>`.
     token: string,

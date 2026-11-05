@@ -411,7 +411,7 @@ impl SearchService {
         let allow = |kind: &str| kinds.is_empty() || kinds.contains(kind);
         let mut candidates = Vec::new();
 
-        if allow("file") {
+        if allow("file") || allow("document") {
             candidates.extend(self.file_mentions(&text, limit)?);
         }
 
@@ -433,6 +433,7 @@ impl SearchService {
             }
             candidates.push(record_mention(record, kind, index));
         }
+        candidates.retain(|candidate| allow(&candidate.kind));
 
         Ok(finish_mentions(candidates, limit))
     }
@@ -460,13 +461,14 @@ impl SearchService {
             .hits
             .into_iter()
             .map(|hit| {
-                let label = hit.path.rsplit('/').next().unwrap_or(&hit.path).to_string();
+                let kind = file_mention_kind(&hit.path);
+                let label = file_mention_label(&hit.path, kind);
                 let subtitle = hit
                     .path
                     .rsplit_once('/')
                     .map(|(parent, _)| parent.to_string());
                 mention_api::Candidate {
-                    kind: "file".into(),
+                    kind: kind.into(),
                     token: format!("file:{}", hit.path),
                     label,
                     subtitle,
@@ -500,6 +502,28 @@ impl SearchService {
     }
 }
 
+fn file_mention_kind(path: &str) -> &'static str {
+    let extension = path
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some(
+            "md" | "markdown" | "mdx" | "txt" | "rst" | "adoc" | "org" | "tex" | "pdf" | "doc"
+            | "docx" | "odt" | "rtf",
+        ) => "document",
+        _ => "file",
+    }
+}
+
+fn file_mention_label(path: &str, kind: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if kind != "document" {
+        return name.to_string();
+    }
+    let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
+    stem.replace(['-', '_'], " ")
+}
+
 fn mention_schema(schema: &str) -> Option<&'static str> {
     match schema {
         "fungos.crm/company@1" => Some("company"),
@@ -512,6 +536,10 @@ fn mention_schema(schema: &str) -> Option<&'static str> {
         "fungos.crm/call@1" => Some("call"),
         "fungos.mail/thread@1" => Some("thread"),
         "fungos.mail/message@1" => Some("message"),
+        "fungos.doc/document" | "fungos.doc/document@1" | "fungos.docs/document@1" => {
+            Some("document")
+        }
+        "fungos.note/note@1" | "fungos.notes/note@1" => Some("document"),
         _ => None,
     }
 }
@@ -1123,6 +1151,18 @@ surfaces = ["canvas"]
         store
             .put_record(
                 book,
+                "doc-arch",
+                "fungos.doc/document",
+                1,
+                serde_json::json!({
+                    "title": "Architecture",
+                    "visibility": "team"
+                }),
+            )
+            .unwrap();
+        store
+            .put_record(
+                book,
                 "x-not-mentionable",
                 "dev.fungos/unknown@1",
                 1,
@@ -1150,20 +1190,35 @@ surfaces = ["canvas"]
             .unwrap();
         assert!(accounts.iter().all(|candidate| candidate.kind == "account"));
         assert_eq!(accounts[0].token, format!("record:{book}#a-acme"));
+
+        let documents = host
+            .suggest("architecture".into(), vec!["document".into()], 10)
+            .unwrap();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].token, format!("record:{book}#doc-arch"));
+        assert_eq!(documents[0].schema.as_deref(), Some("fungos.doc/document"));
     }
 
     #[test]
-    fn mention_suggestions_include_workspace_files() {
+    fn mention_suggestions_include_workspace_documents_and_files() {
         let dir = tempfile::tempdir().unwrap();
         seed_vfs(dir.path());
         let records = tempfile::tempdir().unwrap();
         let mut host = SearchService::open(dir.path(), records.path(), vec![]).unwrap();
+        let documents = host
+            .suggest("greece".into(), vec!["document".into()], 5)
+            .unwrap();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].kind, "document");
+        assert_eq!(documents[0].token, "file:notes/greece.txt");
+        assert_eq!(documents[0].label, "greece");
+        assert_eq!(documents[0].visibility, "workspace");
+
         let files = host
-            .suggest("greece".into(), vec!["file".into()], 5)
+            .suggest("paris".into(), vec!["file".into()], 5)
             .unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].kind, "file");
-        assert_eq!(files[0].token, "file:notes/greece.txt");
-        assert_eq!(files[0].visibility, "workspace");
+        assert_eq!(files[0].token, "file:photos/paris.jpg");
     }
 }

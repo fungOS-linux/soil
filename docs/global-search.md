@@ -61,7 +61,7 @@ suggest(text, kinds, limit) -> list<candidate>
 ```wit
 candidate {
   kind,        // person / account / company / project / task / opportunity /
-              // activity / call / thread / message / file
+              // activity / call / thread / message / document / file
   token,       // record:<book>#<entity> or file:<path>
   label,
   subtitle,
@@ -84,11 +84,18 @@ fungos.crm/activity@1      -> activity
 fungos.crm/call@1          -> call
 fungos.mail/thread@1       -> thread
 fungos.mail/message@1      -> message
+fungos.doc/document        -> document
+fungos.doc/document@1      -> document
+fungos.docs/document@1     -> document
+fungos.note/note@1         -> document
+fungos.notes/note@1        -> document
 ```
 
 Unknown schemas are not mentionable. Privacy follows the books the host opened:
-a team book yields projections, a private book yields private records. Files
-come from the VFS index with `visibility = workspace`.
+a team book yields projections, a private book yields private records. VFS
+entries with document extensions (`.md`, `.txt`, `.pdf`, `.docx`, and similar)
+are `document` candidates; other paths are `file` candidates. Both use
+`visibility = workspace`.
 
 Insert `token` into the document/task/record and persist a graph link:
 
