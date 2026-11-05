@@ -1,1 +1,121 @@
-../../../../../wit/soil-index.wit
+// Derived, rebuildable index over the VFS namespace.
+//
+// The index is not authority. It never creates, mutates or owns a file; it
+// answers browse/search queries and returns paths. The Spore then calls
+// `soil:vfs.stat`/`read` for the authoritative entry and bytes. A host may
+// rebuild the index at any time and bump `generation`.
+package soil:index@1.1.0;
+
+interface index {
+  enum order {
+    path,
+    path-desc,
+    modified,
+    modified-desc,
+    size,
+    size-desc,
+  }
+
+  enum mode {
+    /// Literal path/text substring; the fast grep/FZF default.
+    substring,
+    /// Ranked fuzzy path match.
+    fuzzy,
+    /// Host full-text index, including OCR and extracted text.
+    full-text,
+    /// Host embedding/vector search.
+    semantic,
+    /// Bounded regular-expression search over indexed paths and text.
+    regex,
+  }
+
+  enum match-source {
+    path,
+    text,
+    ocr,
+    metadata,
+    embedding,
+  }
+
+  enum error {
+    /// The `soil:index` grant was not linked for this Spore.
+    denied,
+    /// The index is rebuilding or has no completed generation yet.
+    not-ready,
+    /// The query page or search budget was exceeded.
+    over-budget,
+    /// The query is malformed (empty text, invalid parent, bad limit).
+    invalid,
+    /// The index backend failed.
+    io,
+    /// The caller's generation is older than the current index generation.
+    stale,
+    /// This host has no backend for the requested mode.
+    unsupported,
+  }
+
+  record hit {
+    path: string,
+    /// Higher is more relevant. Stable for a given index generation.
+    score: u32,
+    /// Optional bounded text fragment; the host owns the source text.
+    snippet: option<string>,
+    /// What produced this hit, when the backend can say.
+    matched-by: option<match-source>,
+  }
+
+  record page {
+    hits: list<hit>,
+    /// Offset for the next page, or none when this page is the end.
+    next: option<u64>,
+    /// Index generation used for this page.
+    generation: u64,
+  }
+
+  record query {
+    text: string,
+    /// Search mode. None lets the host choose its fastest useful mode.
+    mode: option<mode>,
+    /// Restrict to direct children of this path; none means the whole workspace.
+    parent: option<string>,
+    /// Optional media-type prefix filter, e.g. `image/` or `text/`.
+    media-type-prefix: option<string>,
+    offset: u64,
+    limit: u32,
+  }
+
+  record knn-query {
+    text: string,
+    /// Restrict to direct children of this path; none means the whole workspace.
+    parent: option<string>,
+    /// Optional media-type prefix filter, e.g. `image/` or `text/`.
+    media-type-prefix: option<string>,
+    offset: u64,
+    limit: u32,
+  }
+
+  record index-state {
+    ready: bool,
+    generation: u64,
+    entries: u64,
+    rebuilt-at-ms: u64,
+  }
+
+  /// Browse direct children in the requested order.
+  browse: func(parent: string, order: order, offset: u64, limit: u32) -> result<page, error>;
+
+  /// Search paths, media types, metadata, and indexed text. Results are paths;
+  /// call `soil:vfs.stat` for authoritative entry data.
+  search: func(query: query) -> result<page, error>;
+
+  /// Exact KNN over the host embedding index. Returns `unsupported` when the
+  /// host has no embedding provider; guests never choose a model.
+  knn: func(query: knn-query) -> result<page, error>;
+
+  /// Inspect index readiness and generation.
+  state: func() -> result<index-state, error>;
+
+  /// Rebuild from the current VFS namespace. Hosts may also rebuild in the
+  /// background; this call is the explicit refresh boundary.
+  refresh: func() -> result<index-state, error>;
+}
