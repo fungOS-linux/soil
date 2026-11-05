@@ -1,7 +1,7 @@
 # Shared peer sync and Spore opt-in
 
-Status: **transport-neutral records core, 2026-11-05.** The shared
-`unibus/peer/1` Iroh endpoint is the host adapter still being wired.
+Status: **shared Iroh peer host, 2026-11-05.** A real encrypted Iroh
+`unibus/peer/1` loopback test syncs records through the shared host.
 
 ## One session, many application kinds
 
@@ -46,10 +46,21 @@ the Spore. A Spore cannot silently opt into a new network path.
 
 ## Host composition
 
+`crates/soil-sync-host` is the shared Iroh host. It owns:
+
+- an `unibus_iroh::IrohListener`
+- an `IrohTransport` client helper
+- a `fungos_records::Store`
+- a per-session router that sends `records.sync.*` to the records frame handler
+
 The host can enable sync for one or more approved books while constructing the
-`soil:records` adapter. The background peer runner accepts a `unibus/peer/1`
-session and routes `records.sync.*` to the records peer handler. Geode adds its
-own `geode.*` handler to the same router.
+`soil:records` adapter. Geode adds its own `geode.*` handler to the same router.
+The test suite performs a real encrypted Iroh round trip between two endpoints,
+then pulls and applies a contact record over `unibus/peer/1`.
+
+The remaining production input is the Mycelium/fpl-auth `SessionConfig`: endpoint
+identity, trusted session verifier, audience, installation and allowed kinds.
+The host deliberately does not accept a permissive JSON session assertion.
 
 The host owns:
 

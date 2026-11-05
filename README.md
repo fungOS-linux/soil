@@ -28,7 +28,9 @@ list.
 
 Spores do not import Unibus or Iroh. The host owns the shared
 `unibus/peer/1` session, and application sync protocols are message kinds on
-that session. See [Shared peer sync](docs/peer-sync.md).
+that session. The Iroh listener/router lives in `crates/soil-sync-host`; a real
+encrypted loopback test syncs records through it. See
+[Shared peer sync](docs/peer-sync.md).
 
 Principles:
 
