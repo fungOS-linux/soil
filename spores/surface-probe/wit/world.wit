@@ -1,0 +1,7 @@
+package fungos:surface-probe@0.1.0;
+
+world surface-probe {
+  import soil:surface-import/surface@0.1.0;
+
+  export run: func(args: list<string>) -> result<_, string>;
+}

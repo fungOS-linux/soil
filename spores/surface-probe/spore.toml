@@ -1,0 +1,28 @@
+schema = 1
+
+[spore]
+id = "dev.fungos.surface-probe"
+name = "surface-probe"
+version = "0.1.0"
+license = "MIT"
+summary = "Fixture Spore for soil:surface-import events and normalized input"
+
+[engine]
+soil = ">=0.1"
+target = "wasm32-wasip2"
+abi = { surface = "0.1.0" }
+
+[module]
+path = "module.wasm"
+
+[ui]
+entry = "ui/probe.lua"
+jit = true
+hot_reload = false
+
+[launch]
+default = "native"
+surfaces = ["native", "canvas"]
+
+[grants]
+"soil:surface-import" = "open the host-reviewed fixture surface and send normalized input"

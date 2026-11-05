@@ -1,0 +1,29 @@
+schema = 1
+
+[spore]
+id = "dev.fungos.media-probe"
+name = "media-probe"
+version = "0.1.0"
+license = "MIT"
+summary = "Fixture Spore for soil:media playback, encoded chunks, and image readback"
+
+[engine]
+soil = ">=0.1"
+target = "wasm32-wasip2"
+abi = { media = "0.1.0", "media-encoded" = "0.1.0" }
+
+[module]
+path = "module.wasm"
+
+[ui]
+entry = "ui/probe.lua"
+jit = true
+hot_reload = false
+
+[launch]
+default = "native"
+surfaces = ["native", "canvas"]
+
+[grants]
+"soil:media" = "open host-reviewed fixture playback and image sources"
+"soil:media-encoded" = "read fixture encoded chunks for the ABI test"

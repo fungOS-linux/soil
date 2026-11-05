@@ -103,3 +103,7 @@ CID itself grants nothing and is not a second access check.
 trait for host adapters. It includes image decode and tests for playback events,
 encoded chunks, and bounded image readback. A production decoder/presenter is
 still a host adapter, not part of the guest ABI.
+
+## Fixture
+
+[`spores/media-probe`](../spores/media-probe) exercises playback, encoded chunks, and image readback against a host `MediaSource` fixture.

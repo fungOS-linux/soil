@@ -89,3 +89,7 @@ A static editor sends no frames until it changes.
 trait. It tests lifecycle, events, and normalized input with a fixture source.
 Native window import, VST3 hosting, remote transport, and GPU texture import are
 host adapters, not guest ABI.
+
+## Fixture
+
+[`spores/surface-probe`](../spores/surface-probe) exercises surface metadata, damage events, and normalized input against a host `SurfaceSource` fixture.
