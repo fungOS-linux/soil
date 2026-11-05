@@ -55,7 +55,8 @@ review map for what else exists and what is missing.
 | `soil:inference@0.2` | host-mediated model inference | `soil:inference` | draft | Models, tool calls, attachments, non-streaming completion, and a polled SSE `completion-stream` resource. Host owns provider, endpoint, Geode credential, scrubbing, and transport. Canonical WIT: [`wit/soil-inference.wit`](../wit/soil-inference.wit). |
 | `soil:search@0.2` | global search | `soil:search` | draft | Host-composed files + records + future actions. Locators only, never authority. Host: [`crates/soil-search-host`](../crates/soil-search-host). |
 | `soil:time@1` | host monotonic clock | `soil:time` | yes | Monotonic milliseconds and host ticks only. No wall clock, sleep, or timer thread. Canonical WIT: [`wit/soil-time.wit`](../wit/soil-time.wit). |
-| `soil:notify@1` | host notification UI | `soil:notify` | later | Rate-limited, user-visible. Never a background toast loop. |
+| `soil:notify@1` | host notification broker / UI | `soil:notify` + separately `history`, `cleanup`, `focus` | draft | Durable envelopes, per-device inbox state, host focus, opt-in history, scoped cleanup. Canonical WIT: [`wit/soil-notify.wit`](../wit/soil-notify.wit); host: [`crates/soil-notify-host`](../crates/soil-notify-host). |
+| `soil:ringer@1` | host ringer lifecycle | `soil:ringer` | draft | Active calls/doorbells/alarms with a one-device answer claim. Separate from notification history. Canonical WIT: [`wit/soil-ringer.wit`](../wit/soil-ringer.wit). |
 | `soil:display@1` | display enumeration/placement | — | no | Soil owns displays. Spore asks for a surface purpose, not a display id. |
 | `soil:net@1` | raw sockets/DNS | — | no | Use `soil:http`, `soil:api`, or `soil:stream`. No ambient sockets, DNS, redirects, or arbitrary hosts. |
 | `soil:process@1` | process spawn | — | no | A Spore is not a process manager. |
