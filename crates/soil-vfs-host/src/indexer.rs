@@ -371,9 +371,12 @@ impl SqliteIndex {
                         text.contains(&needle)
                             .then_some((2, index::MatchSource::Text))
                     }),
-                index::Mode::Fuzzy => {
-                    fuzzy_score(&path, &needle).map(|score| (score, index::MatchSource::Path))
-                }
+                index::Mode::Fuzzy => fuzzy_score(&path, &needle)
+                    .map(|score| (score, index::MatchSource::Path))
+                    .or_else(|| {
+                        fuzzy_score(&text, &needle)
+                            .map(|score| (score.saturating_add(1000), index::MatchSource::Text))
+                    }),
                 index::Mode::FullText => path
                     .contains(&needle)
                     .then_some((1, index::MatchSource::Path))
@@ -381,7 +384,7 @@ impl SqliteIndex {
                         text.contains(&needle)
                             .then_some((2, index::MatchSource::Text))
                     }),
-                index::Mode::Semantic => unreachable!(),
+                index::Mode::Regex | index::Mode::Semantic => unreachable!(),
             }) else {
                 continue;
             };
@@ -393,6 +396,59 @@ impl SqliteIndex {
             });
         }
         hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
+        let start = usize::try_from(query.offset).unwrap_or(usize::MAX);
+        let page: Vec<_> = hits
+            .into_iter()
+            .skip(start)
+            .take(query.limit as usize)
+            .collect();
+        Ok(index::Page {
+            hits: page,
+            next: None,
+            generation: self.generation,
+        })
+    }
+
+    fn regex_search(
+        &self,
+        query: &index::Query,
+        parent: Option<&str>,
+    ) -> Result<index::Page, index::Error> {
+        let pattern = regex::RegexBuilder::new(&query.text)
+            .case_insensitive(true)
+            .size_limit(1 << 20)
+            .build()
+            .map_err(|_| index::Error::Invalid)?;
+        let mut hits = Vec::new();
+        for node in self.nodes.values() {
+            if node.kind == NodeKind::Directory
+                || !matches_filters(node, parent, query.media_type_prefix.as_deref())
+            {
+                continue;
+            }
+            let path_match = pattern.find(&node.entry.path);
+            let text_match = pattern.find(&node.text);
+            if path_match.is_none() && text_match.is_none() {
+                continue;
+            }
+            let matched_by = if path_match.is_some() {
+                index::MatchSource::Path
+            } else {
+                index::MatchSource::Text
+            };
+            let snippet = text_match.map(|found| {
+                let start = found.start().saturating_sub(40);
+                let end = (found.end() + 80).min(node.text.len());
+                node.text[start..end].to_string()
+            });
+            hits.push(index::Hit {
+                path: node.entry.path.clone(),
+                score: 1,
+                snippet,
+                matched_by: Some(matched_by),
+            });
+        }
+        hits.sort_by(|a, b| a.path.cmp(&b.path));
         let start = usize::try_from(query.offset).unwrap_or(usize::MAX);
         let page: Vec<_> = hits
             .into_iter()
@@ -597,6 +653,7 @@ impl IndexBackend for SqliteIndex {
         match query.mode.unwrap_or(index::Mode::Substring) {
             index::Mode::Semantic => Err(index::Error::Unsupported),
             index::Mode::FullText => self.full_text_search(query, parent.as_deref()),
+            index::Mode::Regex => self.regex_search(query, parent.as_deref()),
             mode => {
                 let mut query = query.clone();
                 query.mode = Some(mode);
@@ -666,7 +723,7 @@ fn build_nodes(vfs: &mut Vfs, entries: &[FileEntry]) -> BTreeMap<String, Node> {
     for entry in entries {
         let path = entry.path.clone();
         add_ancestors(&mut nodes, &path);
-        let text = if entry.media_type.starts_with("text/")
+        let text = if is_indexable_text(entry)
             && entry.hydration == Hydration::Present
             && entry.size <= MAX_INDEX_TEXT as u64
         {
@@ -727,6 +784,67 @@ fn add_ancestors(nodes: &mut BTreeMap<String, Node>, path: &str) {
             text: String::new(),
         });
     }
+}
+
+fn is_indexable_text(entry: &FileEntry) -> bool {
+    if entry.media_type.starts_with("text/") {
+        return true;
+    }
+    if [
+        "json",
+        "javascript",
+        "xml",
+        "yaml",
+        "toml",
+        "rust",
+        "python",
+        "shell",
+        "markdown",
+        "sql",
+        "x-sh",
+        "x-rust",
+    ]
+    .iter()
+    .any(|kind| entry.media_type.contains(kind))
+    {
+        return true;
+    }
+    let extension = entry
+        .path
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(
+        extension.as_str(),
+        "rs" | "md"
+            | "txt"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "json"
+            | "js"
+            | "mjs"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "py"
+            | "go"
+            | "c"
+            | "h"
+            | "cc"
+            | "cpp"
+            | "hpp"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "sql"
+            | "html"
+            | "css"
+            | "lock"
+            | "ini"
+            | "cfg"
+            | "lua"
+    )
 }
 
 fn source_hash(entries: &[FileEntry]) -> String {

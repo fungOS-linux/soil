@@ -3606,6 +3606,7 @@ dependencies = [
  "blake3",
  "fungos-vfs",
  "model2vec-rs",
+ "regex",
  "rusqlite",
  "serde_json",
  "tempfile",

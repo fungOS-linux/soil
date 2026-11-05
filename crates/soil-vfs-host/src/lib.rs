@@ -500,6 +500,50 @@ mod tests {
     }
 
     #[test]
+    fn regex_search_indexes_code_extensions_and_fuzzy_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vfs = Vfs::open(dir.path()).unwrap();
+        vfs.put(
+            "src/main.rs",
+            b"fn main() {\n    run();\n}\n",
+            "application/octet-stream",
+            None,
+        )
+        .unwrap();
+        let mut host = VfsHost::open(dir.path()).unwrap();
+        let page = host
+            .search(index::Query {
+                text: r"fn\s+main".into(),
+                mode: Some(index::Mode::Regex),
+                parent: None,
+                media_type_prefix: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].path, "src/main.rs");
+        assert!(
+            page.hits[0]
+                .snippet
+                .as_deref()
+                .is_some_and(|s| s.contains("fn main"))
+        );
+
+        let page = host
+            .search(index::Query {
+                text: "fn main".into(),
+                mode: Some(index::Mode::Fuzzy),
+                parent: None,
+                media_type_prefix: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert!(page.hits.iter().any(|hit| hit.path == "src/main.rs"));
+    }
+
+    #[test]
     fn full_text_search_uses_fts_and_can_filter_by_parent() {
         let dir = tempfile::tempdir().unwrap();
         seed(dir.path());

@@ -27,6 +27,21 @@ pub struct GitRepo {
     pub name: String,
     pub branch: Option<String>,
     pub remote: Option<String>,
+    pub recent_branches: Vec<String>,
+    pub worktrees: Vec<Worktree>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Worktree {
+    pub id: String,
+    pub branch: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RepoAction {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
 }
 
 #[derive(Default)]
@@ -62,6 +77,53 @@ impl GitIndex {
     #[cfg(test)]
     pub fn repos(&self) -> &[GitRepo] {
         &self.repos
+    }
+
+    pub fn actions(&self, query: &str, limit: usize) -> Vec<(RepoAction, u32)> {
+        let needle = query.to_lowercase();
+        let mut actions = Vec::new();
+        for repo in &self.repos {
+            if !repo.name.to_lowercase().contains(&needle)
+                && !repo.id.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            let base = repo.remote.as_deref().unwrap_or(&repo.id);
+            actions.push((
+                RepoAction {
+                    id: format!("git.open:{}", repo.id),
+                    title: format!("Open {}", repo.name),
+                    subtitle: base.to_string(),
+                },
+                950_000,
+            ));
+            for worktree in &repo.worktrees {
+                actions.push((
+                    RepoAction {
+                        id: format!("git.worktree:{}:{}", repo.id, worktree.id),
+                        title: format!(
+                            "Open worktree {}",
+                            worktree.branch.as_deref().unwrap_or(&worktree.id)
+                        ),
+                        subtitle: repo.id.clone(),
+                    },
+                    940_000,
+                ));
+            }
+            for branch in repo.recent_branches.iter().take(8) {
+                actions.push((
+                    RepoAction {
+                        id: format!("git.branch:{}:{}", repo.id, branch),
+                        title: format!("Switch to {branch}"),
+                        subtitle: repo.id.clone(),
+                    },
+                    900_000,
+                ));
+            }
+        }
+        actions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
+        actions.truncate(limit);
+        actions
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<(GitRepo, u32)> {
@@ -152,7 +214,64 @@ fn read_repo(root: &Path, path: &Path) -> Option<GitRepo> {
         name,
         branch,
         remote,
+        recent_branches: read_recent_branches(&git),
+        worktrees: read_worktrees(&git),
     })
+}
+
+fn read_recent_branches(git: &Path) -> Vec<String> {
+    let mut branches = Vec::new();
+    if let Ok(log) = fs::read_to_string(git.join("logs/HEAD")) {
+        for line in log.lines().rev() {
+            let Some((_, rest)) = line.split_once("\t") else {
+                continue;
+            };
+            for part in rest.split_whitespace() {
+                if let Some(branch) = part.strip_prefix("refs/heads/")
+                    && !branches.iter().any(|seen| seen == branch)
+                {
+                    branches.push(branch.to_string());
+                }
+            }
+            if let Some((from, to)) = rest
+                .strip_prefix("checkout: moving from ")
+                .and_then(|rest| rest.split_once(" to "))
+            {
+                for branch in [from, to] {
+                    if !branch.is_empty() && !branches.iter().any(|seen| seen == branch) {
+                        branches.push(branch.to_string());
+                    }
+                }
+            }
+            if branches.len() >= 8 {
+                break;
+            }
+        }
+    }
+    branches
+}
+
+fn read_worktrees(git: &Path) -> Vec<Worktree> {
+    let mut worktrees = Vec::new();
+    let Ok(entries) = fs::read_dir(git.join("worktrees")) else {
+        return worktrees;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let branch = fs::read_to_string(entry.path().join("HEAD"))
+            .ok()
+            .and_then(|head| {
+                head.strip_prefix("ref: refs/heads/")
+                    .map(str::trim)
+                    .map(str::to_owned)
+            });
+        worktrees.push(Worktree { id, branch });
+    }
+    worktrees.sort_by(|a, b| a.id.cmp(&b.id));
+    worktrees
 }
 
 fn parse_origin(config: &str) -> Option<String> {
@@ -194,6 +313,18 @@ mod tests {
         let repo = root.join("fpl/dock");
         fs::create_dir_all(repo.join(".git")).unwrap();
         fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::create_dir_all(repo.join(".git/worktrees/feat")).unwrap();
+        fs::write(
+            repo.join(".git/worktrees/feat/HEAD"),
+            "ref: refs/heads/feat/ui\n",
+        )
+        .unwrap();
+        fs::create_dir_all(repo.join(".git/logs")).unwrap();
+        fs::write(
+            repo.join(".git/logs/HEAD"),
+            "0 0\tcheckout: moving from main to main\n",
+        )
+        .unwrap();
         fs::write(
             repo.join(".git/config"),
             "[remote \"origin\"]\n\turl = https://user:token@github.com/acme/dock.git\n",
@@ -214,5 +345,22 @@ mod tests {
         assert_eq!(index.search("dock", 10).len(), 1);
         assert_eq!(index.search("main", 10).len(), 1);
         assert!(index.search("nope", 10).is_empty());
+        assert_eq!(repo.worktrees[0].branch.as_deref(), Some("feat/ui"));
+        let actions = index.actions("dock", 10);
+        assert!(
+            actions
+                .iter()
+                .any(|(action, _)| action.id == "git.open:fpl/dock")
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|(action, _)| action.id == "git.worktree:fpl/dock:feat")
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|(action, _)| action.id == "git.branch:fpl/dock:main")
+        );
     }
 }

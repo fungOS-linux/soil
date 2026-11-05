@@ -51,6 +51,7 @@ hit {
 - `VfsHost` search over the derived SQLite/FTS5 index
 - `fungos-records` substring search over an explicit allowlist of books
 - bounded local Git discovery under host-granted roots
+- optional Microsoft `tgrep` regex search over an explicit root or VFS mount
 
 Results are merged by score, then title, and paginated. `refresh` rebuilds the
 VFS index and advances the search generation.

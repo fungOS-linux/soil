@@ -25,6 +25,8 @@ interface index {
     full-text,
     /// Host embedding/vector search.
     semantic,
+    /// Bounded regular-expression search over indexed paths and text.
+    regex,
   }
 
   enum match-source {

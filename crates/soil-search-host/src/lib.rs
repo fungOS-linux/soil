@@ -6,6 +6,7 @@
 //! approved books.
 
 mod git;
+mod tgrep;
 
 use std::sync::{Arc, Mutex};
 
@@ -13,6 +14,7 @@ use anyhow::Context;
 use fungos_records::{Record, Store};
 use git::GitIndex;
 use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
+use tgrep::TgrepSource;
 use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit", world: "search-host" });
@@ -28,6 +30,7 @@ pub struct SearchService {
     records: Option<Mutex<Store>>,
     books: Vec<String>,
     git: Option<GitIndex>,
+    tgrep: Option<TgrepSource>,
     generation: u64,
 }
 
@@ -38,6 +41,7 @@ impl SearchService {
             records: records.map(Mutex::new),
             books,
             git: None,
+            tgrep: None,
             generation: 1,
         }
     }
@@ -76,10 +80,23 @@ impl SearchService {
         self
     }
 
+    /// Use Microsoft tgrep over an explicit root, which may be a VFS FUSE
+    /// mount. Regex mode prefers tgrep when configured.
+    pub fn with_tgrep(
+        mut self,
+        root: impl Into<std::path::PathBuf>,
+        binary: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.tgrep = Some(TgrepSource::new(root, binary));
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
     fn sources(&self) -> u32 {
         u32::from(self.vfs.is_some())
             + u32::from(self.records.is_some())
             + u32::from(self.git.is_some())
+            + u32::from(self.tgrep.is_some())
     }
 
     fn snapshot(&self) -> search_api::SearchState {
@@ -116,6 +133,9 @@ impl SearchService {
         if kinds.contains(&search_api::Kind::Repository) {
             hits.extend(self.git_hits(&query));
         }
+        if kinds.contains(&search_api::Kind::Action) {
+            hits.extend(self.action_hits(&query));
+        }
         hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
         let start = usize::try_from(query.offset).unwrap_or(usize::MAX);
         let total = hits.len();
@@ -136,6 +156,26 @@ impl SearchService {
         &mut self,
         query: &search_api::Query,
     ) -> Result<Vec<search_api::Hit>, search_api::Error> {
+        if query.mode == Some(search_api::Mode::Regex)
+            && let Some(tgrep) = &self.tgrep
+        {
+            let hits = tgrep
+                .search(&query.text, MAX_PAGE as usize)
+                .map_err(|_| search_api::Error::Io)?;
+            return Ok(hits
+                .into_iter()
+                .map(|hit| search_api::Hit {
+                    kind: search_api::Kind::File,
+                    id: hit.path.clone(),
+                    title: hit.path.rsplit('/').next().unwrap_or(&hit.path).to_string(),
+                    subtitle: Some(format!("{}:{}", hit.line, hit.column)),
+                    snippet: (!hit.text.is_empty()).then_some(hit.text),
+                    score: 1_000_000,
+                    source: "tgrep".into(),
+                    updated_at_ms: None,
+                })
+                .collect());
+        }
         let Some(vfs) = self.vfs.as_mut() else {
             return Ok(Vec::new());
         };
@@ -146,6 +186,7 @@ impl SearchService {
                 search_api::Mode::Fuzzy => index::Mode::Fuzzy,
                 search_api::Mode::FullText => index::Mode::FullText,
                 search_api::Mode::Semantic => index::Mode::Semantic,
+                search_api::Mode::Regex => index::Mode::Regex,
             }),
             parent: None,
             media_type_prefix: None,
@@ -186,6 +227,25 @@ impl SearchService {
                     (None, Some(remote)) => remote,
                     (None, None) => repo.id.clone(),
                 }),
+                snippet: None,
+                score,
+                source: "git".into(),
+                updated_at_ms: None,
+            })
+            .collect()
+    }
+
+    fn action_hits(&self, query: &search_api::Query) -> Vec<search_api::Hit> {
+        let Some(git) = &self.git else {
+            return Vec::new();
+        };
+        git.actions(&query.text, MAX_PAGE as usize)
+            .into_iter()
+            .map(|(action, score)| search_api::Hit {
+                kind: search_api::Kind::Action,
+                id: action.id,
+                title: action.title,
+                subtitle: Some(action.subtitle),
                 snippet: None,
                 score,
                 source: "git".into(),
@@ -356,6 +416,35 @@ mod tests {
             .unwrap();
         assert_eq!(page.hits.len(), 1);
         assert_eq!(page.hits[0].id, "notes/greece.txt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tgrep_backs_regex_file_search() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("tgrep");
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"match","data":{"path":{"text":"/repo/src/main.rs"},"line_number":7,"submatches":[{"start":4}],"lines":{"text":"fn main() {\n"}}}'
+"#
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut host = SearchService::new(None, None, vec![]).with_tgrep("/repo", &binary);
+        let page = host
+            .search(search_api::Query {
+                text: "fn main".into(),
+                kinds: vec![search_api::Kind::File],
+                mode: Some(search_api::Mode::Regex),
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].source, "tgrep");
+        assert_eq!(page.hits[0].id, "src/main.rs");
     }
 
     #[test]

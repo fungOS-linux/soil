@@ -103,6 +103,7 @@ Search behavior:
 | `fuzzy` | in-memory path ranking |
 | `full-text` | SQLite FTS5 + exact path promotion |
 | `semantic` | opt-in host embedding provider + vector search |
+| `regex` | bounded case-insensitive regex over indexed paths/text |
 
 Vector helpers store `f32` BLOBs and rank by brute-force cosine. That is the v1
 baseline. If the workspace outgrows it, add `sqlite-vec`/HNSW/LanceDB behind the
@@ -121,6 +122,30 @@ available behind the `remote` feature for host-owned HTTP, not a Spore import.
 
 The index is local and never synced. Sync durable intent through `records` and
 content through VFS/Unibus, then rebuild the index per device.
+
+## Code search
+
+Text extraction accepts `text/*`, common source media types, and code
+extensions even when a provider stores `application/octet-stream`. `regex`
+mode scans indexed paths and text with a bounded pattern size; `fuzzy` can
+match body text as well as paths.
+
+```sh
+soil-grep --root ~/fungos-node --mode regex 'fn\s+main'
+soil-grep --root ~/fungos-node --mode fuzzy 'contcts'
+```
+
+For Microsoft `tgrep`, the global search host can use an explicit binary and
+root:
+
+```rust
+let search = SearchService::open(vfs_root, records_root, books)?
+    .with_tgrep("~/fungOS", "tgrep");
+```
+
+The root can be a native checkout or a `fungos-vfs` FUSE mount. Regex file
+searches then use tgrep's trigram index and JSON stream; the host still owns
+the binary, root, and query. Native regex search remains the fallback.
 
 ## Browser inspector
 
