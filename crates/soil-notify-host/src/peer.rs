@@ -45,8 +45,29 @@ impl NotifyPeerAdapter {
             if !payload.is_empty() {
                 continue;
             }
-            self.handle(&envelope)?;
+            if self.handle(&envelope)? && envelope.message.kind != NOTIFY_ACK {
+                let ack = WireEnvelope::new(
+                    &self.installation_id,
+                    &self.producer_id,
+                    Some(&envelope.producer_id),
+                    "",
+                    Message::new(NOTIFY_ACK, serde_json::json!({"id": envelope.request_id})),
+                );
+                session
+                    .send(&ack, &[])
+                    .await
+                    .map_err(|error| anyhow::anyhow!("unibus ack: {error}"))?;
+            }
         }
+    }
+
+    /// True when there is at least one due outbox row.
+    pub fn has_pending(&self, now_ms: u64) -> anyhow::Result<bool> {
+        Ok(!self
+            .broker
+            .pending_outbox(now_ms, 1)
+            .map_err(|error| anyhow::anyhow!("outbox: {error}"))?
+            .is_empty())
     }
 
     /// Flush due outbox rows for this session. Rows addressed to `*` are
@@ -81,6 +102,12 @@ impl NotifyPeerAdapter {
                 .send(&envelope, &[])
                 .await
                 .map_err(|error| anyhow::anyhow!("unibus send: {error}"))?;
+            // Iroh needs the admitted session to stay alive long enough for the
+            // receiver to drain the uni stream. Acks are terminal and do not
+            // need this grace period.
+            if row.kind != NOTIFY_ACK {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
             self.broker
                 .ack_outbox(row.id)
                 .map_err(|error| anyhow::anyhow!("outbox ack: {error}"))?;
@@ -178,6 +205,16 @@ mod tests {
             _payload: &'a [u8],
         ) -> PeerFuture<'a, ()> {
             self.sent.push(envelope.clone());
+            if envelope.message.kind != NOTIFY_ACK {
+                let ack = WireEnvelope::new(
+                    "home",
+                    "studio",
+                    Some("mac"),
+                    "",
+                    Message::new(NOTIFY_ACK, serde_json::json!({"id": envelope.request_id})),
+                );
+                self.incoming.push_back((ack, Vec::new()));
+            }
             Box::pin(async { Ok(()) })
         }
 

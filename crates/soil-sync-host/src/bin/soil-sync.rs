@@ -359,7 +359,9 @@ async fn supervise(
         let now = now_ms();
         #[cfg(feature = "notify")]
         if let Some(adapter) = &notify {
-            if now.saturating_sub(last_notify_flush) >= 5_000 {
+            if now.saturating_sub(last_notify_flush) >= 5_000
+                && adapter.has_pending(now).unwrap_or(false)
+            {
                 last_notify_flush = now;
                 for peer in &config.peers {
                     let candidate = candidate_for(&config, peer, now_s());
@@ -568,7 +570,7 @@ fn make_notify_adapter(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut broker = soil_notify_host::NotifyBroker::open(path, &config.installation_id)
+    let mut broker = soil_notify_host::NotifyBroker::open(path, &config.local_producer)
         .map_err(|error| anyhow::anyhow!("open notify db: {error}"))?;
     broker.set_peers(config.peers.iter().map(|peer| peer.producer_id.clone()));
     Ok(Some(Arc::new(soil_notify_host::NotifyPeerAdapter::new(
