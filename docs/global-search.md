@@ -81,6 +81,7 @@ fungos.crm/company@1       -> company
 fungos.crm/contact@1       -> person
 fungos.crm/project@1       -> project
 fungos.crm/task@1          -> task
+fungos.task/task@1         -> task
 fungos.crm/opportunity@1   -> opportunity
 fungos.crm/activity@1      -> activity
 fungos.crm/call@1          -> call
@@ -123,6 +124,8 @@ fungos.graph/link@1
 ```
 
 The label is resolved later. Never copy the display name into the mention.
+
+See [Mentions](mentions.md) for persistence and backlinks.
 
 The inspection server exposes the same resolver:
 

@@ -537,7 +537,7 @@ fn mention_schema(schema: &str) -> Option<&'static str> {
         "fungos.crm/account@1" => Some("account"),
         "fungos.crm/contact@1" | "fungos.contacts/contact" => Some("person"),
         "fungos.crm/project@1" => Some("project"),
-        "fungos.crm/task@1" => Some("task"),
+        "fungos.crm/task@1" | "fungos.task/task@1" => Some("task"),
         "fungos.crm/opportunity@1" => Some("opportunity"),
         "fungos.crm/activity@1" => Some("activity"),
         "fungos.crm/call@1" => Some("call"),
