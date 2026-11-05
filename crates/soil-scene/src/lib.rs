@@ -252,6 +252,9 @@ pub enum Content {
     Rect(Rect),
     Text(Text),
     Image(Image),
+    /// A GPU line strip. Points are local to the node transform: translation
+    /// and scale place the strip, so a chart can emit one node per series.
+    Polyline(Polyline),
     Shader(Shader),
 }
 
@@ -262,6 +265,7 @@ impl Content {
             Self::Rect(rect) => rect.validate(),
             Self::Text(text) => text.validate(),
             Self::Image(image) => image.validate(),
+            Self::Polyline(polyline) => polyline.validate(),
             Self::Shader(shader) => shader.validate(),
         }
     }
@@ -313,6 +317,42 @@ pub struct Image {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Polyline {
+    /// At least two points. Each point is `[x, y]` in local scene units.
+    pub points: Vec<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ink: Option<Ink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgb: Option<[u8; 3]>,
+    /// Stroke width in local scene units.
+    #[serde(default = "unit")]
+    pub width: f32,
+    #[serde(default = "opaque")]
+    pub opacity: f32,
+}
+
+impl Polyline {
+    fn validate(&self) -> Result<(), Error> {
+        if self.points.len() < 2 || self.points.len() > 1_000_000 {
+            return Err(Error::invalid("polyline needs 2..=1,000,000 points"));
+        }
+        for point in &self.points {
+            finite(point[0])?;
+            finite(point[1])?;
+        }
+        if !self.width.is_finite() || self.width <= 0.0 {
+            return Err(Error::invalid("polyline width must be positive"));
+        }
+        finite(self.opacity)?;
+        if !(0.0..=1.0).contains(&self.opacity) {
+            return Err(Error::invalid("polyline opacity must be 0..=1"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Shader {
     /// WGSL. The host compiles and caches it; a new shader is data, not a build.
     pub wgsl: String,
@@ -322,6 +362,10 @@ pub struct Shader {
 }
 
 const fn opaque() -> f32 {
+    1.0
+}
+
+const fn unit() -> f32 {
     1.0
 }
 

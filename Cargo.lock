@@ -3983,6 +3983,7 @@ dependencies = [
  "pollster",
  "serde_json",
  "soil-scene",
+ "soil-vt",
  "wgpu",
 ]
 

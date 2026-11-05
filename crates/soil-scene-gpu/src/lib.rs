@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::io::Read;
 use wgpu::util::DeviceExt;
 
+pub mod terminal;
+
 /// Theme values the renderer needs. The scene carries semantic inks, never
 /// literal colours; the host resolves them through this table.
 #[derive(Clone, Copy, Debug)]
@@ -419,32 +421,98 @@ fn world_bounds(node: &soil_scene::Node, nodes: &[soil_scene::Node]) -> (f32, f3
 
 fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) -> Vec<Vertex> {
     let mut out = Vec::new();
+    let _ = (width, height);
     for node in &scene.nodes {
-        let soil_scene::Content::Rect(rect) = &node.content else {
-            continue;
-        };
         let (x, y, w, h) = world_bounds(node, &scene.nodes);
-        let (x0, x1) = (x / 4.0, (x + w) / 4.0);
-        let (y0, y1) = (y / 4.0, (y + h) / 4.0);
-        let color = ink(theme, rect.ink);
-        let alpha = rect.opacity.clamp(0.0, 1.0);
-        let c = [
-            color[0] as f32 / 255.0,
-            color[1] as f32 / 255.0,
-            color[2] as f32 / 255.0,
-            alpha,
-        ];
-        // `width`/`height` are part of the public contract even though the
-        // normalized scene already resolves to clip space.
-        let _ = (width, height);
-        for (vx, vy) in [(x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)] {
-            out.push(Vertex {
-                pos: [vx, vy],
-                color: c,
-            });
+        match &node.content {
+            soil_scene::Content::Rect(rect) => {
+                let color = ink(theme, rect.ink);
+                push_quad(&mut out, x, y, x + w, y + h, color, rect.opacity);
+            }
+            soil_scene::Content::Polyline(polyline) => {
+                let color = ink(theme, polyline.ink);
+                let alpha = polyline.opacity.clamp(0.0, 1.0);
+                let half = polyline.width * 0.5;
+                for pair in polyline.points.windows(2) {
+                    let (x1, y1) = (x + pair[0][0] * w, y + pair[0][1] * h);
+                    let (x2, y2) = (x + pair[1][0] * w, y + pair[1][1] * h);
+                    let dx = x2 - x1;
+                    let dy = y2 - y1;
+                    let length = (dx * dx + dy * dy).sqrt();
+                    if length <= f32::EPSILON {
+                        continue;
+                    }
+                    let nx = -dy / length * half;
+                    let ny = dx / length * half;
+                    push_segment(
+                        &mut out,
+                        [x1 + nx, y1 + ny],
+                        [x2 + nx, y2 + ny],
+                        [x2 - nx, y2 - ny],
+                        [x1 - nx, y1 - ny],
+                        color,
+                        alpha,
+                    );
+                }
+            }
+            _ => {}
         }
     }
     out
+}
+
+fn push_quad(
+    out: &mut Vec<Vertex>,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    color: [u8; 3],
+    alpha: f32,
+) {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let c = [
+        color[0] as f32 / 255.0,
+        color[1] as f32 / 255.0,
+        color[2] as f32 / 255.0,
+        alpha,
+    ];
+    for (vx, vy) in [
+        (x0 / 4.0, y0 / 4.0),
+        (x1 / 4.0, y0 / 4.0),
+        (x1 / 4.0, y1 / 4.0),
+        (x0 / 4.0, y0 / 4.0),
+        (x1 / 4.0, y1 / 4.0),
+        (x0 / 4.0, y1 / 4.0),
+    ] {
+        out.push(Vertex {
+            pos: [vx, vy],
+            color: c,
+        });
+    }
+}
+
+fn push_segment(
+    out: &mut Vec<Vertex>,
+    a: [f32; 2],
+    b: [f32; 2],
+    c: [f32; 2],
+    d: [f32; 2],
+    color: [u8; 3],
+    alpha: f32,
+) {
+    let rgba = [
+        color[0] as f32 / 255.0,
+        color[1] as f32 / 255.0,
+        color[2] as f32 / 255.0,
+        alpha,
+    ];
+    for point in [a, b, c, a, c, d] {
+        out.push(Vertex {
+            pos: [point[0] / 4.0, point[1] / 4.0],
+            color: rgba,
+        });
+    }
 }
 
 const ATLAS_WIDTH: u32 = 1024;
@@ -571,7 +639,7 @@ fn text_atlas(
         let size = (scale * theme.body * 1.25).max(1.0);
         let screen_x = (x + 4.0) / 8.0 * width as f32;
         let screen_y = (4.0 - y) / 8.0 * height as f32;
-        let color = ink(theme, text.ink);
+        let color = text.rgb.unwrap_or_else(|| ink(theme, text.ink));
         push_text_quads(
             &mut atlas,
             &mut vertices,
@@ -711,6 +779,30 @@ mod tests {
             .chunks_exact(4)
             .any(|pixel| pixel[0] > 50 || pixel[1] > 50 || pixel[2] > 50);
         assert!(lit, "text should leave visible pixels in the frame");
+    }
+
+    #[test]
+    fn a_polyline_writes_visible_pixels() {
+        let scene = soil_scene::Scene::new(vec![soil_scene::Node {
+            id: "line".into(),
+            parent: None,
+            transition_ms: None,
+            transform: soil_scene::Transform {
+                translation: [0.0, 0.0, 0.0],
+                rotation: [0.0; 3],
+                scale: [1.0, 1.0, 1.0],
+            },
+            content: soil_scene::Content::Polyline(soil_scene::Polyline {
+                points: vec![[-3.0, -2.0], [3.0, 2.0]],
+                ink: Some(soil_scene::Ink::Primary),
+                rgb: None,
+                width: 0.1,
+                opacity: 1.0,
+            }),
+        }]);
+        let frame = render(&scene, 200, 120, Theme::default()).expect("render");
+        let lit = frame.rgba.chunks_exact(4).any(|pixel| pixel[2] > 100);
+        assert!(lit, "polyline should leave visible pixels");
     }
 
     #[test]

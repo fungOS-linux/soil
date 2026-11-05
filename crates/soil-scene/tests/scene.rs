@@ -148,3 +148,21 @@ fn a_transform_defaults_to_identity() {
     assert_eq!(node.transform.scale, [1.0, 1.0, 1.0]);
     assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
 }
+
+#[test]
+fn a_polyline_is_a_bounded_scene_primitive() {
+    let scene = Scene::new(vec![Node {
+        id: "line".into(),
+        parent: None,
+        transition_ms: None,
+        transform: Transform::default(),
+        content: Content::Polyline(soil_scene::Polyline {
+            points: vec![[0.0, 0.0], [1.0, 1.0]],
+            ink: Some(Ink::Primary),
+            rgb: None,
+            width: 0.1,
+            opacity: 1.0,
+        }),
+    }]);
+    scene.validate().expect("valid polyline");
+}
