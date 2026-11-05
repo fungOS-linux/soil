@@ -4,6 +4,7 @@
 //! VFS root, the `soil:vfs` / `soil:index` / `soil:vfs-mut` grants, and the
 //! line-oriented terminal.
 
+mod config;
 mod overlay;
 
 use std::{
@@ -271,7 +272,35 @@ fn run_lines(runtime: &mut Runtime) -> Result<()> {
 }
 
 fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
+    let passthrough = args
+        .iter()
+        .position(|arg| arg == "--")
+        .map(|index| args.split_off(index + 1));
+    if args.last().map(String::as_str) == Some("--") {
+        args.pop();
+    }
+
+    let config_path = take_option(&mut args, "--config").map(|value| expand_home(&value));
+    let profile = take_option(&mut args, "--inference-profile")
+        .or_else(|| std::env::var("MUSH_INFERENCE_PROFILE").ok());
+    let config = match config_path {
+        Some(path) => config::SoilConfig::load(&path)?,
+        None => config::SoilConfig::discover(root)?
+            .map(|(_, config)| config)
+            .unwrap_or_default(),
+    };
+    let mut resolved = config.resolve(profile.as_deref())?;
+    if let Some(value) = take_option(&mut args, "--base-url") {
+        resolved.base_url = Some(value);
+    }
+    if let Some(value) = take_option(&mut args, "--model") {
+        resolved.model = Some(value);
+    }
+    if let Some(value) = take_option(&mut args, "--mcp-url") {
+        resolved.mcp_url = Some(value);
+    }
     let operator = take_option(&mut args, "--operator-bin")
+        .or(resolved.operator_bin.clone())
         .or_else(|| std::env::var("MUSH_OPERATOR").ok())
         .unwrap_or_else(|| "operator-tui".into());
     let prompt = take_option(&mut args, "--prompt");
@@ -286,10 +315,31 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     command.arg("--workspace").arg(&workspace);
     command.env("MUSH_ROOT", root);
     command.env("MUSH_OVERLAY", &workspace);
+    if let Some(provider) = &resolved.provider {
+        command.env("MUSH_INFERENCE_PROVIDER", provider);
+    }
+    if let Some(base_url) = &resolved.base_url {
+        command.env("BIFROST_BASE_URL", base_url);
+    }
+    if let Some(api_key) = &resolved.api_key {
+        command.env("BIFROST_API_KEY", api_key);
+    }
+    if let Some(model) = &resolved.model {
+        command.env("OPERATOR_MODEL", model);
+    }
+    if let Some(mcp_url) = &resolved.mcp_url {
+        command.env("EDGERUNNER_MCP_URL", mcp_url);
+    }
+    if let Some(token) = &resolved.mcp_token {
+        command.env("EDGERUNNER_MCP_TOKEN", token);
+    }
     if let Some(prompt) = prompt {
         command.arg("--prompt").arg(prompt);
     }
     command.args(&args);
+    if let Some(passthrough) = passthrough {
+        command.args(passthrough);
+    }
     let status = command.status().context("start operator session")?;
 
     let changes = overlay.diff()?;

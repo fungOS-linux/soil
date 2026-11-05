@@ -88,12 +88,21 @@ mush run op --root ~/fungos-node -- --model fpl/llm
 Options:
 
 ```text
---operator-bin PATH   default operator-tui, or MUSH_OPERATOR
---prompt TEXT         use a one-shot operator run
---no-apply            show the diff and discard the overlay
---keep                keep the materialized overlay directory
---root PATH           VFS root
+--config PATH          Soil inference/operator config
+--inference-profile    named profile from [inference.profiles]
+--operator-bin PATH    default operator-tui, or MUSH_OPERATOR
+--base-url URL         override the resolved inference endpoint
+--model NAME           override the resolved model alias
+--mcp-url URL          override the unibus-mcp bridge endpoint
+--prompt TEXT          use a one-shot operator run
+--no-apply             show the diff and discard the overlay
+--keep                 keep the materialized overlay directory
+--root PATH            VFS root
 ```
+
+Inference and MCP configuration comes from [Soil config](soil-config.md).
+`unibus-mcp`/DCP tools arrive through Operator's MCP bridge; no host PATH is
+exposed.
 
 The overlay respects `.gitignore`, `.ignore`, and `.soilignore` in both
 directions. Build outputs and binaries covered by those files are never applied

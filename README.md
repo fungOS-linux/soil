@@ -129,6 +129,10 @@ No sibling worktrees are required. See [dependency policy](docs/dependencies.md)
 
 `soil shell` mounts a VFS through FUSE and starts an interactive shell. `soil rm` unlinks the namespace entry while retaining the content-addressed blob and history. See [Soil shell](docs/soil-shell.md).
 
+## Soil operator config
+
+Operator inference profiles and `unibus-mcp`/DCP routes resolve from one Soil config instead of scattered provider environment. See [Soil operator and inference config](docs/soil-config.md).
+
 ## Scrubber
 
 `soil-scrub` is a local reversible redactor for prompts, tool calls, and tool output. It uses keyed session tokens, not hashes, and restores values only for explicitly scoped host tools. See [Scrubber](docs/scrubber.md).

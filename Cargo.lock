@@ -3385,8 +3385,11 @@ dependencies = [
  "fungos-vfs",
  "ignore",
  "rustyline",
+ "serde",
+ "serde_json",
  "soil-vfs-host",
  "tempfile",
+ "toml 0.8.23",
  "wasmtime",
  "wasmtime-wasi",
 ]
