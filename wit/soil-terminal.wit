@@ -1,0 +1,122 @@
+// Host-rendered terminal surface.
+//
+// The Spore owns VT parsing (for example with libghostty-vt) and submits a
+// bounded cell grid. The host owns fonts, shaping, pixels, accessibility and
+// the input lifecycle. The host never receives raw escape sequences.
+//
+// Handles are component-instance-scoped. A later revision can replace them
+// with WIT resources.
+package soil:terminal@0.1.0;
+
+interface surface {
+  enum failure {
+    denied,
+    not-ready,
+    stale,
+    over-budget,
+    invalid,
+    closed,
+    backend,
+  }
+
+  enum cursor-shape {
+    block,
+    bar,
+    underline,
+  }
+
+  record style {
+    /// 0xRRGGBB, or 0 for the host default.
+    fg: u32,
+    bg: u32,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    reverse: bool,
+    dim: bool,
+    strikethrough: bool,
+  }
+
+  record cell {
+    /// One grapheme cluster. Empty means a wide-cell continuation.
+    text: string,
+    /// 1 or 2 display columns.
+    width: u8,
+    style: style,
+  }
+
+  record cursor {
+    row: u32,
+    column: u32,
+    visible: bool,
+    shape: cursor-shape,
+  }
+
+  record frame {
+    cols: u32,
+    rows: u32,
+    /// Row-major, exactly `cols * rows` cells.
+    cells: list<cell>,
+    cursor: cursor,
+    title: option<string>,
+    /// Monotonic per view; the host refuses stale frames.
+    generation: u64,
+  }
+
+  record state {
+    generation: u64,
+    cols: u32,
+    rows: u32,
+    focused: bool,
+    visible: bool,
+  }
+
+  variant key {
+    enter,
+    escape,
+    tab,
+    backspace,
+    delete,
+    home,
+    end,
+    page-up,
+    page-down,
+    insert,
+    up,
+    down,
+    left,
+    right,
+    f-key(u8),
+    character(char),
+  }
+
+  record modifiers {
+    shift: bool,
+    control: bool,
+    alt: bool,
+    meta: bool,
+  }
+
+  record event {
+    key: key,
+    modifiers: modifiers,
+  }
+
+  record input {
+    event: event,
+    /// Present for bracketed paste; the host has already applied policy.
+    paste: option<string>,
+  }
+
+  open: func(cols: u32, rows: u32) -> result<u64, failure>;
+
+  /// Submit a complete frame. Full-frame for v0; damage regions are additive.
+  present: func(view: u64, frame: frame) -> result<state, failure>;
+
+  /// Wait for one normalized key or paste. `none` means the timeout elapsed.
+  next-input: func(view: u64, timeout-ms: u32) -> result<option<input>, failure>;
+
+  observe: func(view: u64) -> result<state, failure>;
+
+  close: func(view: u64) -> result<_, failure>;
+}

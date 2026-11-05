@@ -72,6 +72,24 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("appdata", &["open"])],
     },
     Contract {
+        file: "wit/soil-mycelium.wit",
+        source: include_str!("../../../wit/soil-mycelium.wit"),
+        package: "soil:mycelium@0.1.0",
+        interfaces: &[
+            ("directory", &["targets", "get"]),
+            (
+                "session",
+                &["open-shell", "read", "write", "resize", "status", "close", "exec"],
+            ),
+        ],
+    },
+    Contract {
+        file: "wit/soil-terminal.wit",
+        source: include_str!("../../../wit/soil-terminal.wit"),
+        package: "soil:terminal@0.1.0",
+        interfaces: &[("surface", &["open", "present", "next-input", "observe", "close"])],
+    },
+    Contract {
         file: "wit/soil-canvas.wit",
         source: include_str!("../../../wit/soil-canvas.wit"),
         package: "soil:canvas@1.0.0",
