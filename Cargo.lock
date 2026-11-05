@@ -5521,8 +5521,11 @@ name = "soil-principal-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ed25519-dalek 2.2.0",
+ "mycelium-peer-protocol",
  "serde",
  "serde_json",
+ "tempfile",
  "wasmtime",
 ]
 

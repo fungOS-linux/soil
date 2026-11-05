@@ -100,6 +100,126 @@ pub struct PrincipalHost {
     provider: Arc<dyn PrincipalProvider>,
 }
 
+#[cfg(feature = "mycelium")]
+#[derive(Debug, Clone)]
+pub struct MyceliumTrustProvider {
+    path: std::path::PathBuf,
+    issuers: std::collections::BTreeSet<String>,
+    kind: PrincipalKind,
+    device: Option<String>,
+    team_scope_prefix: String,
+}
+
+#[cfg(feature = "mycelium")]
+#[derive(Debug, serde::Deserialize)]
+struct PrincipalTrustDocument {
+    grant: mycelium_peer_protocol::AccessRecord,
+    #[serde(default)]
+    revocations: Vec<mycelium_peer_protocol::AccessRecord>,
+}
+
+#[cfg(feature = "mycelium")]
+impl MyceliumTrustProvider {
+    pub fn new(
+        path: impl Into<std::path::PathBuf>,
+        issuers: impl IntoIterator<Item = String>,
+        kind: PrincipalKind,
+        device: Option<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            issuers: issuers.into_iter().collect(),
+            kind,
+            device,
+            team_scope_prefix: "team:".into(),
+        }
+    }
+
+    pub fn with_team_scope_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.team_scope_prefix = prefix.into();
+        self
+    }
+
+    fn load(&self) -> Result<Principal, PrincipalError> {
+        use std::io::Read;
+
+        if self.issuers.is_empty() {
+            return Err(PrincipalError::Invalid);
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(&self.path)
+            .and_then(|file| file.take(65_537).read_to_end(&mut bytes))
+            .map_err(|_| PrincipalError::Unavailable)?;
+        if bytes.len() > 65_536 {
+            return Err(PrincipalError::Invalid);
+        }
+        let document: PrincipalTrustDocument =
+            serde_json::from_slice(&bytes).map_err(|_| PrincipalError::Invalid)?;
+        document
+            .grant
+            .verify()
+            .map_err(|_| PrincipalError::Denied)?;
+        if !self.issuers.contains(&document.grant.signer) || document.revocations.len() > 64 {
+            return Err(PrincipalError::Denied);
+        }
+        let now = now_unix_s();
+        for record in &document.revocations {
+            record.verify().map_err(|_| PrincipalError::Denied)?;
+            if !self.issuers.contains(&record.signer) {
+                return Err(PrincipalError::Denied);
+            }
+            if let mycelium_peer_protocol::AccessStatement::Revoke { revoked_at, .. } =
+                &record.statement
+                && *revoked_at <= now
+                && record.statement.revokes(&document.grant.statement)
+            {
+                return Err(PrincipalError::Denied);
+            }
+        }
+
+        let mycelium_peer_protocol::AccessStatement::Grant {
+            principal,
+            serial,
+            roles,
+            scopes,
+            not_before,
+            not_after,
+            ..
+        } = &document.grant.statement
+        else {
+            return Err(PrincipalError::Invalid);
+        };
+        if principal.trim().is_empty() {
+            return Err(PrincipalError::Invalid);
+        }
+        if now < *not_before || now >= *not_after {
+            return Err(PrincipalError::Stale);
+        }
+        let teams = scopes
+            .iter()
+            .filter_map(|scope| scope.strip_prefix(&self.team_scope_prefix))
+            .filter(|team| !team.is_empty())
+            .map(str::to_string)
+            .collect();
+        Ok(Principal {
+            actor: principal.clone(),
+            kind: self.kind,
+            display_name: None,
+            device: self.device.clone(),
+            teams,
+            roles: roles.clone(),
+            generation: *serial,
+        })
+    }
+}
+
+#[cfg(feature = "mycelium")]
+impl PrincipalProvider for MyceliumTrustProvider {
+    fn current(&self) -> Result<Principal, PrincipalError> {
+        self.load()
+    }
+}
+
 impl PrincipalHost {
     pub fn new<P>(provider: P) -> Self
     where
@@ -200,6 +320,97 @@ fn map_error(error: PrincipalError) -> api::Error {
         PrincipalError::Stale => api::Error::Stale,
         PrincipalError::Invalid => api::Error::Invalid,
         PrincipalError::Unavailable => api::Error::Unavailable,
+    }
+}
+
+#[cfg(feature = "mycelium")]
+fn now_unix_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(all(test, feature = "mycelium"))]
+mod mycelium_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use mycelium_peer_protocol::{AccessRecord, AccessStatement};
+
+    fn signed_document(dir: &std::path::Path, revoked: bool) -> (std::path::PathBuf, String) {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let issuer = mycelium_peer_protocol::encode_hex(key.verifying_key().as_bytes());
+        let now = now_unix_s();
+        let statement = AccessStatement::Grant {
+            grant_id: "principal-test".into(),
+            principal: "oidc:https://identity.example#subject-42".into(),
+            serial: 9,
+            roles: vec!["operator".into()],
+            scopes: vec!["team:fpl".into()],
+            unix_users: Vec::new(),
+            ssh_public_keys: Vec::new(),
+            oidc_audiences: vec!["soil".into()],
+            oidc_ssh_key_exchange: false,
+            not_before: now.saturating_sub(60),
+            not_after: now + 3600,
+        };
+        let grant = AccessRecord::sign(&key, statement).unwrap();
+        let revocations = if revoked {
+            vec![
+                AccessRecord::sign(
+                    &key,
+                    AccessStatement::Revoke {
+                        revocation_id: "revoke-test".into(),
+                        grant_id: Some("principal-test".into()),
+                        principal: None,
+                        serial: None,
+                        revoked_at: now,
+                        reason: "test".into(),
+                    },
+                )
+                .unwrap(),
+            ]
+        } else {
+            Vec::new()
+        };
+        let path = dir.join("trust.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "grant": grant,
+                "revocations": revocations,
+                "permit": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        (path, issuer)
+    }
+
+    #[test]
+    fn mycelium_trust_document_maps_to_a_principal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, issuer) = signed_document(dir.path(), false);
+        let provider = MyceliumTrustProvider::new(
+            path,
+            [issuer],
+            PrincipalKind::Human,
+            Some("device-1".into()),
+        );
+        let principal = provider.current().unwrap();
+        assert_eq!(principal.actor, "oidc:https://identity.example#subject-42");
+        assert_eq!(principal.kind, PrincipalKind::Human);
+        assert_eq!(principal.teams, vec!["fpl"]);
+        assert_eq!(principal.roles, vec!["operator"]);
+        assert_eq!(principal.generation, 9);
+    }
+
+    #[test]
+    fn revoked_mycelium_grant_is_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, issuer) = signed_document(dir.path(), true);
+        let provider = MyceliumTrustProvider::new(path, [issuer], PrincipalKind::Human, None);
+        assert_eq!(provider.current(), Err(PrincipalError::Denied));
     }
 }
 

@@ -63,6 +63,39 @@ device/transport identity. The host maps those into the same structure. A
 device or peer identity authenticates a machine; it does not by itself grant
 human permissions.
 
+
+## Mycelium trust document
+
+`soil-principal-host` has an optional `mycelium` feature that reads the same
+retained `AccessRecord` trust document used by the records peer host:
+
+```rust
+let provider = MyceliumTrustProvider::new(
+    trust_file,
+    issuer_public_keys,
+    PrincipalKind::Human,
+    Some(device_id),
+);
+```
+
+It verifies the grant signature and issuer set, rejects revoked or expired
+grants, and maps:
+
+```text
+grant.principal -> actor
+grant.roles     -> roles
+team:<id> scopes -> teams
+grant.serial    -> generation
+host device     -> device
+```
+
+Team extraction is a host policy. The default scope prefix is `team:` and can
+be changed with `with_team_scope_prefix`.
+
+```sh
+cargo test -p soil-principal-host --features mycelium
+```
+
 ## Host integration
 
 ```text
