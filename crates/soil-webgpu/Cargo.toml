@@ -20,6 +20,7 @@ wasmtime = { version = "50", default-features = false, features = [
     "std",
 ] }
 pollster = "0.4"
+base64 = "0.22"
 
 [dev-dependencies]
 wat = "1"

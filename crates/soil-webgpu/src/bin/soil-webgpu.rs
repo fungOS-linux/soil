@@ -3,11 +3,14 @@
 //! Usage:
 //!   soil-webgpu <component.wasm>
 //!   soil-webgpu --frame FILE.bgr [--size WxH] <component.wasm>
+//!   soil-webgpu --canvas-socket PATH --source-id ID [--size WxH] <component.wasm>
 
 use std::{env, fs, path::Path, process::ExitCode};
 
 fn main() -> ExitCode {
     let mut frame_path = None;
+    let mut canvas_socket = None;
+    let mut source_id = None;
     let mut size = (480, 640);
     let mut component = None;
     let mut args = env::args().skip(1);
@@ -19,6 +22,20 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 frame_path = Some(path);
+            }
+            "--canvas-socket" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--canvas-socket requires PATH");
+                    return ExitCode::FAILURE;
+                };
+                canvas_socket = Some(path);
+            }
+            "--source-id" => {
+                let Some(id) = args.next() else {
+                    eprintln!("--source-id requires ID");
+                    return ExitCode::FAILURE;
+                };
+                source_id = Some(id);
             }
             "--size" => {
                 let Some(value) = args.next() else {
@@ -42,7 +59,7 @@ fn main() -> ExitCode {
             _ => {
                 if component.replace(arg).is_some() {
                     eprintln!(
-                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] <component.wasm>"
+                        "usage: soil-webgpu [--frame FILE.bgr | --canvas-socket PATH --source-id ID] [--size WxH] <component.wasm>"
                     );
                     return ExitCode::FAILURE;
                 }
@@ -50,9 +67,19 @@ fn main() -> ExitCode {
         }
     }
     let Some(path) = component else {
-        eprintln!("usage: soil-webgpu [--frame FILE.bgr] [--size WxH] <component.wasm>");
+        eprintln!(
+            "usage: soil-webgpu [--frame FILE.bgr | --canvas-socket PATH --source-id ID] [--size WxH] <component.wasm>"
+        );
         return ExitCode::FAILURE;
     };
+    if canvas_socket.is_some() && source_id.is_none() {
+        eprintln!("--canvas-socket needs --source-id");
+        return ExitCode::FAILURE;
+    }
+    if canvas_socket.is_some() && frame_path.is_some() {
+        eprintln!("--canvas-socket and --frame are mutually exclusive");
+        return ExitCode::FAILURE;
+    }
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -60,7 +87,17 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = if frame_path.is_some() {
+    let result = if let Some(socket) = canvas_socket {
+        let source = source_id.expect("checked above");
+        match soil_webgpu::run_component_socket(&bytes, socket, source.clone(), size.0, size.1) {
+            Ok(status) if status == 0 => {
+                println!("webgpu: ok canvas source={source}");
+                Ok(())
+            }
+            Ok(status) => Err(anyhow::anyhow!("guest status {status}")),
+            Err(error) => Err(error),
+        }
+    } else if frame_path.is_some() {
         match soil_webgpu::run_component_capture(&bytes, size.0, size.1) {
             Ok((status, frame)) => {
                 if status != 0 {

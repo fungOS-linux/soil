@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use soil_scene::{Content, Ink, Node, Present, Rect, Scene, Text, Transform};
+use soil_scene::{Content, Ink, Node, Present, Rect, Scene, Shader, Text, Transform};
 
 fn main() -> std::io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -158,6 +158,30 @@ fn read(reader: &mut BufReader<UnixStream>) -> std::io::Result<serde_json::Value
     Ok(serde_json::from_str(&line).unwrap_or(serde_json::Value::Null))
 }
 
+/// A fragment-only WGSL component: the host supplies the vertex stage, the
+/// extent, and the scale factor in `resolution`, so this only has to say what a
+/// pixel looks like.
+const PLASMA: &str = r#"
+// The host declares Uniforms and binds it at group 0; a producer writes the
+// fragment stage and nothing else, so the two cannot disagree about the layout.
+@fragment
+fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+  let t = u.resolution.z;
+  var p = (uv - 0.5) * vec2<f32>(1.7, 1.0);
+  var v = 0.0;
+  var q = p;
+  for (var i = 0u; i < 8u; i = i + 1u) {
+    let f = f32(i);
+    q = p + vec2<f32>(cos(t * 0.3 + f * 0.7), sin(t * 0.24 + f * 0.53)) * 0.32;
+    v = v + sin(q.x * 3.1 + t) * cos(q.y * 3.7 - t * 0.7) / (f + 1.0);
+  }
+  let glow = smoothstep(0.9, 0.0, length(p));
+  let base = vec3<f32>(0.06, 0.09, 0.14);
+  let accent = vec3<f32>(0.43, 0.66, 1.0) * (0.5 + 0.5 * cos(v * 2.0 + t * 0.4));
+  return vec4<f32>(base + accent * glow * 0.85, 1.0);
+}
+"#;
+
 /// One frame. Coordinates are the host's normalised scene space: -4..4 on both
 /// axes, y up, so the same document draws at any window size.
 fn frame(t: f32) -> Scene {
@@ -194,6 +218,26 @@ fn frame(t: f32) -> Scene {
                 rgb: Some([110, 168, 254]),
                 opacity: 0.9,
                 radius: 24.0,
+            }),
+        },
+        // A GPU component, written here as data: the host compiles the WGSL,
+        // caches the pipeline by digest, and draws it in this node's rectangle.
+        // Changing it needs no compositor build, which is the whole point.
+        Node {
+            id: "plasma".into(),
+            parent: None,
+            // Scene placement is a top-left corner, y up: a 7.2x4.4 node centred
+            // in an 8x8 space starts at (-3.6, 2.2).
+            transform: Transform {
+                translation: [-3.6, 2.2, 0.1],
+                scale: [7.2, 4.4, 1.0],
+                ..Default::default()
+            },
+            content: Content::Shader(Shader {
+                wgsl: PLASMA.into(),
+                // `t` first: the host puts it in resolution.z for convenience,
+                // and the rest land in p0..p4 in order.
+                uniforms: vec![t],
             }),
         },
         Node {

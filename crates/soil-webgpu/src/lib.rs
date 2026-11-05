@@ -6,9 +6,12 @@
 //! else. Adapter/device creation, validation, limits and queue submission stay
 //! in the host through `wgpu-core`; no native handle crosses the boundary.
 
+use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use wasi_webgpu_wasmtime::reexports::{wgpu_core, wgpu_types};
 use wasi_webgpu_wasmtime::{WasiWebGpuCtx, WasiWebGpuCtxView, WasiWebGpuOptions};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -88,6 +91,80 @@ impl CanvasGpuPresenter for FrameCapture {
         let mut slot = self.frame.lock().expect("frame capture poisoned");
         anyhow::ensure!(slot.is_none(), "canvas present budget");
         *slot = Some(frame);
+        Ok(())
+    }
+}
+
+/// A presenter that hands completed frames to a Canvas `ui.sock`.
+///
+/// This is the cross-process form of the same handoff: the guest never learns
+/// the socket path, the host owns the connection and the lease name. The
+/// protocol is Canvas's line-delimited `gpu_frame` message; pixels are base64
+/// on this path because the socket is JSON, not a shared-memory transport.
+pub struct SocketPresenter {
+    stream: UnixStream,
+    source_id: String,
+    size: (u32, u32),
+    revision: u64,
+}
+
+impl SocketPresenter {
+    pub fn new(
+        socket: impl AsRef<std::path::Path>,
+        source_id: impl Into<String>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        let source_id = source_id.into();
+        anyhow::ensure!(
+            !source_id.is_empty()
+                && source_id.len() <= 64
+                && source_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+            "Canvas source id must be a safe identifier"
+        );
+        let mut stream = UnixStream::connect(socket.as_ref())
+            .with_context(|| format!("connect Canvas socket {}", socket.as_ref().display()))?;
+        let hello = format!(
+            r#"{{"kind":"hello","surface_id":"{source_id}","title":"{source_id}","width":{width},"height":{height}}}"#
+        );
+        stream.write_all(hello.as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+        Ok(Self {
+            stream,
+            source_id,
+            size: (width, height),
+            revision: 1,
+        })
+    }
+}
+
+impl CanvasGpuPresenter for SocketPresenter {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn present(&mut self, frame: CanvasFrame) -> Result<()> {
+        anyhow::ensure!(
+            frame.width == self.size.0 && frame.height == self.size.1,
+            "guest presented {}x{}, host granted {}x{}",
+            frame.width,
+            frame.height,
+            self.size.0,
+            self.size.1
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&frame.rgba);
+        let revision = self.revision;
+        self.revision = self.revision.saturating_add(1);
+        let message = format!(
+            r#"{{"kind":"gpu_frame","source_id":"{}","width":{},"height":{},"revision":{revision},"rgba":"{encoded}"}}"#,
+            self.source_id, frame.width, frame.height
+        );
+        self.stream.write_all(message.as_bytes())?;
+        self.stream.write_all(b"\n")?;
+        self.stream.flush()?;
         Ok(())
     }
 }
@@ -236,6 +313,19 @@ impl WebGpuRuntime {
 pub fn run_component_blocking(bytes: &[u8]) -> Result<u32> {
     let runtime = WebGpuRuntime::new()?;
     pollster::block_on(runtime.run_component(bytes))
+}
+
+/// Run one component and present its first frame to a Canvas `ui.sock`.
+pub fn run_component_socket(
+    bytes: &[u8],
+    socket: impl AsRef<std::path::Path>,
+    source_id: impl Into<String>,
+    width: u32,
+    height: u32,
+) -> Result<u32> {
+    let runtime = WebGpuRuntime::new()?;
+    let presenter = SocketPresenter::new(socket, source_id, width, height)?;
+    pollster::block_on(runtime.run_component_with_presenter(bytes, Box::new(presenter)))
 }
 
 /// Run with a capture sink and return both guest status and the first frame.
