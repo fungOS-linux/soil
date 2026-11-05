@@ -96,7 +96,7 @@ pub const CONTRACTS: &[Contract] = &[
     Contract {
         file: "wit/soil-search.wit",
         source: include_str!("../../../wit/soil-search.wit"),
-        package: "soil:search@0.3.0",
+        package: "soil:search@0.4.0",
         interfaces: &[
             ("search", &["search", "state", "refresh"]),
             ("mentions", &["suggest"]),

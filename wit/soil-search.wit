@@ -4,7 +4,7 @@
 // `soil:vfs`, records from `soil:records`, and actions from their owning host
 // capability. A hit is a locator plus display metadata; the caller fetches the
 // authoritative object through the source capability.
-package soil:search@0.3.0;
+package soil:search@0.4.0;
 
 interface search {
   enum kind {
@@ -101,7 +101,7 @@ interface mentions {
 
   record candidate {
     /// person, account, company, project, task, opportunity, activity, call,
-    /// thread, message, document, file, or record.
+    /// thread, message, document, sheet, slide, file, or record.
     kind: string,
     /// Stable locator: `record:<book>#<entity>` or `file:<path>`.
     token: string,
@@ -109,6 +109,8 @@ interface mentions {
     subtitle: option<string>,
     /// Record schema when this candidate came from records.
     schema: option<string>,
+    /// File format hint: md, pdf, docx, xlsx, pptx, and so on.
+    format: option<string>,
     /// Higher is more relevant. Stable for one host generation.
     score: u32,
     /// team, private, or workspace.

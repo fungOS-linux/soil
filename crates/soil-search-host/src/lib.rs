@@ -411,7 +411,10 @@ impl SearchService {
         let allow = |kind: &str| kinds.is_empty() || kinds.contains(kind);
         let mut candidates = Vec::new();
 
-        if allow("file") || allow("document") {
+        if ["file", "document", "sheet", "slide"]
+            .iter()
+            .any(|kind| allow(kind))
+        {
             candidates.extend(self.file_mentions(&text, limit)?);
         }
 
@@ -461,7 +464,7 @@ impl SearchService {
             .hits
             .into_iter()
             .map(|hit| {
-                let kind = file_mention_kind(&hit.path);
+                let (kind, format) = file_mention_class(&hit.path);
                 let label = file_mention_label(&hit.path, kind);
                 let subtitle = hit
                     .path
@@ -473,6 +476,7 @@ impl SearchService {
                     label,
                     subtitle,
                     schema: None,
+                    format,
                     score: hit.score,
                     visibility: "workspace".into(),
                 }
@@ -502,22 +506,25 @@ impl SearchService {
     }
 }
 
-fn file_mention_kind(path: &str) -> &'static str {
+fn file_mention_class(path: &str) -> (&'static str, Option<String>) {
     let extension = path
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_ascii_lowercase());
     match extension.as_deref() {
         Some(
-            "md" | "markdown" | "mdx" | "txt" | "rst" | "adoc" | "org" | "tex" | "pdf" | "doc"
-            | "docx" | "odt" | "rtf",
-        ) => "document",
-        _ => "file",
+            "md" | "markdown" | "mdx" | "txt" | "rst" | "adoc" | "org" | "tex" | "doc" | "docx"
+            | "odt" | "rtf" | "epub" | "html",
+        ) => ("document", extension),
+        Some("pdf") => ("document", extension),
+        Some("xls" | "xlsx" | "xlsm" | "ods" | "csv" | "tsv" | "numbers") => ("sheet", extension),
+        Some("ppt" | "pptx" | "pptm" | "odp" | "key") => ("slide", extension),
+        _ => ("file", extension),
     }
 }
 
 fn file_mention_label(path: &str, kind: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
-    if kind != "document" {
+    if kind == "file" {
         return name.to_string();
     }
     let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
@@ -540,6 +547,8 @@ fn mention_schema(schema: &str) -> Option<&'static str> {
             Some("document")
         }
         "fungos.note/note@1" | "fungos.notes/note@1" => Some("document"),
+        "fungos.sheet/sheet@1" | "fungos.sheets/sheet@1" => Some("sheet"),
+        "fungos.slide/slide@1" | "fungos.slides/slide@1" => Some("slide"),
         _ => None,
     }
 }
@@ -558,6 +567,9 @@ fn record_mention(record: Record, kind: &str, index: usize) -> mention_api::Cand
         label,
         subtitle: mention_subtitle(kind, fields),
         schema: Some(record.schema_id.clone()),
+        format: text_field(fields, "format")
+            .or_else(|| text_field(fields, "file_format"))
+            .or_else(|| text_field(fields, "media_type")),
         score: 900_000u32.saturating_sub(index as u32),
         visibility: fields
             .get("visibility")
@@ -727,6 +739,26 @@ mod tests {
             .unwrap();
         vfs.put("photos/paris.jpg", b"jpeg", "image/jpeg", None)
             .unwrap();
+    }
+
+    fn seed_office_files(root: &std::path::Path) {
+        let mut vfs = Vfs::open(root).unwrap();
+        vfs.put("docs/brief.pdf", b"pdf", "application/pdf", None)
+            .unwrap();
+        vfs.put(
+            "sheets/budget.xlsx",
+            b"xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            None,
+        )
+        .unwrap();
+        vfs.put(
+            "slides/kickoff.pptx",
+            b"pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            None,
+        )
+        .unwrap();
     }
 
     fn seed_records(root: &std::path::Path) -> Store {
@@ -1203,6 +1235,7 @@ surfaces = ["canvas"]
     fn mention_suggestions_include_workspace_documents_and_files() {
         let dir = tempfile::tempdir().unwrap();
         seed_vfs(dir.path());
+        seed_office_files(dir.path());
         let records = tempfile::tempdir().unwrap();
         let mut host = SearchService::open(dir.path(), records.path(), vec![]).unwrap();
         let documents = host
@@ -1212,13 +1245,36 @@ surfaces = ["canvas"]
         assert_eq!(documents[0].kind, "document");
         assert_eq!(documents[0].token, "file:notes/greece.txt");
         assert_eq!(documents[0].label, "greece");
+        assert_eq!(documents[0].format.as_deref(), Some("txt"));
         assert_eq!(documents[0].visibility, "workspace");
+
+        let pdfs = host
+            .suggest("brief".into(), vec!["document".into()], 5)
+            .unwrap();
+        assert_eq!(pdfs.len(), 1);
+        assert_eq!(pdfs[0].kind, "document");
+        assert_eq!(pdfs[0].format.as_deref(), Some("pdf"));
+
+        let sheets = host
+            .suggest("budget".into(), vec!["sheet".into()], 5)
+            .unwrap();
+        assert_eq!(sheets.len(), 1);
+        assert_eq!(sheets[0].kind, "sheet");
+        assert_eq!(sheets[0].format.as_deref(), Some("xlsx"));
+
+        let slides = host
+            .suggest("kickoff".into(), vec!["slide".into()], 5)
+            .unwrap();
+        assert_eq!(slides.len(), 1);
+        assert_eq!(slides[0].kind, "slide");
+        assert_eq!(slides[0].format.as_deref(), Some("pptx"));
 
         let files = host
             .suggest("paris".into(), vec!["file".into()], 5)
             .unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].kind, "file");
+        assert_eq!(files[0].format.as_deref(), Some("jpg"));
         assert_eq!(files[0].token, "file:photos/paris.jpg");
     }
 }

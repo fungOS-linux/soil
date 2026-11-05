@@ -252,6 +252,7 @@ fn mention_json(candidate: soil_search_host::mention_api::Candidate) -> Value {
         "label": candidate.label,
         "subtitle": candidate.subtitle,
         "schema": candidate.schema,
+        "format": candidate.format,
         "score": candidate.score,
         "visibility": candidate.visibility,
     })

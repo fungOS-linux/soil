@@ -1,6 +1,6 @@
 # Global search
 
-`soil:search@0.3.0` is a host-composed discovery surface over the sources a
+`soil:search@0.4.0` is a host-composed discovery surface over the sources a
 host has already granted:
 
 ```text
@@ -61,11 +61,13 @@ suggest(text, kinds, limit) -> list<candidate>
 ```wit
 candidate {
   kind,        // person / account / company / project / task / opportunity /
-              // activity / call / thread / message / document / file
+              // activity / call / thread / message / document / sheet / slide /
+              // file
   token,       // record:<book>#<entity> or file:<path>
   label,
   subtitle,
   schema,      // record schema when the candidate came from records
+  format,      // md / pdf / docx / xlsx / pptx / ...
   score,
   visibility,  // team / private / workspace
 }
@@ -89,13 +91,27 @@ fungos.doc/document@1      -> document
 fungos.docs/document@1     -> document
 fungos.note/note@1         -> document
 fungos.notes/note@1        -> document
+fungos.sheet/sheet@1       -> sheet
+fungos.sheets/sheet@1      -> sheet
+fungos.slide/slide@1       -> slide
+fungos.slides/slide@1      -> slide
 ```
 
 Unknown schemas are not mentionable. Privacy follows the books the host opened:
-a team book yields projections, a private book yields private records. VFS
-entries with document extensions (`.md`, `.txt`, `.pdf`, `.docx`, and similar)
-are `document` candidates; other paths are `file` candidates. Both use
-`visibility = workspace`.
+a team book yields projections, a private book yields private records.
+
+VFS entries are classified by extension:
+
+```text
+document   md markdown mdx txt rst adoc org tex doc docx odt rtf epub html
+document   pdf                 (format = pdf)
+sheet      xls xlsx xlsm ods csv tsv numbers
+slide      ppt pptx pptm odp key
+file       everything else
+```
+
+All VFS mentions use `visibility = workspace`. `format` carries the extension so
+a UI can choose the right icon without parsing the path.
 
 Insert `token` into the document/task/record and persist a graph link:
 

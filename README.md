@@ -57,7 +57,7 @@ Principles:
 | [`soil:media@0.1.0`](wit/soil-media.wit) | `soil:media`, optional `soil:media-encoded` | host playback, encoded chunks, bounded image readback |
 | [`soil:surface-import@0.1.0`](wit/soil-surface-import.wit) | `soil:surface-import` | host-owned imported surfaces, damage events, normalized input |
 | [`soil:inference@0.2.0`](wit/soil-inference.wit) | `soil:inference` | WIT + models, tools, completion, SSE stream resource |
-| [`soil:search@0.3.0`](wit/soil-search.wit) | `soil:search` | WIT + files/records/graph host composition + typed `@` mention resolver |
+| [`soil:search@0.4.0`](wit/soil-search.wit) | `soil:search` | WIT + files/records/graph host composition + typed `@` mention resolver |
 | [`soil:graph@0.1.0`](wit/soil-graph.wit) | `soil:graph` | read-only edge/reference queries over records |
 | [`soil:input@1.0.0`](wit/soil-input.wit) | — | shared normalized input types for Canvas, Terminal and imported surfaces |
 | [`soil:notify@1.1.0`](wit/soil-notify.wit) | `soil:notify`, `soil:notify/ringer` | WIT + host broker + notify Spore; ringer is an interface, not a package |
