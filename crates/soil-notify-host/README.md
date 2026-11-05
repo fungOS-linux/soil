@@ -62,8 +62,25 @@ Envelope `id` is the dedupe key. Delivery is at-least-once. Read/dismiss state
 replicates back as `notify.state.v1`. A relay stores envelopes, not per-device
 visibility decisions.
 
+## Wasmtime wiring
+
+`NotifyRuntime` links `soil:notify/*` and `soil:ringer/calls` plus WASI. The
+real `spores/notify/module.wasm` runs against it in
+`component::tests::runs_the_real_notify_spore_against_the_host`.
+
+## Unibus wiring
+
+`NotifyPeerAdapter` accepts an authenticated `unibus::PeerSession`:
+
+- `serve_session` routes inbound `notify.*` / `ringer.*` frames
+- `flush_session` sends durable outbox rows
+- `soil-sync-host --features notify` mounts the inbound handler on the shared
+  peer session
+- `notify_db` in the sync config points both processes at the same broker DB
+
 ## Test
 
 ```sh
-cargo test --manifest-path crates/soil-notify-host/Cargo.toml
+cargo test -p soil-notify-host
+cargo check -p soil-sync-host --features notify --bins
 ```

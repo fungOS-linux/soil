@@ -54,6 +54,21 @@ Envelope `id` is the dedupe key. Source hosts keep durable per-recipient
 outboxes until ack. Read/dismiss state replicates as `notify.state.v1`. The
 relay stores envelopes, not per-device policy decisions.
 
+## Runtime wiring
+
+`soil-notify-host` links the component imports and runs the real
+`dev.fungos.notify` module in a Wasmtime test. `NotifyPeerAdapter` serves
+`notify.*` / `ringer.*` frames on an authenticated `unibus/peer/1` session.
+
+`soil-sync-host` has a `notify` feature:
+
+```rust
+let host = host.with_notify(Arc::clone(&adapter));
+```
+
+and a `notify_db` config path. The sync supervisor flushes the broker outbox
+over the same peer session it already uses for records.
+
 ## Ringer
 
 A ring is active, not a notification row. First acceptance is a transactional

@@ -32,7 +32,7 @@ use unibus_iroh::{
     transport::{IrohListener, IrohTransport, SessionConfig},
 };
 
-const DEFAULT_KINDS: &str = "records.sync.pull.v1,records.sync.ops.v1,records.sync.push.v1,records.sync.ack.v1,records.sync.error.v1";
+const DEFAULT_KINDS: &str = "records.sync.pull.v1,records.sync.ops.v1,records.sync.push.v1,records.sync.ack.v1,records.sync.error.v1,notify.publish.v1,notify.update.v1,notify.withdraw.v1,notify.ack.v1,notify.state.v1,ringer.incoming.v1,ringer.accept.v1,ringer.decline.v1,ringer.end.v1";
 const DEFAULT_MAX_PAYLOAD: u32 = 16 * 1024 * 1024;
 
 #[derive(Parser)]
@@ -132,6 +132,10 @@ struct SyncConfig {
     sync_interval_secs: u64,
     #[serde(default = "default_push_poll")]
     push_poll_ms: u64,
+    /// Optional host-owned notification/ringer broker DB. The same peer
+    /// session routes `notify.*` and `ringer.*` frames.
+    #[serde(default)]
+    notify_db: Option<PathBuf>,
     #[serde(default)]
     peers: Vec<PeerConfig>,
 }
@@ -290,7 +294,7 @@ async fn run_peer(config_path: PathBuf) -> anyhow::Result<()> {
     }
     let dispatch_store = Arc::new(tokio::sync::Mutex::new(dispatch_store));
     let listener = IrohListener::new(endpoint.clone(), session_config(&config, verifier.clone()));
-    let host = RecordPeerHost::from_shared(
+    let mut host = RecordPeerHost::from_shared(
         listener,
         host_store,
         PeerEndpoint {
@@ -298,6 +302,12 @@ async fn run_peer(config_path: PathBuf) -> anyhow::Result<()> {
             producer_id: config.local_producer.clone(),
         },
     );
+    #[cfg(feature = "notify")]
+    let notify = make_notify_adapter(&config)?;
+    #[cfg(feature = "notify")]
+    if let Some(adapter) = &notify {
+        host = host.with_notify(Arc::clone(adapter));
+    }
     let transport = IrohTransport::new(endpoint.clone(), session_config(&config, verifier.clone()));
     eprintln!("soil-sync: producer={}", config.local_producer);
     eprintln!(
@@ -319,6 +329,8 @@ async fn run_peer(config_path: PathBuf) -> anyhow::Result<()> {
         dispatch_store,
         transport,
         verifier,
+        #[cfg(feature = "notify")]
+        notify,
     ));
     let result = tokio::try_join!(
         async { server.await.map_err(anyhow::Error::from)? },
@@ -334,15 +346,44 @@ async fn supervise(
     store: Arc<tokio::sync::Mutex<Store>>,
     transport: IrohTransport,
     verifier: Arc<GrantVerifier>,
+    #[cfg(feature = "notify")] notify: Option<Arc<soil_notify_host::NotifyPeerAdapter>>,
 ) -> anyhow::Result<()> {
     let poll = std::time::Duration::from_millis(config.push_poll_ms.max(100));
     let interval = std::time::Duration::from_secs(config.sync_interval_secs.max(5));
     let mut ticker = tokio::time::interval(poll);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_anti_entropy = 0u64;
+    let mut last_notify_flush = 0u64;
     loop {
         ticker.tick().await;
         let now = now_ms();
+        #[cfg(feature = "notify")]
+        if let Some(adapter) = &notify {
+            if now.saturating_sub(last_notify_flush) >= 5_000 {
+                last_notify_flush = now;
+                for peer in &config.peers {
+                    let candidate = candidate_for(&config, peer, now_s());
+                    if let Ok(assertion) = verifier.assertion(now_s()) {
+                        match soil_sync_host::flush_notify_with_transport(
+                            &transport, &candidate, &assertion, adapter, now, 100,
+                        )
+                        .await
+                        {
+                            Ok(sent) if sent > 0 => {
+                                eprintln!("soil-sync: notify/{} sent={sent}", peer.producer_id)
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "soil-sync: notify/{} flush failed: {error:#}",
+                                    peer.producer_id
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let mut due = false;
         for book in &config.books {
             for peer in &config.peers {
@@ -515,6 +556,26 @@ async fn sync(config_path: PathBuf, peer: &str, book: &str) -> anyhow::Result<()
     );
     endpoint.close().await;
     Ok(())
+}
+
+#[cfg(feature = "notify")]
+fn make_notify_adapter(
+    config: &SyncConfig,
+) -> anyhow::Result<Option<Arc<soil_notify_host::NotifyPeerAdapter>>> {
+    let Some(path) = &config.notify_db else {
+        return Ok(None);
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut broker = soil_notify_host::NotifyBroker::open(path, &config.installation_id)
+        .map_err(|error| anyhow::anyhow!("open notify db: {error}"))?;
+    broker.set_peers(config.peers.iter().map(|peer| peer.producer_id.clone()));
+    Ok(Some(Arc::new(soil_notify_host::NotifyPeerAdapter::new(
+        Arc::new(broker),
+        config.installation_id.clone(),
+        config.local_producer.clone(),
+    ))))
 }
 
 fn read_config(path: &Path) -> anyhow::Result<SyncConfig> {

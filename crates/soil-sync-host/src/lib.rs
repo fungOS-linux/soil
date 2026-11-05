@@ -22,6 +22,8 @@ pub struct RecordPeerHost {
     listener: IrohListener,
     store: Arc<Mutex<Store>>,
     endpoint: PeerEndpoint,
+    #[cfg(feature = "notify")]
+    notify: Option<Arc<soil_notify_host::NotifyPeerAdapter>>,
 }
 
 impl RecordPeerHost {
@@ -39,7 +41,15 @@ impl RecordPeerHost {
             listener,
             store,
             endpoint,
+            #[cfg(feature = "notify")]
+            notify: None,
         }
+    }
+
+    #[cfg(feature = "notify")]
+    pub fn with_notify(mut self, notify: Arc<soil_notify_host::NotifyPeerAdapter>) -> Self {
+        self.notify = Some(notify);
+        self
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
@@ -51,8 +61,14 @@ impl RecordPeerHost {
                 .map_err(|error| anyhow::anyhow!("Iroh accept: {error}"))?;
             let store = Arc::clone(&self.store);
             let endpoint = self.endpoint.clone();
+            #[cfg(feature = "notify")]
+            let notify = self.notify.clone();
             tokio::spawn(async move {
-                if let Err(error) = serve_session(&mut session, store, endpoint).await {
+                #[cfg(feature = "notify")]
+                let result = serve_session(&mut session, store, endpoint, notify).await;
+                #[cfg(not(feature = "notify"))]
+                let result = serve_session(&mut session, store, endpoint).await;
+                if let Err(error) = result {
                     eprintln!("soil-sync-host: session ended: {error:#}");
                 }
             });
@@ -64,6 +80,7 @@ async fn serve_session(
     session: &mut dyn PeerSession,
     store: Arc<Mutex<Store>>,
     endpoint: PeerEndpoint,
+    #[cfg(feature = "notify")] notify: Option<Arc<soil_notify_host::NotifyPeerAdapter>>,
 ) -> anyhow::Result<()> {
     loop {
         let (envelope, payload) = session
@@ -78,10 +95,38 @@ async fn serve_session(
             fungos_records::handle_peer_frame(session, &mut store, &endpoint, &envelope, &payload)
                 .await
                 .context("handle records peer frame")?;
+        } else {
+            #[cfg(feature = "notify")]
+            if let Some(notify) = &notify {
+                notify
+                    .handle(&envelope)
+                    .context("handle notify peer frame")?;
+            }
         }
         // Unknown kinds are ignored for forward compatibility. A host with
         // Geode/other handlers routes them to the corresponding handler first.
     }
+}
+
+/// Flush notify outbox rows on a fresh authenticated peer session. The shared
+/// session router handles inbound notify frames; this handles push.
+#[cfg(feature = "notify")]
+pub async fn flush_notify_with_transport(
+    transport: &dyn PeerTransport,
+    candidate: &PeerCandidate,
+    assertion: &str,
+    adapter: &soil_notify_host::NotifyPeerAdapter,
+    now_ms: u64,
+    limit: u32,
+) -> anyhow::Result<u32> {
+    let mut session = transport
+        .connect(candidate, assertion)
+        .await
+        .map_err(|error| anyhow::anyhow!("Iroh connect: {error}"))?;
+    adapter
+        .flush_session(&mut *session, now_ms, limit)
+        .await
+        .context("flush notify outbox")
 }
 
 /// Client helper: open one Iroh peer session and sync one records book.

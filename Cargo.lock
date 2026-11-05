@@ -5464,6 +5464,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-notify-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "unibus 0.1.0 (git+https://github.com/fungOS-linux/unibus.git?rev=8bf8f79)",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "soil-process"
 version = "0.1.0"
 dependencies = [
@@ -5609,6 +5624,7 @@ dependencies = [
  "mycelium-peer-protocol",
  "serde",
  "serde_json",
+ "soil-notify-host",
  "tempfile",
  "tokio",
  "unibus 0.1.0 (git+https://github.com/fungOS-linux/unibus.git?rev=8bf8f79)",

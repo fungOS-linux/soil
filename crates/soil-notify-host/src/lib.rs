@@ -14,6 +14,12 @@ use std::{
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
+
+mod component;
+mod peer;
+
+pub use component::{NotifyComponent, NotifyRuntime, add_to_linker};
+pub use peer::NotifyPeerAdapter;
 use serde::{Deserialize, Serialize};
 
 pub const NOTIFY_PUBLISH: &str = "notify.publish.v1";
@@ -250,6 +256,7 @@ pub struct NotifyBroker {
     device_id: String,
     history_enabled: bool,
     undo_window_ms: u64,
+    peers: Vec<String>,
 }
 
 impl NotifyBroker {
@@ -338,11 +345,18 @@ impl NotifyBroker {
             device_id: device_id.into(),
             history_enabled: false,
             undo_window_ms: 15_000,
+            peers: Vec::new(),
         })
     }
 
     pub fn device_id(&self) -> &str {
         &self.device_id
+    }
+
+    /// Configure the peer fanout for durable outbox rows. An empty list uses
+    /// the legacy `*` broadcast row; production hosts should set explicit peers.
+    pub fn set_peers(&mut self, peers: impl IntoIterator<Item = String>) {
+        self.peers = peers.into_iter().collect();
     }
 
     /// History is an explicit host/recipient setting, not implied by inbox.
@@ -409,15 +423,12 @@ impl NotifyBroker {
              VALUES(?1,?2)",
             params![self.device_id, envelope.id],
         )?;
-        tx.execute(
-            "INSERT INTO outbox(peer,kind,payload,next_attempt_ms)
-             VALUES(?1,?2,?3,?4)",
-            params![
-                "*",
-                NOTIFY_PUBLISH,
-                serde_json::to_string(&envelope).unwrap_or_default(),
-                now_ms() as i64,
-            ],
+        enqueue(
+            &tx,
+            &self.peers,
+            NOTIFY_PUBLISH,
+            &serde_json::to_string(&envelope).unwrap_or_default(),
+            now_ms(),
         )?;
         tx.commit()?;
         Ok(envelope.id)
@@ -462,19 +473,213 @@ impl NotifyBroker {
                  VALUES(?1,?2)",
                 params![self.device_id, id],
             )?;
-            tx.execute(
-                "INSERT INTO outbox(peer,kind,payload,next_attempt_ms)
-                 VALUES(?1,?2,?3,?4)",
-                params![
-                    envelope.source_device,
-                    NOTIFY_ACK,
-                    serde_json::json!({ "id": id }).to_string(),
-                    now_ms() as i64,
-                ],
+            enqueue_one(
+                &tx,
+                &envelope.source_device,
+                NOTIFY_ACK,
+                &serde_json::json!({ "id": id }).to_string(),
+                now_ms(),
             )?;
         }
         tx.commit()?;
         Ok(inserted)
+    }
+
+    /// Update an envelope only when it still belongs to the same app.
+    pub fn update(&self, id: &str, envelope: &Envelope) -> Result<(), NotifyError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| NotifyError::Io("lock poisoned".into()))?;
+        let owner: Option<String> = db
+            .query_row(
+                "SELECT app_id FROM envelopes WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match owner {
+            None => return Err(NotifyError::NotFound),
+            Some(owner) if owner != envelope.app_id => return Err(NotifyError::Denied),
+            Some(_) => {}
+        }
+        db.execute(
+            "UPDATE envelopes SET title=?1,body=?2,category=?3,thread=?4,group_key=?5,
+             expires_at_ms=?6,priority=?7,sensitive=?8,actions_json=?9,context_json=?10
+             WHERE id=?11",
+            params![
+                envelope.title,
+                envelope.body,
+                envelope.category,
+                envelope.thread,
+                envelope.group_key,
+                envelope.expires_at_ms.map(|value| value as i64),
+                priority_name(envelope.priority),
+                envelope.sensitive as i64,
+                serde_json::to_string(&envelope.actions).unwrap_or_else(|_| "[]".into()),
+                envelope
+                    .context
+                    .as_ref()
+                    .and_then(|context| serde_json::to_string(context).ok()),
+                id,
+            ],
+        )?;
+        enqueue(
+            &db,
+            &self.peers,
+            NOTIFY_UPDATE,
+            &serde_json::to_string(envelope).unwrap_or_default(),
+            now_ms(),
+        )?;
+        Ok(())
+    }
+
+    /// Withdraw an envelope and its local inbox state.
+    pub fn withdraw(&self, app_id: &str, id: &str) -> Result<(), NotifyError> {
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| NotifyError::Io("lock poisoned".into()))?;
+        let tx = db.transaction()?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT app_id FROM envelopes WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match owner {
+            None => return Err(NotifyError::NotFound),
+            Some(owner) if owner != app_id => return Err(NotifyError::Denied),
+            Some(_) => {}
+        }
+        tx.execute(
+            "DELETE FROM inbox_state WHERE notification_id=?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM envelopes WHERE id=?1", params![id])?;
+        enqueue(
+            &tx,
+            &self.peers,
+            NOTIFY_WITHDRAW,
+            &serde_json::json!({ "id": id, "app_id": app_id }).to_string(),
+            now_ms(),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Apply a replicated read/dismiss state from another device.
+    pub fn apply_remote_state(
+        &self,
+        id: &str,
+        read: bool,
+        dismissed: bool,
+    ) -> Result<(), NotifyError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| NotifyError::Io("lock poisoned".into()))?;
+        db.execute(
+            "UPDATE inbox_state SET read=?1,dismissed_at_ms=CASE WHEN ?2 THEN ?3 ELSE dismissed_at_ms END
+             WHERE device_id=?4 AND notification_id=?5",
+            params![
+                read as i64,
+                dismissed as i64,
+                now_ms() as i64,
+                self.device_id,
+                id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Apply a remote withdraw without echoing it back onto the wire.
+    pub fn apply_remote_withdraw(&self, id: &str) -> Result<(), NotifyError> {
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| NotifyError::Io("lock poisoned".into()))?;
+        let tx = db.transaction()?;
+        tx.execute(
+            "DELETE FROM inbox_state WHERE notification_id=?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM envelopes WHERE id=?1", params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Apply a remote ring without re-broadcasting it.
+    pub fn apply_remote_ring(&self, ring: &Ring) -> Result<bool, NotifyError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| NotifyError::Io("lock poisoned".into()))?;
+        let inserted = db.execute(
+            "INSERT OR IGNORE INTO rings
+             (id,kind,source,title,priority,created_at_ms,expires_at_ms,actions_json,phase)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                ring.id,
+                ring_kind_name(ring.kind),
+                ring.source,
+                ring.title,
+                priority_name(ring.priority),
+                ring.created_at_ms as i64,
+                ring.expires_at_ms.map(|value| value as i64),
+                serde_json::to_string(&ring.actions).unwrap_or_else(|_| "[]".into()),
+                ring_phase_name(RingPhase::Ringing),
+            ],
+        )? > 0;
+        Ok(inserted)
+    }
+
+    /// Apply a remote ring phase transition. The first accepted device wins.
+    pub fn apply_remote_ring_phase(
+        &self,
+        id: &str,
+        phase: RingPhase,
+        answered_by: Option<&str>,
+    ) -> Result<(), NotifyError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| NotifyError::Io("lock poisoned".into()))?;
+        db.execute(
+            "UPDATE rings SET phase=?1,answered_by=?2
+             WHERE id=?3 AND phase=?4",
+            params![
+                ring_phase_name(phase),
+                answered_by,
+                id,
+                ring_phase_name(RingPhase::Ringing),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The first active ring, for a polled ringer subscription.
+    pub fn active_ring(&self) -> Result<Option<RingState>, NotifyError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| NotifyError::Io("lock poisoned".into()))?;
+        db.query_row(
+            "SELECT id,phase,answered_by,muted_by FROM rings
+             WHERE phase=?1 ORDER BY created_at_ms ASC LIMIT 1",
+            params![ring_phase_name(RingPhase::Ringing)],
+            |row| {
+                Ok(RingState {
+                    id: row.get(0)?,
+                    phase: parse_phase(&row.get::<_, String>(1)?),
+                    answered_by: row.get(2)?,
+                    muted_by: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn inbox(&self, filter: &Filter) -> Result<Vec<InboxItem>, NotifyError> {
@@ -590,16 +795,13 @@ impl NotifyBroker {
         if changed == 0 {
             return Err(NotifyError::NotFound);
         }
-        db.execute(
-            "INSERT INTO outbox(peer,kind,payload,next_attempt_ms)
-             VALUES(?1,?2,?3,?4)",
-            params![
-                "*",
-                NOTIFY_STATE,
-                serde_json::json!({ "id": id, "device": self.device_id, "read": true, "dismissed": true })
-                    .to_string(),
-                now_ms() as i64,
-            ],
+        enqueue(
+            &db,
+            &self.peers,
+            NOTIFY_STATE,
+            &serde_json::json!({ "id": id, "device": self.device_id, "read": true, "dismissed": true })
+                .to_string(),
+            now_ms(),
         )?;
         Ok(())
     }
@@ -826,15 +1028,12 @@ impl NotifyBroker {
                 ring_phase_name(RingPhase::Ringing),
             ],
         )?;
-        db.execute(
-            "INSERT INTO outbox(peer,kind,payload,next_attempt_ms)
-             VALUES(?1,?2,?3,?4)",
-            params![
-                "*",
-                RINGER_INCOMING,
-                serde_json::to_string(&ring).unwrap_or_default(),
-                now_ms() as i64,
-            ],
+        enqueue(
+            &db,
+            &self.peers,
+            RINGER_INCOMING,
+            &serde_json::to_string(&ring).unwrap_or_default(),
+            now_ms(),
         )?;
         Ok(())
     }
@@ -907,20 +1106,17 @@ impl NotifyBroker {
             RingPhase::Ended | RingPhase::Missed => RINGER_END,
             RingPhase::Ringing => RINGER_INCOMING,
         };
-        tx.execute(
-            "INSERT INTO outbox(peer,kind,payload,next_attempt_ms)
-             VALUES(?1,?2,?3,?4)",
-            params![
-                "*",
-                kind,
-                serde_json::json!({
-                    "id": id,
-                    "device": self.device_id,
-                    "phase": ring_phase_name(phase),
-                })
-                .to_string(),
-                now_ms() as i64,
-            ],
+        enqueue(
+            &tx,
+            &self.peers,
+            kind,
+            &serde_json::json!({
+                "id": id,
+                "device": self.device_id,
+                "phase": ring_phase_name(phase),
+            })
+            .to_string(),
+            now_ms(),
         )?;
         tx.commit()?;
         read_ring_state(&db, id)
@@ -1040,6 +1236,37 @@ impl NotifyBroker {
         .optional()
         .map_err(Into::into)
     }
+}
+
+fn enqueue(
+    db: &Connection,
+    peers: &[String],
+    kind: &str,
+    payload: &str,
+    now_ms: u64,
+) -> rusqlite::Result<()> {
+    if peers.is_empty() {
+        return enqueue_one(db, "*", kind, payload, now_ms);
+    }
+    for peer in peers {
+        enqueue_one(db, peer, kind, payload, now_ms)?;
+    }
+    Ok(())
+}
+
+fn enqueue_one(
+    db: &Connection,
+    peer: &str,
+    kind: &str,
+    payload: &str,
+    now_ms: u64,
+) -> rusqlite::Result<()> {
+    db.execute(
+        "INSERT INTO outbox(peer,kind,payload,next_attempt_ms)
+         VALUES(?1,?2,?3,?4)",
+        params![peer, kind, payload, now_ms as i64],
+    )?;
+    Ok(())
 }
 
 fn read_inbox_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxItem> {
