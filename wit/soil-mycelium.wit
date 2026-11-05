@@ -1,0 +1,111 @@
+// Mycelium-backed directory and terminal session capability.
+//
+// The host owns identity, certificates, routing, jump hosts, host-key
+// verification and the SSH profile. A Spore names an opaque target id obtained
+// from `directory`; it never supplies a host, port, credential or private key.
+//
+// The handles below are component-instance-scoped and unforgeable in the sense
+// that the host only accepts handles it issued. A later revision can replace
+// them with WIT resources without changing the verbs.
+package soil:mycelium@0.1.0;
+
+interface directory {
+  enum error {
+    /// The `soil:mycelium` grant was not linked or the caller is not allowed.
+    denied,
+    /// The target id is malformed.
+    invalid,
+    /// No visible target has that id.
+    not-found,
+    /// The Mycelium directory is not ready.
+    not-ready,
+    /// The page or response exceeds the host budget.
+    over-budget,
+    /// The host directory or transport failed.
+    io,
+  }
+
+  record target {
+    /// Stable Mycelium id. Never a hostname or address.
+    id: string,
+    /// Human label for UI only.
+    label: string,
+    /// `host`, `vm`, `service`, `console`, ...
+    kind: string,
+    site: option<string>,
+    /// `healthy`, `degraded`, `unreachable`, `unknown`, ...
+    health: string,
+    /// Whether this caller may open a shell on the target.
+    shell: bool,
+  }
+
+  record page {
+    entries: list<target>,
+    /// Offset for the next page, or none at the end.
+    next: option<u64>,
+  }
+
+  /// List visible targets. `kind` is a display filter, not authority.
+  targets: func(kind: option<string>, cursor: u64, limit: u32) -> result<page, error>;
+
+  /// Fetch one visible target without listing.
+  get: func(id: string) -> result<target, error>;
+}
+
+interface session {
+  enum phase {
+    connecting,
+    connected,
+    exited,
+    failed,
+    closed,
+  }
+
+  enum error {
+    denied,
+    unknown-target,
+    unreachable,
+    auth-failed,
+    not-ready,
+    over-budget,
+    closed,
+    io,
+  }
+
+  record state {
+    phase: phase,
+    exit-code: option<s32>,
+    message: option<string>,
+  }
+
+  record exec-result {
+    code: s32,
+    stdout: list<u8>,
+    stderr: list<u8>,
+  }
+
+  /// Open an interactive PTY shell through the host's Mycelium SSH profile.
+  /// `cols` and `rows` seed the remote terminal size.
+  open-shell: func(target: string, cols: u32, rows: u32) -> result<u64, error>;
+
+  /// Read bytes from the PTY. Empty list means the timeout elapsed; `none`
+  /// means the session reached EOF.
+  read: func(session: u64, max-bytes: u32, timeout-ms: u32) -> result<option<list<u8>>, error>;
+
+  /// Write input bytes to the PTY.
+  write: func(session: u64, bytes: list<u8>) -> result<u32, error>;
+
+  /// Tell the remote PTY its new window size.
+  resize: func(session: u64, cols: u32, rows: u32) -> result<_, error>;
+
+  status: func(session: u64) -> result<state, error>;
+
+  close: func(session: u64) -> result<_, error>;
+
+  /// Run a non-interactive command for agents. No PTY, no VT semantics.
+  exec: func(
+    target: string,
+    argv: list<string>,
+    timeout-ms: u32,
+  ) -> result<exec-result, error>;
+}
