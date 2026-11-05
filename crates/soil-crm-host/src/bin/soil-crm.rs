@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use soil_crm_host::{default_root, seed_mock, snapshot};
+use soil_crm_host::{default_root, link_contact, seed_mock, snapshot, unlink_contact};
 
 #[derive(Parser)]
 #[command(version, about = "CRM over fungos-records")]
@@ -20,6 +20,30 @@ enum Cmd {
         root: Option<PathBuf>,
         #[arg(long, default_value = "personal/avery/crm")]
         book: String,
+    },
+    /// Link a private contact to an account without sharing it.
+    Link {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long, default_value = "personal/avery/crm")]
+        book: String,
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        contact: String,
+        #[arg(long, default_value = "")]
+        role: String,
+    },
+    /// Remove a private account-contact link and any projection for it.
+    Unlink {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long, default_value = "personal/avery/crm")]
+        book: String,
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        contact: String,
     },
     /// Serve a read-only local CRM inspector.
     Serve {
@@ -41,6 +65,27 @@ fn main() -> anyhow::Result<()> {
                 "seeded {count} mock CRM records into {} / {book}",
                 root.display()
             );
+        }
+        Cmd::Link {
+            root,
+            book,
+            account,
+            contact,
+            role,
+        } => {
+            let root = root.unwrap_or_else(default_root);
+            let id = link_contact(&root, &book, &account, &contact, &role)?;
+            println!("linked privately as {id}; no team projection created");
+        }
+        Cmd::Unlink {
+            root,
+            book,
+            account,
+            contact,
+        } => {
+            let root = root.unwrap_or_else(default_root);
+            unlink_contact(&root, &book, &account, &contact)?;
+            println!("unlinked {contact} from {account}; projection removed if present");
         }
         Cmd::Serve { root, book, listen } => {
             let root = root.unwrap_or_else(default_root);
@@ -171,6 +216,45 @@ load('team');
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linking_is_private_until_explicitly_projected() {
+        let root = tempfile::tempdir().unwrap();
+        seed_mock(root.path(), "personal/test/crm").unwrap();
+        unlink_contact(root.path(), "personal/test/crm", "a-acme", "c-grace").unwrap();
+        link_contact(
+            root.path(),
+            "personal/test/crm",
+            "a-harbor",
+            "c-grace",
+            "Advisor",
+        )
+        .unwrap();
+
+        let team = snapshot(root.path(), "personal/test/crm", "team").unwrap();
+        let private = snapshot(root.path(), "personal/test/crm", "private").unwrap();
+        let harbor_team = team["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["id"] == "a-harbor")
+            .unwrap();
+        assert!(harbor_team["contacts"].as_array().unwrap().is_empty());
+        let harbor_private = private["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["id"] == "a-harbor")
+            .unwrap();
+        let grace = harbor_private["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contact| contact["id"] == "c-grace")
+            .unwrap();
+        assert_eq!(grace["shared"], false);
+        assert_eq!(grace["email"], "grace@acme.example");
+    }
 
     #[test]
     fn mock_snapshot_has_private_and_team_views() {

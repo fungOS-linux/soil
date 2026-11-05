@@ -86,6 +86,8 @@ cargo run -p soil-crm-espo -- sync --dry-run --full
 - Uses Espo `where` on `modifiedAt` for incremental sync.
 - Skips unchanged records when the local schema and body already match.
 - Espo `deleted` rows become records tombstones.
+- Imported contacts create private `account-contact` assignments. The importer
+  never creates a team projection.
 - A failed page aborts before the state file is advanced.
 - Records are written to one book; multiple collections can be added later by
   the host mapping.

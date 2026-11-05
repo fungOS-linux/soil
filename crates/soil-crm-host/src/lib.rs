@@ -24,6 +24,83 @@ pub fn seed_mock(root: &Path, book: &str) -> Result<usize> {
     Ok(count)
 }
 
+/// Link a private contact to an account without creating a team projection.
+pub fn link_contact(
+    root: &Path,
+    book: &str,
+    account_id: &str,
+    contact_id: &str,
+    role: &str,
+) -> Result<String> {
+    let mut store = Store::open(root, &root.join("device_id"))?;
+    let account = store
+        .get(book, account_id)
+        .with_context(|| format!("account {account_id} not found"))?;
+    ensure_schema(&account, ACCOUNT_SCHEMA)?;
+    let contact = store
+        .get(book, contact_id)
+        .with_context(|| format!("contact {contact_id} not found"))?;
+    ensure_schema(&contact, CONTACT_SCHEMA)?;
+    let token = contact.fields["contact_token"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("contact {contact_id} has no contact_token"))?;
+    let assignment_id = assignment_id(account_id, contact_id);
+    store.put_record(
+        book,
+        &assignment_id,
+        ASSIGNMENT_SCHEMA,
+        1,
+        json!({
+            "account_id": account_id,
+            "contact_id": contact_id,
+            "contact_token": token,
+            "role": role,
+            "status": "active",
+        }),
+    )?;
+    Ok(assignment_id)
+}
+
+/// Remove a private account-contact assignment and any projection for it.
+pub fn unlink_contact(root: &Path, book: &str, account_id: &str, contact_id: &str) -> Result<()> {
+    let mut store = Store::open(root, &root.join("device_id"))?;
+    let assignment_id = assignment_id(account_id, contact_id);
+    let assignment = store
+        .get(book, &assignment_id)
+        .with_context(|| format!("assignment {assignment_id} not found"))?;
+    ensure_schema(&assignment, ASSIGNMENT_SCHEMA)?;
+    let token = assignment.fields["contact_token"]
+        .as_str()
+        .unwrap_or_default();
+    store.delete_record(book, &assignment_id, ASSIGNMENT_SCHEMA, 1)?;
+    let projection_id = projection_id(account_id, contact_id);
+    if store.get(book, &projection_id).is_ok() {
+        store.delete_record(book, &projection_id, PROJECTION_SCHEMA, 1)?;
+    }
+    let _ = token;
+    Ok(())
+}
+
+fn ensure_schema(record: &Record, schema: &str) -> Result<()> {
+    if record.schema_id != schema {
+        anyhow::bail!(
+            "record {} has schema {}, expected {schema}",
+            record.entity_id,
+            record.schema_id
+        );
+    }
+    Ok(())
+}
+
+fn assignment_id(account_id: &str, contact_id: &str) -> String {
+    format!("ac-{account_id}-{contact_id}")
+}
+
+fn projection_id(account_id: &str, contact_id: &str) -> String {
+    format!("proj-{account_id}-{contact_id}")
+}
+
 pub fn snapshot(root: &Path, book: &str, view: &str) -> Result<Value> {
     let store = Store::open(root, &root.join("device_id"))?;
     let records = store
@@ -36,18 +113,49 @@ pub fn snapshot(root: &Path, book: &str, view: &str) -> Result<Value> {
         .map(|record| (record.entity_id.clone(), record.fields.clone()))
         .collect();
 
+    let projections = records
+        .iter()
+        .filter(|record| record.schema_id == PROJECTION_SCHEMA)
+        .map(projection)
+        .collect::<Vec<_>>();
+    let projections_by_token: BTreeMap<String, &Value> = projections
+        .iter()
+        .filter_map(|projection| {
+            projection["contact_token"]
+                .as_str()
+                .map(|token| (token.to_string(), projection))
+        })
+        .collect();
+    let contacts_by_id: BTreeMap<String, &Record> = records
+        .iter()
+        .filter(|record| record.schema_id == CONTACT_SCHEMA)
+        .map(|record| (record.entity_id.clone(), record))
+        .collect();
     let contacts = if team {
-        records
-            .iter()
-            .filter(|record| record.schema_id == PROJECTION_SCHEMA)
-            .map(projection)
-            .collect::<Vec<_>>()
+        projections.clone()
     } else {
-        records
+        let mut contacts = Vec::new();
+        for assignment in records
             .iter()
-            .filter(|record| record.schema_id == CONTACT_SCHEMA)
-            .map(contact)
-            .collect::<Vec<_>>()
+            .filter(|record| record.schema_id == ASSIGNMENT_SCHEMA)
+        {
+            let Some(contact_id) = assignment.fields["contact_id"].as_str() else {
+                continue;
+            };
+            let Some(record) = contacts_by_id.get(contact_id) else {
+                continue;
+            };
+            let mut value = contact(record);
+            value["account_id"] = assignment.fields["account_id"].clone();
+            value["role"] = assignment.fields["role"].clone();
+            value["shared"] = Value::Bool(
+                assignment.fields["contact_token"]
+                    .as_str()
+                    .is_some_and(|token| projections_by_token.contains_key(token)),
+            );
+            contacts.push(value);
+        }
+        contacts
     };
 
     let activities = records
@@ -66,6 +174,7 @@ pub fn snapshot(root: &Path, book: &str, view: &str) -> Result<Value> {
 
     let mut out = Vec::new();
     for (id, mut account) in accounts {
+        account["id"] = Value::String(id.clone());
         account["contacts"] = Value::Array(
             contacts
                 .iter()
@@ -108,6 +217,7 @@ fn contact(record: &Record) -> Value {
         "phone": record.fields["phone"],
         "title": record.fields["title"],
         "hidden": record.fields["hidden"],
+        "shared": false,
     })
 }
 
@@ -119,6 +229,7 @@ fn projection(record: &Record) -> Value {
         "first_name": record.fields["first_name"],
         "name": record.fields["first_name"],
         "hidden": record.fields["hidden"],
+        "shared": true,
     })
 }
 
@@ -240,7 +351,7 @@ fn mock_records() -> Vec<(String, &'static str, Value)> {
             }),
         ));
         records.push((
-            format!("ac-{id}"),
+            assignment_id(account, id),
             ASSIGNMENT_SCHEMA,
             json!({
                 "account_id": account,
@@ -250,17 +361,19 @@ fn mock_records() -> Vec<(String, &'static str, Value)> {
                 "status": "active",
             }),
         ));
-        records.push((
-            format!("p-{id}"),
-            PROJECTION_SCHEMA,
-            json!({
-                "account_id": account,
-                "contact_token": token,
-                "first_name": first,
-                "status": "active",
-                "hidden": hidden,
-            }),
-        ));
+        if id == "c-ada" {
+            records.push((
+                projection_id(account, id),
+                PROJECTION_SCHEMA,
+                json!({
+                    "account_id": account,
+                    "contact_token": token,
+                    "first_name": first,
+                    "status": "active",
+                    "hidden": hidden,
+                }),
+            ));
+        }
     }
 
     let activities = [

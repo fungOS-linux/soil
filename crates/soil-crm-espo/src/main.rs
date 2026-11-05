@@ -22,6 +22,7 @@ const CONTACT_SCHEMA: &str = "fungos.crm/contact@1";
 const LEAD_SCHEMA: &str = "fungos.crm/lead@1";
 const OPPORTUNITY_SCHEMA: &str = "fungos.crm/opportunity@1";
 const ACTIVITY_SCHEMA: &str = "fungos.crm/activity@1";
+const ASSIGNMENT_SCHEMA: &str = "fungos.crm/account-contact@1";
 const MAX_PAGES: usize = 1000;
 const DEFAULT_ENTITIES: &str = "Account,Contact,Lead,Opportunity,Call,Meeting,Task";
 
@@ -227,6 +228,28 @@ fn sync(args: SyncArgs) -> Result<()> {
                 } else if !record_is_current(store, &book, &id, schema, &body)? {
                     store.put_record(&book, &id, schema, 1, body)?;
                 }
+                if entity == "Contact"
+                    && !row.get("deleted").and_then(Value::as_bool).unwrap_or(false)
+                    && let Some(account_id) = row.get("accountId").and_then(Value::as_str)
+                    && !account_id.is_empty()
+                {
+                    let assignment_id = format!("ac-espo:{account_id}:{id}");
+                    let token = format!("espo:{id}");
+                    store.put_record(
+                        &book,
+                        &assignment_id,
+                        ASSIGNMENT_SCHEMA,
+                        1,
+                        json!({
+                            "account_id": format!("espo:account:{account_id}"),
+                            "contact_id": id,
+                            "contact_token": token,
+                            "role": string(&row, "title"),
+                            "status": "active",
+                            "source": "espo",
+                        }),
+                    )?;
+                }
             }
             if let Some(modified) = modified
                 && high_water
@@ -342,6 +365,7 @@ fn contact(row: &Value) -> Value {
         "title": string(row, "title"),
         "account_id": string(row, "accountId"),
         "account_name": string(row, "accountName"),
+        "contact_token": format!("espo:{}", string(row, "id")),
         "description": string(row, "description"),
         "address": address(row),
         "owner": string(row, "assignedUserName"),
