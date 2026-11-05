@@ -51,6 +51,21 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("index", &["browse", "search", "state", "refresh"])],
     },
     Contract {
+        file: "wit/soil-records.wit",
+        source: include_str!("../../../wit/soil-records.wit"),
+        package: "soil:records@0.1.0",
+        interfaces: &[(
+            "records",
+            &["get", "scan", "upsert", "delete", "changes", "apply"],
+        )],
+    },
+    Contract {
+        file: "wit/soil-unibus.wit",
+        source: include_str!("../../../wit/soil-unibus.wit"),
+        package: "soil:unibus@0.1.0",
+        interfaces: &[("bus", &["poll", "publish"])],
+    },
+    Contract {
         file: "wit/soil-canvas.wit",
         source: include_str!("../../../wit/soil-canvas.wit"),
         package: "soil:canvas@1.0.0",
