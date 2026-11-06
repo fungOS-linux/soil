@@ -11,6 +11,7 @@ spores/contacts
   show <id|token>
   add <id> <first> <last> <email> [phone] [title]
   set <id|token> <field> <value>
+  link <account-id> <contact-id|token> [role]
   share <account-id> <contact-id|token> [first-name]
   unshare <account-id> <contact-id|token>
   shared
@@ -28,8 +29,8 @@ The host maps them to books and enforces grants.
 
 ```text
 personal contact     authoritative, stays in contacts namespace
-CRM account link     stable contact id/token
-shared projection    first name + opaque token only
+account link         private, stays in contacts namespace
+shared projection    first name + opaque token only, in CRM
 ```
 
 There is no merge and no bulk share. Email, phone, notes and the rest of the

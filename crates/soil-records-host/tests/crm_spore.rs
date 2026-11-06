@@ -296,18 +296,6 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
         )?
         .map_err(anyhow::Error::msg)?;
     bindings
-        .call_run(
-            &mut store,
-            &[
-                "contact".into(),
-                "link".into(),
-                "a-acme".into(),
-                "c-ada".into(),
-                "CTO".into(),
-            ],
-        )?
-        .map_err(anyhow::Error::msg)?;
-    bindings
         .call_run(&mut store, &["contacts".into(), "shared".into()])?
         .map_err(anyhow::Error::msg)?;
     bindings
@@ -351,8 +339,6 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
     assert_eq!(activity.fields["description"], "Next step");
     let opportunity = store.get("team/test/crm", "opp-1")?;
     assert_eq!(opportunity.fields["stage"], "won");
-    let link = store.get("team/test/crm", "ac-a-acme-c-ada")?;
-    assert_eq!(link.fields["contact_token"], "t-ada");
     let call = store.get("personal/test/calls", "call-2")?;
     assert_eq!(call.fields["visibility"], "private");
     let message = store.get("personal/test/messages", "mail-1")?;

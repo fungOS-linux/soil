@@ -15,6 +15,7 @@ view [selected]
 show <id|token>
 add <id> <first> <last> <email> [phone] [title]
 set <id|token> <field> <value>
+link <account-id> <contact-id|token> [role]
 share <account-id> <contact-id|token> [first-name]
 unshare <account-id> <contact-id|token>
 shared
@@ -32,8 +33,8 @@ The host maps namespaces to books and enforces grants.
 
 ## No merge
 
-There is no merge and no bulk share. Personal contacts stay in the contacts
-book. `share` writes only:
+There is no merge and no bulk share. Personal contacts and account links stay in
+the contacts book. `share` writes only:
 
 ```text
 first name
@@ -42,6 +43,8 @@ account id
 ```
 
 Email, phone, notes and the rest of the contact body never enter the shared CRM.
+The `account-contact` link also stays private in the contacts book; the shared
+CRM only gets the explicit projection.
 
 ## UI
 

@@ -150,10 +150,6 @@ impl Guest for Component {
                 let value = set_opportunity_stage(&data.crm_namespace, &args)?;
                 print_json("opportunity", &value);
             }
-            "contact" if args.get(1).map(String::as_str) == Some("link") => {
-                let value = link_contact(&data, &args)?;
-                print_json("contact", &value);
-            }
             "contacts" if args.get(1).map(String::as_str) == Some("shared") => {
                 print_json("contacts", &data.shared_contacts());
             }
@@ -181,7 +177,6 @@ impl Guest for Component {
                     "audit [target-id] [limit]",
                     "activity add <id> <account-id> <kind> <title> <occurred-at> [summary]",
                     "opportunity stage <opportunity-id> <stage>",
-                    "contact link <account-id> <contact-id> [role]",
                     "contacts shared",
                     "call add <id> <account-id> <title> <occurred-at> [summary]",
                     "email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>",
@@ -514,48 +509,75 @@ impl Dataset {
 
     fn contacts_for(&self, account_id: &str) -> Vec<Value> {
         let contacts = rows_by_id(self.contact_rows());
-        let projections = self.rows(PROJECTION_SCHEMA).collect::<Vec<_>>();
-        self.rows(ASSIGNMENT_SCHEMA)
+        let projections = self
+            .rows(PROJECTION_SCHEMA)
+            .filter(|projection| projection.text("account_id") == account_id)
+            .collect::<Vec<_>>();
+        let assignments = self
+            .rows(ASSIGNMENT_SCHEMA)
             .filter(|assignment| assignment.text("account_id") == account_id)
-            .map(|assignment| {
-                let contact_id = assignment.text("contact_id");
-                let token = assignment.text("contact_token");
-                let contact = contacts.get(contact_id);
-                let projection = projections
-                    .iter()
-                    .find(|projection| projection.text("contact_token") == token);
-                if let Some(contact) = contact {
-                    json!({
-                        "id": contact.id,
-                        "name": contact_name(contact),
-                        "first_name": contact_first_name(contact),
-                        "email": contact_email(contact),
-                        "phone": contact_phone(contact),
-                        "title": contact.text("title"),
-                        "contact_token": token,
-                        "role": assignment.text("role"),
-                        "shared": projection.is_some(),
-                    })
-                } else if let Some(projection) = projection {
-                    json!({
-                        "id": contact_id,
-                        "name": projection.text("first_name"),
-                        "first_name": projection.text("first_name"),
-                        "contact_token": token,
-                        "role": assignment.text("role"),
-                        "shared": true,
-                    })
-                } else {
-                    json!({
-                        "id": contact_id,
-                        "name": token,
-                        "contact_token": token,
-                        "role": assignment.text("role"),
-                        "shared": false,
-                    })
-                }
-            })
-            .collect()
+            .collect::<Vec<_>>();
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        for assignment in assignments {
+            let contact_id = assignment.text("contact_id");
+            let token = assignment.text("contact_token");
+            seen.insert(token.to_string());
+            let contact = contacts
+                .get(contact_id)
+                .or_else(|| contacts.values().find(|contact| contact_token(contact) == token));
+            let projection = projections
+                .iter()
+                .find(|projection| projection.text("contact_token") == token);
+            if let Some(contact) = contact {
+                out.push(json!({
+                    "id": contact.id,
+                    "name": contact_name(contact),
+                    "first_name": contact_first_name(contact),
+                    "last_name": contact_last_name(contact),
+                    "email": contact_email(contact),
+                    "phone": contact_phone(contact),
+                    "title": contact.text("title"),
+                    "contact_token": token,
+                    "role": assignment.text("role"),
+                    "shared": projection.is_some(),
+                }));
+            } else if let Some(projection) = projection {
+                out.push(json!({
+                    "id": contact_id,
+                    "name": projection.text("first_name"),
+                    "first_name": projection.text("first_name"),
+                    "contact_token": token,
+                    "role": assignment.text("role"),
+                    "shared": true,
+                }));
+            } else {
+                out.push(json!({
+                    "id": contact_id,
+                    "name": token,
+                    "contact_token": token,
+                    "role": assignment.text("role"),
+                    "shared": false,
+                }));
+            }
+        }
+        for projection in projections {
+            let token = projection.text("contact_token");
+            if seen.contains(token) {
+                continue;
+            }
+            let contact = contacts
+                .values()
+                .find(|contact| contact_token(contact) == token);
+            out.push(json!({
+                "id": contact.map(|contact| contact.id.as_str()).unwrap_or(token),
+                "name": projection.text("first_name"),
+                "first_name": projection.text("first_name"),
+                "contact_token": token,
+                "shared": true,
+            }));
+        }
+        out
     }
 
     fn projects_for(&self, account_id: &str) -> Vec<Value> {
@@ -852,69 +874,6 @@ fn set_opportunity_stage(crm: &str, args: &[String]) -> Result<Value, String> {
     Ok(json!({
         "id": id,
         "stage": stage,
-        "revision": stored.revision,
-    }))
-}
-
-fn link_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
-    let account_id = args
-        .get(2)
-        .ok_or_else(|| "usage: contact link <account-id> <contact-id> [role]".to_string())?;
-    let contact_id = args
-        .get(3)
-        .ok_or_else(|| "contact link: missing contact id".to_string())?;
-    let role = args.get(4).cloned().unwrap_or_default();
-    if data.rows(ACCOUNT_SCHEMA).all(|account| account.id != *account_id) {
-        return Err(format!("account {account_id} not found"));
-    }
-    let contact = records::get(&key(CONTACTS, contact_id))
-        .map_err(|error| format!("contact {contact_id}: {error:?}"))?;
-    if !is_contact_schema(&contact.schema) {
-        return Err(format!("{contact_id} is {}, not a contact", contact.schema));
-    }
-    let body: Value = serde_json::from_slice(&contact.body)
-        .map_err(|error| format!("decode contact {contact_id}: {error}"))?;
-    let token = body
-        .get("contact_token")
-        .and_then(Value::as_str)
-        .filter(|token| !token.is_empty())
-        .or_else(|| body.get("uid").and_then(Value::as_str).filter(|token| !token.is_empty()))
-        .ok_or_else(|| format!("contact {contact_id} has no contact token/uid"))?;
-    let assignment_id = format!("ac-{account_id}-{contact_id}");
-    let stored = put_record(
-        &data.crm_namespace,
-        &assignment_id,
-        ASSIGNMENT_SCHEMA,
-        json!({
-            "account_id": account_id,
-            "contact_id": contact_id,
-            "contact_token": token,
-            "role": role,
-            "status": "active",
-            "source": "spore",
-        }),
-    )?;
-    write_audit(
-        &data.crm_namespace,
-        "crm.contact.link",
-        &assignment_id,
-        ASSIGNMENT_SCHEMA,
-        &data.crm_namespace,
-        stored.revision,
-        None,
-        Some(json!({
-            "account_id": account_id,
-            "contact_id": contact_id,
-            "contact_token": token,
-            "role": role,
-        })),
-    )?;
-    Ok(json!({
-        "id": assignment_id,
-        "account_id": account_id,
-        "contact_id": contact_id,
-        "contact_token": token,
-        "role": role,
         "revision": stored.revision,
     }))
 }

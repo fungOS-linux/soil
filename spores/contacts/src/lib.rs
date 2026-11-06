@@ -21,6 +21,7 @@ use soil::records::records;
 
 const CONTACT_SCHEMA: &str = "fungos.contacts/contact";
 const ACCOUNT_SCHEMA: &str = "fungos.crm/account@1";
+const ASSIGNMENT_SCHEMA: &str = "fungos.crm/account-contact@1";
 const PROJECTION_SCHEMA: &str = "fungos.crm/account-contact-projection@1";
 const AUDIT_SCHEMA: &str = "fungos.audit/event@1";
 const DEFAULT_CONTACTS: &str = "contacts";
@@ -53,6 +54,10 @@ impl Guest for Component {
                 let value = set(&contacts, &args)?;
                 print_json("contact", &value);
             }
+            "link" => {
+                let value = link(&contacts, &args)?;
+                print_json("link", &value);
+            }
             "share" => {
                 let value = share(&contacts, &crm, &args)?;
                 print_json("share", &value);
@@ -69,6 +74,7 @@ impl Guest for Component {
                     "show <id|token>",
                     "add <id> <first> <last> <email> [phone] [title]",
                     "set <id|token> <field> <value>",
+                    "link <account-id> <contact-id|token> [role]",
                     "share <account-id> <contact-id|token> [first-name]",
                     "unshare <account-id> <contact-id|token>",
                     "shared",
@@ -266,6 +272,55 @@ fn labeled_values(value: &str) -> Value {
     } else {
         json!([{ "label": "work", "value": value }])
     }
+}
+
+fn link(contacts: &str, args: &[String]) -> Result<Value, String> {
+    let account_id = args
+        .get(1)
+        .ok_or_else(|| "usage: link <account-id> <contact-id|token> [role]".to_string())?;
+    let contact_ref = args
+        .get(2)
+        .ok_or_else(|| "link: missing contact id".to_string())?;
+    let role = args.get(3).cloned().unwrap_or_default();
+    let (entry, contact) = find_contact(contacts, contact_ref)?;
+    let token = contact
+        .get("uid")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| format!("contact {} has no uid", entry.key.id))?;
+    let assignment_id = format!("ac-{account_id}-{}", entry.key.id);
+    let body = json!({
+        "account_id": account_id,
+        "contact_id": entry.key.id,
+        "contact_token": token,
+        "role": role,
+        "status": "active",
+        "source": "contacts-spore",
+    });
+    let stored = put(contacts, &assignment_id, ASSIGNMENT_SCHEMA, body.clone())?;
+    write_audit(
+        contacts,
+        contacts,
+        "contacts.link",
+        &assignment_id,
+        ASSIGNMENT_SCHEMA,
+        stored.revision,
+        None,
+        Some(json!({
+            "account_id": account_id,
+            "contact_id": entry.key.id,
+            "contact_token": token,
+            "role": role,
+        })),
+    )?;
+    Ok(json!({
+        "id": assignment_id,
+        "account_id": account_id,
+        "contact_id": entry.key.id,
+        "contact_token": token,
+        "role": role,
+        "revision": stored.revision,
+    }))
 }
 
 fn share(contacts: &str, crm: &str, args: &[String]) -> Result<Value, String> {

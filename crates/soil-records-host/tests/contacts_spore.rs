@@ -136,6 +136,10 @@ fn contacts_spore_edits_and_shares_explicitly() -> Result<()> {
     run(&bindings, &mut store, &args)?;
 
     let mut args = ns.to_vec();
+    args.extend(["link", "espo:account:a1", "c-ada", "CTO"]);
+    run(&bindings, &mut store, &args)?;
+
+    let mut args = ns.to_vec();
     args.extend(["share", "espo:account:a1", "c-ada", "Ada"]);
     run(&bindings, &mut store, &args)?;
 
@@ -168,6 +172,13 @@ fn contacts_spore_edits_and_shares_explicitly() -> Result<()> {
     let contact = store.get("personal/test/contacts", "c-ada")?;
     assert_eq!(contact.fields["title"], "VP Engineering");
     assert_eq!(contact.fields["uid"], "ct-c-ada");
+    let link = store.get("personal/test/contacts", "ac-espo:account:a1-c-ada")?;
+    assert_eq!(link.fields["contact_token"], "ct-c-ada");
+    assert!(
+        store
+            .get("team/test/crm", "ac-espo:account:a1-c-ada")
+            .is_err()
+    );
     assert!(
         store
             .get("team/test/crm", "proj-espo:account:a1-c-ada")

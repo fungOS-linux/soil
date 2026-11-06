@@ -37,7 +37,6 @@ pipeline move <opportunity-id> <stage>
 audit [target-id] [limit]
 activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
 opportunity stage <opportunity-id> <stage>
-contact link <account-id> <contact-id> [role]
 contacts shared
 call add <id> <account-id> <title> <occurred-at> [summary]
 email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>
@@ -54,8 +53,9 @@ account link           explicit account-contact record
 shared projection      explicit first name + token only
 ```
 
-`contact link` does not share anything. Sharing a first-name + token projection
-is owned by the Contacts Spore/UI, not the CRM. Calls and emails written by this
+Account↔contact links and sharing belong to the Contacts Spore/UI. The CRM only
+reads the private link when the contacts namespace is granted, and reads
+explicit projections for the team view. Calls and emails written by this
 Spore go to the personal `calls` / `messages` namespaces with
 `visibility = private`.
 
@@ -67,7 +67,6 @@ namespace:
 ```text
 crm.activity.add
 crm.opportunity.stage
-crm.contact.link
 crm.contact.share
 crm.contact.unshare
 crm.call.add

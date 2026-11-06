@@ -179,7 +179,6 @@ spores/crm
   audit [target-id] [limit]
   activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
   opportunity stage <opportunity-id> <stage>
-  contact link <account-id> <contact-id> [role]
   contacts shared
   call add <id> <account-id> <title> <occurred-at> [summary]
   email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>
@@ -209,10 +208,11 @@ Invoke the Spore with:
 Each shared CRM can have its own book and grants. Elmers projects the same
 Espo accounts into each brand book with a `brand` filter.
 
-There is no contact merge and no bulk sharing. `contact link` links a personal
-contact to an account without exposing it. Contact editing and explicit
-share/unshare belong to the Contacts Spore/UI (`spores/contacts`); the CRM only
-links to existing personal contacts and lists explicit projections. Calls and
+There is no contact merge and no bulk sharing. Account↔contact links, contact
+editing and explicit share/unshare belong to the Contacts Spore/UI
+(`spores/contacts`). The link is written to the personal contacts book. The CRM
+reads that private link only when the contacts namespace is granted, and reads
+explicit projections for the team view. Calls and
 emails written by the CRM Spore land in the personal namespaces as private
 records.
 
