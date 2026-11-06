@@ -1,6 +1,12 @@
 # Marbles tasks
 
-Tasks are **Marbles issues**, not `fungos-records` entries.
+Tasks are **Marbles issues**, not copies in a second task schema.
+
+The native/fleet deployment keeps Marbles authoritative. The wasm `mb` path can
+run Marbles directly over `soil:records` with the optional `soil` feature; the
+issue, dependency, event and project records are the store, and claims use
+`compare-and-swap` so two agents cannot both win. Do not introduce
+`fungos.task/task`, `soil-tasks`, a second claim table, or a second ready queue.
 
 ```text
 mb                           issue tracker and task datastore
