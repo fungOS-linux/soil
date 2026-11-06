@@ -5,11 +5,57 @@
 //! renderer draws both with the glyph atlas. No second terminal ABI and no
 //! per-cell canvas widget.
 
-use crate::{Frame, Theme, render};
+use std::sync::OnceLock;
+
+use fontdue::Font;
+
+use crate::{Frame, Renderer, Theme, load_mono_font};
 use soil_scene::{Content, Ink, Node, Rect, Scene, Text, Transform};
 use soil_vt::{Cell, Rgb, Snapshot};
 
-const MARGIN: f32 = 10.0;
+static MONO: OnceLock<Option<Font>> = OnceLock::new();
+
+fn terminal_font() -> Option<&'static Font> {
+    MONO.get_or_init(load_mono_font).as_ref()
+}
+
+struct Grid {
+    x: f32,
+    y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    font_size: f32,
+}
+
+fn grid(snapshot: &Snapshot, width: u32, height: u32) -> Grid {
+    let cols = snapshot.cols.max(1) as f32;
+    let rows = snapshot.rows.max(1) as f32;
+    let margin = (width.min(height) as f32 * 0.018).clamp(10.0, 22.0);
+    let available_w = (width as f32 - margin * 2.0).max(1.0);
+    let available_h = (height as f32 - margin * 2.0).max(1.0);
+    let cell_h = available_h / rows;
+    let mut font_size = (cell_h * 0.78).max(7.0);
+    let mut advance = terminal_font()
+        .map(|font| font.metrics('M', font_size).advance_width)
+        .unwrap_or(font_size * 0.6)
+        .max(1.0);
+    if advance * cols > available_w {
+        let scale = available_w / (advance * cols);
+        font_size = (font_size * scale).max(7.0);
+        advance = terminal_font()
+            .map(|font| font.metrics('M', font_size).advance_width)
+            .unwrap_or(font_size * 0.6)
+            .max(1.0);
+    }
+    let grid_w = advance * cols;
+    Grid {
+        x: (width as f32 - grid_w) * 0.5,
+        y: margin,
+        cell_w: advance,
+        cell_h,
+        font_size,
+    }
+}
 
 /// Render a terminal snapshot into one frame.
 pub fn render_terminal(
@@ -19,24 +65,22 @@ pub fn render_terminal(
     theme: Theme,
 ) -> anyhow::Result<Frame> {
     let scene = terminal_scene(snapshot, width, height, theme);
-    render(&scene, width, height, theme)
+    let mut renderer = Renderer::new()?;
+    renderer.set_font(load_mono_font());
+    renderer.render(&scene, width, height, theme)
 }
 
 /// Build the scene a terminal grid produces. Exposed for tests and previews.
 pub fn terminal_scene(snapshot: &Snapshot, width: u32, height: u32, theme: Theme) -> Scene {
     let mut nodes = Vec::new();
-    let cols = snapshot.cols.max(1) as f32;
-    let rows = snapshot.rows.max(1) as f32;
-    let cell_w = ((width as f32 - MARGIN * 2.0) / cols).max(1.0);
-    let cell_h = ((height as f32 - MARGIN * 2.0) / rows).max(1.0);
-    let font_size = (cell_h * 0.78).max(7.0);
+    let grid = grid(snapshot, width, height);
 
     nodes.push(node_rect(
         "vt-ground",
-        MARGIN,
-        MARGIN,
-        width as f32 - MARGIN * 2.0,
-        height as f32 - MARGIN * 2.0,
+        0.0,
+        0.0,
+        width as f32,
+        height as f32,
         theme.background,
         width,
         height,
@@ -68,15 +112,15 @@ pub fn terminal_scene(snapshot: &Snapshot, width: u32, height: u32, theme: Theme
                 }
                 col += 1;
             }
-            let x = MARGIN + start as f32 * cell_w;
-            let y = MARGIN + row as f32 * cell_h;
+            let x = grid.x + start as f32 * grid.cell_w;
+            let y = grid.y + row as f32 * grid.cell_h;
             if style.bg != theme.background || style.selected {
                 nodes.push(node_rect(
                     &format!("vt-bg-{row}-{start}"),
                     x,
                     y,
-                    (col - start) as f32 * cell_w,
-                    cell_h,
+                    (col - start) as f32 * grid.cell_w,
+                    grid.cell_h,
                     if style.selected {
                         theme.primary
                     } else {
@@ -93,7 +137,7 @@ pub fn terminal_scene(snapshot: &Snapshot, width: u32, height: u32, theme: Theme
                     &text,
                     x,
                     y,
-                    font_size,
+                    grid.font_size,
                     if style.selected {
                         theme.background
                     } else {
@@ -111,10 +155,10 @@ pub fn terminal_scene(snapshot: &Snapshot, width: u32, height: u32, theme: Theme
     if let Some((cursor_x, cursor_y)) = snapshot.cursor {
         nodes.push(node_rect(
             "vt-cursor",
-            MARGIN + cursor_x as f32 * cell_w,
-            MARGIN + cursor_y as f32 * cell_h,
-            cell_w,
-            cell_h,
+            grid.x + cursor_x as f32 * grid.cell_w,
+            grid.y + cursor_y as f32 * grid.cell_h,
+            grid.cell_w,
+            grid.cell_h,
             theme.primary,
             width,
             height,

@@ -65,3 +65,34 @@ device is not created per frame.
 
 `soil-viz` and `soil-vt-window` both use `soil_scene_gpu::Renderer`; the free
 `render` function remains a one-shot convenience for tests and tools.
+## Live visualization
+
+`soil-viz --live` takes a Lua-authored `LiveSpec` and runs the animation loop in
+Rust. Lua owns layout, titles, palettes and styling; Rust owns resident data
+sources, delta time and frame generation. There is no per-frame Lua or FFI
+stream bridge.
+
+```sh
+cargo build --release -p soil-scene-gpu --bin soil-viz
+./target/release/soil-viz --live /tmp/fungos-viz-live.json --fps 60
+```
+
+`soil-live-frame` renders one deterministic frame for screenshots and tests:
+
+```sh
+cargo run -p soil-scene-gpu --bin soil-live-frame --   --spec /tmp/fungos-viz-live.json --time 3.2 --rgba /tmp/live.rgba
+```
+
+The host reuses one wgpu device, renderer, target texture and bind group. It
+waits until the next `Instant` deadline, advances by the measured delta, and
+reloads the spec (not the process) when the file changes.
+## Direct window rendering
+
+`soil_scene_gpu::window::WindowRenderer` creates the scene pipelines for the
+surface format and draws straight into the swapchain. Native windows no longer
+render offscreen, read the frame back to the CPU, upload it to another texture
+and blit it. One `wgpu::Device`, one renderer, one target.
+
+`soil-viz` and `soil-vt-window` both use this path. The terminal also loads a
+monospace face, derives cell width from the font advance, and uses the
+`Theme::terminal` palette so cell runs stay aligned and readable.

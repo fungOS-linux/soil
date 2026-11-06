@@ -12,7 +12,9 @@ use std::collections::HashMap;
 use std::io::Read;
 use wgpu::util::DeviceExt;
 
+pub mod live;
 pub mod terminal;
+pub mod window;
 
 /// Theme values the renderer needs. The scene carries semantic inks, never
 /// literal colours; the host resolves them through this table.
@@ -43,6 +45,25 @@ impl Default for Theme {
             warning: [245, 190, 80],
             danger: [255, 122, 122],
             info: [112, 205, 255],
+            body: 16.0,
+        }
+    }
+}
+
+impl Theme {
+    /// A terminal-oriented palette: slightly purple ground, soft foreground,
+    /// and the pastel accents used by modern terminal themes.
+    pub fn terminal() -> Self {
+        Self {
+            background: [17, 17, 27],
+            surface: [30, 30, 46],
+            text: [205, 214, 244],
+            muted: [127, 132, 156],
+            primary: [137, 180, 250],
+            success: [166, 227, 161],
+            warning: [249, 226, 175],
+            danger: [243, 139, 168],
+            info: [137, 220, 235],
             body: 16.0,
         }
     }
@@ -125,6 +146,8 @@ pub struct Renderer {
     rect_pipeline: wgpu::RenderPipeline,
     text_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
+    font: Option<Font>,
+    format: wgpu::TextureFormat,
 }
 
 impl Renderer {
@@ -145,8 +168,16 @@ impl Renderer {
             experimental_features: Default::default(),
         }))
         .context("request a GPU device")?;
+        Self::from_device(device, queue, wgpu::TextureFormat::Rgba8Unorm)
+    }
 
-        let format = wgpu::TextureFormat::Rgba8Unorm;
+    /// Build the pipelines for an existing device. Native window hosts use this
+    /// so the surface texture and the scene target live on the same device.
+    pub fn from_device(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        format: wgpu::TextureFormat,
+    ) -> Result<Self> {
         let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("soil-scene-gpu rects"),
             source: wgpu::ShaderSource::Wgsl(RECT_SHADER.into()),
@@ -186,34 +217,34 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(TEXT_SHADER.into()),
         });
         let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("soil-scene-gpu text"),
-        layout: None,
-        vertex: wgpu::VertexState {
-            module: &text_shader,
-            entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<TextureVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
-            }],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &text_shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
+            label: Some("soil-scene-gpu text"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &text_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<TextureVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &text_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("soil-scene-gpu text sampler"),
@@ -228,42 +259,39 @@ impl Renderer {
             rect_pipeline,
             text_pipeline,
             sampler,
+            font: load_font(),
+            format,
         })
     }
 
-    /// Render one scene at exactly `width x height`.
-    pub fn render(
-        &self,
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn set_font(&mut self, font: Option<Font>) {
+        self.font = font;
+    }
+
+    /// Draw one scene directly into an existing target view.
+    ///
+    /// This is the native-window path: no offscreen readback and no second
+    /// texture upload. The target must use the format passed to `from_device`.
+    pub fn draw_to(
+        &mut self,
         scene: &soil_scene::Scene,
         width: u32,
         height: u32,
         theme: Theme,
-    ) -> Result<Frame> {
+        target: &wgpu::TextureView,
+    ) -> Result<()> {
         anyhow::ensure!(width > 0 && height > 0, "frame needs a non-zero extent");
         anyhow::ensure!(
             width <= 4096 && height <= 4096,
             "frame extent is outside 1..=4096"
         );
         scene.validate().map_err(|error| anyhow::anyhow!(error))?;
-
         let device = &self.device;
         let queue = &self.queue;
-        let format = wgpu::TextureFormat::Rgba8Unorm;
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("soil-scene-gpu target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let rects = rect_vertices(scene, width, height, theme);
         let rect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -272,9 +300,9 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let (atlas, text_vertices) = text_atlas(scene, width, height, theme)?;
+        let (atlas, text_vertices) = text_atlas(scene, width, height, theme, self.font.as_mut())?;
         let overlay_texture = device.create_texture_with_data(
-            &queue,
+            queue,
             &wgpu::TextureDescriptor {
                 label: Some("soil-scene-gpu text atlas"),
                 size: wgpu::Extent3d {
@@ -326,7 +354,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("soil-scene-gpu pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: target,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -355,6 +383,43 @@ impl Renderer {
                 pass.draw(0..text_vertices.len() as u32, 0..1);
             }
         }
+        queue.submit([encoder.finish()]);
+        Ok(())
+    }
+
+    /// Render one scene into a CPU-readable frame.
+    pub fn render(
+        &mut self,
+        scene: &soil_scene::Scene,
+        width: u32,
+        height: u32,
+        theme: Theme,
+    ) -> Result<Frame> {
+        anyhow::ensure!(width > 0 && height > 0, "frame needs a non-zero extent");
+        anyhow::ensure!(
+            width <= 4096 && height <= 4096,
+            "frame extent is outside 1..=4096"
+        );
+        scene.validate().map_err(|error| anyhow::anyhow!(error))?;
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("soil-scene-gpu target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.draw_to(scene, width, height, theme, &view)?;
+        let device = &self.device;
+        let queue = &self.queue;
 
         let bytes_per_pixel = 4u32;
         let unpadded = width * bytes_per_pixel;
@@ -365,6 +430,9 @@ impl Renderer {
             size: u64::from(padded) * u64::from(height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("soil-scene-gpu readback"),
         });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -419,7 +487,12 @@ impl Renderer {
 ///
 /// Prefer [`Renderer`] for repeated frames.
 pub fn render(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) -> Result<Frame> {
-    Renderer::new()?.render(scene, width, height, theme)
+    let mut renderer = Renderer::new()?;
+    renderer.render(scene, width, height, theme)
+}
+
+fn rgb_or_ink(theme: Theme, rgb: Option<[u8; 3]>, semantic: Option<soil_scene::Ink>) -> [u8; 3] {
+    rgb.unwrap_or_else(|| ink(theme, semantic))
 }
 
 fn ink(theme: Theme, ink: Option<soil_scene::Ink>) -> [u8; 3] {
@@ -462,13 +535,16 @@ fn world_bounds(node: &soil_scene::Node, nodes: &[soil_scene::Node]) -> (f32, f3
     (x, y, w, h)
 }
 
-fn heat_color(theme: Theme, t: f32) -> [u8; 3] {
+fn heat_color(_theme: Theme, t: f32) -> [u8; 3] {
+    // Viridis-like ramp: density fields start dark, then become cyan/green/
+    // yellow. A semantic primary at t=0 turns every occupied cell into a slab
+    // of blue and hides the structure a density map is meant to show.
     let stops = [
-        (0.0, theme.primary),
-        (0.28, theme.info),
-        (0.52, theme.success),
-        (0.76, theme.warning),
-        (1.0, theme.danger),
+        (0.0, [35, 18, 66]),
+        (0.25, [64, 57, 132]),
+        (0.5, [0, 125, 160]),
+        (0.75, [40, 200, 120]),
+        (1.0, [255, 225, 70]),
     ];
     let t = t.clamp(0.0, 1.0);
     for pair in stops.windows(2) {
@@ -493,13 +569,13 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
         let (x, y, w, h) = world_bounds(node, &scene.nodes);
         match &node.content {
             soil_scene::Content::Rect(rect) => {
-                let color = ink(theme, rect.ink);
+                let color = rgb_or_ink(theme, rect.rgb, rect.ink);
                 // Scene translation is the top-left in a y-up space; scale is
                 // positive down, so the quad spans `y - h .. y`.
                 push_quad(&mut out, x, y - h, x + w, y, color, rect.opacity);
             }
             soil_scene::Content::Area(area) => {
-                let color = ink(theme, area.ink);
+                let color = rgb_or_ink(theme, area.rgb, area.ink);
                 let alpha = area.opacity.clamp(0.0, 1.0);
                 for pair in area.points.windows(2) {
                     let (x1, y1) = (x + pair[0][0] * w, y + pair[0][1] * h);
@@ -517,7 +593,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                 }
             }
             soil_scene::Content::Points(points) => {
-                let color = ink(theme, points.ink);
+                let color = rgb_or_ink(theme, points.rgb, points.ink);
                 let alpha = points.opacity.clamp(0.0, 1.0);
                 let half_w = points.size[0] * 0.5 * w;
                 let half_h = points.size[1] * 0.5 * h;
@@ -555,6 +631,9 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                 for row in 0..rows {
                     for col in 0..cols {
                         let value = heatmap.values[row * cols + col];
+                        if heatmap.zero_transparent && value <= 0.0 {
+                            continue;
+                        }
                         let t = ((value - lo) / span).clamp(0.0, 1.0);
                         let color = heat_color(theme, t);
                         let x0 = x + col as f32 * cell_w;
@@ -613,7 +692,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                 }
             }
             soil_scene::Content::Polyline(polyline) => {
-                let color = ink(theme, polyline.ink);
+                let color = rgb_or_ink(theme, polyline.rgb, polyline.ink);
                 let alpha = polyline.opacity.clamp(0.0, 1.0);
                 let half = polyline.width * 0.5;
                 let points: Vec<[f32; 2]> = polyline
@@ -938,10 +1017,11 @@ fn text_atlas(
     width: u32,
     height: u32,
     theme: Theme,
+    font: Option<&mut Font>,
 ) -> Result<(Vec<u8>, Vec<TextureVertex>)> {
     let mut atlas = Atlas::new();
     let mut vertices = Vec::new();
-    let mut font = load_font();
+    let mut font = font;
     for node in &scene.nodes {
         let soil_scene::Content::Text(text) = &node.content else {
             continue;
@@ -949,6 +1029,7 @@ fn text_atlas(
         let Some(font) = font.as_mut() else {
             continue;
         };
+        let font: &mut Font = font;
         let (x, y, scale, _) = world_bounds(node, &scene.nodes);
         let size = (scale * theme.body * 1.25).max(1.0);
         let screen_x = (x + 4.0) / 8.0 * width as f32;
@@ -1042,15 +1123,8 @@ fn push_text_quads(
     }
 }
 
-fn load_font() -> Option<Font> {
-    let candidates = [
-        std::env::var("SOIL_SCENE_FONT").ok(),
-        Some("/System/Library/Fonts/Supplemental/Arial.ttf".into()),
-        Some("/System/Library/Fonts/Supplemental/Arial Unicode.ttf".into()),
-        Some("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".into()),
-        Some("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf".into()),
-    ];
-    for path in candidates.into_iter().flatten() {
+fn load_font_path(candidates: impl IntoIterator<Item = String>) -> Option<Font> {
+    for path in candidates {
         let Ok(mut file) = std::fs::File::open(&path) else {
             continue;
         };
@@ -1063,6 +1137,43 @@ fn load_font() -> Option<Font> {
         }
     }
     None
+}
+
+fn load_font() -> Option<Font> {
+    load_font_path(
+        [
+            std::env::var("SOIL_SCENE_FONT").ok(),
+            Some("/System/Library/Fonts/Supplemental/Arial.ttf".into()),
+            Some("/System/Library/Fonts/Supplemental/Arial Unicode.ttf".into()),
+            Some("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".into()),
+            Some("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf".into()),
+        ]
+        .into_iter()
+        .flatten(),
+    )
+}
+
+/// Load the terminal monospace face. Environment override wins, then the
+/// platform monospace, then a Nerd Font for prompt glyphs.
+pub fn load_mono_font() -> Option<Font> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    load_font_path(
+        [
+            std::env::var("SOIL_TERMINAL_FONT").ok(),
+            Some("/System/Library/Fonts/SFNSMono.ttf".into()),
+            Some("/System/Library/Fonts/Menlo.ttc".into()),
+            Some(format!(
+                "{home}/Library/Fonts/Fira Code Regular Nerd Font Complete Mono.otf"
+            )),
+            Some(format!(
+                "{home}/Library/Fonts/JetBrainsMonoNerdFont-Regular.ttf"
+            )),
+            Some("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into()),
+            Some("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf".into()),
+        ]
+        .into_iter()
+        .flatten(),
+    )
 }
 
 #[cfg(test)]

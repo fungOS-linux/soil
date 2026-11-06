@@ -140,7 +140,8 @@ fn run_pty(socket: &str, source_id: &str, options: &Options) -> anyhow::Result<(
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
     let host = soil_vt::Host::spawn(options.cols, options.rows, 2_000)?;
-    let renderer = soil_scene_gpu::Renderer::new()?;
+    let mut renderer = soil_scene_gpu::Renderer::new()?;
+    renderer.set_font(soil_scene_gpu::load_mono_font());
     let (sender, receiver) = channel::<Vec<u8>>();
     let reader_host = host.clone();
     std::thread::spawn(move || {
@@ -160,7 +161,7 @@ fn run_pty(socket: &str, source_id: &str, options: &Options) -> anyhow::Result<(
         &first,
         options.size.0,
         options.size.1,
-        Theme::default(),
+        Theme::terminal(),
     );
     let first_frame = renderer.render(
         &first_scene,

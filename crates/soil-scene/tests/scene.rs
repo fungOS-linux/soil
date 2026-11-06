@@ -246,6 +246,7 @@ fn chart_catalog_primitives_are_bounded() {
                 min: None,
                 max: None,
                 opacity: 0.9,
+                zero_transparent: false,
             }),
         ),
         node(
@@ -278,6 +279,7 @@ fn chart_catalog_primitives_are_bounded() {
                 min: None,
                 max: None,
                 opacity: 1.0,
+                zero_transparent: false,
             }),
         )])
         .validate()

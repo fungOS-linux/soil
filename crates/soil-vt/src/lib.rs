@@ -163,11 +163,12 @@ impl Session {
         })?;
         {
             let counter = std::rc::Rc::clone(&bells);
-            terminal.on_bell(move |_| counter.set(counter.get() + 1));
+            let _ = terminal.on_bell(move |_| counter.set(counter.get() + 1));
         }
         {
             let outbox = std::rc::Rc::clone(&responses);
-            terminal.on_pty_write(move |_, data| outbox.borrow_mut().extend_from_slice(data));
+            let _ =
+                terminal.on_pty_write(move |_, data| outbox.borrow_mut().extend_from_slice(data));
         }
         Ok(Self {
             terminal,

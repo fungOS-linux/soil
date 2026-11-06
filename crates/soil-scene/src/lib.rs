@@ -434,6 +434,10 @@ pub struct Heatmap {
     pub max: Option<f32>,
     #[serde(default = "opaque")]
     pub opacity: f32,
+    /// Skip cells whose value is zero. Density fields use this so an empty
+    /// region does not paint the low end of the colour ramp.
+    #[serde(default)]
+    pub zero_transparent: bool,
 }
 
 impl Heatmap {

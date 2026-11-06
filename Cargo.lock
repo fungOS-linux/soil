@@ -3934,6 +3934,15 @@ name = "soil-canvas-input"
 version = "0.1.0"
 
 [[package]]
+name = "soil-input"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "winit",
+]
+
+[[package]]
 name = "soil-layout"
 version = "0.1.0"
 dependencies = [
@@ -3982,7 +3991,9 @@ dependencies = [
  "fontdue",
  "pollster",
  "portable-pty",
+ "serde",
  "serde_json",
+ "soil-input",
  "soil-scene",
  "soil-vt",
  "wgpu",
