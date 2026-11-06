@@ -43,5 +43,25 @@ soil-vt-gpu --canvas-socket "$CANVAS_CONFIG_DIR/ui.sock" --source-id vt-gpu \
   --cols 80 --rows 24 --size 960x540 --command /bin/sh
 ```
 
-Input routing back into the pty is still the host's job; the resident renderer
-already redraws on output instead of waiting for a one-shot snapshot.
+Input routing back into the pty is still the host's job for Canvas surfaces;
+the resident renderer already redraws on output instead of waiting for a
+one-shot snapshot.
+
+## Native terminal window
+
+`soil-vt-window` is the standalone host: a real pty, `soil_vt::Host`, the same
+GPU terminal renderer, and a winit surface. No Canvas or browser is involved.
+
+```sh
+cargo build -p soil-scene-gpu --bin soil-vt-window
+./target/debug/soil-vt-window --shell
+./target/debug/soil-vt-window --command /bin/zsh
+```
+
+Keyboard input goes back to the pty, including arrows, function keys, Ctrl
+sequences and Alt prefixes. Resizing updates both the pty and the emulator grid.
+`Ctrl+Shift+Q` quits the host. The window keeps one `Renderer`, so a new wgpu
+device is not created per frame.
+
+`soil-viz` and `soil-vt-window` both use `soil_scene_gpu::Renderer`; the free
+`render` function remains a one-shot convenience for tests and tools.

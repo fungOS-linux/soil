@@ -113,88 +113,79 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Render one scene at exactly `width x height`.
-pub fn render(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) -> Result<Frame> {
-    anyhow::ensure!(width > 0 && height > 0, "frame needs a non-zero extent");
-    anyhow::ensure!(
-        width <= 4096 && height <= 4096,
-        "frame extent is outside 1..=4096"
-    );
-    scene.validate().map_err(|error| anyhow::anyhow!(error))?;
+/// A reusable GPU renderer.
+///
+/// Creating a wgpu device and its pipelines is a process-lifetime cost, not a
+/// frame cost. Hosts that render continuously (a terminal window, a live chart,
+/// a presentation loop) should build one `Renderer` and call `render` on it;
+/// [`render`] remains the one-shot convenience for callers that truly need it.
+pub struct Renderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    rect_pipeline: wgpu::RenderPipeline,
+    text_pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+}
 
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .context("request a GPU adapter")?;
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("soil-scene-gpu"),
-        required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::default(),
-        memory_hints: wgpu::MemoryHints::default(),
-        trace: wgpu::Trace::Off,
-        experimental_features: Default::default(),
-    }))
-    .context("request a GPU device")?;
+impl Renderer {
+    pub fn new() -> Result<Self> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .context("request a GPU adapter")?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("soil-scene-gpu"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+            experimental_features: Default::default(),
+        }))
+        .context("request a GPU device")?;
 
-    let format = wgpu::TextureFormat::Rgba8Unorm;
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("soil-scene-gpu target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("soil-scene-gpu rects"),
+            source: wgpu::ShaderSource::Wgsl(RECT_SHADER.into()),
+        });
+        let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("soil-scene-gpu rects"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &rect_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rect_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
-    let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("soil-scene-gpu rects"),
-        source: wgpu::ShaderSource::Wgsl(RECT_SHADER.into()),
-    });
-    let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("soil-scene-gpu rects"),
-        layout: None,
-        vertex: wgpu::VertexState {
-            module: &rect_shader,
-            entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
-            }],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &rect_shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
-
-    let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("soil-scene-gpu text"),
-        source: wgpu::ShaderSource::Wgsl(TEXT_SHADER.into()),
-    });
-    let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("soil-scene-gpu text"),
+            source: wgpu::ShaderSource::Wgsl(TEXT_SHADER.into()),
+        });
+        let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("soil-scene-gpu text"),
         layout: None,
         vertex: wgpu::VertexState {
@@ -224,159 +215,211 @@ pub fn render(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) 
         cache: None,
     });
 
-    let rects = rect_vertices(scene, width, height, theme);
-    let rect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("soil-scene-gpu rect vertices"),
-        contents: bytemuck::cast_slice(&rects),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("soil-scene-gpu text sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
 
-    let (atlas, text_vertices) = text_atlas(scene, width, height, theme)?;
-    let overlay_texture = device.create_texture_with_data(
-        &queue,
-        &wgpu::TextureDescriptor {
-            label: Some("soil-scene-gpu text atlas"),
+        Ok(Self {
+            device,
+            queue,
+            rect_pipeline,
+            text_pipeline,
+            sampler,
+        })
+    }
+
+    /// Render one scene at exactly `width x height`.
+    pub fn render(
+        &self,
+        scene: &soil_scene::Scene,
+        width: u32,
+        height: u32,
+        theme: Theme,
+    ) -> Result<Frame> {
+        anyhow::ensure!(width > 0 && height > 0, "frame needs a non-zero extent");
+        anyhow::ensure!(
+            width <= 4096 && height <= 4096,
+            "frame extent is outside 1..=4096"
+        );
+        scene.validate().map_err(|error| anyhow::anyhow!(error))?;
+
+        let device = &self.device;
+        let queue = &self.queue;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("soil-scene-gpu target"),
             size: wgpu::Extent3d {
-                width: ATLAS_WIDTH,
-                height: ATLAS_HEIGHT,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
-        },
-        wgpu::util::TextureDataOrder::LayerMajor,
-        &atlas,
-    );
-    let overlay_view = overlay_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("soil-scene-gpu text sampler"),
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("soil-scene-gpu text bind group"),
-        layout: &text_pipeline.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&overlay_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-        ],
-    });
-    let text_buffer = if text_vertices.is_empty() {
-        None
-    } else {
-        Some(
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("soil-scene-gpu text vertices"),
-                contents: bytemuck::cast_slice(&text_vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            }),
-        )
-    };
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("soil-scene-gpu encode"),
-    });
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("soil-scene-gpu pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: theme.background[0] as f64 / 255.0,
-                        g: theme.background[1] as f64 / 255.0,
-                        b: theme.background[2] as f64 / 255.0,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
         });
-        if !rects.is_empty() {
-            pass.set_pipeline(&rect_pipeline);
-            pass.set_vertex_buffer(0, rect_buffer.slice(..));
-            pass.draw(0..rects.len() as u32, 0..1);
-        }
-        if let Some(buffer) = &text_buffer {
-            pass.set_pipeline(&text_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.set_vertex_buffer(0, buffer.slice(..));
-            pass.draw(0..text_vertices.len() as u32, 0..1);
-        }
-    }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let bytes_per_pixel = 4u32;
-    let unpadded = width * bytes_per_pixel;
-    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let padded = unpadded.div_ceil(align) * align;
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("soil-scene-gpu readback"),
-        size: u64::from(padded) * u64::from(height),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(height),
+        let rects = rect_vertices(scene, width, height, theme);
+        let rect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("soil-scene-gpu rect vertices"),
+            contents: bytemuck::cast_slice(&rects),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let (atlas, text_vertices) = text_atlas(scene, width, height, theme)?;
+        let overlay_texture = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("soil-scene-gpu text atlas"),
+                size: wgpu::Extent3d {
+                    width: ATLAS_WIDTH,
+                    height: ATLAS_HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
             },
-        },
-        wgpu::Extent3d {
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &atlas,
+        );
+        let overlay_view = overlay_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("soil-scene-gpu text bind group"),
+            layout: &self.text_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&overlay_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        let text_buffer = if text_vertices.is_empty() {
+            None
+        } else {
+            Some(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("soil-scene-gpu text vertices"),
+                    contents: bytemuck::cast_slice(&text_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+            )
+        };
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("soil-scene-gpu encode"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("soil-scene-gpu pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: theme.background[0] as f64 / 255.0,
+                            g: theme.background[1] as f64 / 255.0,
+                            b: theme.background[2] as f64 / 255.0,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            if !rects.is_empty() {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, rect_buffer.slice(..));
+                pass.draw(0..rects.len() as u32, 0..1);
+            }
+            if let Some(buffer) = &text_buffer {
+                pass.set_pipeline(&self.text_pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..text_vertices.len() as u32, 0..1);
+            }
+        }
+
+        let bytes_per_pixel = 4u32;
+        let unpadded = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("soil-scene-gpu readback"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .context("poll GPU readback")?;
+        receiver.recv().context("wait for GPU readback")??;
+        let mapped = slice.get_mapped_range();
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for row in 0..height {
+            let start = (row * padded) as usize;
+            rgba.extend_from_slice(&mapped[start..start + unpadded as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+
+        Ok(Frame {
             width,
             height,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit([encoder.finish()]);
-
-    let slice = readback.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = sender.send(result);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .context("poll GPU readback")?;
-    receiver.recv().context("wait for GPU readback")??;
-    let mapped = slice.get_mapped_range();
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-    for row in 0..height {
-        let start = (row * padded) as usize;
-        rgba.extend_from_slice(&mapped[start..start + unpadded as usize]);
+            rgba,
+        })
     }
-    drop(mapped);
-    readback.unmap();
+}
 
-    Ok(Frame {
-        width,
-        height,
-        rgba,
-    })
+/// Render one scene with a fresh renderer.
+///
+/// Prefer [`Renderer`] for repeated frames.
+pub fn render(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) -> Result<Frame> {
+    Renderer::new()?.render(scene, width, height, theme)
 }
 
 fn ink(theme: Theme, ink: Option<soil_scene::Ink>) -> [u8; 3] {

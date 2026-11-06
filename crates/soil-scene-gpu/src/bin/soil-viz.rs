@@ -270,6 +270,7 @@ struct App {
     watch: bool,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
+    renderer: Option<soil_scene_gpu::Renderer>,
     scene: soil_scene::Scene,
     last_modified: Option<SystemTime>,
     dirty: bool,
@@ -295,14 +296,16 @@ impl App {
         };
         if self.dirty {
             let size = window.inner_size();
-            match soil_scene_gpu::render(
-                &self.scene,
-                size.width.max(1),
-                size.height.max(1),
-                Theme::default(),
-            ) {
-                Ok(frame) => gpu.upload(&frame),
-                Err(error) => eprintln!("soil-viz: render failed: {error:#}"),
+            if let Some(renderer) = &self.renderer {
+                match renderer.render(
+                    &self.scene,
+                    size.width.max(1),
+                    size.height.max(1),
+                    Theme::default(),
+                ) {
+                    Ok(frame) => gpu.upload(&frame),
+                    Err(error) => eprintln!("soil-viz: render failed: {error:#}"),
+                }
             }
             self.dirty = false;
         }
@@ -327,6 +330,14 @@ impl ApplicationHandler for App {
             Ok(gpu) => self.gpu = Some(gpu),
             Err(error) => {
                 eprintln!("soil-viz: GPU init failed: {error:#}");
+                event_loop.exit();
+                return;
+            }
+        }
+        match soil_scene_gpu::Renderer::new() {
+            Ok(renderer) => self.renderer = Some(renderer),
+            Err(error) => {
+                eprintln!("soil-viz: renderer init failed: {error:#}");
                 event_loop.exit();
                 return;
             }
@@ -414,6 +425,7 @@ fn main() -> anyhow::Result<()> {
         watch,
         window: None,
         gpu: None,
+        renderer: None,
         scene,
         last_modified,
         dirty: true,

@@ -140,6 +140,7 @@ fn run_pty(socket: &str, source_id: &str, options: &Options) -> anyhow::Result<(
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
     let host = soil_vt::Host::spawn(options.cols, options.rows, 2_000)?;
+    let renderer = soil_scene_gpu::Renderer::new()?;
     let (sender, receiver) = channel::<Vec<u8>>();
     let reader_host = host.clone();
     std::thread::spawn(move || {
@@ -155,8 +156,14 @@ fn run_pty(socket: &str, source_id: &str, options: &Options) -> anyhow::Result<(
         }
     });
     let first = host.snapshot();
-    let first_frame = soil_scene_gpu::terminal::render_terminal(
+    let first_scene = soil_scene_gpu::terminal::terminal_scene(
         &first,
+        options.size.0,
+        options.size.1,
+        Theme::default(),
+    );
+    let first_frame = renderer.render(
+        &first_scene,
         options.size.0,
         options.size.1,
         Theme::default(),
@@ -182,12 +189,14 @@ fn run_pty(socket: &str, source_id: &str, options: &Options) -> anyhow::Result<(
         let generation = host.generation();
         if generation != last_generation && last_draw.elapsed() >= Duration::from_millis(30) {
             let snapshot = host.snapshot();
-            let frame = soil_scene_gpu::terminal::render_terminal(
+            let scene = soil_scene_gpu::terminal::terminal_scene(
                 &snapshot,
                 options.size.0,
                 options.size.1,
                 Theme::default(),
-            )?;
+            );
+            let frame =
+                renderer.render(&scene, options.size.0, options.size.1, Theme::default())?;
             let shared =
                 soil_scene::shm::publish(frame.width, frame.height, revision, &frame.rgba)?;
             let line = format!(
