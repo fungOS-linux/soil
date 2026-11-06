@@ -258,6 +258,70 @@ impl records::Host for RecordsBookHost {
         Ok(self.entry(record))
     }
 
+    fn compare_and_swap(
+        &mut self,
+        key: records::Key,
+        expected: Option<records::Version>,
+        entry: records::Entry,
+    ) -> Result<records::CasResult, records::Error> {
+        let id = self.key(&key)?;
+        if entry.key.collection != key.collection || entry.key.id != key.id {
+            return Err(records::Error::Invalid);
+        }
+        if !entry.deleted {
+            self.check_schema(&entry.schema)?;
+            self.validate_body(&entry.schema, &entry.body)?;
+        }
+
+        let mut store = self.store.lock().expect("records store poisoned");
+        let current = store.get(&self.book, &id).ok();
+        let current_entry = current.as_ref().map(|record| self.entry(record.clone()));
+        let matches = match (&expected, &current) {
+            (None, None) => true,
+            // A tombstone is absent for create-if-absent semantics.
+            (None, Some(record)) => record.deleted,
+            (Some(_), None) => return Err(records::Error::NotFound),
+            (Some(version), Some(record)) => {
+                record.updated_hlc == version.revision && record.origin == version.origin
+            }
+        };
+
+        if !matches {
+            return Ok(records::CasResult {
+                applied: false,
+                entry: current_entry.expect("conflict has a current entry"),
+            });
+        }
+
+        let schema = if entry.schema.is_empty() {
+            current
+                .as_ref()
+                .map(|record| record.schema_id.clone())
+                .or_else(|| self.schema_name().map(str::to_owned))
+                .ok_or(records::Error::Invalid)?
+        } else {
+            entry.schema.clone()
+        };
+
+        if entry.deleted {
+            store
+                .delete_record(&self.book, &id, &schema, 1)
+                .map_err(|_| records::Error::Io)?;
+        } else {
+            let body = self.validate_body(&schema, &entry.body)?;
+            store
+                .put_record(&self.book, &id, &schema, 1, body)
+                .map_err(|_| records::Error::Io)?;
+        }
+
+        let record = store.get(&self.book, &id).map_err(|_| records::Error::Io)?;
+        drop(store);
+        Ok(records::CasResult {
+            applied: true,
+            entry: self.entry(record),
+        })
+    }
+
     fn delete(&mut self, key: records::Key) -> Result<(), records::Error> {
         let id = self.key(&key)?;
         let mut store = self.store.lock().expect("records store poisoned");
@@ -416,6 +480,88 @@ mod tests {
             .key
             .id,
             "msg-1"
+        );
+    }
+
+    #[test]
+    fn compare_and_swap_rejects_a_stale_writer_and_allows_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host =
+            RecordsBookHost::open_contacts(dir.path(), "personal/test/contacts", "contact")
+                .unwrap();
+        let key = records::Key {
+            collection: "contact".into(),
+            id: "ada".into(),
+        };
+        let first = host
+            .compare_and_swap(key.clone(), None, contact("ada"))
+            .unwrap();
+        assert!(first.applied);
+        let version = records::Version {
+            revision: first.entry.revision,
+            origin: first.entry.origin.clone(),
+        };
+
+        let duplicate = host
+            .compare_and_swap(key.clone(), None, contact("ada"))
+            .unwrap();
+        assert!(!duplicate.applied);
+        assert_eq!(duplicate.entry.revision, version.revision);
+        assert_eq!(duplicate.entry.origin, version.origin);
+
+        let stale = host
+            .compare_and_swap(
+                key.clone(),
+                Some(records::Version {
+                    revision: version.revision.saturating_sub(1),
+                    origin: version.origin.clone(),
+                }),
+                contact("ada"),
+            )
+            .unwrap();
+        assert!(!stale.applied);
+
+        let mut changed = contact("ada");
+        changed.revision = 0;
+        let replaced = host
+            .compare_and_swap(key.clone(), Some(version), changed)
+            .unwrap();
+        assert!(replaced.applied);
+        assert!(replaced.entry.revision > stale.entry.revision);
+
+        let current = records::Version {
+            revision: replaced.entry.revision,
+            origin: replaced.entry.origin.clone(),
+        };
+        let mut tombstone = contact("ada");
+        tombstone.deleted = true;
+        tombstone.body.clear();
+        let deleted = host
+            .compare_and_swap(key.clone(), Some(current), tombstone)
+            .unwrap();
+        assert!(deleted.applied);
+        assert!(deleted.entry.deleted);
+        assert!(
+            host.scan("contact".into(), None, 10)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+
+        assert_eq!(
+            host.compare_and_swap(
+                records::Key {
+                    collection: "contact".into(),
+                    id: "missing".into(),
+                },
+                Some(records::Version {
+                    revision: 1,
+                    origin: "x".into(),
+                }),
+                contact("missing"),
+            )
+            .unwrap_err(),
+            records::Error::NotFound
         );
     }
 

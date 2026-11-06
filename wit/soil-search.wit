@@ -4,7 +4,7 @@
 // `soil:vfs`, records from `soil:records`, and actions from their owning host
 // capability. A hit is a locator plus display metadata; the caller fetches the
 // authoritative object through the source capability.
-package soil:search@0.4.0;
+package soil:search@0.5.0;
 
 interface search {
   enum kind {
@@ -15,6 +15,8 @@ interface search {
     peer,
     service,
     action,
+    task,
+    principal,
   }
 
   enum mode {

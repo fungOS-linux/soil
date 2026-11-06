@@ -96,6 +96,59 @@ be changed with `with_team_scope_prefix`.
 cargo test -p soil-principal-host --features mycelium
 ```
 
+
+## JWT verification through Mycelium
+
+Loose coupling to Mycelium uses its stable CLI contract:
+
+```sh
+mycelium access oidc verify \
+  --issuer https://identity.example \
+  --audience soil \
+  --token-env SOIL_OIDC_TOKEN \
+  --json
+```
+
+`MyceliumCliVerifier` invokes that command without linking Mycelium code or
+touching a daemon socket. The JWT is passed only through the child process
+environment, never argv, WIT, logs, or persistence.
+
+The parsed contract is:
+
+```text
+principal
+issuer
+subject
+email       // ignored by the Soil projection
+groups      // mapped to roles
+expires_at
+```
+
+Then:
+
+```rust
+let verified = MyceliumCliVerifier::new("mycelium")
+    .verify(token, issuer, audience)?;
+let principal = Principal::from_verified_oidc(
+    verified,
+    PrincipalKind::Human,
+    Some(device_id),
+    generation,
+)?;
+```
+
+The verifier rejects:
+
+```text
+non-zero exit
+oversized output
+malformed JSON
+expired token
+principal that does not match oidc:<issuer>#<subject>
+```
+
+This keeps Mycelium as the OIDC implementation and Soil as the host projection.
+
 ## Host integration
 
 ```text

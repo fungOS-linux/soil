@@ -5481,6 +5481,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-marbles"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "soil-media-host"
 version = "0.1.0"
 dependencies = [
@@ -5627,7 +5637,9 @@ dependencies = [
  "anyhow",
  "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=46450ede02588e533984378bc979cb4010f9867b)",
  "fungos-vfs",
+ "serde",
  "serde_json",
+ "soil-marbles",
  "soil-spore",
  "soil-vfs-host",
  "tempfile",

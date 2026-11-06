@@ -46,6 +46,19 @@ interface records {
     skipped: u32,
   }
 
+  /// The exact revision/origin tuple returned by a local write.
+  record version {
+    revision: u64,
+    origin: string,
+  }
+
+  /// Result of a conditional write. On conflict `entry` is the current
+  /// authoritative entry, so the caller can re-read and retry.
+  record cas-result {
+    applied: bool,
+    entry: entry,
+  }
+
   enum error {
     /// The requested grant was not linked for this Spore.
     denied,
@@ -73,6 +86,19 @@ interface records {
   /// Create or replace a local record. The host assigns `revision` and
   /// `origin`; the returned entry is authoritative.
   upsert: func(entry: entry) -> result<entry, error>;
+
+  /// Conditional create/replace/delete.
+  ///
+  /// `expected = none` means create only if there is no live record.
+  /// `expected = some(version)` requires the current live record to match
+  /// exactly. On a mismatch the host returns `applied = false` and the
+  /// current entry; it never overwrites the winner. A missing record with an
+  /// expected version returns `not-found`.
+  compare-and-swap: func(
+    key: key,
+    expected: option<version>,
+    entry: entry,
+  ) -> result<cas-result, error>;
 
   /// Write a tombstone. The record remains visible to `changes` until the
   /// host's tombstone retention expires.

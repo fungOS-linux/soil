@@ -59,6 +59,103 @@ pub struct OidcClaims {
     pub roles: Vec<String>,
 }
 
+/// The stable JSON identity emitted by `mycelium access oidc verify --json`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct VerifiedOidc {
+    pub principal: String,
+    pub issuer: String,
+    pub subject: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    pub expires_at: u64,
+}
+
+/// Pluggable JWT verifier. The host supplies a token; the verifier never
+/// crosses the WIT boundary and never returns the token.
+pub trait OidcVerifier: Send + Sync {
+    fn verify(
+        &self,
+        token: &str,
+        issuer: &str,
+        audience: &str,
+    ) -> Result<VerifiedOidc, PrincipalError>;
+}
+
+/// Loose coupling to Mycelium: invoke the stable `mycelium access oidc verify`
+/// JSON contract. No Mycelium source dependency, daemon socket, or token in
+/// argv. The token is passed only through the child process environment.
+pub struct MyceliumCliVerifier {
+    binary: std::path::PathBuf,
+    discovery: Option<String>,
+    token_env: String,
+}
+
+impl MyceliumCliVerifier {
+    pub fn new(binary: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            binary: binary.into(),
+            discovery: None,
+            token_env: "SOIL_OIDC_TOKEN".into(),
+        }
+    }
+
+    pub fn with_discovery(mut self, discovery: impl Into<String>) -> Self {
+        self.discovery = Some(discovery.into());
+        self
+    }
+
+    pub fn with_token_env(mut self, name: impl Into<String>) -> Self {
+        self.token_env = name.into();
+        self
+    }
+}
+
+impl OidcVerifier for MyceliumCliVerifier {
+    fn verify(
+        &self,
+        token: &str,
+        issuer: &str,
+        audience: &str,
+    ) -> Result<VerifiedOidc, PrincipalError> {
+        let mut command = std::process::Command::new(&self.binary);
+        command
+            .arg("access")
+            .arg("oidc")
+            .arg("verify")
+            .arg("--issuer")
+            .arg(issuer)
+            .arg("--audience")
+            .arg(audience)
+            .arg("--token-env")
+            .arg(&self.token_env)
+            .arg("--json")
+            .env(&self.token_env, token);
+        if let Some(discovery) = &self.discovery {
+            command.arg("--discovery").arg(discovery);
+        }
+        let output = command.output().map_err(|_| PrincipalError::Unavailable)?;
+        if !output.status.success() || output.stdout.len() > 65_536 {
+            return Err(PrincipalError::Denied);
+        }
+        let verified: VerifiedOidc =
+            serde_json::from_slice(&output.stdout).map_err(|_| PrincipalError::Invalid)?;
+        if verified.expires_at <= now_unix_s() {
+            return Err(PrincipalError::Stale);
+        }
+        let expected = format!(
+            "oidc:{}#{}",
+            verified.issuer.trim_end_matches('/'),
+            verified.subject
+        );
+        if verified.principal != expected || verified.subject.trim().is_empty() {
+            return Err(PrincipalError::Invalid);
+        }
+        Ok(verified)
+    }
+}
+
 /// A Mycelium grant identity. The host has already verified the signed grant.
 #[derive(Debug, Clone)]
 pub struct MyceliumGrantIdentity {
@@ -261,6 +358,28 @@ impl Principal {
         })
     }
 
+    /// Map a verified `mycelium access oidc verify` identity. Groups become
+    /// roles; team extraction remains an explicit host policy.
+    pub fn from_verified_oidc(
+        identity: VerifiedOidc,
+        kind: PrincipalKind,
+        device: Option<String>,
+        generation: u64,
+    ) -> Result<Self, PrincipalError> {
+        if identity.expires_at <= now_unix_s() || identity.subject.trim().is_empty() {
+            return Err(PrincipalError::Stale);
+        }
+        Ok(Self {
+            actor: identity.principal,
+            kind,
+            display_name: None,
+            device,
+            teams: Vec::new(),
+            roles: identity.groups,
+            generation,
+        })
+    }
+
     /// Map an already-verified Mycelium grant identity.
     pub fn from_mycelium(
         identity: MyceliumGrantIdentity,
@@ -323,12 +442,69 @@ fn map_error(error: PrincipalError) -> api::Error {
     }
 }
 
-#[cfg(feature = "mycelium")]
 fn now_unix_s() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod oidc_cli_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn fake_verifier(dir: &std::path::Path, payload: &str) -> MyceliumCliVerifier {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("mycelium");
+        std::fs::write(&path, format!("#!/bin/sh\ncat <<'JSON'\n{payload}\nJSON\n")).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        MyceliumCliVerifier::new(path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mycelium_cli_verifier_parses_the_stable_json_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let verifier = fake_verifier(
+            dir.path(),
+            r#"{"principal":"oidc:https://identity.example#user-42","issuer":"https://identity.example","subject":"user-42","email":"a@example.test","groups":["operators"],"expires_at":9999999999}"#,
+        );
+        let verified = verifier
+            .verify("token", "https://identity.example", "soil")
+            .unwrap();
+        assert_eq!(verified.principal, "oidc:https://identity.example#user-42");
+        assert_eq!(verified.groups, vec!["operators"]);
+        let principal = Principal::from_verified_oidc(
+            verified,
+            PrincipalKind::Human,
+            Some("device-1".into()),
+            4,
+        )
+        .unwrap();
+        assert_eq!(principal.roles, vec!["operators"]);
+        assert_eq!(principal.generation, 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mycelium_cli_verifier_denies_failed_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.path().join("mycelium");
+        std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        let verifier = MyceliumCliVerifier::new(path);
+        assert_eq!(
+            verifier.verify("token", "https://identity.example", "soil"),
+            Err(PrincipalError::Denied)
+        );
+    }
 }
 
 #[cfg(all(test, feature = "mycelium"))]
