@@ -1,0 +1,5 @@
+package fungos:consent@0.1.0;
+
+world guest {
+  export run: func();
+}
