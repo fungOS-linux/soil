@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 
 use serde::{Serialize, de::DeserializeOwned};
 use soil::records::records::{self, Entry, Key, Page};
-pub use soil::records::records::{CasResult, Version};
+pub use soil::records::records::{CasResult, Entry, Version};
 use soil_sdk_codec::{Codec, JsonCodec};
 use thiserror::Error;
 
