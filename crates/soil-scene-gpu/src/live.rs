@@ -21,6 +21,8 @@ const TAU: f32 = std::f32::consts::PI * 2.0;
 const CHART_POINTS: usize = 160;
 const SAMPLE_SECONDS: f32 = 0.2;
 const ATLAS_POINTS: usize = 240;
+const INCIDENT_CYCLE: f32 = 240.0;
+const INCIDENT_OFFSET: f32 = 32.0;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LiveSpec {
@@ -1008,6 +1010,10 @@ fn cost_ohlc(elapsed: f32) -> (f32, f32, f32, f32) {
 }
 
 fn metrics(elapsed: f32) -> Metrics {
+    let cost = cost_ohlc(elapsed);
+    // The demo narrative loops instead of settling into a flat recovery. The
+    // offset lets the pre-roll show baseline before the leak begins.
+    let elapsed = (elapsed + INCIDENT_OFFSET).rem_euclid(INCIDENT_CYCLE);
     let memory = if elapsed < 60.0 {
         45.0 + noise(3.0, elapsed, 1.0) + sine_wave(elapsed, 30.0, 0.9)
     } else if elapsed < 120.0 {
@@ -1017,7 +1023,7 @@ fn metrics(elapsed: f32) -> Metrics {
     } else if elapsed < 175.0 {
         95.0 + noise(1.0, elapsed, 4.0)
     } else {
-        50.0 + (95.0 - 50.0) * (-0.05 * (elapsed - 175.0)).exp() + noise(2.0, elapsed, 5.0)
+        50.0 + (95.0 - 50.0) * (-0.09 * (elapsed - 175.0)).exp() + noise(2.0, elapsed, 5.0)
     };
     let memory = clamp(memory, 0.0, 100.0);
     let gc_pressure = (memory - 60.0).max(0.0) * 1.2;
@@ -1040,7 +1046,7 @@ fn metrics(elapsed: f32) -> Metrics {
     let error_base = (p99 - 400.0).max(0.0) * 0.02;
     let errors5xx = (error_base.powf(1.5) + noise(0.5, elapsed, 13.0)).max(0.0);
     let errors4xx = (3.5 + noise(1.0, elapsed, 14.0)).max(0.0);
-    let (cost_open, cost_high, cost_low, cost_close) = cost_ohlc(elapsed);
+    let (cost_open, cost_high, cost_low, cost_close) = cost;
     Metrics {
         memory,
         cpu,
