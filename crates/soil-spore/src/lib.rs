@@ -84,6 +84,16 @@ pub struct Manifest {
     /// Declared absences. Reviewed like grants: intent is written down.
     #[serde(default)]
     pub denied: BTreeMap<String, Vec<String>>,
+    /// Declares a host-system surface. The host must still allowlist the exact
+    /// Spore id and signed digest; this flag is not a grant.
+    #[serde(default)]
+    pub system: Option<System>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct System {
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -212,6 +222,15 @@ impl Manifest {
             return Err(Error::Invalid(format!(
                 "launch.default {:?} is not in launch.surfaces",
                 self.launch.default
+            )));
+        }
+
+        if let Some(system) = &self.system
+            && !identifier(&system.role)
+        {
+            return Err(Error::Invalid(format!(
+                "system role {:?} is not an identifier",
+                system.role
             )));
         }
 
