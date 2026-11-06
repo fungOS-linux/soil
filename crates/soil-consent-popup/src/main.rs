@@ -6,7 +6,6 @@
 //! later; this binary is deliberately small and native.
 
 use std::{
-    io::{BufRead, BufReader, Write},
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
@@ -17,15 +16,10 @@ use std::{
 };
 
 use eframe::egui;
-use serde::Serialize;
-use soil_consent::{Broker, Decision, Effect, Pending, Preview, Request, Scope};
+use soil_consent::{Broker, Decision, Effect, Pending, Preview, Request, Scope, wire};
 
 fn main() -> anyhow::Result<()> {
-    let socket = std::env::args()
-        .skip(1)
-        .find(|arg| !arg.starts_with('-'))
-        .map(PathBuf::from)
-        .unwrap_or_else(default_socket);
+    let socket = socket_arg()?;
     let broker = Arc::new(Broker::new());
     start_server(broker.clone(), socket.clone())?;
 
@@ -38,16 +32,35 @@ fn main() -> anyhow::Result<()> {
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "soil-consent",
         options,
         Box::new(move |cc| Ok(Box::new(ConsentApp::new(cc, broker)))),
-    )?;
+    );
+    let _ = std::fs::remove_file(&socket);
+    result?;
     Ok(())
 }
 
-fn default_socket() -> PathBuf {
-    std::env::temp_dir().join("soil-consent.sock")
+fn socket_arg() -> anyhow::Result<PathBuf> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let explicit = args
+        .iter()
+        .position(|arg| arg == "--socket")
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+        .or_else(|| args.iter().find(|arg| !arg.starts_with('-')).cloned());
+    let private = wire::private_socket_dir().map_err(anyhow::Error::msg)?;
+    match explicit {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if path.parent() != Some(private.as_path()) {
+                anyhow::bail!("consent socket must live in {}", private.display());
+            }
+            Ok(path)
+        }
+        None => Ok(private.join("consent.sock")),
+    }
 }
 
 fn start_server(broker: Arc<Broker>, path: PathBuf) -> anyhow::Result<()> {
@@ -62,6 +75,7 @@ fn start_server(broker: Arc<Broker>, path: PathBuf) -> anyhow::Result<()> {
     }
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    wire::validate_socket(&path).map_err(anyhow::Error::msg)?;
     eprintln!("soil-consent-popup: listening on {}", path.display());
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -77,53 +91,30 @@ fn start_server(broker: Arc<Broker>, path: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum Response {
-    Decision { decision: Decision },
-    Error { error: String },
-}
-
 fn serve_one(stream: UnixStream, broker: Arc<Broker>) -> anyhow::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    if line.len() > 1024 * 1024 {
-        return write_response(
+    if !wire::peer_is_self(&stream).map_err(anyhow::Error::msg)? {
+        let _ = wire::write_response(
             stream,
-            Response::Error {
-                error: "request too large".into(),
+            &wire::Response::Error {
+                error: "peer is not this user".into(),
             },
         );
+        return Ok(());
     }
-    let request: Request = match serde_json::from_str(&line) {
+    let request = match wire::read_request(&stream) {
         Ok(request) => request,
         Err(error) => {
-            return write_response(
-                stream,
-                Response::Error {
-                    error: format!("invalid request: {error}"),
-                },
-            );
+            return wire::write_response(stream, &wire::Response::Error { error })
+                .map_err(Into::into);
         }
     };
-    match broker.request(request) {
-        Ok(decision) => write_response(stream, Response::Decision { decision }),
-        Err(error) => write_response(
-            stream,
-            Response::Error {
-                error: error.to_string(),
-            },
-        ),
-    }
-}
-
-fn write_response(mut stream: UnixStream, response: Response) -> anyhow::Result<()> {
-    let encoded = serde_json::to_string(&response)?;
-    stream.write_all(encoded.as_bytes())?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
-    Ok(())
+    let response = match broker.request(request) {
+        Ok(decision) => wire::Response::Decision { decision },
+        Err(error) => wire::Response::Error {
+            error: error.to_string(),
+        },
+    };
+    wire::write_response(stream, &response).map_err(Into::into)
 }
 
 struct ConsentApp {

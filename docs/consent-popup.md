@@ -5,7 +5,7 @@ replaceable: the broker lives in `soil-consent`, the popup is just presentation
 and a Unix-socket client.
 
 ```sh
-cargo run -p soil-consent-popup -- /tmp/soil-consent.sock
+cargo run -p soil-consent-popup
 ```
 
 The window starts hidden and opens when a pending request arrives. It shows one

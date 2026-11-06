@@ -21,4 +21,7 @@ entry = "ui/consent.lua"
 default = "native"
 surfaces = ["native"]
 
+[system]
+role = "consent"
+
 [grants]

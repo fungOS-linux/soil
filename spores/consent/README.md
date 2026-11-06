@@ -8,10 +8,11 @@ decision, and renders one request at a time. Canvas/Spore-composed previews come
 later.
 
 ```sh
-cargo run -p soil-consent-popup -- /tmp/soil-consent.sock
+cargo run -p soil-consent-popup
 ```
 
-The socket is mode `0600`. No UI, closed UI, cancel or timeout denies.
+The socket lives in a private `0700` per-user directory and is mode `0600`.
+No UI, closed UI, cancel or timeout denies.
 
 `module.wasm` is a minimal package identity module. The native binary is
 `soil-consent-popup`.

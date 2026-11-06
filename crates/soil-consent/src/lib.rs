@@ -18,6 +18,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod client;
+pub mod wire;
+
 const MAX_HISTORY: usize = 256;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 

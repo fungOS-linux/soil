@@ -113,6 +113,21 @@ the operator. Soil receives a keyring and, optionally, a required fingerprint.
 If Mycelium later supplies keys through a resolver, only the argument to
 `verify-signature` changes.
 
+A Spore may declare a host-system surface:
+
+```toml
+[system]
+role = "consent"
+```
+
+This is not a grant. The host must allowlist the exact Spore id, role and signed
+digest before treating it as a system surface.
+
+The next signing layer is Mycelium-backed publisher identity with delegated
+keys and revocation. The signature must cover the manifest, lock and module; a
+revoked or expired delegated key fails closed. Package trust and capability
+grants stay separate.
+
 ## Commands
 
 ```sh
