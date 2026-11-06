@@ -1,6 +1,6 @@
 # CRM Spore
 
-Status: **read-only CRM Spore over namespaced records, 2026-11-06.**
+Status: **CRM Spore over namespaced records, 2026-11-06.**
 
 ```text
 crm        shared CRM: accounts, companies, projects, activities, opportunities
@@ -20,6 +20,9 @@ accounts
 account <account-id>
 timeline <account-id> [limit]
 pipeline
+activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
+opportunity stage <opportunity-id> <stage>
+contact link <account-id> <contact-id> [role]
 help
 ```
 

@@ -108,8 +108,28 @@ impl Guest for Component {
                 print_json("timeline", &json!({ "account_id": id, "events": events }));
             }
             "pipeline" => print_json("pipeline", &data.pipeline()),
+            "activity" if args.get(1).map(String::as_str) == Some("add") => {
+                let value = add_activity(&data, &args)?;
+                print_json("activity", &value);
+            }
+            "opportunity" if args.get(1).map(String::as_str) == Some("stage") => {
+                let value = set_opportunity_stage(&args)?;
+                print_json("opportunity", &value);
+            }
+            "contact" if args.get(1).map(String::as_str) == Some("link") => {
+                let value = link_contact(&data, &args)?;
+                print_json("contact", &value);
+            }
             "help" => print_json("help", &json!({
-                "actions": ["accounts", "account <id>", "timeline <id> [limit]", "pipeline"],
+                "actions": [
+                    "accounts",
+                    "account <id>",
+                    "timeline <id> [limit]",
+                    "pipeline",
+                    "activity add <id> <account-id> <kind> <title> <occurred-at> [summary]",
+                    "opportunity stage <opportunity-id> <stage>",
+                    "contact link <account-id> <contact-id> [role]",
+                ],
                 "namespaces": [CRM, CONTACTS, CALLS, MESSAGES],
             })),
             other => return Err(format!("unknown action {other:?}; use help")),
@@ -469,6 +489,141 @@ impl Dataset {
         events.truncate(limit.max(1));
         Ok(events)
     }
+}
+
+fn add_activity(data: &Dataset, args: &[String]) -> Result<Value, String> {
+    let id = args.get(2).ok_or_else(|| {
+        "usage: activity add <id> <account-id> <kind> <title> <occurred-at> [summary]".to_string()
+    })?;
+    let account_id = args.get(3).ok_or_else(|| "activity add: missing account id".to_string())?;
+    let kind = args.get(4).ok_or_else(|| "activity add: missing kind".to_string())?;
+    let title = args.get(5).ok_or_else(|| "activity add: missing title".to_string())?;
+    let occurred_at = args
+        .get(6)
+        .ok_or_else(|| "activity add: missing occurred-at".to_string())?;
+    let summary = args.iter().skip(7).cloned().collect::<Vec<_>>().join(" ");
+    if data.rows(ACCOUNT_SCHEMA).all(|account| account.id != *account_id) {
+        return Err(format!("account {account_id} not found"));
+    }
+    let company_id = data
+        .rows(ACCOUNT_COMPANY_SCHEMA)
+        .find(|link| link.text("account_id") == account_id)
+        .map(|link| link.text("company_id"))
+        .unwrap_or_default();
+    let body = json!({
+        "kind": kind,
+        "name": title,
+        "occurred_at": occurred_at,
+        "description": summary,
+        "account_id": account_id,
+        "company_id": company_id,
+        "visibility": "team",
+        "source": "spore",
+        "source_id": id,
+    });
+    let stored = put_record(CRM, id, ACTIVITY_SCHEMA, body)?;
+    Ok(json!({
+        "id": id,
+        "schema": ACTIVITY_SCHEMA,
+        "account_id": account_id,
+        "kind": kind,
+        "title": title,
+        "occurred_at": occurred_at,
+        "revision": stored.revision,
+    }))
+}
+
+fn set_opportunity_stage(args: &[String]) -> Result<Value, String> {
+    let id = args.get(2).ok_or_else(|| {
+        "usage: opportunity stage <opportunity-id> <stage>".to_string()
+    })?;
+    let stage = args.get(3).ok_or_else(|| "opportunity stage: missing stage".to_string())?;
+    let entry = records::get(&key(CRM, id)).map_err(|error| format!("{error:?}"))?;
+    if entry.schema != OPPORTUNITY_SCHEMA {
+        return Err(format!("{id} is {}, not an opportunity", entry.schema));
+    }
+    let mut body: Value =
+        serde_json::from_slice(&entry.body).map_err(|error| format!("decode {id}: {error}"))?;
+    body["stage"] = Value::String(stage.clone());
+    let stored = put_record(CRM, id, OPPORTUNITY_SCHEMA, body)?;
+    Ok(json!({
+        "id": id,
+        "stage": stage,
+        "revision": stored.revision,
+    }))
+}
+
+fn link_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
+    let account_id = args
+        .get(2)
+        .ok_or_else(|| "usage: contact link <account-id> <contact-id> [role]".to_string())?;
+    let contact_id = args
+        .get(3)
+        .ok_or_else(|| "contact link: missing contact id".to_string())?;
+    let role = args.get(4).cloned().unwrap_or_default();
+    if data.rows(ACCOUNT_SCHEMA).all(|account| account.id != *account_id) {
+        return Err(format!("account {account_id} not found"));
+    }
+    let contact = records::get(&key(CONTACTS, contact_id))
+        .map_err(|error| format!("contact {contact_id}: {error:?}"))?;
+    if contact.schema != CONTACT_SCHEMA {
+        return Err(format!("{contact_id} is {}, not a contact", contact.schema));
+    }
+    let body: Value = serde_json::from_slice(&contact.body)
+        .map_err(|error| format!("decode contact {contact_id}: {error}"))?;
+    let token = body
+        .get("contact_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| format!("contact {contact_id} has no contact_token"))?;
+    let assignment_id = format!("ac-{account_id}-{contact_id}");
+    let stored = put_record(
+        CRM,
+        &assignment_id,
+        ASSIGNMENT_SCHEMA,
+        json!({
+            "account_id": account_id,
+            "contact_id": contact_id,
+            "contact_token": token,
+            "role": role,
+            "status": "active",
+            "source": "spore",
+        }),
+    )?;
+    Ok(json!({
+        "id": assignment_id,
+        "account_id": account_id,
+        "contact_id": contact_id,
+        "contact_token": token,
+        "role": role,
+        "revision": stored.revision,
+    }))
+}
+
+fn key(namespace: &str, id: &str) -> records::Key {
+    records::Key {
+        collection: namespace.to_string(),
+        id: id.to_string(),
+    }
+}
+
+fn put_record(
+    namespace: &str,
+    id: &str,
+    schema: &str,
+    body: Value,
+) -> Result<records::Entry, String> {
+    let body = serde_json::to_vec(&body).map_err(|error| format!("encode {id}: {error}"))?;
+    records::upsert(&records::Entry {
+        key: key(namespace, id),
+        schema: schema.to_string(),
+        revision: 0,
+        updated_at_ms: 0,
+        origin: String::new(),
+        deleted: false,
+        body,
+    })
+    .map_err(|error| format!("write {id}: {error:?}"))
 }
 
 fn load_namespace(name: &str, required: bool) -> Result<Vec<Row>, String> {

@@ -25,7 +25,7 @@ default = "canvas"
 surfaces = ["canvas", "native", "web"]
 
 [grants]
-"soil:records" = "read the granted CRM, contacts, calls and messages namespaces"
+"soil:records" = "read/write the granted CRM namespace and read the granted personal namespaces"
 
 [denied]
 "soil:http" = ["the CRM Spore has no network authority"]

@@ -175,6 +175,9 @@ spores/crm
   account <account-id>
   timeline <account-id> [limit]
   pipeline
+  activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
+  opportunity stage <opportunity-id> <stage>
+  contact link <account-id> <contact-id> [role]
 ```
 
 The host maps namespace names to books and enforces read/write per namespace.

@@ -204,7 +204,7 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
     let records = NamespacedRecordsHost::open(
         root.path(),
         vec![
-            Namespace::read("crm", "team/test/crm", "crm"),
+            Namespace::write("crm", "team/test/crm", "crm"),
             Namespace::read("contacts", "personal/test/contacts", "contact"),
             Namespace::read("messages", "personal/test/messages", "message"),
             Namespace::read("calls", "personal/test/calls", "call"),
@@ -247,5 +247,53 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
     bindings
         .call_run(&mut store, &["accounts".into()])?
         .map_err(anyhow::Error::msg)?;
+    bindings
+        .call_run(
+            &mut store,
+            &[
+                "activity".into(),
+                "add".into(),
+                "act-2".into(),
+                "a-acme".into(),
+                "meeting".into(),
+                "Follow-up".into(),
+                "2026-01-05T10:00:00Z".into(),
+                "Next step".into(),
+            ],
+        )?
+        .map_err(anyhow::Error::msg)?;
+    bindings
+        .call_run(
+            &mut store,
+            &[
+                "opportunity".into(),
+                "stage".into(),
+                "opp-1".into(),
+                "won".into(),
+            ],
+        )?
+        .map_err(anyhow::Error::msg)?;
+    bindings
+        .call_run(
+            &mut store,
+            &[
+                "contact".into(),
+                "link".into(),
+                "a-acme".into(),
+                "c-ada".into(),
+                "CTO".into(),
+            ],
+        )?
+        .map_err(anyhow::Error::msg)?;
+
+    let store = Store::open(root.path(), &root.path().join("device_id"))?;
+    let activity = store.get("team/test/crm", "act-2")?;
+    assert_eq!(activity.schema_id, "fungos.crm/activity@1");
+    assert_eq!(activity.fields["name"], "Follow-up");
+    assert_eq!(activity.fields["description"], "Next step");
+    let opportunity = store.get("team/test/crm", "opp-1")?;
+    assert_eq!(opportunity.fields["stage"], "won");
+    let link = store.get("team/test/crm", "ac-a-acme-c-ada")?;
+    assert_eq!(link.fields["contact_token"], "t-ada");
     Ok(())
 }
