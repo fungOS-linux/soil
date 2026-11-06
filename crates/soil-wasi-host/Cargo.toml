@@ -1,0 +1,36 @@
+[package]
+name = "soil-wasi-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["http1", "server"] }
+ipnet = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+url = "2"
+wasmtime = { version = "50", default-features = false, features = [
+    "anyhow",
+    "component-model",
+    "cranelift",
+    "runtime",
+    "std",
+] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
+wasmtime-wasi-http = { version = "50", default-features = false, features = [
+    "default-send-request",
+    "p2",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "soil-wasi-http"
+path = "src/bin/soil-wasi-http.rs"
