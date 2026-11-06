@@ -94,6 +94,31 @@ fn wasm_spore_supports_append_grep_wc_tree_and_recursive_rm() {
     );
 }
 
+#[test]
+fn wasm_spore_supports_redirection_recursive_mkdir_cp_and_find() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg("mkdir -p a/b/c\necho hello > a/b/c/note.txt\necho world >> a/b/c/note.txt\ncp -r a/b copied\nfind . '*.txt'\ncat copied/c/note.txt")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("hello"), "{stdout}");
+    assert!(stdout.contains("world"), "{stdout}");
+    assert!(stdout.contains("note.txt"), "{stdout}");
+    let mut vfs = Vfs::open(dir.path()).unwrap();
+    assert_eq!(vfs.get("copied/c/note.txt").unwrap(), b"hello\nworld\n");
+}
+
 #[cfg(unix)]
 #[test]
 fn run_op_applies_overlay_and_respects_gitignore() {
