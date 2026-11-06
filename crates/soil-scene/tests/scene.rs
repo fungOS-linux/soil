@@ -160,6 +160,7 @@ fn a_polyline_is_a_bounded_scene_primitive() {
             points: vec![[0.0, 0.0], [1.0, 1.0]],
             ink: Some(Ink::Primary),
             rgb: None,
+            rgb2: None,
             width: 0.1,
             opacity: 1.0,
             join: soil_scene::LineJoin::Miter,
@@ -194,6 +195,7 @@ fn polyline_joins_are_validated() {
         points: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
         ink: Some(Ink::Primary),
         rgb: None,
+        rgb2: None,
         width: 0.1,
         opacity: 1.0,
         join: soil_scene::LineJoin::Round,
@@ -233,6 +235,7 @@ fn chart_catalog_primitives_are_bounded() {
             Content::Points(soil_scene::Points {
                 points: vec![[0.0, 0.0], [0.5, 0.5]],
                 size: [0.02, 0.02],
+                shape: soil_scene::PointShape::Circle,
                 ink: Some(Ink::Info),
                 rgb: None,
                 opacity: 0.8,

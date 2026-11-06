@@ -76,6 +76,10 @@ pub struct ChartSpec {
     pub series: Vec<SeriesSpec>,
     #[serde(default)]
     pub style: ChartStyle,
+    #[serde(default)]
+    pub y_min: Option<f32>,
+    #[serde(default)]
+    pub y_max: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,6 +92,8 @@ pub struct SeriesSpec {
     pub kind: SeriesKind,
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    #[serde(default)]
+    pub color2: Option<[u8; 3]>,
     #[serde(default)]
     pub width: Option<f32>,
     #[serde(default)]
@@ -307,6 +313,14 @@ impl LiveViz {
         self.scene()
     }
 
+    /// Seek to an absolute scene time. Used by deterministic frame capture;
+    /// the live loop uses `tick`, which clamps a suspended process jump.
+    pub fn seek(&mut self, time: f32) -> Scene {
+        self.time = time.max(0.0);
+        self.frame = self.frame.wrapping_add(1);
+        self.scene()
+    }
+
     /// Advance by real elapsed time, not a fixed assumed tick.
     pub fn tick(&mut self, now: Instant) -> Option<Scene> {
         let dt = now.duration_since(self.last_update).as_secs_f32();
@@ -468,7 +482,7 @@ impl<'a> Painter<'a> {
                 ink: None,
                 rgb: Some(color),
                 opacity,
-                radius,
+                radius: self.sw(radius).min(self.sh(radius)),
             }),
         });
     }
@@ -522,6 +536,46 @@ impl<'a> Painter<'a> {
                 points,
                 ink: None,
                 rgb: Some(color),
+                rgb2: None,
+                width: self.sh(width),
+                opacity,
+                join: soil_scene::LineJoin::Round,
+                miter_limit: 4.0,
+            }),
+        });
+    }
+
+    fn polyline_gradient(
+        &mut self,
+        id: &str,
+        points: &[(f32, f32)],
+        width: f32,
+        color: [u8; 3],
+        color2: [u8; 3],
+        opacity: f32,
+    ) {
+        if points.len() < 2 {
+            return;
+        }
+        self.z += 0.02;
+        let points = points
+            .iter()
+            .map(|(x, y)| [self.nx(*x), self.ny(*y)])
+            .collect();
+        self.nodes.push(Node {
+            id: id.into(),
+            parent: None,
+            transition_ms: Some(0),
+            transform: Transform {
+                translation: [0.0, 0.0, self.z],
+                rotation: [0.0; 3],
+                scale: [1.0, 1.0, 1.0],
+            },
+            content: Content::Polyline(Polyline {
+                points,
+                ink: None,
+                rgb: Some(color),
+                rgb2: Some(color2),
                 width: self.sh(width),
                 opacity,
                 join: soil_scene::LineJoin::Round,
@@ -587,6 +641,7 @@ impl<'a> Painter<'a> {
             content: Content::Points(Points {
                 points,
                 size: [self.sw(size), self.sh(size)],
+                shape: soil_scene::PointShape::Circle,
                 ink: None,
                 rgb: Some(color),
                 opacity,
@@ -658,24 +713,134 @@ fn panel(painter: &mut Painter, id: &str, r: &LayerRect, title: Option<&str>) {
     }
 }
 
-fn source_params(source: Option<&str>, index: usize) -> (f32, f32, f32) {
-    match source.unwrap_or("") {
-        "latency.p50" => (46.0, 11.0, 0.0),
-        "latency.p95" => (60.0, 16.0, 1.4),
-        "latency.p99" => (74.0, 22.0, 2.8),
-        _ => (
-            46.0 + index as f32 * 14.0,
-            11.0 + index as f32 * 5.0,
-            index as f32 * 1.4,
-        ),
+#[derive(Debug, Clone, Copy, Default)]
+struct Metrics {
+    memory: f32,
+    cpu: f32,
+    p50: f32,
+    p95: f32,
+    p99: f32,
+    throughput: f32,
+    errors5xx: f32,
+    errors4xx: f32,
+    active: f32,
+    waiting: f32,
+}
+
+fn clamp(value: f32, min: f32, max: f32) -> f32 {
+    value.max(min).min(max)
+}
+
+fn noise(range: f32, elapsed: f32, seed: f32) -> f32 {
+    let value = ((elapsed * 12.9898 + seed * 78.233).sin() * 43758.5453).fract();
+    (value - 0.5) * 2.0 * range
+}
+
+fn sine_wave(elapsed: f32, period: f32, amplitude: f32) -> f32 {
+    amplitude * (std::f32::consts::TAU * elapsed / period).sin()
+}
+
+fn metrics(elapsed: f32) -> Metrics {
+    let elapsed = elapsed.max(0.0);
+    let memory = if elapsed < 60.0 {
+        45.0 + noise(3.0, elapsed, 1.0) + sine_wave(elapsed, 30.0, 0.9)
+    } else if elapsed < 120.0 {
+        45.0 + (elapsed - 60.0) * 0.5 + noise(3.0, elapsed, 2.0) + sine_wave(elapsed, 30.0, 0.9)
+    } else if elapsed < 155.0 {
+        75.0 + (elapsed - 120.0) * 0.8 + noise(3.0, elapsed, 3.0) + sine_wave(elapsed, 30.0, 0.9)
+    } else if elapsed < 175.0 {
+        95.0 + noise(1.0, elapsed, 4.0)
+    } else {
+        50.0 + (95.0 - 50.0) * (-0.05 * (elapsed - 175.0)).exp() + noise(2.0, elapsed, 5.0)
+    };
+    let memory = clamp(memory, 0.0, 100.0);
+    let gc_pressure = (memory - 60.0).max(0.0) * 1.2;
+    let cpu = clamp(25.0 + gc_pressure + noise(3.0, elapsed, 6.0), 0.0, 100.0);
+    let gc_jitter = (memory - 55.0).max(0.0) * 2.0;
+    let p50 = (45.0 + gc_jitter + noise(5.0, elapsed, 7.0)).max(0.0);
+    let p95_multiplier = 1.8 + (memory - 70.0).max(0.0) * 0.06;
+    let p95 = p50 * p95_multiplier + noise(10.0, elapsed, 8.0);
+    let p99_multiplier = 1.5 + (memory - 75.0).max(0.0) * 0.08;
+    let p99 = p95 * p99_multiplier + noise(20.0, elapsed, 9.0);
+    let hold_factor = (p95 - 100.0).max(0.0) * 0.5;
+    let active = clamp(80.0 + hold_factor + noise(3.0, elapsed, 10.0), 0.0, 200.0);
+    let waiting = ((active - 180.0) * 3.0 + noise(2.0, elapsed, 11.0)).max(0.0);
+    let base_throughput = 1200.0;
+    let throughput_factor = (1.0 - ((active - 100.0).max(0.0) / 100.0) * 0.8).max(0.05);
+    let throughput = (base_throughput * throughput_factor
+        + noise(30.0, elapsed, 12.0)
+        + sine_wave(elapsed, 30.0, 24.0))
+    .max(0.0);
+    let error_base = (p99 - 400.0).max(0.0) * 0.02;
+    let errors5xx = (error_base.powf(1.5) + noise(0.5, elapsed, 13.0)).max(0.0);
+    let errors4xx = (3.5 + noise(1.0, elapsed, 14.0)).max(0.0);
+    Metrics {
+        memory,
+        cpu,
+        p50,
+        p95: p95.max(0.0),
+        p99: p99.max(0.0),
+        throughput,
+        errors5xx,
+        errors4xx,
+        active,
+        waiting,
     }
 }
 
-fn chart_value(base: f32, amplitude: f32, phase: f32, point: usize, time: f32) -> f32 {
-    let x = point as f32;
-    let wave =
-        (x * 0.055 + time * 1.35 + phase).sin() + (x * 0.19 + time * 2.1 + phase).sin() * 0.14;
-    base + wave * amplitude
+fn source_value(source: &str, metrics: Metrics) -> Option<f32> {
+    Some(match source {
+        "latency.p50" => metrics.p50,
+        "latency.p95" => metrics.p95,
+        "latency.p99" => metrics.p99,
+        "throughput" => metrics.throughput,
+        "memory" => metrics.memory,
+        "cpu" => metrics.cpu,
+        "errors.5xx" => metrics.errors5xx,
+        "errors.4xx" => metrics.errors4xx,
+        "connections.active" => metrics.active,
+        "connections.waiting" => metrics.waiting,
+        _ => return None,
+    })
+}
+
+/// Each chart shows five samples per second, oldest at x=0.
+fn sample_time(now: f32, point: usize) -> f32 {
+    let span = (CHART_POINTS - 1) as f32 * 0.2;
+    (now - span + point as f32 * 0.2).max(0.0)
+}
+
+fn chart_value(source: Option<&str>, point: usize, time: f32) -> f32 {
+    let source = source.unwrap_or("latency.p50");
+    source_value(source, metrics(sample_time(time, point))).unwrap_or(0.0)
+}
+
+fn chart_bounds(spec: &ChartSpec, time: f32, hidden: &[bool]) -> (f32, f32) {
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for (index, series) in spec.series.iter().enumerate() {
+        if hidden.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        let source = series.source.as_deref();
+        for point in 0..CHART_POINTS {
+            let value = chart_value(source, point, time);
+            lo = lo.min(value);
+            hi = hi.max(value);
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() {
+        lo = 0.0;
+        hi = 1.0;
+    }
+    if (hi - lo).abs() < f32::EPSILON {
+        hi = lo + 1.0;
+    }
+    let padding = (hi - lo) * 0.08;
+    (
+        spec.y_min.unwrap_or((lo - padding).max(0.0)),
+        spec.y_max.unwrap_or(hi + padding),
+    )
 }
 
 fn draw_chart(
@@ -737,8 +902,7 @@ fn draw_chart(
 
     let xlo = 0.0;
     let xhi = CHART_POINTS as f32;
-    let ylo = 20.0;
-    let yhi = 120.0;
+    let (ylo, yhi) = chart_bounds(spec, time, hidden);
     let sx = |x: f32| left + (x - xlo) / (xhi - xlo) * plot_w;
     let sy = |y: f32| plot_bottom - (y - ylo) / (yhi - ylo) * plot_h;
     for tick in 0..=5 {
@@ -780,19 +944,19 @@ fn draw_chart(
         if hidden.get(index).copied().unwrap_or(false) {
             continue;
         }
-        let (base, amplitude, phase) = source_params(series.source.as_deref(), index);
         let color = series
             .color
             .unwrap_or(CHART_COLORS[index % CHART_COLORS.len()]);
         let mut points = Vec::with_capacity(CHART_POINTS);
         for point in 0..CHART_POINTS {
-            let y = chart_value(base, amplitude, phase, point, time);
+            let y = chart_value(series.source.as_deref(), point, time).clamp(ylo, yhi);
             points.push((sx(point as f32), sy(y)));
         }
         if series.smooth {
             points = smooth(&points, style.smooth_steps);
         }
         let paint = series.width.unwrap_or(style.line_width);
+        let gradient = series.color2;
         if series.kind == SeriesKind::Area {
             painter.area(
                 &format!("{}-{}-fill", spec.id, index),
@@ -810,13 +974,24 @@ fn draw_chart(
                 color,
                 style.glow * 0.35,
             );
-            painter.polyline(
-                &format!("{}-{}-glow-inner", spec.id, index),
-                &points,
-                paint + style.glow_width * 0.8,
-                color,
-                style.glow * 0.72,
-            );
+            if let Some(color2) = gradient {
+                painter.polyline_gradient(
+                    &format!("{}-{}-glow-inner", spec.id, index),
+                    &points,
+                    paint + style.glow_width * 0.8,
+                    color,
+                    color2,
+                    style.glow * 0.72,
+                );
+            } else {
+                painter.polyline(
+                    &format!("{}-{}-glow-inner", spec.id, index),
+                    &points,
+                    paint + style.glow_width * 0.8,
+                    color,
+                    style.glow * 0.72,
+                );
+            }
         }
         if series.kind == SeriesKind::Scatter {
             painter.points(
@@ -883,8 +1058,7 @@ fn draw_chart(
             if hidden.get(index).copied().unwrap_or(false) {
                 continue;
             }
-            let (base, amplitude, phase) = source_params(series.source.as_deref(), index);
-            let value = chart_value(base, amplitude, phase, nearest, time);
+            let value = chart_value(series.source.as_deref(), nearest, time);
             let color = series
                 .color
                 .unwrap_or(CHART_COLORS[index % CHART_COLORS.len()]);

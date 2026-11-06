@@ -15,6 +15,9 @@ pub struct WindowRenderer {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
+    samples: u32,
+    msaa: Option<wgpu::Texture>,
+    msaa_size: (u32, u32),
 }
 
 impl WindowRenderer {
@@ -53,11 +56,23 @@ impl WindowRenderer {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        let renderer = Renderer::from_device(device, queue, format)?;
+        let samples = if adapter
+            .get_texture_format_features(format)
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4)
+        {
+            4
+        } else {
+            1
+        };
+        let renderer = Renderer::from_device_sampled(device, queue, format, samples)?;
         Ok(Self {
             surface,
             config,
             renderer,
+            samples,
+            msaa: None,
+            msaa_size: (0, 0),
         })
     }
 
@@ -71,7 +86,40 @@ impl WindowRenderer {
         }
         self.config.width = size.width;
         self.config.height = size.height;
+        self.msaa = None;
+        self.msaa_size = (0, 0);
         self.surface.configure(self.renderer.device(), &self.config);
+    }
+
+    fn ensure_msaa(&mut self) -> Option<wgpu::TextureView> {
+        if self.samples <= 1 {
+            return None;
+        }
+        let size = (self.config.width, self.config.height);
+        if self.msaa.is_none() || self.msaa_size != size {
+            let texture = self
+                .renderer
+                .device()
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("soil-window msaa"),
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: self.samples,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+            self.msaa = Some(texture);
+            self.msaa_size = size;
+        }
+        self.msaa
+            .as_ref()
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()))
     }
 
     /// Draw directly into the current swapchain image.
@@ -80,8 +128,19 @@ impl WindowRenderer {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.renderer
-            .draw_to(scene, self.config.width, self.config.height, theme, &view)?;
+        if let Some(msaa) = self.ensure_msaa() {
+            self.renderer.draw_to_resolve(
+                scene,
+                self.config.width,
+                self.config.height,
+                theme,
+                &msaa,
+                &view,
+            )?;
+        } else {
+            self.renderer
+                .draw_to(scene, self.config.width, self.config.height, theme, &view)?;
+        }
         output.present();
         Ok(())
     }

@@ -336,6 +336,9 @@ pub struct Polyline {
     pub ink: Option<Ink>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rgb: Option<[u8; 3]>,
+    /// Optional end colour. The renderer interpolates along the stroke.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgb2: Option<[u8; 3]>,
     /// Stroke width in local scene units.
     #[serde(default = "unit")]
     pub width: f32,
@@ -389,8 +392,10 @@ impl Polyline {
 pub struct Points {
     /// At least one point. Each point is `[x, y]` in local scene units.
     pub points: Vec<[f32; 2]>,
-    /// Local width and height of each square point.
+    /// Local width and height of each point.
     pub size: [f32; 2],
+    #[serde(default)]
+    pub shape: PointShape,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ink: Option<Ink>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -419,6 +424,14 @@ impl Points {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PointShape {
+    #[default]
+    Square,
+    Circle,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

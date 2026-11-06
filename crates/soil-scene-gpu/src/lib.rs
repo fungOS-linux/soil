@@ -81,6 +81,9 @@ pub struct Frame {
 struct Vertex {
     pos: [f32; 2],
     color: [f32; 4],
+    local: [f32; 2],
+    extent: [f32; 2],
+    radius: f32,
 }
 
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -95,18 +98,35 @@ const RECT_SHADER: &str = r#"
 struct VertexIn {
   @location(0) pos: vec2<f32>,
   @location(1) color: vec4<f32>,
+  @location(2) local: vec2<f32>,
+  @location(3) extent: vec2<f32>,
+  @location(4) radius: f32,
 };
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
   @location(0) color: vec4<f32>,
+  @location(1) local: vec2<f32>,
+  @location(2) extent: vec2<f32>,
+  @location(3) radius: f32,
 };
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
-  return VertexOut(vec4<f32>(in.pos, 0.0, 1.0), in.color);
+  return VertexOut(vec4<f32>(in.pos, 0.0, 1.0), in.color, in.local, in.extent, in.radius);
 }
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-  return in.color;
+  // Negative radius marks geometry that is not a rounded quad (lines,
+  // triangles, area strips). Those keep their exact vertex coverage.
+  if (in.radius < 0.0) {
+    return in.color;
+  }
+  let p = in.local * in.extent;
+  let r = clamp(in.radius, 0.0, min(in.extent.x, in.extent.y));
+  let q = abs(p) - in.extent + vec2<f32>(r, r);
+  let d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+  let aa = max(fwidth(d), 0.00001);
+  let coverage = 1.0 - smoothstep(0.0, aa, d);
+  return vec4<f32>(in.color.rgb, in.color.a * coverage);
 }
 "#;
 
@@ -168,7 +188,7 @@ impl Renderer {
             experimental_features: Default::default(),
         }))
         .context("request a GPU device")?;
-        Self::from_device(device, queue, wgpu::TextureFormat::Rgba8Unorm)
+        Self::from_device_sampled(device, queue, wgpu::TextureFormat::Rgba8Unorm, 1)
     }
 
     /// Build the pipelines for an existing device. Native window hosts use this
@@ -177,6 +197,15 @@ impl Renderer {
         device: wgpu::Device,
         queue: wgpu::Queue,
         format: wgpu::TextureFormat,
+    ) -> Result<Self> {
+        Self::from_device_sampled(device, queue, format, 1)
+    }
+
+    pub fn from_device_sampled(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        format: wgpu::TextureFormat,
+        samples: u32,
     ) -> Result<Self> {
         let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("soil-scene-gpu rects"),
@@ -191,7 +220,13 @@ impl Renderer {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32x4,
+                        2 => Float32x2,
+                        3 => Float32x2,
+                        4 => Float32
+                    ],
                 }],
                 compilation_options: Default::default(),
             },
@@ -207,7 +242,10 @@ impl Renderer {
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                ..Default::default()
+            },
             multiview: None,
             cache: None,
         });
@@ -241,7 +279,10 @@ impl Renderer {
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                ..Default::default()
+            },
             multiview: None,
             cache: None,
         });
@@ -283,6 +324,30 @@ impl Renderer {
         height: u32,
         theme: Theme,
         target: &wgpu::TextureView,
+    ) -> Result<()> {
+        self.draw_to_inner(scene, width, height, theme, target, None)
+    }
+
+    pub fn draw_to_resolve(
+        &mut self,
+        scene: &soil_scene::Scene,
+        width: u32,
+        height: u32,
+        theme: Theme,
+        target: &wgpu::TextureView,
+        resolve: &wgpu::TextureView,
+    ) -> Result<()> {
+        self.draw_to_inner(scene, width, height, theme, target, Some(resolve))
+    }
+
+    fn draw_to_inner(
+        &mut self,
+        scene: &soil_scene::Scene,
+        width: u32,
+        height: u32,
+        theme: Theme,
+        target: &wgpu::TextureView,
+        resolve: Option<&wgpu::TextureView>,
     ) -> Result<()> {
         anyhow::ensure!(width > 0 && height > 0, "frame needs a non-zero extent");
         anyhow::ensure!(
@@ -356,7 +421,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: resolve,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: theme.background[0] as f64 / 255.0,
@@ -364,7 +429,11 @@ impl Renderer {
                             b: theme.background[2] as f64 / 255.0,
                             a: 1.0,
                         }),
-                        store: wgpu::StoreOp::Store,
+                        store: if resolve.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                 })],
                 depth_stencil_attachment: None,
@@ -491,6 +560,15 @@ pub fn render(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) 
     renderer.render(scene, width, height, theme)
 }
 
+fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        (a[0] as f32 + (b[0] as f32 - a[0] as f32) * t) as u8,
+        (a[1] as f32 + (b[1] as f32 - a[1] as f32) * t) as u8,
+        (a[2] as f32 + (b[2] as f32 - a[2] as f32) * t) as u8,
+    ]
+}
+
 fn rgb_or_ink(theme: Theme, rgb: Option<[u8; 3]>, semantic: Option<soil_scene::Ink>) -> [u8; 3] {
     rgb.unwrap_or_else(|| ink(theme, semantic))
 }
@@ -572,7 +650,16 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                 let color = rgb_or_ink(theme, rect.rgb, rect.ink);
                 // Scene translation is the top-left in a y-up space; scale is
                 // positive down, so the quad spans `y - h .. y`.
-                push_quad(&mut out, x, y - h, x + w, y, color, rect.opacity);
+                push_quad(
+                    &mut out,
+                    x,
+                    y - h,
+                    x + w,
+                    y,
+                    color,
+                    rect.opacity,
+                    rect.radius,
+                );
             }
             soil_scene::Content::Area(area) => {
                 let color = rgb_or_ink(theme, area.rgb, area.ink);
@@ -599,6 +686,11 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                 let alpha = points.opacity.clamp(0.0, 1.0);
                 let half_w = points.size[0] * 0.5 * w;
                 let half_h = points.size[1] * 0.5 * h;
+                let radius = if points.shape == soil_scene::PointShape::Circle {
+                    half_w.min(half_h)
+                } else {
+                    0.0
+                };
                 for point in &points.points {
                     let px = x + point[0] * w;
                     let py = y + point[1] * h;
@@ -610,6 +702,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                         py + half_h,
                         color,
                         alpha,
+                        radius,
                     );
                 }
             }
@@ -648,6 +741,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                             top,
                             color,
                             heatmap.opacity.clamp(0.0, 1.0),
+                            0.0,
                         );
                     }
                 }
@@ -679,6 +773,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                         high.max(low),
                         color,
                         alpha,
+                        0.0,
                     );
                     let top = open.min(close);
                     let bottom = open.max(close);
@@ -690,11 +785,13 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                         bottom.max(top + pixel_y),
                         color,
                         alpha,
+                        0.0,
                     );
                 }
             }
             soil_scene::Content::Polyline(polyline) => {
                 let color = rgb_or_ink(theme, polyline.rgb, polyline.ink);
+                let color2 = polyline.rgb2;
                 let alpha = polyline.opacity.clamp(0.0, 1.0);
                 let half = polyline.width * 0.5;
                 let points: Vec<[f32; 2]> = polyline
@@ -702,6 +799,17 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                     .iter()
                     .map(|point| [x + point[0] * w, y + point[1] * h])
                     .collect();
+                let min_x = points.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+                let max_x = points
+                    .iter()
+                    .map(|p| p[0])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let span = (max_x - min_x).max(0.0001);
+                let color_at = |px: f32| {
+                    color2
+                        .map(|end| lerp_rgb(color, end, ((px - min_x) / span).clamp(0.0, 1.0)))
+                        .unwrap_or(color)
+                };
                 for pair in points.windows(2) {
                     let [x1, y1] = pair[0];
                     let [x2, y2] = pair[1];
@@ -713,13 +821,14 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                     }
                     let nx = -dy / length * half;
                     let ny = dx / length * half;
+                    let segment_color = color_at((x1 + x2) * 0.5);
                     push_segment(
                         &mut out,
                         [x1 + nx, y1 + ny],
                         [x2 + nx, y2 + ny],
                         [x2 - nx, y2 - ny],
                         [x1 - nx, y1 - ny],
-                        color,
+                        segment_color,
                         alpha,
                     );
                 }
@@ -732,7 +841,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                         half,
                         polyline.join,
                         polyline.miter_limit,
-                        color,
+                        color_at(points[index][0]),
                         alpha,
                     );
                 }
@@ -770,6 +879,9 @@ fn push_triangle(
         out.push(Vertex {
             pos: [point[0] / 4.0, point[1] / 4.0],
             color: rgba,
+            local: [0.0, 0.0],
+            extent: [0.0, 0.0],
+            radius: -1.0,
         });
     }
 }
@@ -856,6 +968,7 @@ fn push_join(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_quad(
     out: &mut Vec<Vertex>,
     x0: f32,
@@ -864,6 +977,7 @@ fn push_quad(
     y1: f32,
     color: [u8; 3],
     alpha: f32,
+    radius: f32,
 ) {
     let alpha = alpha.clamp(0.0, 1.0);
     let c = [
@@ -872,17 +986,21 @@ fn push_quad(
         color[2] as f32 / 255.0,
         alpha,
     ];
-    for (vx, vy) in [
-        (x0 / 4.0, y0 / 4.0),
-        (x1 / 4.0, y0 / 4.0),
-        (x1 / 4.0, y1 / 4.0),
-        (x0 / 4.0, y0 / 4.0),
-        (x1 / 4.0, y1 / 4.0),
-        (x0 / 4.0, y1 / 4.0),
+    let extent = [(x1 - x0) / 8.0, (y1 - y0) / 8.0];
+    for (vx, vy, lx, ly) in [
+        (x0 / 4.0, y0 / 4.0, -1.0, -1.0),
+        (x1 / 4.0, y0 / 4.0, 1.0, -1.0),
+        (x1 / 4.0, y1 / 4.0, 1.0, 1.0),
+        (x0 / 4.0, y0 / 4.0, -1.0, -1.0),
+        (x1 / 4.0, y1 / 4.0, 1.0, 1.0),
+        (x0 / 4.0, y1 / 4.0, -1.0, 1.0),
     ] {
         out.push(Vertex {
             pos: [vx, vy],
             color: c,
+            local: [lx, ly],
+            extent,
+            radius: radius / 4.0,
         });
     }
 }
@@ -928,6 +1046,9 @@ fn push_segment_gradient(
         out.push(Vertex {
             pos: [point[0] / 4.0, point[1] / 4.0],
             color: rgba,
+            local: [0.0, 0.0],
+            extent: [0.0, 0.0],
+            radius: -1.0,
         });
     }
 }
@@ -1247,6 +1368,7 @@ mod tests {
                 points: vec![[-3.0, -2.0], [3.0, 2.0]],
                 ink: Some(soil_scene::Ink::Primary),
                 rgb: None,
+                rgb2: None,
                 width: 0.1,
                 opacity: 1.0,
                 join: soil_scene::LineJoin::Miter,

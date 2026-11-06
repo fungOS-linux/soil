@@ -63,7 +63,7 @@ fn main() -> anyhow::Result<()> {
     live.set_scale(scale);
     live.set_pointer(pointer);
     if time > 0.0 {
-        live.advance(time);
+        live.seek(time);
     }
     let frame = live.render(width, height)?;
     std::fs::write(&rgba_path, &frame.rgba)?;
