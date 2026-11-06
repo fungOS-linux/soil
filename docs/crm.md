@@ -190,6 +190,25 @@ The Spore never sees a book path. Contacts, calls and mail stay in personal
 books; the shared CRM holds the relationship and references them by stable id
 or contact token.
 
+Multiple CRMs are separate namespaces:
+
+```text
+crm                 default/personal CRM
+crm:fpl             FPL shared CRM
+crm:puget-audio     Puget Audio shared CRM
+crm:new-ancients    New Ancients shared CRM
+```
+
+Invoke the Spore with:
+
+```text
+--crm crm:fpl pipeline
+--crm crm:puget-audio account a-acme
+```
+
+Each shared CRM can have its own book and grants. Elmers projects the same
+Espo accounts into each brand book with a `brand` filter.
+
 There is no contact merge and no bulk sharing. `contact link` links a personal
 contact to an account without exposing it. `contact share` writes only an
 explicit first-name + token projection; `contact unshare` removes it. Calls and

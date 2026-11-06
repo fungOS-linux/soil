@@ -205,6 +205,7 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
         root.path(),
         vec![
             Namespace::write("crm", "team/test/crm", "crm"),
+            Namespace::read("crm:fpl", "team/test/crm", "crm"),
             Namespace::read("contacts", "personal/test/contacts", "contact"),
             Namespace::write("messages", "personal/test/messages", "message"),
             Namespace::write("calls", "personal/test/calls", "call"),
@@ -243,6 +244,17 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
         .map_err(anyhow::Error::msg)?;
     bindings
         .call_run(&mut store, &["pipeline".into()])?
+        .map_err(anyhow::Error::msg)?;
+    bindings
+        .call_run(
+            &mut store,
+            &[
+                "--crm".into(),
+                "crm:fpl".into(),
+                "pipeline".into(),
+                "co-fpl".into(),
+            ],
+        )?
         .map_err(anyhow::Error::msg)?;
     bindings
         .call_run(&mut store, &["accounts".into()])?

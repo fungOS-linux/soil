@@ -5,7 +5,7 @@ id = "dev.fungos.crm"
 name = "crm"
 version = "0.1.0"
 license = "Apache-2.0 OR MIT"
-summary = "CRM Spore over namespaced records"
+summary = "CRM Spore over namespaced records, with per-brand CRM namespaces and a pipeline board"
 
 [engine]
 soil = ">=0.1"

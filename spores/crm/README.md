@@ -13,6 +13,17 @@ The host maps namespace names to books and enforces read/write grants. The
 Spore never sees a host path. Roles/Mycelium decide which namespace grants are
 linked.
 
+One Spore can target several CRMs:
+
+```sh
+--crm crm
+--crm crm:fpl
+--crm crm:puget-audio
+--crm crm:new-ancients
+```
+
+Each namespace is a separate shared CRM book. Personal namespaces stay the same.
+
 ## Actions
 
 ```text
@@ -46,6 +57,11 @@ shared projection      explicit first name + token only
 `contact link` does not share anything. `contact share` is required before a
 team view sees a first-name projection. Calls and emails written by this Spore
 go to the personal `calls` / `messages` namespaces with `visibility = private`.
+
+## UI
+
+`ui/editor.lua` renders either the account detail view or a pipeline board. The
+snapshot carries `mode = "pipeline"` and `pipeline.stages[]` with cards.
 
 ## Build
 

@@ -36,7 +36,7 @@ const THREAD_SCHEMA: &str = "fungos.conversation/thread@1";
 const MESSAGE_SCHEMA: &str = "fungos.conversation/message@1";
 const LINK_SCHEMA: &str = "fungos.graph/link";
 
-const CRM: &str = "crm";
+const DEFAULT_CRM: &str = "crm";
 const CONTACTS: &str = "contacts";
 const CALLS: &str = "calls";
 const MESSAGES: &str = "messages";
@@ -89,6 +89,7 @@ struct TimelineFilter {
 }
 
 struct Dataset {
+    crm_namespace: String,
     crm: Vec<Row>,
     contacts: Vec<Row>,
     calls: Vec<Row>,
@@ -101,8 +102,9 @@ export!(Component);
 
 impl Guest for Component {
     fn run(args: Vec<String>) -> Result<(), String> {
+        let (crm, args) = parse_crm(args)?;
         let action = args.first().map(String::as_str).unwrap_or("accounts");
-        let data = Dataset::load()?;
+        let data = Dataset::load(crm)?;
         match action {
             "accounts" => print_json("accounts", &data.accounts()?),
             "account" => {
@@ -131,7 +133,7 @@ impl Guest for Component {
                 print_json("activity", &value);
             }
             "opportunity" if args.get(1).map(String::as_str) == Some("stage") => {
-                let value = set_opportunity_stage(&args)?;
+                let value = set_opportunity_stage(&data.crm_namespace, &args)?;
                 print_json("opportunity", &value);
             }
             "contact" if args.get(1).map(String::as_str) == Some("link") => {
@@ -143,7 +145,7 @@ impl Guest for Component {
                 print_json("contact", &value);
             }
             "contact" if args.get(1).map(String::as_str) == Some("unshare") => {
-                let value = unshare_contact(&args)?;
+                let value = unshare_contact(&data.crm_namespace, &args)?;
                 print_json("contact", &value);
             }
             "contacts" if args.get(1).map(String::as_str) == Some("shared") => {
@@ -178,7 +180,9 @@ impl Guest for Component {
                     "call add <id> <account-id> <title> <occurred-at> [summary]",
                     "email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>",
                 ],
-                "namespaces": [CRM, CONTACTS, CALLS, MESSAGES],
+                "crm": DEFAULT_CRM,
+                "usage": "--crm <namespace> <action> ...",
+                "namespaces": [DEFAULT_CRM, CONTACTS, CALLS, MESSAGES],
             })),
             other => return Err(format!("unknown action {other:?}; use help")),
         }
@@ -187,9 +191,10 @@ impl Guest for Component {
 }
 
 impl Dataset {
-    fn load() -> Result<Self, String> {
+    fn load(crm: String) -> Result<Self, String> {
         Ok(Self {
-            crm: load_namespace(CRM, true)?,
+            crm_namespace: crm.clone(),
+            crm: load_namespace(&crm, true)?,
             contacts: load_namespace(CONTACTS, false)?,
             calls: load_namespace(CALLS, false)?,
             messages: load_namespace(MESSAGES, false)?,
@@ -749,7 +754,7 @@ fn add_activity(data: &Dataset, args: &[String]) -> Result<Value, String> {
         "source": "spore",
         "source_id": id,
     });
-    let stored = put_record(CRM, id, ACTIVITY_SCHEMA, body)?;
+    let stored = put_record(&data.crm_namespace, id, ACTIVITY_SCHEMA, body)?;
     Ok(json!({
         "id": id,
         "schema": ACTIVITY_SCHEMA,
@@ -761,19 +766,19 @@ fn add_activity(data: &Dataset, args: &[String]) -> Result<Value, String> {
     }))
 }
 
-fn set_opportunity_stage(args: &[String]) -> Result<Value, String> {
+fn set_opportunity_stage(crm: &str, args: &[String]) -> Result<Value, String> {
     let id = args.get(2).ok_or_else(|| {
         "usage: opportunity stage <opportunity-id> <stage>".to_string()
     })?;
     let stage = args.get(3).ok_or_else(|| "opportunity stage: missing stage".to_string())?;
-    let entry = records::get(&key(CRM, id)).map_err(|error| format!("{error:?}"))?;
+    let entry = records::get(&key(crm, id)).map_err(|error| format!("{error:?}"))?;
     if entry.schema != OPPORTUNITY_SCHEMA {
         return Err(format!("{id} is {}, not an opportunity", entry.schema));
     }
     let mut body: Value =
         serde_json::from_slice(&entry.body).map_err(|error| format!("decode {id}: {error}"))?;
     body["stage"] = Value::String(stage.clone());
-    let stored = put_record(CRM, id, OPPORTUNITY_SCHEMA, body)?;
+    let stored = put_record(crm, id, OPPORTUNITY_SCHEMA, body)?;
     Ok(json!({
         "id": id,
         "stage": stage,
@@ -806,7 +811,7 @@ fn link_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
         .ok_or_else(|| format!("contact {contact_id} has no contact_token"))?;
     let assignment_id = format!("ac-{account_id}-{contact_id}");
     let stored = put_record(
-        CRM,
+        &data.crm_namespace,
         &assignment_id,
         ASSIGNMENT_SCHEMA,
         json!({
@@ -854,7 +859,7 @@ fn share_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
         .unwrap_or_else(|| token.to_string());
     let projection_id = format!("proj-{account_id}-{}", contact.id);
     let stored = put_record(
-        CRM,
+        &data.crm_namespace,
         &projection_id,
         PROJECTION_SCHEMA,
         json!({
@@ -873,7 +878,7 @@ fn share_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
     }))
 }
 
-fn unshare_contact(args: &[String]) -> Result<Value, String> {
+fn unshare_contact(crm: &str, args: &[String]) -> Result<Value, String> {
     let account_id = args
         .get(2)
         .ok_or_else(|| "usage: contact unshare <account-id> <contact-id>".to_string())?;
@@ -881,7 +886,7 @@ fn unshare_contact(args: &[String]) -> Result<Value, String> {
         .get(3)
         .ok_or_else(|| "contact unshare: missing contact id".to_string())?;
     let projection_id = format!("proj-{account_id}-{contact_id}");
-    records::delete(&key(CRM, &projection_id))
+    records::delete(&key(crm, &projection_id))
         .map_err(|error| format!("unshare {projection_id}: {error:?}"))?;
     Ok(json!({ "id": projection_id, "shared": false }))
 }
@@ -1010,6 +1015,24 @@ fn put_record(
         body,
     })
     .map_err(|error| format!("write {id}: {error:?}"))
+}
+
+fn parse_crm(args: Vec<String>) -> Result<(String, Vec<String>), String> {
+    if let Some(first) = args.first() {
+        if first == "--crm" {
+            let name = args
+                .get(1)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| "--crm requires a namespace such as crm or crm:fpl".to_string())?;
+            return Ok((name.clone(), args[2..].to_vec()));
+        }
+        if let Some(name) = first.strip_prefix("--crm=")
+            && !name.is_empty()
+        {
+            return Ok((name.to_string(), args[1..].to_vec()));
+        }
+    }
+    Ok((DEFAULT_CRM.to_string(), args))
 }
 
 fn load_namespace(name: &str, required: bool) -> Result<Vec<Row>, String> {
