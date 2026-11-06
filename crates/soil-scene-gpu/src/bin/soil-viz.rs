@@ -25,6 +25,7 @@ struct App {
     live: Option<LiveViz>,
     live_path: Option<String>,
     last_modified: Option<SystemTime>,
+    last_mtime_check: Instant,
     last_tick: Instant,
     fps: u32,
     scene: soil_scene::Scene,
@@ -307,15 +308,20 @@ impl ApplicationHandler for App {
         }
         let interval = Duration::from_millis(1000 / u64::from(self.fps.max(1)));
         if self.live.is_some() {
-            if let Some(path) = self.live_path.as_deref()
-                && modified(path) != self.last_modified
-            {
-                match self.reload_live() {
-                    Ok(()) => {}
-                    Err(error) => eprintln!("soil-viz: live spec reload failed: {error:#}"),
+            let now = Instant::now();
+            // `stat` on every event-loop wake shows up in profiles. Hot reload
+            // does not need sub-second granularity.
+            if now.duration_since(self.last_mtime_check) >= Duration::from_secs(1) {
+                self.last_mtime_check = now;
+                if let Some(path) = self.live_path.as_deref()
+                    && modified(path) != self.last_modified
+                {
+                    match self.reload_live() {
+                        Ok(()) => {}
+                        Err(error) => eprintln!("soil-viz: live spec reload failed: {error:#}"),
+                    }
                 }
             }
-            let now = Instant::now();
             if !self.paused && now.duration_since(self.last_tick) >= interval {
                 let scene = self.live.as_mut().and_then(|live| live.tick(now));
                 if let Some(scene) = scene {
@@ -419,6 +425,7 @@ fn main() -> anyhow::Result<()> {
         live,
         live_path,
         last_modified,
+        last_mtime_check: Instant::now(),
         last_tick: Instant::now(),
         fps,
         scene,
