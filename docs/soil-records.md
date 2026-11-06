@@ -110,6 +110,65 @@ let contacts = TypedBook::<Contact>::open();
 let page = contacts.scan(None, 50)?;
 ```
 
+## Generic ingest sink
+
+`soil-records-ingest` is a loopback HTTP sink for native adapters and workflow
+engines. It is not a CRM API; it accepts schema-tagged records for an allowed
+book.
+
+```sh
+cargo run -p soil-records-host --bin soil-records-ingest -- \
+  --root ~/.local/share/fungos/records \
+  --book personal/avery/crm \
+  --schema-prefix fungos.crm/ \
+  --token-env SOIL_RECORDS_TOKEN \
+  --listen 127.0.0.1:8791
+```
+
+Single record:
+
+```json
+POST /api/records
+{
+  "book": "personal/avery/crm",
+  "id": "espo:account:a1",
+  "schema": "fungos.crm/account@1",
+  "body": { "name": "Acme" }
+}
+```
+
+Batch:
+
+```json
+POST /api/records/batch
+{
+  "records": [
+    { "book": "...", "id": "...", "schema": "...", "body": { } }
+  ]
+}
+```
+
+Delete:
+
+```json
+{ "book": "...", "id": "...", "schema": "...", "op": "delete" }
+```
+
+The sink enforces:
+
+```text
+bearer token
+book allowlist
+schema prefix allowlist
+8 MiB body cap
+1,000-record batch cap
+JSON object bodies
+```
+
+It owns no domain meaning. Elmers and other native adapters decide what records
+to project. The same records then sync to devices through the normal records
+path.
+
 ## Boundary
 
 - `soil:records` is not `soil:appdata`: records are durable, schema-tagged,

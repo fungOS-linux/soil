@@ -8,9 +8,15 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "46450ede02588e533984378bc979cb4010f9867b" }
 serde_json = "1"
+tiny_http = "0.12"
 wasmtime = { version = "50", features = ["anyhow"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[[bin]]
+name = "soil-records-ingest"
+path = "src/bin/soil-records-ingest.rs"
