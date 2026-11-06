@@ -6185,6 +6185,20 @@ name = "soil-canvas-input"
 version = "0.1.0"
 
 [[package]]
+name = "soil-command"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "soil-records-host",
+ "tempfile",
+ "toml 0.8.23",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "soil-consent"
 version = "0.1.0"
 dependencies = [
