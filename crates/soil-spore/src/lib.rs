@@ -26,6 +26,8 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
+pub mod publisher;
+
 pub const SCHEMA: u32 = 1;
 pub const LOCK_NAME: &str = "spore.lock";
 pub const SIGNATURE_DIR: &str = "signatures";
