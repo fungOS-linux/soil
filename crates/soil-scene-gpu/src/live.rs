@@ -32,12 +32,27 @@ pub struct LiveSpec {
     pub gap: f32,
     #[serde(default)]
     pub fps: Option<u32>,
+    /// Open the native window fullscreen.
+    #[serde(default)]
+    pub fullscreen: Option<bool>,
+    /// Lua-owned zoom for UI geometry and text. `1.0` fills the window at the
+    /// app's natural density; larger values show fewer, bigger elements.
+    #[serde(default = "unit_float")]
+    pub ui_scale: f32,
     #[serde(default)]
     pub layers: Vec<LayerSpec>,
 }
 
+fn unit_float() -> f32 {
+    1.0
+}
+
 fn one() -> u32 {
     1
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,6 +94,9 @@ pub struct ChartSpec {
     pub subtitle: Option<String>,
     #[serde(default)]
     pub series: Vec<SeriesSpec>,
+    /// Draw the interactive legend. Lua can hide it per chart.
+    #[serde(default = "yes")]
+    pub legend: bool,
     #[serde(default)]
     pub style: ChartStyle,
     #[serde(default)]
@@ -93,6 +111,10 @@ pub struct SeriesSpec {
     pub id: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    /// Initial visibility. The legend still shows hidden series so a click can
+    /// bring them back.
+    #[serde(default)]
+    pub visible: Option<bool>,
     #[serde(default)]
     pub kind: SeriesKind,
     #[serde(default)]
@@ -300,6 +322,8 @@ pub struct LiveViz {
     atlas_points: Vec<(f32, f32, usize)>,
     hidden: Vec<Vec<bool>>,
     scale: f32,
+    viewport: (f32, f32),
+    ui_scale: f32,
     pointer: Option<(f32, f32)>,
 }
 
@@ -321,10 +345,16 @@ impl LiveViz {
             .layers
             .iter()
             .map(|layer| match layer {
-                LayerSpec::Chart(chart) => vec![false; chart.series.len()],
+                LayerSpec::Chart(chart) => chart
+                    .series
+                    .iter()
+                    .map(|series| series.visible == Some(false))
+                    .collect(),
                 _ => Vec::new(),
             })
             .collect();
+        let viewport = (spec.width.max(1.0), spec.height.max(1.0));
+        let ui_scale = spec.ui_scale.clamp(0.5, 4.0);
         let mut live = Self {
             spec,
             theme: Theme::default(),
@@ -336,6 +366,8 @@ impl LiveViz {
             atlas_points,
             hidden,
             scale: 1.0,
+            viewport,
+            ui_scale,
             pointer: None,
         };
         live.rebuild(0.0);
@@ -343,10 +375,12 @@ impl LiveViz {
     }
 
     fn sample(index: i64) -> Sample {
-        let time = (index as f32 * SAMPLE_SECONDS).max(0.0);
+        let raw = index as f32 * SAMPLE_SECONDS;
         Sample {
-            time,
-            metrics: metrics(time),
+            // Keep the display clock non-negative while the pre-roll still has
+            // real history to draw behind the first live sample.
+            time: raw.max(0.0),
+            metrics: metrics(raw),
         }
     }
 
@@ -390,7 +424,29 @@ impl LiveViz {
         self.scale = scale.clamp(0.5, 4.0);
     }
 
-    /// Pointer position in spec/logical pixels.
+    /// Layout against the actual window instead of stretching a fixed design
+    /// canvas. Width and height are logical pixels.
+    pub fn set_viewport(&mut self, width: f32, height: f32) {
+        if width > 1.0 && height > 1.0 {
+            self.viewport = (width, height);
+        }
+    }
+
+    /// Logical window size before the Lua-owned UI zoom.
+    pub fn viewport(&self) -> (f32, f32) {
+        self.viewport
+    }
+
+    /// Design units the painter lays out in. `ui_scale > 1` shows fewer, bigger
+    /// elements; the panel fractions still span the window.
+    pub fn design_size(&self) -> (f32, f32) {
+        (
+            (self.viewport.0 / self.ui_scale).max(1.0),
+            (self.viewport.1 / self.ui_scale).max(1.0),
+        )
+    }
+
+    /// Pointer position in design pixels.
     pub fn set_pointer(&mut self, pointer: Option<(f32, f32)>) {
         self.pointer = pointer;
     }
@@ -425,12 +481,13 @@ impl LiveViz {
     pub fn scene(&self) -> Scene {
         let mut nodes = Vec::with_capacity(512);
         let gap = self.spec.gap.max(0.0);
+        let (width, height) = self.design_size();
         let mut painter = Painter::new(
             &mut nodes,
-            self.spec.width,
-            self.spec.height,
+            width,
+            height,
             self.theme,
-            self.scale,
+            self.scale * self.ui_scale,
         );
         for (layer_index, layer) in self.spec.layers.iter().enumerate() {
             match layer {
@@ -479,24 +536,26 @@ impl LiveViz {
     /// Hit-test the chart legend band. Coordinates are window pixels.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitAction> {
         let gap = self.spec.gap.max(0.0);
+        let (width, height) = self.design_size();
         for (layer_index, layer) in self.spec.layers.iter().enumerate() {
             let LayerSpec::Chart(spec) = layer else {
                 continue;
             };
-            let r = layer_rect(&spec.rect, self.spec.width, self.spec.height, gap);
-            let left = r.x + 58.0;
-            let top = r.y + 54.0;
-            let plot_h = (r.h - 92.0).max(16.0);
-            let legend_y = top + plot_h + 18.0;
-            if y < legend_y || y > legend_y + 20.0 || x < left {
+            let r = layer_rect(&spec.rect, width, height, gap);
+            let layout = chart_layout(spec, &r);
+            let Some(first) = layout.legend.first() else {
+                continue;
+            };
+            let top = first.y - 2.0;
+            let bottom = top + layout.legend_height.max(layout.legend_row_height);
+            if y < top || y > bottom {
                 continue;
             }
-            for index in 0..spec.series.len() {
-                let legend_x = left + index as f32 * 112.0;
-                if x >= legend_x && x <= legend_x + 100.0 {
+            for item in &layout.legend {
+                if x >= item.x && x <= item.x + item.width {
                     return Some(HitAction::ToggleSeries {
                         layer: layer_index,
-                        series: index,
+                        series: item.series,
                     });
                 }
             }
@@ -929,7 +988,6 @@ fn sine_wave(elapsed: f32, period: f32, amplitude: f32) -> f32 {
 /// A deterministic request-cost path. The live host owns this stream; the
 /// candle chart only names the source.
 fn cost_at(elapsed: f32) -> f32 {
-    let elapsed = elapsed.max(0.0);
     42.0 + elapsed * 0.018
         + sine_wave(elapsed, 47.0, 2.1)
         + sine_wave(elapsed, 11.0, 0.55)
@@ -938,12 +996,12 @@ fn cost_at(elapsed: f32) -> f32 {
 
 fn cost_ohlc(elapsed: f32) -> (f32, f32, f32, f32) {
     let span = 0.2;
-    let open = cost_at((elapsed - span).max(0.0));
+    let open = cost_at(elapsed - span);
     let close = cost_at(elapsed);
     let mut high = open.max(close);
     let mut low = open.min(close);
     for step in 1..=4 {
-        let sample = cost_at((elapsed - span + span * step as f32 / 5.0).max(0.0));
+        let sample = cost_at(elapsed - span + span * step as f32 / 5.0);
         high = high.max(sample);
         low = low.min(sample);
     }
@@ -952,7 +1010,6 @@ fn cost_ohlc(elapsed: f32) -> (f32, f32, f32, f32) {
 }
 
 fn metrics(elapsed: f32) -> Metrics {
-    let elapsed = elapsed.max(0.0);
     let memory = if elapsed < 60.0 {
         45.0 + noise(3.0, elapsed, 1.0) + sine_wave(elapsed, 30.0, 0.9)
     } else if elapsed < 120.0 {
@@ -1179,6 +1236,95 @@ fn series_point_color(
     series_color(series, index)
 }
 
+#[derive(Debug, Clone)]
+struct LegendItem {
+    series: usize,
+    x: f32,
+    y: f32,
+    width: f32,
+}
+
+#[derive(Debug, Clone)]
+struct ChartLayout {
+    left: f32,
+    top: f32,
+    plot_w: f32,
+    plot_h: f32,
+    plot_bottom: f32,
+    legend: Vec<LegendItem>,
+    legend_row_height: f32,
+    legend_height: f32,
+}
+
+fn approx_text_width(text: &str, size: f32) -> f32 {
+    text.chars()
+        .map(|ch| {
+            if ch.is_whitespace() {
+                size * 0.32
+            } else {
+                size * 0.58
+            }
+        })
+        .sum()
+}
+
+fn chart_layout(spec: &ChartSpec, r: &LayerRect) -> ChartLayout {
+    let left = r.x + 58.0;
+    let top = r.y + 54.0;
+    let plot_w = (r.w - 78.0).max(16.0);
+    let font = spec.style.label_size.max(9.0);
+    let mark = 12.0;
+    let gap = 16.0;
+    let row_height = (font + 9.0).max(18.0);
+    let mut legend = Vec::new();
+    let mut rows = 0usize;
+    if spec.legend {
+        let mut x = 0.0;
+        let mut row = 0usize;
+        for (index, series) in spec.series.iter().enumerate() {
+            let label = series
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("series {}", index + 1));
+            let width = mark + 6.0 + approx_text_width(&label, font);
+            if x > 0.0 && x + width > plot_w {
+                row += 1;
+                x = 0.0;
+            }
+            legend.push(LegendItem {
+                series: index,
+                x: left + x,
+                y: row as f32 * row_height,
+                width,
+            });
+            x += width + gap;
+            rows = rows.max(row + 1);
+        }
+    }
+    let legend_height = rows as f32 * row_height;
+    let legend_space = if legend.is_empty() {
+        0.0
+    } else {
+        legend_height + 10.0
+    };
+    let plot_h = (r.h - 62.0 - legend_space).max(16.0);
+    let plot_bottom = top + plot_h;
+    let legend_y = plot_bottom + 18.0;
+    for item in &mut legend {
+        item.y += legend_y;
+    }
+    ChartLayout {
+        left,
+        top,
+        plot_w,
+        plot_h,
+        plot_bottom,
+        legend,
+        legend_row_height: row_height,
+        legend_height,
+    }
+}
+
 fn draw_chart(
     painter: &mut Painter,
     spec: &ChartSpec,
@@ -1201,11 +1347,12 @@ fn draw_chart(
             [145, 155, 170],
         );
     }
-    let left = r.x + 58.0;
-    let top = r.y + 54.0;
-    let plot_w = (r.w - 78.0).max(16.0);
-    let plot_h = (r.h - 92.0).max(16.0);
-    let plot_bottom = top + plot_h;
+    let layout = chart_layout(spec, &r);
+    let left = layout.left;
+    let top = layout.top;
+    let plot_w = layout.plot_w;
+    let plot_h = layout.plot_h;
+    let plot_bottom = layout.plot_bottom;
     painter.rect(
         &format!("{}-plot", spec.id),
         left,
@@ -1498,64 +1645,77 @@ fn draw_chart(
                 }
             }
         }
+    }
 
-        let label = series
-            .label
-            .clone()
-            .unwrap_or_else(|| format!("series {}", index + 1));
-        let legend_x = left + index as f32 * 112.0;
-        let legend_y = plot_bottom + 24.0;
+    let legend_font = spec.style.label_size.max(9.0);
+    for item in &layout.legend {
+        let index = item.series;
+        let series = &spec.series[index];
+        let color = if series.kind == SeriesKind::Candle {
+            series
+                .up_color
+                .unwrap_or_else(|| series_color(series, index))
+        } else {
+            series_color(series, index)
+        };
+        let hidden_series = hidden.get(index).copied().unwrap_or(false);
+        let opacity = if hidden_series { 0.35 } else { 1.0 };
+        let mid = item.y + legend_font * 0.5;
         match series.kind {
             SeriesKind::Scatter => painter.points(
                 &format!("{}-legend-point-{index}", spec.id),
-                &[(legend_x + 6.0, legend_y)],
+                &[(item.x + 6.0, mid)],
                 6.0,
                 color,
-                1.0,
+                opacity,
             ),
             SeriesKind::Bar | SeriesKind::Candle => painter.rect(
                 &format!("{}-legend-mark-{index}", spec.id),
-                legend_x,
-                legend_y - 5.0,
+                item.x,
+                mid - 5.0,
                 11.0,
                 10.0,
-                if series.kind == SeriesKind::Candle {
-                    series.up_color.unwrap_or(color)
-                } else {
-                    color
-                },
-                1.0,
+                color,
+                opacity,
                 2.0,
             ),
             SeriesKind::Band | SeriesKind::StackedArea => painter.rect(
                 &format!("{}-legend-mark-{index}", spec.id),
-                legend_x,
-                legend_y - 4.0,
+                item.x,
+                mid - 4.0,
                 12.0,
                 8.0,
                 color,
                 if series.kind == SeriesKind::StackedArea {
-                    0.72
+                    opacity * 0.72
                 } else {
-                    0.45
+                    opacity * 0.45
                 },
                 2.0,
             ),
             _ => painter.polyline(
                 &format!("{}-legend-line-{index}", spec.id),
-                &[(legend_x, legend_y), (legend_x + 12.0, legend_y)],
+                &[(item.x, mid), (item.x + 12.0, mid)],
                 3.0,
                 color,
-                1.0,
+                opacity,
             ),
         }
+        let label = series
+            .label
+            .clone()
+            .unwrap_or_else(|| format!("series {}", index + 1));
         painter.text(
             &format!("{}-legend-{index}", spec.id),
             &label,
-            legend_x + 18.0,
-            plot_bottom + 18.0,
-            10.0,
-            [180, 190, 205],
+            item.x + 18.0,
+            item.y,
+            legend_font,
+            if hidden_series {
+                [120, 130, 145]
+            } else {
+                [180, 190, 205]
+            },
         );
     }
 
@@ -2053,6 +2213,48 @@ mod tests {
         let scene = live.advance(0.016);
         scene.validate().expect("valid scene");
         assert!(scene.nodes.len() > 20);
+    }
+
+    #[test]
+    fn legend_is_lua_visible_and_clickable() {
+        let spec: LiveSpec = serde_json::from_str(SPEC).expect("spec");
+        let live = LiveViz::new(spec.clone());
+        let chart = match &live.spec.layers[0] {
+            LayerSpec::Chart(chart) => chart,
+            _ => panic!("chart"),
+        };
+        let (width, height) = live.design_size();
+        let rect = layer_rect(&chart.rect, width, height, live.spec.gap);
+        let layout = chart_layout(chart, &rect);
+        assert_eq!(layout.legend.len(), 2);
+        let item = &layout.legend[1];
+        assert_eq!(
+            live.hit_test(item.x + 1.0, item.y + 1.0),
+            Some(HitAction::ToggleSeries {
+                layer: 0,
+                series: 1
+            })
+        );
+        let mut hidden = LiveViz::new(spec);
+        hidden.toggle_series(0, 1);
+        assert!(hidden.hidden[0][1]);
+    }
+
+    #[test]
+    fn legend_can_be_disabled_from_the_spec() {
+        let mut spec: LiveSpec = serde_json::from_str(SPEC).expect("spec");
+        if let LayerSpec::Chart(chart) = &mut spec.layers[0] {
+            chart.legend = false;
+        }
+        let live = LiveViz::new(spec);
+        let chart = match &live.spec.layers[0] {
+            LayerSpec::Chart(chart) => chart,
+            _ => panic!("chart"),
+        };
+        let (width, height) = live.design_size();
+        let rect = layer_rect(&chart.rect, width, height, live.spec.gap);
+        let layout = chart_layout(chart, &rect);
+        assert!(layout.legend.is_empty());
     }
 
     #[test]

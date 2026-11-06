@@ -61,6 +61,7 @@ fn main() -> anyhow::Result<()> {
     height = height.min(4096);
     let mut live = LiveViz::new(spec);
     live.set_scale(scale);
+    live.set_viewport(width as f32, height as f32);
     live.set_pointer(pointer);
     if time > 0.0 {
         live.seek(time);

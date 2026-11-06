@@ -17,7 +17,7 @@ use soil_scene_gpu::window::WindowRenderer;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 struct App {
     scene_path: String,
@@ -34,6 +34,7 @@ struct App {
     paused: bool,
     pointer: Point,
     modifiers: Modifiers,
+    fullscreen: bool,
     quit: bool,
 }
 
@@ -75,16 +76,9 @@ impl App {
                 if pointer.phase != PointerPhase::Press {
                     return;
                 }
-                let spec_size = self
-                    .live
-                    .as_ref()
-                    .map(|live| (live.spec().width, live.spec().height));
-                let (px, py) = if let (Some(window), Some((sw, sh))) = (&self.window, spec_size) {
-                    let size = window.inner_size();
-                    (
-                        pointer.x * sw / size.width.max(1) as f32,
-                        pointer.y * sh / size.height.max(1) as f32,
-                    )
+                let (px, py) = if let Some(live) = &self.live {
+                    let (width, height) = live.design_size();
+                    (pointer.x * width, pointer.y * height)
                 } else {
                     (pointer.x, pointer.y)
                 };
@@ -126,6 +120,16 @@ impl App {
                             }
                         }
                     }
+                    Key::Named(NamedKey::F(11)) => {
+                        self.fullscreen = !self.fullscreen;
+                        if let Some(window) = &self.window {
+                            window.set_fullscreen(if self.fullscreen {
+                                Some(Fullscreen::Borderless(None))
+                            } else {
+                                None
+                            });
+                        }
+                    }
                     Key::Character(text) if text.eq_ignore_ascii_case("q") => self.quit = true,
                     Key::Named(NamedKey::Escape) => self.quit = true,
                     _ => {}
@@ -150,9 +154,19 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let (width, height) = self
+            .live
+            .as_ref()
+            .map(|live| (live.spec().width, live.spec().height))
+            .unwrap_or((1200.0, 840.0));
         let attrs = winit::window::Window::default_attributes()
             .with_title("Soil · visualization layers")
-            .with_inner_size(winit::dpi::LogicalSize::new(1200.0, 840.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(width, height))
+            .with_fullscreen(if self.fullscreen {
+                Some(Fullscreen::Borderless(None))
+            } else {
+                None
+            });
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -169,6 +183,8 @@ impl ApplicationHandler for App {
         }
         if let Some(live) = &mut self.live {
             live.set_scale(window.scale_factor() as f32);
+            let logical = size.to_logical::<f32>(window.scale_factor());
+            live.set_viewport(logical.width, logical.height);
             self.scene = live.scene();
         }
         self.window = Some(window.clone());
@@ -190,19 +206,27 @@ impl ApplicationHandler for App {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size);
                 }
-                self.dirty = true;
                 if let Some(window) = &self.window {
+                    let logical = size.to_logical::<f32>(window.scale_factor());
+                    if let Some(live) = &mut self.live {
+                        live.set_viewport(logical.width, logical.height);
+                        self.scene = live.scene();
+                    }
                     window.request_redraw();
                 }
+                self.dirty = true;
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let Some(live) = &mut self.live {
-                    live.set_scale(scale_factor as f32);
-                    self.scene = live.scene();
-                    self.dirty = true;
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
+                if let Some(window) = &self.window {
+                    let size = window.inner_size();
+                    let logical = size.to_logical::<f32>(scale_factor);
+                    if let Some(live) = &mut self.live {
+                        live.set_scale(scale_factor as f32);
+                        live.set_viewport(logical.width, logical.height);
+                        self.scene = live.scene();
                     }
+                    self.dirty = true;
+                    window.request_redraw();
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -221,8 +245,8 @@ impl ApplicationHandler for App {
                 };
                 self.pointer = Point { x, y }.clamp_unit();
                 if let Some(live) = &mut self.live {
-                    let spec = (live.spec().width, live.spec().height);
-                    live.set_pointer(Some((self.pointer.x * spec.0, self.pointer.y * spec.1)));
+                    let (width, height) = live.design_size();
+                    live.set_pointer(Some((self.pointer.x * width, self.pointer.y * height)));
                     self.scene = live.scene();
                     self.dirty = true;
                     if let Some(window) = &self.window {
@@ -341,11 +365,14 @@ fn main() -> anyhow::Result<()> {
     let mut live_path = None;
     let mut watch = false;
     let mut fps = 60u32;
+    let mut fullscreen = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--scene" => scene_path = args.next(),
             "--live" => live_path = args.next(),
             "--watch" => watch = true,
+            "--fullscreen" => fullscreen = true,
+            "--windowed" => fullscreen = false,
             "--fps" => {
                 fps = args
                     .next()
@@ -357,15 +384,22 @@ fn main() -> anyhow::Result<()> {
             other => anyhow::bail!("unknown argument {other}"),
         }
     }
-    let (scene, live, live_path, scene_path) = if let Some(live_path) = live_path {
+    let (scene, live, live_path, scene_path, fullscreen) = if let Some(live_path) = live_path {
         let bytes = std::fs::read(&live_path)?;
         let spec: soil_scene_gpu::live::LiveSpec = serde_json::from_slice(&bytes)?;
         if let Some(spec_fps) = spec.fps {
             fps = fps.min(spec_fps.max(1));
         }
+        let fullscreen = fullscreen || spec.fullscreen.unwrap_or(false);
         let live = LiveViz::new(spec);
         let scene = live.scene();
-        (scene, Some(live), Some(live_path.clone()), live_path)
+        (
+            scene,
+            Some(live),
+            Some(live_path.clone()),
+            live_path,
+            fullscreen,
+        )
     } else {
         let scene_path = scene_path.ok_or_else(|| anyhow::anyhow!("missing --scene or --live"))?;
         let bytes = std::fs::read(&scene_path)?;
@@ -374,7 +408,7 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("scene is not a soil_scene Scene");
         };
         scene.validate().map_err(|error| anyhow::anyhow!(error))?;
-        (scene, None, None, scene_path)
+        (scene, None, None, scene_path, fullscreen)
     };
     let last_modified = modified(live_path.as_deref().unwrap_or(&scene_path));
     let event_loop = EventLoop::new()?;
@@ -394,6 +428,7 @@ fn main() -> anyhow::Result<()> {
         paused: false,
         pointer: Point::default(),
         modifiers: Modifiers::default(),
+        fullscreen,
         quit: false,
     };
     event_loop.run_app(&mut app)?;
