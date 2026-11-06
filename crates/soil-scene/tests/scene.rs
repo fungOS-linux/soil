@@ -266,7 +266,19 @@ fn chart_catalog_primitives_are_bounded() {
                 width: 0.1,
                 up_ink: Some(Ink::Success),
                 down_ink: Some(Ink::Danger),
+                up_rgb: None,
+                down_rgb: None,
                 opacity: 1.0,
+            }),
+        ),
+        node(
+            "band",
+            Content::Band(soil_scene::Band {
+                upper: vec![[0.0, 1.0], [1.0, 1.5]],
+                lower: vec![[0.0, 0.0], [1.0, 0.5]],
+                ink: Some(Ink::Warning),
+                rgb: None,
+                opacity: 0.3,
             }),
         ),
     ])
@@ -284,6 +296,21 @@ fn chart_catalog_primitives_are_bounded() {
                 max: None,
                 opacity: 1.0,
                 zero_transparent: false,
+            }),
+        )])
+        .validate()
+        .is_err()
+    );
+
+    assert!(
+        Scene::new(vec![node(
+            "bad-band",
+            Content::Band(soil_scene::Band {
+                upper: vec![[0.0, 1.0], [1.0, 1.5]],
+                lower: vec![[0.0, 0.0]],
+                ink: None,
+                rgb: None,
+                opacity: 1.0,
             }),
         )])
         .validate()

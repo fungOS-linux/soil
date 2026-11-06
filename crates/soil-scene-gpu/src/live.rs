@@ -9,7 +9,10 @@
 use std::time::Instant;
 
 use serde::Deserialize;
-use soil_scene::{Area, Content, Heatmap, Node, Points, Polyline, Rect, Scene, Text, Transform};
+use soil_scene::{
+    Area, Band, Candle, Candles, Content, Heatmap, Node, Points, Polyline, Rect, Scene, Text,
+    Transform,
+};
 
 use crate::{Frame, Theme};
 
@@ -102,6 +105,35 @@ pub struct SeriesSpec {
     pub smooth: bool,
     #[serde(default)]
     pub source: Option<String>,
+    /// Optional lower boundary for a `band` series.
+    #[serde(default)]
+    pub band_source: Option<String>,
+    /// OHLC source names for a `candle` series. `source` is the close when
+    /// `close_source` is omitted.
+    #[serde(default)]
+    pub open_source: Option<String>,
+    #[serde(default)]
+    pub high_source: Option<String>,
+    #[serde(default)]
+    pub low_source: Option<String>,
+    #[serde(default)]
+    pub close_source: Option<String>,
+    /// Bar baseline, defaults to zero.
+    #[serde(default)]
+    pub baseline: Option<f32>,
+    /// Fraction of a category slot used by a grouped bar series.
+    #[serde(default)]
+    pub bar_width: Option<f32>,
+    #[serde(default)]
+    pub bar_radius: Option<f32>,
+    /// Sample every Nth point. Useful for bars and candles, where one mark per
+    /// 5 Hz sample is denser than the eye can resolve.
+    #[serde(default)]
+    pub stride: Option<usize>,
+    #[serde(default)]
+    pub up_color: Option<[u8; 3]>,
+    #[serde(default)]
+    pub down_color: Option<[u8; 3]>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -111,6 +143,11 @@ pub enum SeriesKind {
     Line,
     Area,
     Scatter,
+    Bar,
+    Candle,
+    Band,
+    #[serde(rename = "stacked_area")]
+    StackedArea,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -620,6 +657,89 @@ impl<'a> Painter<'a> {
         });
     }
 
+    fn band(
+        &mut self,
+        id: &str,
+        upper: &[(f32, f32)],
+        lower: &[(f32, f32)],
+        color: [u8; 3],
+        opacity: f32,
+    ) {
+        if upper.len() < 2 || upper.len() != lower.len() {
+            return;
+        }
+        self.z += 0.01;
+        let upper = upper
+            .iter()
+            .map(|(x, y)| [self.nx(*x), self.ny(*y)])
+            .collect();
+        let lower = lower
+            .iter()
+            .map(|(x, y)| [self.nx(*x), self.ny(*y)])
+            .collect();
+        self.nodes.push(Node {
+            id: id.into(),
+            parent: None,
+            transition_ms: Some(0),
+            transform: Transform {
+                translation: [0.0, 0.0, self.z],
+                rotation: [0.0; 3],
+                scale: [1.0, 1.0, 1.0],
+            },
+            content: Content::Band(Band {
+                upper,
+                lower,
+                ink: None,
+                rgb: Some(color),
+                opacity,
+            }),
+        });
+    }
+
+    fn candles(
+        &mut self,
+        id: &str,
+        candles: &[(f32, Candle)],
+        width: f32,
+        up: [u8; 3],
+        down: [u8; 3],
+        opacity: f32,
+    ) {
+        if candles.is_empty() {
+            return;
+        }
+        self.z += 0.02;
+        let candles = candles
+            .iter()
+            .map(|(x, candle)| Candle {
+                x: self.nx(*x),
+                open: self.ny(candle.open),
+                high: self.ny(candle.high),
+                low: self.ny(candle.low),
+                close: self.ny(candle.close),
+            })
+            .collect();
+        self.nodes.push(Node {
+            id: id.into(),
+            parent: None,
+            transition_ms: Some(0),
+            transform: Transform {
+                translation: [0.0, 0.0, self.z],
+                rotation: [0.0; 3],
+                scale: [1.0, 1.0, 1.0],
+            },
+            content: Content::Candles(Candles {
+                candles,
+                width: self.sw(width),
+                up_ink: None,
+                down_ink: None,
+                up_rgb: Some(up),
+                down_rgb: Some(down),
+                opacity,
+            }),
+        });
+    }
+
     fn points(&mut self, id: &str, points: &[(f32, f32)], size: f32, color: [u8; 3], opacity: f32) {
         if points.is_empty() {
             return;
@@ -725,6 +845,10 @@ struct Metrics {
     errors4xx: f32,
     active: f32,
     waiting: f32,
+    cost_open: f32,
+    cost_high: f32,
+    cost_low: f32,
+    cost_close: f32,
 }
 
 fn clamp(value: f32, min: f32, max: f32) -> f32 {
@@ -738,6 +862,31 @@ fn noise(range: f32, elapsed: f32, seed: f32) -> f32 {
 
 fn sine_wave(elapsed: f32, period: f32, amplitude: f32) -> f32 {
     amplitude * (std::f32::consts::TAU * elapsed / period).sin()
+}
+
+/// A deterministic request-cost path. The live host owns this stream; the
+/// candle chart only names the source.
+fn cost_at(elapsed: f32) -> f32 {
+    let elapsed = elapsed.max(0.0);
+    42.0 + elapsed * 0.018
+        + sine_wave(elapsed, 47.0, 2.1)
+        + sine_wave(elapsed, 11.0, 0.55)
+        + noise(0.32, elapsed, 21.0)
+}
+
+fn cost_ohlc(elapsed: f32) -> (f32, f32, f32, f32) {
+    let span = 0.2;
+    let open = cost_at((elapsed - span).max(0.0));
+    let close = cost_at(elapsed);
+    let mut high = open.max(close);
+    let mut low = open.min(close);
+    for step in 1..=4 {
+        let sample = cost_at((elapsed - span + span * step as f32 / 5.0).max(0.0));
+        high = high.max(sample);
+        low = low.min(sample);
+    }
+    let wick = 0.06 + noise(0.03, elapsed, 22.0).abs();
+    (open, high + wick, (low - wick).max(0.0), close)
 }
 
 fn metrics(elapsed: f32) -> Metrics {
@@ -774,6 +923,7 @@ fn metrics(elapsed: f32) -> Metrics {
     let error_base = (p99 - 400.0).max(0.0) * 0.02;
     let errors5xx = (error_base.powf(1.5) + noise(0.5, elapsed, 13.0)).max(0.0);
     let errors4xx = (3.5 + noise(1.0, elapsed, 14.0)).max(0.0);
+    let (cost_open, cost_high, cost_low, cost_close) = cost_ohlc(elapsed);
     Metrics {
         memory,
         cpu,
@@ -785,6 +935,10 @@ fn metrics(elapsed: f32) -> Metrics {
         errors4xx,
         active,
         waiting,
+        cost_open,
+        cost_high,
+        cost_low,
+        cost_close,
     }
 }
 
@@ -800,6 +954,10 @@ fn source_value(source: &str, metrics: Metrics) -> Option<f32> {
         "errors.4xx" => metrics.errors4xx,
         "connections.active" => metrics.active,
         "connections.waiting" => metrics.waiting,
+        "cost" | "cost.close" => metrics.cost_close,
+        "cost.open" => metrics.cost_open,
+        "cost.high" => metrics.cost_high,
+        "cost.low" => metrics.cost_low,
         _ => return None,
     })
 }
@@ -815,19 +973,110 @@ fn chart_value(source: Option<&str>, point: usize, time: f32) -> f32 {
     source_value(source, metrics(sample_time(time, point))).unwrap_or(0.0)
 }
 
+fn series_stride(series: &SeriesSpec) -> usize {
+    series.stride.unwrap_or(1).clamp(1, 64)
+}
+
+fn point_indices(series: &SeriesSpec) -> impl Iterator<Item = usize> {
+    let stride = series_stride(series);
+    (0..CHART_POINTS).step_by(stride)
+}
+
+fn candle_values(series: &SeriesSpec, point: usize, time: f32) -> (f32, f32, f32, f32) {
+    let close_source = series.close_source.as_deref().or(series.source.as_deref());
+    let open_source = series.open_source.as_deref().or(close_source);
+    let high_source = series.high_source.as_deref().or(close_source);
+    let low_source = series.low_source.as_deref().or(close_source);
+    let open = chart_value(open_source, point, time);
+    let high = chart_value(high_source, point, time);
+    let low = chart_value(low_source, point, time);
+    let close = chart_value(close_source, point, time);
+    (
+        open,
+        high.max(open).max(close),
+        low.min(open).min(close),
+        close,
+    )
+}
+
+fn band_values(series: &SeriesSpec, point: usize, time: f32) -> (f32, f32) {
+    let upper = chart_value(series.source.as_deref(), point, time);
+    let lower = series
+        .band_source
+        .as_deref()
+        .map(|source| chart_value(Some(source), point, time))
+        .unwrap_or(upper);
+    (upper, lower)
+}
+
+fn series_value(series: &SeriesSpec, point: usize, time: f32) -> f32 {
+    match series.kind {
+        SeriesKind::Candle => candle_values(series, point, time).3,
+        SeriesKind::Band => {
+            let (upper, lower) = band_values(series, point, time);
+            (upper + lower) * 0.5
+        }
+        _ => chart_value(series.source.as_deref(), point, time),
+    }
+}
+
 fn chart_bounds(spec: &ChartSpec, time: f32, hidden: &[bool]) -> (f32, f32) {
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
+    let mut bar_lo = f32::INFINITY;
+    let mut bar_hi = f32::NEG_INFINITY;
+    let mut stack = vec![0.0f32; CHART_POINTS];
     for (index, series) in spec.series.iter().enumerate() {
         if hidden.get(index).copied().unwrap_or(false) {
             continue;
         }
-        let source = series.source.as_deref();
-        for point in 0..CHART_POINTS {
-            let value = chart_value(source, point, time);
-            lo = lo.min(value);
-            hi = hi.max(value);
+        match series.kind {
+            SeriesKind::Candle => {
+                for point in point_indices(series) {
+                    let (_, high, low, _) = candle_values(series, point, time);
+                    lo = lo.min(low);
+                    hi = hi.max(high);
+                }
+            }
+            SeriesKind::Band => {
+                for point in point_indices(series) {
+                    let (upper, lower) = band_values(series, point, time);
+                    lo = lo.min(lower);
+                    hi = hi.max(upper);
+                }
+            }
+            SeriesKind::StackedArea => {
+                for point in point_indices(series) {
+                    let lower = stack[point];
+                    let upper = lower + chart_value(series.source.as_deref(), point, time);
+                    lo = lo.min(lower);
+                    hi = hi.max(upper);
+                    stack[point] = upper;
+                }
+            }
+            SeriesKind::Bar => {
+                let baseline = series.baseline.unwrap_or(0.0);
+                bar_lo = bar_lo.min(baseline);
+                bar_hi = bar_hi.max(baseline);
+                for point in point_indices(series) {
+                    let value = chart_value(series.source.as_deref(), point, time);
+                    lo = lo.min(value);
+                    hi = hi.max(value);
+                }
+            }
+            _ => {
+                let source = series.source.as_deref();
+                for point in point_indices(series) {
+                    let value = chart_value(source, point, time);
+                    lo = lo.min(value);
+                    hi = hi.max(value);
+                }
+            }
         }
+    }
+    if bar_lo.is_finite() {
+        lo = lo.min(bar_lo);
+        hi = hi.max(bar_hi);
     }
     if !lo.is_finite() || !hi.is_finite() {
         lo = 0.0;
@@ -841,6 +1090,24 @@ fn chart_bounds(spec: &ChartSpec, time: f32, hidden: &[bool]) -> (f32, f32) {
         spec.y_min.unwrap_or((lo - padding).max(0.0)),
         spec.y_max.unwrap_or(hi + padding),
     )
+}
+
+fn series_color(series: &SeriesSpec, index: usize) -> [u8; 3] {
+    series
+        .color
+        .unwrap_or(CHART_COLORS[index % CHART_COLORS.len()])
+}
+
+fn series_point_color(series: &SeriesSpec, index: usize, point: usize, time: f32) -> [u8; 3] {
+    if series.kind == SeriesKind::Candle {
+        let (open, _, _, close) = candle_values(series, point, time);
+        return if close >= open {
+            series.up_color.unwrap_or([34, 197, 94])
+        } else {
+            series.down_color.unwrap_or([239, 68, 68])
+        };
+    }
+    series_color(series, index)
 }
 
 fn draw_chart(
@@ -940,91 +1207,269 @@ fn draw_chart(
         );
     }
 
+    let bar_count = spec
+        .series
+        .iter()
+        .enumerate()
+        .filter(|(index, series)| {
+            series.kind == SeriesKind::Bar && !hidden.get(*index).copied().unwrap_or(false)
+        })
+        .count()
+        .max(1);
+    let bar_stride = spec
+        .series
+        .iter()
+        .find(|series| series.kind == SeriesKind::Bar)
+        .map(series_stride)
+        .unwrap_or(1);
+    let bar_slots = (0..CHART_POINTS).step_by(bar_stride).count().max(1) as f32;
+    let mut bar_rank = 0;
+    let mut stack = vec![0.0f32; CHART_POINTS];
+
     for (index, series) in spec.series.iter().enumerate() {
         if hidden.get(index).copied().unwrap_or(false) {
             continue;
         }
-        let color = series
-            .color
-            .unwrap_or(CHART_COLORS[index % CHART_COLORS.len()]);
-        let mut points = Vec::with_capacity(CHART_POINTS);
-        for point in 0..CHART_POINTS {
-            let y = chart_value(series.source.as_deref(), point, time).clamp(ylo, yhi);
-            points.push((sx(point as f32), sy(y)));
-        }
-        if series.smooth {
-            points = smooth(&points, style.smooth_steps);
-        }
-        let paint = series.width.unwrap_or(style.line_width);
-        let gradient = series.color2;
-        if series.kind == SeriesKind::Area {
-            painter.area(
-                &format!("{}-{}-fill", spec.id, index),
-                &points,
-                sy(ylo),
-                color,
-                series.fill_opacity.unwrap_or(style.area_opacity),
-            );
-        }
-        if style.glow > 0.0 {
-            painter.polyline(
-                &format!("{}-{}-glow-outer", spec.id, index),
-                &points,
-                paint + style.glow_width * 1.7,
-                color,
-                style.glow * 0.35,
-            );
-            if let Some(color2) = gradient {
-                painter.polyline_gradient(
-                    &format!("{}-{}-glow-inner", spec.id, index),
-                    &points,
-                    paint + style.glow_width * 0.8,
+        let color = series_color(series, index);
+        let points: Vec<usize> = point_indices(series).collect();
+        match series.kind {
+            SeriesKind::StackedArea => {
+                let mut upper = Vec::with_capacity(points.len());
+                let mut lower = Vec::with_capacity(points.len());
+                for &point in &points {
+                    let lower_value = stack[point];
+                    let upper_value =
+                        lower_value + chart_value(series.source.as_deref(), point, time);
+                    stack[point] = upper_value;
+                    upper.push((sx(point as f32), sy(upper_value.clamp(ylo, yhi))));
+                    lower.push((sx(point as f32), sy(lower_value.clamp(ylo, yhi))));
+                }
+                painter.band(
+                    &format!("{}-{}-stack", spec.id, index),
+                    &upper,
+                    &lower,
                     color,
-                    color2,
-                    style.glow * 0.72,
+                    series.fill_opacity.unwrap_or(0.28),
                 );
-            } else {
                 painter.polyline(
-                    &format!("{}-{}-glow-inner", spec.id, index),
-                    &points,
-                    paint + style.glow_width * 0.8,
+                    &format!("{}-{}-stack-top", spec.id, index),
+                    &upper,
+                    series.width.unwrap_or(1.4),
                     color,
-                    style.glow * 0.72,
+                    0.9,
                 );
             }
+            SeriesKind::Bar => {
+                let group_slot = plot_w / bar_slots;
+                let group_w =
+                    (group_slot * series.bar_width.unwrap_or(0.72).clamp(0.1, 1.0)).max(2.0);
+                let bar_w = (group_w / bar_count as f32).max(1.0);
+                let baseline = series.baseline.unwrap_or(0.0).clamp(ylo, yhi);
+                let zero = sy(baseline);
+                let radius = series.bar_radius.unwrap_or(2.0);
+                for point in points {
+                    let value = chart_value(series.source.as_deref(), point, time).clamp(ylo, yhi);
+                    let y = sy(value);
+                    let center = sx(point as f32);
+                    let x = center - group_w * 0.5 + bar_rank as f32 * bar_w + bar_w * 0.09;
+                    painter.rect(
+                        &format!("{}-{}-bar-{point}", spec.id, index),
+                        x,
+                        y.min(zero),
+                        (bar_w * 0.82).max(1.0),
+                        (zero - y).abs().max(1.0),
+                        color,
+                        series.fill_opacity.unwrap_or(0.9),
+                        radius,
+                    );
+                }
+                bar_rank += 1;
+            }
+            SeriesKind::Candle => {
+                let up = series.up_color.unwrap_or([34, 197, 94]);
+                let down = series.down_color.unwrap_or([239, 68, 68]);
+                let body = series.width.unwrap_or(6.0).max(1.0);
+                let candles: Vec<(f32, Candle)> = points
+                    .iter()
+                    .map(|&point| {
+                        let (open, high, low, close) = candle_values(series, point, time);
+                        (
+                            sx(point as f32),
+                            Candle {
+                                x: 0.0,
+                                open: sy(open),
+                                high: sy(high),
+                                low: sy(low),
+                                close: sy(close),
+                            },
+                        )
+                    })
+                    .collect();
+                painter.candles(
+                    &format!("{}-{}-candles", spec.id, index),
+                    &candles,
+                    body,
+                    up,
+                    down,
+                    1.0,
+                );
+            }
+            SeriesKind::Band => {
+                let upper: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|&point| {
+                        let (upper, _) = band_values(series, point, time);
+                        (sx(point as f32), sy(upper.clamp(ylo, yhi)))
+                    })
+                    .collect();
+                let lower: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|&point| {
+                        let (_, lower) = band_values(series, point, time);
+                        (sx(point as f32), sy(lower.clamp(ylo, yhi)))
+                    })
+                    .collect();
+                painter.band(
+                    &format!("{}-{}-band", spec.id, index),
+                    &upper,
+                    &lower,
+                    color,
+                    series.fill_opacity.unwrap_or(style.area_opacity * 0.7),
+                );
+                let paint = series.width.unwrap_or(style.line_width);
+                painter.polyline(
+                    &format!("{}-{}-band-upper", spec.id, index),
+                    &upper,
+                    paint,
+                    color,
+                    0.82,
+                );
+                painter.polyline(
+                    &format!("{}-{}-band-lower", spec.id, index),
+                    &lower,
+                    paint * 0.65,
+                    series.color2.unwrap_or(color),
+                    0.48,
+                );
+            }
+            _ => {
+                let mut screen: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|&point| {
+                        let y = chart_value(series.source.as_deref(), point, time).clamp(ylo, yhi);
+                        (sx(point as f32), sy(y))
+                    })
+                    .collect();
+                if series.smooth {
+                    screen = smooth(&screen, style.smooth_steps);
+                }
+                let paint = series.width.unwrap_or(style.line_width);
+                if series.kind == SeriesKind::Area {
+                    painter.area(
+                        &format!("{}-{}-fill", spec.id, index),
+                        &screen,
+                        sy(ylo),
+                        color,
+                        series.fill_opacity.unwrap_or(style.area_opacity),
+                    );
+                }
+                if style.glow > 0.0 {
+                    painter.polyline(
+                        &format!("{}-{}-glow-outer", spec.id, index),
+                        &screen,
+                        paint + style.glow_width * 1.7,
+                        color,
+                        style.glow * 0.35,
+                    );
+                    if let Some(color2) = series.color2 {
+                        painter.polyline_gradient(
+                            &format!("{}-{}-glow-inner", spec.id, index),
+                            &screen,
+                            paint + style.glow_width * 0.8,
+                            color,
+                            color2,
+                            style.glow * 0.72,
+                        );
+                    } else {
+                        painter.polyline(
+                            &format!("{}-{}-glow-inner", spec.id, index),
+                            &screen,
+                            paint + style.glow_width * 0.8,
+                            color,
+                            style.glow * 0.72,
+                        );
+                    }
+                }
+                if series.kind == SeriesKind::Scatter {
+                    painter.points(
+                        &format!("{}-{}-points", spec.id, index),
+                        &screen,
+                        3.0,
+                        color,
+                        0.95,
+                    );
+                } else {
+                    painter.polyline(
+                        &format!("{}-{}", spec.id, index),
+                        &screen,
+                        paint,
+                        color,
+                        1.0,
+                    );
+                }
+            }
         }
-        if series.kind == SeriesKind::Scatter {
-            painter.points(
-                &format!("{}-{}-points", spec.id, index),
-                &points,
-                3.0,
-                color,
-                0.95,
-            );
-        } else {
-            painter.polyline(
-                &format!("{}-{}", spec.id, index),
-                &points,
-                paint,
-                color,
-                1.0,
-            );
-        }
+
         let label = series
             .label
             .clone()
             .unwrap_or_else(|| format!("series {}", index + 1));
         let legend_x = left + index as f32 * 112.0;
-        painter.polyline(
-            &format!("{}-legend-line-{index}", spec.id),
-            &[
-                (legend_x, plot_bottom + 24.0),
-                (legend_x + 12.0, plot_bottom + 24.0),
-            ],
-            3.0,
-            color,
-            1.0,
-        );
+        let legend_y = plot_bottom + 24.0;
+        match series.kind {
+            SeriesKind::Scatter => painter.points(
+                &format!("{}-legend-point-{index}", spec.id),
+                &[(legend_x + 6.0, legend_y)],
+                6.0,
+                color,
+                1.0,
+            ),
+            SeriesKind::Bar | SeriesKind::Candle => painter.rect(
+                &format!("{}-legend-mark-{index}", spec.id),
+                legend_x,
+                legend_y - 5.0,
+                11.0,
+                10.0,
+                if series.kind == SeriesKind::Candle {
+                    series.up_color.unwrap_or(color)
+                } else {
+                    color
+                },
+                1.0,
+                2.0,
+            ),
+            SeriesKind::Band | SeriesKind::StackedArea => painter.rect(
+                &format!("{}-legend-mark-{index}", spec.id),
+                legend_x,
+                legend_y - 4.0,
+                12.0,
+                8.0,
+                color,
+                if series.kind == SeriesKind::StackedArea {
+                    0.72
+                } else {
+                    0.45
+                },
+                2.0,
+            ),
+            _ => painter.polyline(
+                &format!("{}-legend-line-{index}", spec.id),
+                &[(legend_x, legend_y), (legend_x + 12.0, legend_y)],
+                3.0,
+                color,
+                1.0,
+            ),
+        }
         painter.text(
             &format!("{}-legend-{index}", spec.id),
             &label,
@@ -1058,11 +1503,9 @@ fn draw_chart(
             if hidden.get(index).copied().unwrap_or(false) {
                 continue;
             }
-            let value = chart_value(series.source.as_deref(), nearest, time);
-            let color = series
-                .color
-                .unwrap_or(CHART_COLORS[index % CHART_COLORS.len()]);
-            let y = sy(value);
+            let value = series_value(series, nearest, time);
+            let color = series_point_color(series, index, nearest, time);
+            let y = sy(value.clamp(ylo, yhi));
             painter.points(
                 &format!("{}-{}-hover", spec.id, index),
                 &[(cx, y)],
@@ -1453,6 +1896,72 @@ mod tests {
             }
         ]
     }"#;
+
+    const SPEC_TYPES: &str = r#"{
+        "schema": 1,
+        "width": 800,
+        "height": 600,
+        "layers": [
+            {
+                "kind": "chart",
+                "id": "types",
+                "rect": { "x": 0, "y": 0, "width": 1, "height": 1 },
+                "title": "Types",
+                "series": [
+                    { "label": "5xx", "kind": "bar", "source": "errors.5xx", "stride": 4 },
+                    {
+                        "label": "cost",
+                        "kind": "candle",
+                        "source": "cost.close",
+                        "open_source": "cost.open",
+                        "high_source": "cost.high",
+                        "low_source": "cost.low",
+                        "close_source": "cost.close",
+                        "stride": 2
+                    },
+                    {
+                        "label": "envelope",
+                        "kind": "band",
+                        "source": "latency.p95",
+                        "band_source": "latency.p50",
+                        "stride": 2
+                    },
+                    {
+                        "label": "stack",
+                        "kind": "stacked_area",
+                        "source": "memory",
+                        "stride": 2
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    #[test]
+    fn bar_candle_and_band_series_build_valid_scene_nodes() {
+        let spec: LiveSpec = serde_json::from_str(SPEC_TYPES).expect("spec");
+        let mut live = LiveViz::new(spec);
+        let scene = live.advance(42.0);
+        scene.validate().expect("valid scene");
+        let bars = scene
+            .nodes
+            .iter()
+            .filter(|node| matches!(&node.content, Content::Rect(rect) if rect.rgb.is_some()))
+            .count();
+        let candles = scene
+            .nodes
+            .iter()
+            .filter(|node| matches!(&node.content, Content::Candles(_)))
+            .count();
+        let bands = scene
+            .nodes
+            .iter()
+            .filter(|node| matches!(&node.content, Content::Band(_)))
+            .count();
+        assert!(bars > 10, "expected many bar rects, got {bars}");
+        assert_eq!(candles, 1, "expected one candle primitive");
+        assert_eq!(bands, 2, "expected band and stacked-area primitives");
+    }
 
     #[test]
     fn a_live_spec_builds_a_valid_scene() {

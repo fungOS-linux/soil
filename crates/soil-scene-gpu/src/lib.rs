@@ -681,6 +681,21 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                     );
                 }
             }
+            soil_scene::Content::Band(band) => {
+                let color = rgb_or_ink(theme, band.rgb, band.ink);
+                let alpha = band.opacity.clamp(0.0, 1.0);
+                for index in 0..band.upper.len().saturating_sub(1) {
+                    let upper0 = band.upper[index];
+                    let upper1 = band.upper[index + 1];
+                    let lower0 = band.lower[index];
+                    let lower1 = band.lower[index + 1];
+                    let u0 = [x + upper0[0] * w, y + upper0[1] * h];
+                    let u1 = [x + upper1[0] * w, y + upper1[1] * h];
+                    let l1 = [x + lower1[0] * w, y + lower1[1] * h];
+                    let l0 = [x + lower0[0] * w, y + lower0[1] * h];
+                    push_segment(&mut out, u0, u1, l1, l0, color, alpha);
+                }
+            }
             soil_scene::Content::Points(points) => {
                 let color = rgb_or_ink(theme, points.rgb, points.ink);
                 let alpha = points.opacity.clamp(0.0, 1.0);
@@ -748,8 +763,10 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
             }
             soil_scene::Content::Candles(candles) => {
                 let alpha = candles.opacity.clamp(0.0, 1.0);
-                let up = ink(theme, candles.up_ink);
-                let down = ink(theme, candles.down_ink);
+                let up = candles.up_rgb.unwrap_or_else(|| ink(theme, candles.up_ink));
+                let down = candles
+                    .down_rgb
+                    .unwrap_or_else(|| ink(theme, candles.down_ink));
                 let body = candles.width * w;
                 let pixel_x = 8.0 / width.max(1) as f32;
                 let pixel_y = 8.0 / height.max(1) as f32;
@@ -1403,6 +1420,59 @@ mod tests {
         let frame = render(&scene, 200, 120, Theme::default()).expect("render");
         let lit = frame.rgba.chunks_exact(4).any(|pixel| pixel[2] > 100);
         assert!(lit, "area should leave visible pixels");
+    }
+
+    #[test]
+    fn a_band_and_candles_write_visible_pixels() {
+        let band = soil_scene::Content::Band(soil_scene::Band {
+            upper: vec![[-3.0, 2.0], [3.0, 2.0]],
+            lower: vec![[-3.0, 0.0], [3.0, 0.0]],
+            ink: None,
+            rgb: Some([255, 0, 0]),
+            opacity: 1.0,
+        });
+        let candles = soil_scene::Content::Candles(soil_scene::Candles {
+            candles: vec![soil_scene::Candle {
+                x: 0.0,
+                open: 1.0,
+                high: 2.0,
+                low: -1.0,
+                close: 1.5,
+            }],
+            width: 0.2,
+            up_ink: None,
+            down_ink: None,
+            up_rgb: Some([0, 255, 0]),
+            down_rgb: Some([255, 0, 0]),
+            opacity: 1.0,
+        });
+        let scene = soil_scene::Scene::new(vec![
+            soil_scene::Node {
+                id: "band".into(),
+                parent: None,
+                transition_ms: None,
+                transform: soil_scene::Transform::default(),
+                content: band,
+            },
+            soil_scene::Node {
+                id: "candles".into(),
+                parent: None,
+                transition_ms: None,
+                transform: soil_scene::Transform::default(),
+                content: candles,
+            },
+        ]);
+        let frame = render(&scene, 200, 120, Theme::default()).expect("render");
+        let band_lit = frame
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel[0] > 100 && pixel[1] < 80);
+        let candle_lit = frame
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel[1] > 100 && pixel[0] < 100);
+        assert!(band_lit, "band should leave a red fill");
+        assert!(candle_lit, "up candles should leave a green mark");
     }
 
     #[test]

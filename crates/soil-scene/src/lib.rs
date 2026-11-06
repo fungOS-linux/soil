@@ -257,6 +257,9 @@ pub enum Content {
     Polyline(Polyline),
     /// A filled area between a polyline and a local baseline.
     Area(Area),
+    /// A filled ribbon between an upper and lower polyline. Used for
+    /// confidence bands and stacked areas.
+    Band(Band),
     /// A dense point cloud, one primitive instead of one node per point.
     Points(Points),
     /// A row-major scalar field rendered through the host heat ramp.
@@ -275,6 +278,7 @@ impl Content {
             Self::Image(image) => image.validate(),
             Self::Polyline(polyline) => polyline.validate(),
             Self::Area(area) => area.validate(),
+            Self::Band(band) => band.validate(),
             Self::Points(points) => points.validate(),
             Self::Heatmap(heatmap) => heatmap.validate(),
             Self::Candles(candles) => candles.validate(),
@@ -493,6 +497,11 @@ pub struct Candles {
     pub up_ink: Option<Ink>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub down_ink: Option<Ink>,
+    /// Literal up/down colours for a series that owns its palette.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up_rgb: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub down_rgb: Option<[u8; 3]>,
     #[serde(default = "opaque")]
     pub opacity: f32,
 }
@@ -568,6 +577,43 @@ impl Area {
             if !(0.0..=1.0).contains(&base) {
                 return Err(Error::invalid("area base opacity must be 0..=1"));
             }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Band {
+    /// Upper boundary, one `[x, y]` per sample in local scene units.
+    pub upper: Vec<[f32; 2]>,
+    /// Lower boundary. Must have the same length as `upper`.
+    pub lower: Vec<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ink: Option<Ink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgb: Option<[u8; 3]>,
+    #[serde(default = "opaque")]
+    pub opacity: f32,
+}
+
+impl Band {
+    fn validate(&self) -> Result<(), Error> {
+        if self.upper.len() < 2 || self.upper.len() > 1_000_000 {
+            return Err(Error::invalid("band needs 2..=1,000,000 samples"));
+        }
+        if self.lower.len() != self.upper.len() {
+            return Err(Error::invalid(
+                "band upper and lower must have equal length",
+            ));
+        }
+        for point in self.upper.iter().chain(self.lower.iter()) {
+            finite(point[0])?;
+            finite(point[1])?;
+        }
+        finite(self.opacity)?;
+        if !(0.0..=1.0).contains(&self.opacity) {
+            return Err(Error::invalid("band opacity must be 0..=1"));
         }
         Ok(())
     }
