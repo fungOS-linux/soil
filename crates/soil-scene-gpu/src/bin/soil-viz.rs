@@ -59,7 +59,7 @@ impl App {
         };
         let bytes = std::fs::read(path)?;
         let spec: soil_scene_gpu::live::LiveSpec = serde_json::from_slice(&bytes)?;
-        let live = LiveViz::new(spec);
+        let mut live = LiveViz::new(spec);
         self.scene = live.scene();
         self.live = Some(live);
         self.last_modified = modified(path);
@@ -397,7 +397,7 @@ fn main() -> anyhow::Result<()> {
             fps = fps.min(spec_fps.max(1));
         }
         let fullscreen = fullscreen || spec.fullscreen.unwrap_or(false);
-        let live = LiveViz::new(spec);
+        let mut live = LiveViz::new(spec);
         let scene = live.scene();
         (
             scene,

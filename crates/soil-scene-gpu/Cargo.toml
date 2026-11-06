@@ -20,6 +20,7 @@ soil-vt = { path = "../soil-vt" }
 soil-input = { path = "../soil-input", features = ["winit"] }
 wgpu = "27"
 winit = "0.30"
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 
 [[bin]]
 name = "soil-scene-gpu"
