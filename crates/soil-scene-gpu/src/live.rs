@@ -377,9 +377,7 @@ impl LiveViz {
     fn sample(index: i64) -> Sample {
         let raw = index as f32 * SAMPLE_SECONDS;
         Sample {
-            // Keep the display clock non-negative while the pre-roll still has
-            // real history to draw behind the first live sample.
-            time: raw.max(0.0),
+            time: raw,
             metrics: metrics(raw),
         }
     }
@@ -1206,11 +1204,68 @@ fn chart_bounds(spec: &ChartSpec, hidden: &[bool], samples: &VecDeque<Sample>) -
     if (hi - lo).abs() < f32::EPSILON {
         hi = lo + 1.0;
     }
-    let padding = (hi - lo) * 0.08;
-    (
-        spec.y_min.unwrap_or((lo - padding).max(0.0)),
-        spec.y_max.unwrap_or(hi + padding),
-    )
+    let raw_lo = lo;
+    let raw_hi = hi;
+    let span = (raw_hi - raw_lo).abs();
+    let padding = if span > f32::EPSILON {
+        span * 0.05
+    } else {
+        (raw_hi.abs() * 0.05).max(0.5)
+    };
+    let lo = spec
+        .y_min
+        .map(|min| min.min(raw_lo))
+        .unwrap_or(raw_lo - padding);
+    let hi = spec
+        .y_max
+        .map(|max| max.max(raw_hi))
+        .unwrap_or(raw_hi + padding);
+    nice_bounds(lo, hi)
+}
+
+fn nice_step(span: f32, target: usize) -> f32 {
+    if !span.is_finite() || span <= 0.0 {
+        return 1.0;
+    }
+    let target = target.max(1) as f32;
+    let raw = span / target;
+    let magnitude = 10f32.powf(raw.log10().floor());
+    for candidate in [1.0, 2.0, 2.5, 5.0, 10.0] {
+        let step = candidate * magnitude;
+        if raw <= step {
+            return step;
+        }
+    }
+    10.0 * magnitude
+}
+
+fn nice_bounds(lo: f32, hi: f32) -> (f32, f32) {
+    if !lo.is_finite() || !hi.is_finite() || hi < lo {
+        return (0.0, 1.0);
+    }
+    let step = nice_step((hi - lo).max(f32::EPSILON), 6);
+    let lo = (lo / step).floor() * step;
+    let hi = (hi / step).ceil() * step;
+    if hi <= lo { (lo, lo + step) } else { (lo, hi) }
+}
+
+fn format_axis_value(value: f32, step: f32) -> String {
+    let abs = value.abs();
+    if step >= 1000.0 {
+        if abs >= 1000.0 {
+            format!("{:.1}k", value / 1000.0)
+        } else {
+            format!("{value:.0}")
+        }
+    } else if step >= 10.0 {
+        format!("{value:.0}")
+    } else if step >= 1.0 {
+        format!("{value:.0}")
+    } else if step >= 0.1 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.2}")
+    }
 }
 
 fn series_color(series: &SeriesSpec, index: usize) -> [u8; 3] {
@@ -1303,13 +1358,13 @@ fn chart_layout(spec: &ChartSpec, r: &LayerRect) -> ChartLayout {
     }
     let legend_height = rows as f32 * row_height;
     let legend_space = if legend.is_empty() {
-        0.0
+        14.0
     } else {
-        legend_height + 10.0
+        legend_height + 18.0
     };
     let plot_h = (r.h - 62.0 - legend_space).max(16.0);
     let plot_bottom = top + plot_h;
-    let legend_y = plot_bottom + 18.0;
+    let legend_y = plot_bottom + 26.0;
     for item in &mut legend {
         item.y += legend_y;
     }
@@ -1396,8 +1451,13 @@ fn draw_chart(
         .unwrap_or(0.0);
     let sx = |x: f32| left + (x - phase - xlo) / (xhi - xlo) * plot_w;
     let sy = |y: f32| plot_bottom - (y - ylo) / (yhi - ylo) * plot_h;
-    for tick in 0..=5 {
-        let value = ylo + (yhi - ylo) * tick as f32 / 5.0;
+    let y_step = nice_step(yhi - ylo, 6);
+    let y_ticks = (((yhi - ylo) / y_step).round() as usize).clamp(1, 12);
+    for tick in 0..=y_ticks {
+        let value = ylo + tick as f32 * y_step;
+        if value > yhi + y_step * 0.01 {
+            break;
+        }
         let y = sy(value);
         painter.rect(
             &format!("{}-grid-{tick}", spec.id),
@@ -1409,11 +1469,13 @@ fn draw_chart(
             style.grid_opacity,
             0.0,
         );
+        let label = format_axis_value(value, y_step);
+        let label_w = approx_text_width(&label, style.label_size);
         painter.text(
             &format!("{}-ylabel-{tick}", spec.id),
-            &format!("{value:.0}"),
-            left - 32.0,
-            y - 5.0,
+            &label,
+            left - label_w - 10.0,
+            y - style.label_size * 0.55,
             style.label_size,
             [145, 155, 170],
         );
@@ -1421,10 +1483,17 @@ fn draw_chart(
     for tick in 0..=4 {
         let value = xhi * tick as f32 / 4.0;
         let x = sx(value);
+        let seconds = (value - phase - (CHART_POINTS - 1) as f32) * SAMPLE_SECONDS;
+        let label = if tick == 4 {
+            "now".to_string()
+        } else {
+            format!("{seconds:.0}s")
+        };
+        let label_w = approx_text_width(&label, style.label_size);
         painter.text(
             &format!("{}-xlabel-{tick}", spec.id),
-            &format!("{value:.0}"),
-            x - 8.0,
+            &label,
+            (x - label_w * 0.5).max(left),
             plot_bottom + 8.0,
             style.label_size,
             [145, 155, 170],
@@ -1777,7 +1846,7 @@ fn draw_chart(
             );
             let sample_time = samples
                 .get(nearest)
-                .map(|sample| sample.time)
+                .map(|sample| sample.time - time)
                 .unwrap_or(0.0);
             painter.text(
                 &format!("{}-tooltip-title", spec.id),
@@ -2213,6 +2282,18 @@ mod tests {
         let scene = live.advance(0.016);
         scene.validate().expect("valid scene");
         assert!(scene.nodes.len() > 20);
+    }
+
+    #[test]
+    fn y_bounds_expand_to_include_data_and_land_on_nice_steps() {
+        let (lo, hi) = nice_bounds(0.0, 760.0);
+        assert!(lo <= 0.0);
+        assert!(hi >= 760.0);
+        let step = nice_step(hi - lo, 6);
+        assert!((lo / step).fract().abs() < 0.0001);
+        assert!((hi / step).fract().abs() < 0.0001);
+        let (lo, hi) = nice_bounds(40.0, 48.0);
+        assert_eq!((lo, hi), (40.0, 48.0));
     }
 
     #[test]
