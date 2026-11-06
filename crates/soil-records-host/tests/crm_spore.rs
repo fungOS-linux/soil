@@ -304,18 +304,6 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
         )?
         .map_err(anyhow::Error::msg)?;
     bindings
-        .call_run(
-            &mut store,
-            &[
-                "contact".into(),
-                "share".into(),
-                "a-acme".into(),
-                "c-ada".into(),
-                "Ada".into(),
-            ],
-        )?
-        .map_err(anyhow::Error::msg)?;
-    bindings
         .call_run(&mut store, &["contacts".into(), "shared".into()])?
         .map_err(anyhow::Error::msg)?;
     bindings
@@ -351,17 +339,6 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
             ],
         )?
         .map_err(anyhow::Error::msg)?;
-    bindings
-        .call_run(
-            &mut store,
-            &[
-                "contact".into(),
-                "unshare".into(),
-                "a-acme".into(),
-                "c-ada".into(),
-            ],
-        )?
-        .map_err(anyhow::Error::msg)?;
 
     let store = Store::open(root.path(), &root.path().join("device_id"))?;
     let activity = store.get("team/test/crm", "act-2")?;
@@ -372,12 +349,6 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
     assert_eq!(opportunity.fields["stage"], "won");
     let link = store.get("team/test/crm", "ac-a-acme-c-ada")?;
     assert_eq!(link.fields["contact_token"], "t-ada");
-    assert!(
-        store
-            .get("team/test/crm", "proj-a-acme-c-ada")
-            .map(|record| record.deleted)
-            .unwrap_or(true)
-    );
     let call = store.get("personal/test/calls", "call-2")?;
     assert_eq!(call.fields["visibility"], "private");
     let message = store.get("personal/test/messages", "mail-1")?;
@@ -387,16 +358,6 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
         audits
             .iter()
             .any(|record| record.fields["action"] == "crm.opportunity.stage")
-    );
-    assert!(
-        audits
-            .iter()
-            .any(|record| record.fields["action"] == "crm.contact.share")
-    );
-    assert!(
-        audits
-            .iter()
-            .any(|record| record.fields["action"] == "crm.contact.unshare")
     );
     assert!(
         audits

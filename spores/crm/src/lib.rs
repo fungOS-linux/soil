@@ -153,14 +153,6 @@ impl Guest for Component {
                 let value = link_contact(&data, &args)?;
                 print_json("contact", &value);
             }
-            "contact" if args.get(1).map(String::as_str) == Some("share") => {
-                let value = share_contact(&data, &args)?;
-                print_json("contact", &value);
-            }
-            "contact" if args.get(1).map(String::as_str) == Some("unshare") => {
-                let value = unshare_contact(&data.crm_namespace, &args)?;
-                print_json("contact", &value);
-            }
             "contacts" if args.get(1).map(String::as_str) == Some("shared") => {
                 print_json("contacts", &data.shared_contacts());
             }
@@ -189,8 +181,6 @@ impl Guest for Component {
                     "activity add <id> <account-id> <kind> <title> <occurred-at> [summary]",
                     "opportunity stage <opportunity-id> <stage>",
                     "contact link <account-id> <contact-id> [role]",
-                    "contact share <account-id> <contact-id> [first-name]",
-                    "contact unshare <account-id> <contact-id>",
                     "contacts shared",
                     "call add <id> <account-id> <title> <occurred-at> [summary]",
                     "email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>",
@@ -921,95 +911,6 @@ fn link_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
         "role": role,
         "revision": stored.revision,
     }))
-}
-
-fn share_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
-    let account_id = args
-        .get(2)
-        .ok_or_else(|| "usage: contact share <account-id> <contact-id> [first-name]".to_string())?;
-    let contact_id = args
-        .get(3)
-        .ok_or_else(|| "contact share: missing contact id".to_string())?;
-    if data.rows(ACCOUNT_SCHEMA).all(|account| account.id != *account_id) {
-        return Err(format!("account {account_id} not found"));
-    }
-    let contact = data
-        .rows(CONTACT_SCHEMA)
-        .find(|row| row.id == *contact_id || row.text("contact_token") == *contact_id)
-        .ok_or_else(|| format!("contact {contact_id} not found"))?;
-    let token = contact.text("contact_token");
-    if token.is_empty() {
-        return Err(format!("contact {contact_id} has no contact_token"));
-    }
-    let first_name = args
-        .get(4)
-        .cloned()
-        .filter(|name| !name.is_empty())
-        .or_else(|| nonempty(contact.text("first_name")))
-        .unwrap_or_else(|| token.to_string());
-    let projection_id = format!("proj-{account_id}-{}", contact.id);
-    let stored = put_record(
-        &data.crm_namespace,
-        &projection_id,
-        PROJECTION_SCHEMA,
-        json!({
-            "contact_token": token,
-            "account_id": account_id,
-            "first_name": first_name,
-            "hidden": false,
-        }),
-    )?;
-    write_audit(
-        &data.crm_namespace,
-        "crm.contact.share",
-        &projection_id,
-        PROJECTION_SCHEMA,
-        &data.crm_namespace,
-        stored.revision,
-        None,
-        Some(json!({
-            "account_id": account_id,
-            "contact_token": token,
-            "first_name": first_name,
-        })),
-    )?;
-    Ok(json!({
-        "id": projection_id,
-        "account_id": account_id,
-        "contact_token": token,
-        "first_name": first_name,
-        "revision": stored.revision,
-    }))
-}
-
-fn unshare_contact(crm: &str, args: &[String]) -> Result<Value, String> {
-    let account_id = args
-        .get(2)
-        .ok_or_else(|| "usage: contact unshare <account-id> <contact-id>".to_string())?;
-    let contact_id = args
-        .get(3)
-        .ok_or_else(|| "contact unshare: missing contact id".to_string())?;
-    let projection_id = format!("proj-{account_id}-{contact_id}");
-    let entry = records::get(&key(crm, &projection_id))
-        .map_err(|error| format!("unshare {projection_id}: {error:?}"))?;
-    let before: Value = serde_json::from_slice(&entry.body).unwrap_or(Value::Null);
-    records::delete(&key(crm, &projection_id))
-        .map_err(|error| format!("unshare {projection_id}: {error:?}"))?;
-    write_audit(
-        crm,
-        "crm.contact.unshare",
-        &projection_id,
-        PROJECTION_SCHEMA,
-        crm,
-        entry.revision,
-        Some(json!({
-            "account_id": before.get("account_id").cloned().unwrap_or(Value::Null),
-            "contact_token": before.get("contact_token").cloned().unwrap_or(Value::Null),
-            "first_name": before.get("first_name").cloned().unwrap_or(Value::Null),
-        })),
-        None,
-    )?;
-    Ok(json!({ "id": projection_id, "shared": false }))
 }
 
 fn add_call(data: &Dataset, args: &[String]) -> Result<Value, String> {

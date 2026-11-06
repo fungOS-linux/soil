@@ -180,8 +180,6 @@ spores/crm
   activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
   opportunity stage <opportunity-id> <stage>
   contact link <account-id> <contact-id> [role]
-  contact share <account-id> <contact-id> [first-name]
-  contact unshare <account-id> <contact-id>
   contacts shared
   call add <id> <account-id> <title> <occurred-at> [summary]
   email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>
@@ -212,11 +210,11 @@ Each shared CRM can have its own book and grants. Elmers projects the same
 Espo accounts into each brand book with a `brand` filter.
 
 There is no contact merge and no bulk sharing. `contact link` links a personal
-contact to an account without exposing it. `contact share` writes only an
-explicit first-name + token projection; `contact unshare` removes it. Calls and
-emails written by the Spore land in the personal namespaces as private records.
-Contact editing belongs to the contacts Spore/UI; the CRM only links to existing
-personal contacts.
+contact to an account without exposing it. Contact editing and explicit
+share/unshare belong to the Contacts Spore/UI (`spores/contacts`); the CRM only
+links to existing personal contacts and lists explicit projections. Calls and
+emails written by the CRM Spore land in the personal namespaces as private
+records.
 
 CRM mutations write `fungos.audit/event@1` records into the selected CRM
 namespace. The audit payload carries action/target metadata and stage or link

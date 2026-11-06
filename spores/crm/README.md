@@ -38,8 +38,6 @@ audit [target-id] [limit]
 activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
 opportunity stage <opportunity-id> <stage>
 contact link <account-id> <contact-id> [role]
-contact share <account-id> <contact-id> [first-name]
-contact unshare <account-id> <contact-id>
 contacts shared
 call add <id> <account-id> <title> <occurred-at> [summary]
 email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>
@@ -56,12 +54,10 @@ account link           explicit account-contact record
 shared projection      explicit first name + token only
 ```
 
-`contact link` does not share anything. `contact share` is required before a
-team view sees a first-name projection. Calls and emails written by this Spore
-go to the personal `calls` / `messages` namespaces with `visibility = private`.
-
-Contact editing belongs to the contacts Spore/UI. This Spore only links to an
-existing personal contact and optionally projects a first name + token.
+`contact link` does not share anything. Sharing a first-name + token projection
+is owned by the Contacts Spore/UI, not the CRM. Calls and emails written by this
+Spore go to the personal `calls` / `messages` namespaces with
+`visibility = private`.
 
 ## Audit
 
