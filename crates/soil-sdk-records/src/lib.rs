@@ -108,6 +108,32 @@ impl Book {
         Ok(records::delete(&key(self.collection.clone(), id))?)
     }
 
+    /// Conditional create/replace/delete. On conflict the returned entry is
+    /// the current authoritative record; the write was not applied.
+    pub fn compare_and_swap(
+        &self,
+        id: impl Into<String>,
+        expected: Option<records::Version>,
+        schema: impl Into<String>,
+        body: Vec<u8>,
+        deleted: bool,
+    ) -> Result<records::CasResult> {
+        let key = key(self.collection.clone(), id);
+        Ok(records::compare_and_swap(
+            &key,
+            expected.as_ref(),
+            &Entry {
+                key: key.clone(),
+                schema: schema.into(),
+                revision: 0,
+                updated_at_ms: 0,
+                origin: String::new(),
+                deleted,
+                body,
+            },
+        )?)
+    }
+
     pub fn changes(&self, since: Option<String>, limit: u32) -> Result<Page> {
         Ok(records::changes(since.as_deref(), limit)?)
     }
@@ -211,5 +237,6 @@ mod tests {
         assert!(WIT.contains("package soil:records@0.1.0;"));
         assert!(WIT.contains("world guest"));
         assert!(WIT.contains("apply: func"));
+        assert!(WIT.contains("compare-and-swap: func"));
     }
 }

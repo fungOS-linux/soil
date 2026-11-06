@@ -8,6 +8,8 @@ package soil:records@0.1.0;
 
 key { collection, id }
 entry { key, schema, revision, updated-at-ms, origin, deleted, body }
+version { revision, origin }
+cas-result { applied, entry }
 page { entries, next }
 ```
 
@@ -17,6 +19,7 @@ Host surface:
 get
 scan
 upsert
+compare-and-swap
 delete
 changes
 apply
@@ -58,6 +61,7 @@ Implemented:
 - `get`
 - `scan`
 - `upsert`
+- `compare-and-swap`
 - `delete`
 - `changes`
 - `apply`
@@ -67,6 +71,12 @@ Implemented:
 tombstones. `apply` writes remote entries through the records op log using the
 remote revision as HLC and the remote origin as the device. Equal revisions are
 ordered lexicographically by origin.
+
+`compare-and-swap` is the single-writer primitive: `expected = none` creates
+only when no live record exists, and `expected = some(version)` requires an
+exact `(revision, origin)` match. A mismatch returns `applied = false` with the
+current entry, so callers can re-read instead of silently overwriting a winner.
+It is the primitive used for Marbles claims.
 
 The host returns `revision = updated-at-ms = op HLC` and
 `origin = op device id` for local writes. Deleted entries disappear from
