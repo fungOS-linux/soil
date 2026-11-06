@@ -35,6 +35,7 @@ const OPPORTUNITY_SCHEMA: &str = "fungos.crm/opportunity@1";
 const THREAD_SCHEMA: &str = "fungos.conversation/thread@1";
 const MESSAGE_SCHEMA: &str = "fungos.conversation/message@1";
 const LINK_SCHEMA: &str = "fungos.graph/link";
+const AUDIT_SCHEMA: &str = "fungos.audit/event@1";
 
 const DEFAULT_CRM: &str = "crm";
 const CONTACTS: &str = "contacts";
@@ -127,7 +128,19 @@ impl Guest for Component {
                 let id = args.get(1).ok_or_else(|| "usage: project <project-id>".to_string())?;
                 print_json("project", &data.project(id)?);
             }
+            "pipeline" if args.get(1).map(String::as_str) == Some("move") => {
+                let value = move_opportunity(&data.crm_namespace, &args)?;
+                print_json("pipeline", &value);
+            }
             "pipeline" => print_json("pipeline", &data.pipeline(args.get(1).map(String::as_str))),
+            "audit" => {
+                let target = args.get(1).filter(|value| !value.starts_with(|c: char| c.is_ascii_digit()));
+                let limit = args
+                    .get(if target.is_some() { 2 } else { 1 })
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(50);
+                print_json("audit", &data.audit(target.map(String::as_str), limit));
+            }
             "activity" if args.get(1).map(String::as_str) == Some("add") => {
                 let value = add_activity(&data, &args)?;
                 print_json("activity", &value);
@@ -170,7 +183,9 @@ impl Guest for Component {
                     "contact <id|token>",
                     "project <id>",
                     "timeline <id> [limit]",
-                    "pipeline",
+                    "pipeline [company-id]",
+                    "pipeline move <opportunity-id> <stage>",
+                    "audit [target-id] [limit]",
                     "activity add <id> <account-id> <kind> <title> <occurred-at> [summary]",
                     "opportunity stage <opportunity-id> <stage>",
                     "contact link <account-id> <contact-id> [role]",
@@ -456,6 +471,32 @@ impl Dataset {
             "opportunities": opportunities,
             "timeline": events,
         }))
+    }
+
+    fn audit(&self, target: Option<&str>, limit: usize) -> Value {
+        let mut events = self
+            .rows(AUDIT_SCHEMA)
+            .filter(|row| target.is_none_or(|target| row.text("target") == target))
+            .map(|row| json!({
+                "id": row.id,
+                "at_ms": row.field("at_ms"),
+                "action": row.text("action"),
+                "target": row.text("target"),
+                "target_schema": row.text("target_schema"),
+                "target_namespace": row.text("target_namespace"),
+                "result": row.text("result"),
+                "before": row.field("before"),
+                "after": row.field("after"),
+            }))
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| {
+            right["at_ms"]
+                .as_u64()
+                .cmp(&left["at_ms"].as_u64())
+                .then_with(|| right["id"].as_str().cmp(&left["id"].as_str()))
+        });
+        events.truncate(limit.max(1));
+        json!({ "events": events })
     }
 
     fn shared_contacts(&self) -> Value {
@@ -755,6 +796,21 @@ fn add_activity(data: &Dataset, args: &[String]) -> Result<Value, String> {
         "source_id": id,
     });
     let stored = put_record(&data.crm_namespace, id, ACTIVITY_SCHEMA, body)?;
+    write_audit(
+        &data.crm_namespace,
+        "crm.activity.add",
+        id,
+        ACTIVITY_SCHEMA,
+        &data.crm_namespace,
+        stored.revision,
+        None,
+        Some(json!({
+            "account_id": account_id,
+            "kind": kind,
+            "occurred_at": occurred_at,
+            "visibility": "team",
+        })),
+    )?;
     Ok(json!({
         "id": id,
         "schema": ACTIVITY_SCHEMA,
@@ -764,6 +820,14 @@ fn add_activity(data: &Dataset, args: &[String]) -> Result<Value, String> {
         "occurred_at": occurred_at,
         "revision": stored.revision,
     }))
+}
+
+fn move_opportunity(crm: &str, args: &[String]) -> Result<Value, String> {
+    let id = args.get(2).ok_or_else(|| {
+        "usage: pipeline move <opportunity-id> <stage>".to_string()
+    })?;
+    let stage = args.get(3).ok_or_else(|| "pipeline move: missing stage".to_string())?;
+    set_opportunity_stage(crm, &["opportunity".into(), "stage".into(), id.clone(), stage.clone()])
 }
 
 fn set_opportunity_stage(crm: &str, args: &[String]) -> Result<Value, String> {
@@ -777,8 +841,19 @@ fn set_opportunity_stage(crm: &str, args: &[String]) -> Result<Value, String> {
     }
     let mut body: Value =
         serde_json::from_slice(&entry.body).map_err(|error| format!("decode {id}: {error}"))?;
+    let before_stage = body.get("stage").cloned().unwrap_or(Value::Null);
     body["stage"] = Value::String(stage.clone());
     let stored = put_record(crm, id, OPPORTUNITY_SCHEMA, body)?;
+    write_audit(
+        crm,
+        "crm.opportunity.stage",
+        id,
+        OPPORTUNITY_SCHEMA,
+        crm,
+        stored.revision,
+        Some(json!({ "stage": before_stage })),
+        Some(json!({ "stage": stage })),
+    )?;
     Ok(json!({
         "id": id,
         "stage": stage,
@@ -822,6 +897,21 @@ fn link_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
             "status": "active",
             "source": "spore",
         }),
+    )?;
+    write_audit(
+        &data.crm_namespace,
+        "crm.contact.link",
+        &assignment_id,
+        ASSIGNMENT_SCHEMA,
+        &data.crm_namespace,
+        stored.revision,
+        None,
+        Some(json!({
+            "account_id": account_id,
+            "contact_id": contact_id,
+            "contact_token": token,
+            "role": role,
+        })),
     )?;
     Ok(json!({
         "id": assignment_id,
@@ -869,6 +959,20 @@ fn share_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
             "hidden": false,
         }),
     )?;
+    write_audit(
+        &data.crm_namespace,
+        "crm.contact.share",
+        &projection_id,
+        PROJECTION_SCHEMA,
+        &data.crm_namespace,
+        stored.revision,
+        None,
+        Some(json!({
+            "account_id": account_id,
+            "contact_token": token,
+            "first_name": first_name,
+        })),
+    )?;
     Ok(json!({
         "id": projection_id,
         "account_id": account_id,
@@ -886,8 +990,25 @@ fn unshare_contact(crm: &str, args: &[String]) -> Result<Value, String> {
         .get(3)
         .ok_or_else(|| "contact unshare: missing contact id".to_string())?;
     let projection_id = format!("proj-{account_id}-{contact_id}");
+    let entry = records::get(&key(crm, &projection_id))
+        .map_err(|error| format!("unshare {projection_id}: {error:?}"))?;
+    let before: Value = serde_json::from_slice(&entry.body).unwrap_or(Value::Null);
     records::delete(&key(crm, &projection_id))
         .map_err(|error| format!("unshare {projection_id}: {error:?}"))?;
+    write_audit(
+        crm,
+        "crm.contact.unshare",
+        &projection_id,
+        PROJECTION_SCHEMA,
+        crm,
+        entry.revision,
+        Some(json!({
+            "account_id": before.get("account_id").cloned().unwrap_or(Value::Null),
+            "contact_token": before.get("contact_token").cloned().unwrap_or(Value::Null),
+            "first_name": before.get("first_name").cloned().unwrap_or(Value::Null),
+        })),
+        None,
+    )?;
     Ok(json!({ "id": projection_id, "shared": false }))
 }
 
@@ -918,6 +1039,20 @@ fn add_call(data: &Dataset, args: &[String]) -> Result<Value, String> {
             "source": "spore",
             "source_id": id,
         }),
+    )?;
+    write_audit(
+        &data.crm_namespace,
+        "crm.call.add",
+        id,
+        ACTIVITY_SCHEMA,
+        CALLS,
+        stored.revision,
+        None,
+        Some(json!({
+            "account_id": account_id,
+            "occurred_at": occurred_at,
+            "visibility": "private",
+        })),
     )?;
     Ok(json!({
         "id": id,
@@ -981,6 +1116,21 @@ fn add_email(data: &Dataset, args: &[String]) -> Result<Value, String> {
             "account_id": account_id,
         }),
     )?;
+    write_audit(
+        &data.crm_namespace,
+        "crm.email.add",
+        id,
+        MESSAGE_SCHEMA,
+        MESSAGES,
+        stored.revision,
+        None,
+        Some(json!({
+            "account_id": account_id,
+            "thread_id": thread_id,
+            "occurred_at_ms": occurred_at_ms,
+            "visibility": "private",
+        })),
+    )?;
     Ok(json!({
         "id": id,
         "thread_id": thread_id,
@@ -1015,6 +1165,37 @@ fn put_record(
         body,
     })
     .map_err(|error| format!("write {id}: {error:?}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_audit(
+    crm: &str,
+    action: &str,
+    target: &str,
+    target_schema: &str,
+    target_namespace: &str,
+    at_ms: u64,
+    before: Option<Value>,
+    after: Option<Value>,
+) -> Result<(), String> {
+    let id = format!("audit-{action}-{target}-{at_ms}");
+    put_record(
+        crm,
+        &id,
+        AUDIT_SCHEMA,
+        json!({
+            "at_ms": at_ms,
+            "action": action,
+            "target": target,
+            "target_schema": target_schema,
+            "target_namespace": target_namespace,
+            "result": "ok",
+            "before": before,
+            "after": after,
+            "source": "crm-spore",
+        }),
+    )?;
+    Ok(())
 }
 
 fn parse_crm(args: Vec<String>) -> Result<(String, Vec<String>), String> {

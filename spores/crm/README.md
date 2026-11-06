@@ -32,7 +32,9 @@ account <account-id>
 contact <contact-id|contact-token>
 project <project-id>
 timeline <account-id> [limit]
-pipeline
+pipeline [company-id]
+pipeline move <opportunity-id> <stage>
+audit [target-id] [limit]
 activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
 opportunity stage <opportunity-id> <stage>
 contact link <account-id> <contact-id> [role]
@@ -57,6 +59,27 @@ shared projection      explicit first name + token only
 `contact link` does not share anything. `contact share` is required before a
 team view sees a first-name projection. Calls and emails written by this Spore
 go to the personal `calls` / `messages` namespaces with `visibility = private`.
+
+Contact editing belongs to the contacts Spore/UI. This Spore only links to an
+existing personal contact and optionally projects a first name + token.
+
+## Audit
+
+Every CRM mutation writes `fungos.audit/event@1` into the selected CRM
+namespace:
+
+```text
+crm.activity.add
+crm.opportunity.stage
+crm.contact.link
+crm.contact.share
+crm.contact.unshare
+crm.call.add
+crm.email.add
+```
+
+Audit payloads record metadata only. Personal call/email bodies and summaries
+are not copied into the audit record.
 
 ## UI
 

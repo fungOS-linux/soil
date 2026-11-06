@@ -174,7 +174,9 @@ spores/crm
   accounts
   account <account-id>
   timeline <account-id> [limit]
-  pipeline
+  pipeline [company-id]
+  pipeline move <opportunity-id> <stage>
+  audit [target-id] [limit]
   activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
   opportunity stage <opportunity-id> <stage>
   contact link <account-id> <contact-id> [role]
@@ -213,6 +215,12 @@ There is no contact merge and no bulk sharing. `contact link` links a personal
 contact to an account without exposing it. `contact share` writes only an
 explicit first-name + token projection; `contact unshare` removes it. Calls and
 emails written by the Spore land in the personal namespaces as private records.
+Contact editing belongs to the contacts Spore/UI; the CRM only links to existing
+personal contacts.
+
+CRM mutations write `fungos.audit/event@1` records into the selected CRM
+namespace. The audit payload carries action/target metadata and stage or link
+deltas, never personal call/email bodies.
 
 Roles are a host policy layer: the host links only the namespace grants the
 current principal's Mycelium roles allow. Unibus/records sync remains
