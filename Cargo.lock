@@ -6285,6 +6285,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-marbles-import"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=46450ede02588e533984378bc979cb4010f9867b)",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "soil-media-host"
 version = "0.1.0"
 dependencies = [
@@ -6455,7 +6465,9 @@ dependencies = [
 name = "soil-spore"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek 2.2.0",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tar",
  "toml 0.8.23",
