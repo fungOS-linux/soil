@@ -139,10 +139,18 @@ impl Shell {
                 return;
             }
         };
+        let (words, redirect) = match parse_redirection(words) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.error(&error);
+                return;
+            }
+        };
         let Some(command) = words.first().map(String::as_str) else {
             return;
         };
         let args: Vec<String> = words[1..].iter().map(|word| self.expand(word)).collect();
+        let saved = std::mem::take(&mut self.out);
         let result = match command {
             "help" => {
                 self.out.push_str(HELP);
@@ -161,6 +169,7 @@ impl Shell {
             "cd" => self.cd(args.first().map(String::as_str)),
             "ls" => self.ls(&args),
             "mkdir" => self.mkdir(&args),
+            "find" => self.find(&args),
             "rmdir" => self.rmdir(&args),
             "cat" => self.cat(&args),
             "write" => self.write(&args),
@@ -192,9 +201,35 @@ impl Shell {
             }
             other => Err(format!("unknown command {other}; try help")),
         };
-        if let Err(error) = result {
-            self.error(&error);
+        let produced = std::mem::replace(&mut self.out, saved);
+        match result {
+            Ok(()) => {
+                if let Some((append, target)) = redirect {
+                    if let Err(error) = self.redirect(&target, append, &produced) {
+                        self.error(&error);
+                    }
+                } else {
+                    self.out.push_str(&produced);
+                }
+            }
+            Err(error) => self.error(&error),
         }
+    }
+
+    fn redirect(&mut self, target: &str, append: bool, data: &str) -> Result<(), String> {
+        let path = self.resolve(target)?;
+        let (mut bytes, version) = match vfs::stat(&path) {
+            Ok(entry) if entry.kind == Kind::Directory => {
+                return Err(format!("redirect: {} is a directory", self.display(&path)));
+            }
+            Ok(entry) if append => (self.read_file(&path)?, Some(entry.version)),
+            Ok(_) => (Vec::new(), None),
+            Err(_) => (Vec::new(), None),
+        };
+        bytes.extend_from_slice(data.as_bytes());
+        vfs_mut::write(&path, &bytes, media_type(&path), version)
+            .map_err(|error| format!("redirect {}: {error:?}", self.display(&path)))?;
+        Ok(())
     }
 
     fn cd(&mut self, target: Option<&str>) -> Result<(), String> {
@@ -264,13 +299,45 @@ impl Shell {
     }
 
     fn mkdir(&mut self, args: &[String]) -> Result<(), String> {
-        if args.is_empty() {
-            return Err("mkdir PATH...".into());
+        let create_parents = args.iter().any(|arg| arg == "-p");
+        let paths = args
+            .iter()
+            .filter(|arg| !arg.starts_with('-'))
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return Err("mkdir [-p] PATH...".into());
         }
-        for arg in args {
+        for arg in paths {
             let path = self.resolve(arg)?;
-            vfs_mut::mkdir(&path)
-                .map_err(|error| format!("mkdir {}: {error:?}", self.display(&path)))?;
+            if create_parents {
+                self.mkdir_recursive(&path)?;
+            } else {
+                vfs_mut::mkdir(&path)
+                    .map_err(|error| format!("mkdir {}: {error:?}", self.display(&path)))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn mkdir_recursive(&mut self, path: &str) -> Result<(), String> {
+        if path.is_empty() {
+            return Ok(());
+        }
+        let mut prefix = String::new();
+        for component in path.split('/') {
+            if component.is_empty() {
+                continue;
+            }
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            match vfs::stat(&prefix) {
+                Ok(entry) if entry.kind == Kind::Directory => {}
+                Ok(_) => return Err(format!("mkdir: {} is a file", self.display(&prefix))),
+                Err(_) => vfs_mut::mkdir(&prefix)
+                    .map_err(|error| format!("mkdir {}: {error:?}", self.display(&prefix)))?,
+            }
         }
         Ok(())
     }
@@ -627,25 +694,119 @@ impl Shell {
     }
 
     fn cp(&mut self, args: &[String]) -> Result<(), String> {
-        if args.len() != 2 {
-            return Err("cp FROM TO".into());
+        let recursive = args.iter().any(|arg| arg == "-r" || arg == "-R");
+        let paths = args
+            .iter()
+            .filter(|arg| !arg.starts_with('-'))
+            .collect::<Vec<_>>();
+        if paths.len() != 2 {
+            return Err("cp [-r] FROM TO".into());
         }
-        let from = self.resolve(&args[0])?;
-        let to = self.resolve(&args[1])?;
-        let bytes = self.read_file(&from)?;
-        let result = vfs_mut::write(&to, &bytes, media_type(&to), None).map_err(|error| {
-            format!(
-                "cp {} {}: {error:?}",
+        let from = self.resolve(paths[0])?;
+        let mut to = self.resolve(paths[1])?;
+        let entry = vfs::stat(&from).map_err(|error| format!("cp: {error:?}"))?;
+        if entry.kind == Kind::Directory {
+            if !recursive {
+                return Err("cp: source is a directory; use -r".into());
+            }
+            if matches!(vfs::stat(&to), Ok(entry) if entry.kind == Kind::Directory) {
+                to = format!("{to}/{}", from.rsplit('/').next().unwrap_or("copy"));
+            }
+            self.copy_tree(&from, &to)?;
+        } else {
+            let bytes = self.read_file(&from)?;
+            let result = vfs_mut::write(&to, &bytes, media_type(&to), None).map_err(|error| {
+                format!(
+                    "cp {} {}: {error:?}",
+                    self.display(&from),
+                    self.display(&to)
+                )
+            })?;
+            self.out.push_str(&format!(
+                "copied {} -> {} v{}\n",
                 self.display(&from),
-                self.display(&to)
-            )
-        })?;
-        self.out.push_str(&format!(
-            "copied {} -> {} v{}\n",
-            self.display(&from),
-            self.display(&to),
-            result.version
-        ));
+                self.display(&to),
+                result.version
+            ));
+        }
+        Ok(())
+    }
+
+    fn copy_tree(&mut self, from: &str, to: &str) -> Result<(), String> {
+        match vfs::stat(to) {
+            Ok(entry) if entry.kind == Kind::Directory => {}
+            Ok(_) => return Err(format!("cp: {} is a file", self.display(to))),
+            Err(_) => vfs_mut::mkdir(to)
+                .map_err(|error| format!("mkdir {}: {error:?}", self.display(to)))?,
+        }
+        let mut offset = 0;
+        loop {
+            let page = vfs::ls(from, offset, 512).map_err(|error| format!("cp: {error:?}"))?;
+            for entry in page.entries {
+                let target = if to.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{to}/{}", entry.name)
+                };
+                if entry.kind == Kind::Directory {
+                    self.copy_tree(&entry.path, &target)?;
+                } else {
+                    let bytes = self.read_file(&entry.path)?;
+                    vfs_mut::write(&target, &bytes, media_type(&target), None)
+                        .map_err(|error| format!("cp {}: {error:?}", self.display(&target)))?;
+                }
+            }
+            match page.next {
+                Some(next) if next > offset => offset = next,
+                _ => break,
+            }
+        }
+        Ok(())
+    }
+
+    fn find(&mut self, args: &[String]) -> Result<(), String> {
+        let (root, pattern) = match args {
+            [] => (".", None),
+            [root] => (root.as_str(), None),
+            [root, pattern] => (root.as_str(), Some(pattern.as_str())),
+            _ => return Err("find [ROOT] [PATTERN]".into()),
+        };
+        let root = self.resolve(root)?;
+        let mut stack = vec![(root, 0usize)];
+        let mut count = 0usize;
+        while let Some((dir, depth)) = stack.pop() {
+            if depth > 64 {
+                return Err("find: maximum depth exceeded".into());
+            }
+            let mut offset = 0;
+            loop {
+                let page =
+                    vfs::ls(&dir, offset, 512).map_err(|error| format!("find: {error:?}"))?;
+                for entry in page.entries {
+                    count += 1;
+                    if count > 20_000 {
+                        return Err("find: too many entries".into());
+                    }
+                    let path = self.display(&entry.path);
+                    if pattern.is_none_or(|pattern| {
+                        glob_match(pattern, &entry.name) || glob_match(pattern, &path)
+                    }) {
+                        self.out.push_str(&path);
+                        if entry.kind == Kind::Directory {
+                            self.out.push('/');
+                        }
+                        self.out.push('\n');
+                    }
+                    if entry.kind == Kind::Directory {
+                        stack.push((entry.path, depth + 1));
+                    }
+                }
+                match page.next {
+                    Some(next) if next > offset => offset = next,
+                    _ => break,
+                }
+            }
+        }
         Ok(())
     }
 
@@ -924,6 +1085,57 @@ fn split_words(line: &str) -> Result<Vec<String>, String> {
         words.push(word);
     }
     Ok(words)
+}
+
+fn parse_redirection(
+    mut words: Vec<String>,
+) -> Result<(Vec<String>, Option<(bool, String)>), String> {
+    let Some(index) = words.iter().position(|word| word == ">" || word == ">>") else {
+        return Ok((words, None));
+    };
+    let append = words[index] == ">>";
+    let Some(target) = words.get(index + 1).cloned() else {
+        return Err("redirection needs a path".into());
+    };
+    if words
+        .iter()
+        .skip(index + 2)
+        .any(|word| word == ">" || word == ">>")
+    {
+        return Err("only one output redirection is supported".into());
+    }
+    words.truncate(index);
+    if words.is_empty() {
+        return Err("redirection needs a command".into());
+    }
+    Ok((words, Some((append, target))))
+}
+
+fn glob_match(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut p, mut v) = (0, 0);
+    let (mut star, mut mark) = (None, 0);
+    while v < value.len() {
+        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            p += 1;
+            mark = v;
+        } else if let Some(star_index) = star {
+            p = star_index + 1;
+            mark += 1;
+            v = mark;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 const HELP: &str = "\

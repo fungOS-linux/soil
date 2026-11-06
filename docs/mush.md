@@ -141,7 +141,7 @@ stat PATH
 tree [DIR]
 rm [-r] PATH...
 mv FROM TO
-cp FROM TO
+cp [-r] FROM TO
 search QUERY
 source SCRIPT
 echo TEXT
@@ -155,7 +155,10 @@ exit
 ## Editing and inspection
 
 `write` replaces a file; `append` reads the current version and writes a new
-version with the appended line, preserving VFS history. `touch`, `head`, `tail`,
+version with the appended line, preserving VFS history. `CMD > PATH` and
+`CMD >> PATH` redirect command output through the same versioned VFS write
+path. `mkdir -p`, `cp -r` and `find` are implemented over `soil:vfs` /
+`soil:vfs-mut`. `touch`, `head`, `tail`,
 `grep`, `wc`, `stat`, `tree` and recursive `rm -r` are implemented entirely over
 `soil:vfs` / `soil:vfs-mut`. There is still no host `$EDITOR` or process spawn.
 
