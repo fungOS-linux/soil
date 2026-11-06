@@ -131,6 +131,8 @@ pub enum AnnotationSpec {
     Line(LineAnnotation),
     Band(BandAnnotation),
     Threshold(ThresholdAnnotation),
+    #[serde(rename = "x_event")]
+    XEvent(XEventAnnotation),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +145,21 @@ pub struct LineAnnotation {
     pub color: Option<[u8; 3]>,
     #[serde(default = "annotation_opacity")]
     pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct XEventAnnotation {
+    /// Seconds into the incident cycle.
+    pub at: f32,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    #[serde(default = "annotation_opacity")]
+    pub opacity: f32,
+    /// Draw a faint vertical guide in addition to the axis marker.
+    #[serde(default)]
+    pub line: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1963,6 +1980,54 @@ fn draw_chart(
                     );
                 }
             }
+            AnnotationSpec::XEvent(event) => {
+                let Some(x) = cycle_x(event.at) else {
+                    continue;
+                };
+                let color = event.color.unwrap_or([96, 165, 250]);
+                if event.line.unwrap_or(true) {
+                    painter.rect(
+                        &format!("{}-annotation-x-line-{index}", spec.id),
+                        x,
+                        top,
+                        1.0,
+                        plot_h,
+                        color,
+                        (event.opacity * 0.45).clamp(0.0, 1.0),
+                        0.0,
+                    );
+                }
+                painter.points(
+                    &format!("{}-annotation-x-mark-{index}", spec.id),
+                    &[(x, plot_bottom - 3.0)],
+                    7.0,
+                    color,
+                    1.0,
+                );
+                if let Some(label) = &event.label {
+                    let width = approx_text_width(label, 9.0);
+                    let label_x = (x - width * 0.5).clamp(left, (left + plot_w - width).max(left));
+                    let label_y = plot_bottom - 18.0;
+                    painter.rect(
+                        &format!("{}-annotation-x-label-bg-{index}", spec.id),
+                        label_x - 3.0,
+                        label_y - 2.0,
+                        width + 6.0,
+                        12.0,
+                        [17, 19, 29],
+                        0.92,
+                        2.0,
+                    );
+                    painter.text(
+                        &format!("{}-annotation-x-label-{index}", spec.id),
+                        label,
+                        label_x,
+                        label_y,
+                        9.0,
+                        color,
+                    );
+                }
+            }
             AnnotationSpec::Threshold(threshold) => {
                 if threshold.value < ylo || threshold.value > yhi {
                     continue;
@@ -2571,6 +2636,13 @@ mod tests {
                     color: Some([255, 255, 0]),
                     opacity: 1.0,
                 }),
+                AnnotationSpec::XEvent(XEventAnnotation {
+                    at: 132.0,
+                    label: Some("deploy".into()),
+                    color: Some([0, 255, 0]),
+                    opacity: 1.0,
+                    line: Some(false),
+                }),
             ];
         }
         let mut live = LiveViz::new(spec);
@@ -2586,6 +2658,12 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|node| node.id == "latency-annotation-threshold-1")
+        );
+        assert!(
+            scene
+                .nodes
+                .iter()
+                .any(|node| node.id == "latency-annotation-x-mark-2")
         );
     }
 
