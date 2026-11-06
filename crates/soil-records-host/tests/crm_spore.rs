@@ -206,8 +206,8 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
         vec![
             Namespace::write("crm", "team/test/crm", "crm"),
             Namespace::read("contacts", "personal/test/contacts", "contact"),
-            Namespace::read("messages", "personal/test/messages", "message"),
-            Namespace::read("calls", "personal/test/calls", "call"),
+            Namespace::write("messages", "personal/test/messages", "message"),
+            Namespace::write("calls", "personal/test/calls", "call"),
         ],
     )?;
     let mut config = Config::new();
@@ -291,6 +291,62 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
             ],
         )?
         .map_err(anyhow::Error::msg)?;
+    bindings
+        .call_run(
+            &mut store,
+            &[
+                "contact".into(),
+                "share".into(),
+                "a-acme".into(),
+                "c-ada".into(),
+                "Ada".into(),
+            ],
+        )?
+        .map_err(anyhow::Error::msg)?;
+    bindings
+        .call_run(&mut store, &["contacts".into(), "shared".into()])?
+        .map_err(anyhow::Error::msg)?;
+    bindings
+        .call_run(
+            &mut store,
+            &[
+                "call".into(),
+                "add".into(),
+                "call-2".into(),
+                "a-acme".into(),
+                "Personal follow-up".into(),
+                "2026-01-06T10:00:00Z".into(),
+                "Private note".into(),
+            ],
+        )?
+        .map_err(anyhow::Error::msg)?;
+    bindings
+        .call_run(
+            &mut store,
+            &[
+                "email".into(),
+                "add".into(),
+                "mail-1".into(),
+                "thread-mail".into(),
+                "a-acme".into(),
+                "Pilot update".into(),
+                "Ada".into(),
+                "Here is the update".into(),
+                "1767520800000".into(),
+            ],
+        )?
+        .map_err(anyhow::Error::msg)?;
+    bindings
+        .call_run(
+            &mut store,
+            &[
+                "contact".into(),
+                "unshare".into(),
+                "a-acme".into(),
+                "c-ada".into(),
+            ],
+        )?
+        .map_err(anyhow::Error::msg)?;
 
     let store = Store::open(root.path(), &root.path().join("device_id"))?;
     let activity = store.get("team/test/crm", "act-2")?;
@@ -301,5 +357,15 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
     assert_eq!(opportunity.fields["stage"], "won");
     let link = store.get("team/test/crm", "ac-a-acme-c-ada")?;
     assert_eq!(link.fields["contact_token"], "t-ada");
+    assert!(
+        store
+            .get("team/test/crm", "proj-a-acme-c-ada")
+            .map(|record| record.deleted)
+            .unwrap_or(true)
+    );
+    let call = store.get("personal/test/calls", "call-2")?;
+    assert_eq!(call.fields["visibility"], "private");
+    let message = store.get("personal/test/messages", "mail-1")?;
+    assert_eq!(message.fields["account_id"], "a-acme");
     Ok(())
 }

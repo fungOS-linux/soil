@@ -178,12 +178,22 @@ spores/crm
   activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
   opportunity stage <opportunity-id> <stage>
   contact link <account-id> <contact-id> [role]
+  contact share <account-id> <contact-id> [first-name]
+  contact unshare <account-id> <contact-id>
+  contacts shared
+  call add <id> <account-id> <title> <occurred-at> [summary]
+  email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>
 ```
 
 The host maps namespace names to books and enforces read/write per namespace.
 The Spore never sees a book path. Contacts, calls and mail stay in personal
 books; the shared CRM holds the relationship and references them by stable id
 or contact token.
+
+There is no contact merge and no bulk sharing. `contact link` links a personal
+contact to an account without exposing it. `contact share` writes only an
+explicit first-name + token projection; `contact unshare` removes it. Calls and
+emails written by the Spore land in the personal namespaces as private records.
 
 Roles are a host policy layer: the host links only the namespace grants the
 current principal's Mycelium roles allow. Unibus/records sync remains

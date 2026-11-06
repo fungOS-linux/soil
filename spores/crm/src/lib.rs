@@ -125,7 +125,7 @@ impl Guest for Component {
                 let id = args.get(1).ok_or_else(|| "usage: project <project-id>".to_string())?;
                 print_json("project", &data.project(id)?);
             }
-            "pipeline" => print_json("pipeline", &data.pipeline()),
+            "pipeline" => print_json("pipeline", &data.pipeline(args.get(1).map(String::as_str))),
             "activity" if args.get(1).map(String::as_str) == Some("add") => {
                 let value = add_activity(&data, &args)?;
                 print_json("activity", &value);
@@ -137,6 +137,25 @@ impl Guest for Component {
             "contact" if args.get(1).map(String::as_str) == Some("link") => {
                 let value = link_contact(&data, &args)?;
                 print_json("contact", &value);
+            }
+            "contact" if args.get(1).map(String::as_str) == Some("share") => {
+                let value = share_contact(&data, &args)?;
+                print_json("contact", &value);
+            }
+            "contact" if args.get(1).map(String::as_str) == Some("unshare") => {
+                let value = unshare_contact(&args)?;
+                print_json("contact", &value);
+            }
+            "contacts" if args.get(1).map(String::as_str) == Some("shared") => {
+                print_json("contacts", &data.shared_contacts());
+            }
+            "call" if args.get(1).map(String::as_str) == Some("add") => {
+                let value = add_call(&data, &args)?;
+                print_json("call", &value);
+            }
+            "email" if args.get(1).map(String::as_str) == Some("add") => {
+                let value = add_email(&data, &args)?;
+                print_json("email", &value);
             }
             "contact" => {
                 let id = args.get(1).ok_or_else(|| "usage: contact <contact-id|contact-token>".to_string())?;
@@ -153,6 +172,11 @@ impl Guest for Component {
                     "activity add <id> <account-id> <kind> <title> <occurred-at> [summary]",
                     "opportunity stage <opportunity-id> <stage>",
                     "contact link <account-id> <contact-id> [role]",
+                    "contact share <account-id> <contact-id> [first-name]",
+                    "contact unshare <account-id> <contact-id>",
+                    "contacts shared",
+                    "call add <id> <account-id> <title> <occurred-at> [summary]",
+                    "email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>",
                 ],
                 "namespaces": [CRM, CONTACTS, CALLS, MESSAGES],
             })),
@@ -260,11 +284,17 @@ impl Dataset {
         }))
     }
 
-    fn pipeline(&self) -> Value {
-        let mut stages: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    fn pipeline(&self, company_id: Option<&str>) -> Value {
+        let accounts = rows_by_id(self.rows(ACCOUNT_SCHEMA));
+        let mut stages: BTreeMap<String, (u64, u64, Vec<Value>)> = BTreeMap::new();
         for opportunity in self.rows(OPPORTUNITY_SCHEMA) {
             let stage = opportunity.text("stage");
             if stage.is_empty() {
+                continue;
+            }
+            if let Some(company_id) = company_id
+                && opportunity.text("company_id") != company_id
+            {
                 continue;
             }
             let amount = opportunity
@@ -272,16 +302,30 @@ impl Dataset {
                 .as_f64()
                 .unwrap_or(0.0)
                 .max(0.0) as u64;
-            let entry = stages.entry(stage.to_string()).or_insert((0, 0));
+            let entry = stages.entry(stage.to_string()).or_insert((0, 0, Vec::new()));
             entry.0 += 1;
             entry.1 += amount;
+            entry.2.push(json!({
+                "id": opportunity.id,
+                "name": opportunity.text("name"),
+                "account_id": opportunity.text("account_id"),
+                "account_name": accounts
+                    .get(opportunity.text("account_id"))
+                    .map(|account| account.text("name"))
+                    .unwrap_or(""),
+                "amount": amount,
+                "close_date": opportunity.text("close_date"),
+                "owner": opportunity.text("owner"),
+                "company_id": opportunity.text("company_id"),
+            }));
         }
         let stages = stages
             .into_iter()
-            .map(|(stage, (count, amount))| json!({
+            .map(|(stage, (count, amount, opportunities))| json!({
                 "stage": stage,
                 "count": count,
                 "amount": amount,
+                "opportunities": opportunities,
             }))
             .collect::<Vec<_>>();
         json!({ "stages": stages })
@@ -407,6 +451,24 @@ impl Dataset {
             "opportunities": opportunities,
             "timeline": events,
         }))
+    }
+
+    fn shared_contacts(&self) -> Value {
+        let accounts = rows_by_id(self.rows(ACCOUNT_SCHEMA));
+        let contacts = self
+            .rows(PROJECTION_SCHEMA)
+            .map(|projection| json!({
+                "contact_token": projection.text("contact_token"),
+                "first_name": projection.text("first_name"),
+                "account_id": projection.text("account_id"),
+                "account_name": accounts
+                    .get(projection.text("account_id"))
+                    .map(|account| account.text("name"))
+                    .unwrap_or(""),
+                "shared": true,
+            }))
+            .collect::<Vec<_>>();
+        json!({ "contacts": contacts })
     }
 
     fn contacts_for(&self, account_id: &str) -> Vec<Value> {
@@ -594,6 +656,14 @@ impl Dataset {
                     }
                 }
             }
+            if let Some(account_id) = message.field("account_id").as_str()
+                && !account_id.is_empty()
+            {
+                account_ids.insert(account_id.to_string());
+                if let Some(companies) = companies_by_account.get(account_id) {
+                    company_ids.extend(companies.iter().cloned());
+                }
+            }
             if account_ids.is_empty()
                 && company_ids.is_empty()
                 && project_ids.is_empty()
@@ -754,6 +824,164 @@ fn link_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
         "contact_id": contact_id,
         "contact_token": token,
         "role": role,
+        "revision": stored.revision,
+    }))
+}
+
+fn share_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
+    let account_id = args
+        .get(2)
+        .ok_or_else(|| "usage: contact share <account-id> <contact-id> [first-name]".to_string())?;
+    let contact_id = args
+        .get(3)
+        .ok_or_else(|| "contact share: missing contact id".to_string())?;
+    if data.rows(ACCOUNT_SCHEMA).all(|account| account.id != *account_id) {
+        return Err(format!("account {account_id} not found"));
+    }
+    let contact = data
+        .rows(CONTACT_SCHEMA)
+        .find(|row| row.id == *contact_id || row.text("contact_token") == *contact_id)
+        .ok_or_else(|| format!("contact {contact_id} not found"))?;
+    let token = contact.text("contact_token");
+    if token.is_empty() {
+        return Err(format!("contact {contact_id} has no contact_token"));
+    }
+    let first_name = args
+        .get(4)
+        .cloned()
+        .filter(|name| !name.is_empty())
+        .or_else(|| nonempty(contact.text("first_name")))
+        .unwrap_or_else(|| token.to_string());
+    let projection_id = format!("proj-{account_id}-{}", contact.id);
+    let stored = put_record(
+        CRM,
+        &projection_id,
+        PROJECTION_SCHEMA,
+        json!({
+            "contact_token": token,
+            "account_id": account_id,
+            "first_name": first_name,
+            "hidden": false,
+        }),
+    )?;
+    Ok(json!({
+        "id": projection_id,
+        "account_id": account_id,
+        "contact_token": token,
+        "first_name": first_name,
+        "revision": stored.revision,
+    }))
+}
+
+fn unshare_contact(args: &[String]) -> Result<Value, String> {
+    let account_id = args
+        .get(2)
+        .ok_or_else(|| "usage: contact unshare <account-id> <contact-id>".to_string())?;
+    let contact_id = args
+        .get(3)
+        .ok_or_else(|| "contact unshare: missing contact id".to_string())?;
+    let projection_id = format!("proj-{account_id}-{contact_id}");
+    records::delete(&key(CRM, &projection_id))
+        .map_err(|error| format!("unshare {projection_id}: {error:?}"))?;
+    Ok(json!({ "id": projection_id, "shared": false }))
+}
+
+fn add_call(data: &Dataset, args: &[String]) -> Result<Value, String> {
+    let id = args.get(2).ok_or_else(|| {
+        "usage: call add <id> <account-id> <title> <occurred-at> [summary]".to_string()
+    })?;
+    let account_id = args.get(3).ok_or_else(|| "call add: missing account id".to_string())?;
+    let title = args.get(4).ok_or_else(|| "call add: missing title".to_string())?;
+    let occurred_at = args
+        .get(5)
+        .ok_or_else(|| "call add: missing occurred-at".to_string())?;
+    let summary = args.iter().skip(6).cloned().collect::<Vec<_>>().join(" ");
+    if data.rows(ACCOUNT_SCHEMA).all(|account| account.id != *account_id) {
+        return Err(format!("account {account_id} not found"));
+    }
+    let stored = put_record(
+        CALLS,
+        id,
+        ACTIVITY_SCHEMA,
+        json!({
+            "kind": "call",
+            "name": title,
+            "occurred_at": occurred_at,
+            "description": summary,
+            "account_id": account_id,
+            "visibility": "private",
+            "source": "spore",
+            "source_id": id,
+        }),
+    )?;
+    Ok(json!({
+        "id": id,
+        "namespace": CALLS,
+        "account_id": account_id,
+        "title": title,
+        "occurred_at": occurred_at,
+        "revision": stored.revision,
+    }))
+}
+
+fn add_email(data: &Dataset, args: &[String]) -> Result<Value, String> {
+    let id = args.get(2).ok_or_else(|| {
+        "usage: email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>"
+            .to_string()
+    })?;
+    let thread_id = args.get(3).ok_or_else(|| "email add: missing thread id".to_string())?;
+    let account_id = args.get(4).ok_or_else(|| "email add: missing account id".to_string())?;
+    let subject = args.get(5).ok_or_else(|| "email add: missing subject".to_string())?;
+    let sender = args.get(6).ok_or_else(|| "email add: missing sender".to_string())?;
+    let body = args.get(7).ok_or_else(|| "email add: missing body".to_string())?;
+    let occurred_at_ms = args
+        .get(8)
+        .ok_or_else(|| "email add: missing occurred-at-ms".to_string())?
+        .parse::<u64>()
+        .map_err(|_| "email add: occurred-at-ms must be an integer".to_string())?;
+    if data.rows(ACCOUNT_SCHEMA).all(|account| account.id != *account_id) {
+        return Err(format!("account {account_id} not found"));
+    }
+    put_record(
+        MESSAGES,
+        thread_id,
+        THREAD_SCHEMA,
+        json!({
+            "channel": "email",
+            "external_id": thread_id,
+            "title": subject,
+            "participants": [sender],
+            "visibility": "private",
+            "first_at_ms": occurred_at_ms,
+            "last_at_ms": occurred_at_ms,
+        }),
+    )?;
+    let stored = put_record(
+        MESSAGES,
+        id,
+        MESSAGE_SCHEMA,
+        json!({
+            "thread_id": thread_id,
+            "channel": "email",
+            "external_id": id,
+            "direction": "inbound",
+            "sender": sender,
+            "body": body,
+            "attachments": [],
+            "mentions": [],
+            "source_refs": [],
+            "occurred_at_ms": occurred_at_ms,
+            "edited_at_ms": null,
+            "deleted": false,
+            "account_id": account_id,
+        }),
+    )?;
+    Ok(json!({
+        "id": id,
+        "thread_id": thread_id,
+        "namespace": MESSAGES,
+        "account_id": account_id,
+        "subject": subject,
         "revision": stored.revision,
     }))
 }

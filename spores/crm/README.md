@@ -25,8 +25,27 @@ pipeline
 activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
 opportunity stage <opportunity-id> <stage>
 contact link <account-id> <contact-id> [role]
+contact share <account-id> <contact-id> [first-name]
+contact unshare <account-id> <contact-id>
+contacts shared
+call add <id> <account-id> <title> <occurred-at> [summary]
+email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>
 help
 ```
+
+## Contact policy
+
+There is no merge and no bulk share.
+
+```text
+personal contact       stays in contacts namespace
+account link           explicit account-contact record
+shared projection      explicit first name + token only
+```
+
+`contact link` does not share anything. `contact share` is required before a
+team view sees a first-name projection. Calls and emails written by this Spore
+go to the personal `calls` / `messages` namespaces with `visibility = private`.
 
 ## Build
 
