@@ -496,6 +496,12 @@ impl Dataset {
             .map(|projection| json!({
                 "contact_token": projection.text("contact_token"),
                 "first_name": projection.text("first_name"),
+                "last_name": projection.text("last_name"),
+                "name": format!(
+                    "{} {}",
+                    projection.text("first_name"),
+                    projection.text("last_name")
+                ).trim(),
                 "account_id": projection.text("account_id"),
                 "account_name": accounts
                     .get(projection.text("account_id"))
@@ -543,10 +549,13 @@ impl Dataset {
                     "shared": projection.is_some(),
                 }));
             } else if let Some(projection) = projection {
+                let first = projection.text("first_name");
+                let last = projection.text("last_name");
                 out.push(json!({
                     "id": contact_id,
-                    "name": projection.text("first_name"),
-                    "first_name": projection.text("first_name"),
+                    "name": format!("{first} {last}").trim(),
+                    "first_name": first,
+                    "last_name": last,
                     "contact_token": token,
                     "role": assignment.text("role"),
                     "shared": true,
@@ -569,10 +578,13 @@ impl Dataset {
             let contact = contacts
                 .values()
                 .find(|contact| contact_token(contact) == token);
+            let first = projection.text("first_name");
+            let last = projection.text("last_name");
             out.push(json!({
                 "id": contact.map(|contact| contact.id.as_str()).unwrap_or(token),
-                "name": projection.text("first_name"),
-                "first_name": projection.text("first_name"),
+                "name": format!("{first} {last}").trim(),
+                "first_name": first,
+                "last_name": last,
                 "contact_token": token,
                 "shared": true,
             }));

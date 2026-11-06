@@ -140,7 +140,7 @@ fn contacts_spore_edits_and_shares_explicitly() -> Result<()> {
     run(&bindings, &mut store, &args)?;
 
     let mut args = ns.to_vec();
-    args.extend(["share", "espo:account:a1", "c-ada", "Ada"]);
+    args.extend(["share", "espo:account:a1", "c-ada", "Ada", "Lovelace"]);
     run(&bindings, &mut store, &args)?;
 
     let mut args = ns.to_vec();
@@ -152,12 +152,13 @@ fn contacts_spore_edits_and_shares_explicitly() -> Result<()> {
     run(&bindings, &mut store, &args)?;
 
     let check = Store::open(root.path(), &root.path().join("device_id"))?;
+    let projection = check.get("team/test/crm", "proj-espo:account:a1-c-ada")?;
     assert_eq!(
-        check
-            .get("team/test/crm", "proj-espo:account:a1-c-ada")?
-            .schema_id,
+        projection.schema_id,
         "fungos.crm/account-contact-projection@1"
     );
+    assert_eq!(projection.fields["first_name"], "Ada");
+    assert_eq!(projection.fields["last_name"], "Lovelace");
     drop(check);
 
     let mut args = ns.to_vec();

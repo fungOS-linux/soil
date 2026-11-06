@@ -50,7 +50,7 @@ There is no merge and no bulk share.
 ```text
 personal contact       stays in contacts namespace
 account link           explicit account-contact record
-shared projection      explicit first name + token only
+shared projection      explicit first/last name + token only
 ```
 
 Account↔contact links and sharing belong to the Contacts Spore/UI. The CRM only

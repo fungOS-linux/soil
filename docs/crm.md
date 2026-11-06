@@ -34,7 +34,7 @@ private contact
 private assignment
   account link, role
 team projection
-  first name + opaque contact token
+  first/last name + opaque contact token
 ```
 
 A team sees an account assignment through the projection. It does not

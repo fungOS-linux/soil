@@ -4,7 +4,7 @@ Status: **personal contacts + explicit CRM projections, 2026-11-06.**
 
 ```text
 contacts namespace   personal, authoritative contact records
-crm namespace        only explicit first-name + token projections
+crm namespace        only explicit first/last-name + token projections
 ```
 
 ## Actions
@@ -16,7 +16,7 @@ show <id|token>
 add <id> <first> <last> <email> [phone] [title]
 set <id|token> <field> <value>
 link <account-id> <contact-id|token> [role]
-share <account-id> <contact-id|token> [first-name]
+share <account-id> <contact-id|token> [first-name] [last-name]
 unshare <account-id> <contact-id|token>
 shared
 help
@@ -38,6 +38,7 @@ the contacts book. `share` writes only:
 
 ```text
 first name
+last name
 opaque contact token
 account id
 ```

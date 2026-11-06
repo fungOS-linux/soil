@@ -75,7 +75,7 @@ impl Guest for Component {
                     "add <id> <first> <last> <email> [phone] [title]",
                     "set <id|token> <field> <value>",
                     "link <account-id> <contact-id|token> [role]",
-                    "share <account-id> <contact-id|token> [first-name]",
+                    "share <account-id> <contact-id|token> [first-name] [last-name]",
                     "unshare <account-id> <contact-id|token>",
                     "shared",
                 ],
@@ -326,7 +326,7 @@ fn link(contacts: &str, args: &[String]) -> Result<Value, String> {
 fn share(contacts: &str, crm: &str, args: &[String]) -> Result<Value, String> {
     let account_id = args
         .get(1)
-        .ok_or_else(|| "usage: share <account-id> <contact-id|token> [first-name]".to_string())?;
+        .ok_or_else(|| "usage: share <account-id> <contact-id|token> [first-name] [last-name]".to_string())?;
     let contact_ref = args
         .get(2)
         .ok_or_else(|| "share: missing contact id".to_string())?;
@@ -348,11 +348,18 @@ fn share(contacts: &str, crm: &str, args: &[String]) -> Result<Value, String> {
         .filter(|name| !name.is_empty())
         .or_else(|| contact.get("given_name").and_then(Value::as_str).map(str::to_string))
         .unwrap_or_else(|| token.to_string());
+    let last_name = args
+        .get(4)
+        .cloned()
+        .filter(|name| !name.is_empty())
+        .or_else(|| contact.get("family_name").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_default();
     let projection_id = format!("proj-{account_id}-{}", entry.key.id);
     let body = json!({
         "contact_token": token,
         "account_id": account_id,
         "first_name": first_name,
+        "last_name": last_name,
         "hidden": false,
     });
     let stored = put(crm, &projection_id, PROJECTION_SCHEMA, body.clone())?;
@@ -368,6 +375,7 @@ fn share(contacts: &str, crm: &str, args: &[String]) -> Result<Value, String> {
             "account_id": account_id,
             "contact_token": token,
             "first_name": first_name,
+            "last_name": last_name,
         })),
     )?;
     Ok(json!({
@@ -375,6 +383,7 @@ fn share(contacts: &str, crm: &str, args: &[String]) -> Result<Value, String> {
         "account_id": account_id,
         "contact_token": token,
         "first_name": first_name,
+        "last_name": last_name,
         "revision": stored.revision,
     }))
 }
@@ -403,6 +412,7 @@ fn unshare(crm: &str, args: &[String]) -> Result<Value, String> {
             "account_id": before.get("account_id").cloned().unwrap_or(Value::Null),
             "contact_token": before.get("contact_token").cloned().unwrap_or(Value::Null),
             "first_name": before.get("first_name").cloned().unwrap_or(Value::Null),
+            "last_name": before.get("last_name").cloned().unwrap_or(Value::Null),
         })),
         None,
     )?;
@@ -415,6 +425,7 @@ fn shared(crm: &str) -> Result<Value, String> {
         .map(|(_, body)| json!({
             "contact_token": body.get("contact_token").cloned().unwrap_or(Value::Null),
             "first_name": body.get("first_name").cloned().unwrap_or(Value::Null),
+            "last_name": body.get("last_name").cloned().unwrap_or(Value::Null),
             "account_id": body.get("account_id").cloned().unwrap_or(Value::Null),
         }))
         .collect::<Vec<_>>();
