@@ -6404,6 +6404,7 @@ dependencies = [
  "tempfile",
  "tiny_http",
  "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]

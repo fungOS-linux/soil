@@ -10,6 +10,9 @@ use anyhow::Context;
 use fungos_records::{Contact, Record, Store};
 use wasmtime::component::{HasSelf, Linker};
 
+mod namespaced;
+pub use namespaced::{Namespace, NamespacedRecordsHost};
+
 wasmtime::component::bindgen!({ path: "wit", world: "records-host" });
 
 pub use soil::records::records;

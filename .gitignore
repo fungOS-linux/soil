@@ -10,6 +10,9 @@ target/
 !spores/media-probe/module.wasm
 !spores/surface-probe/module.wasm
 
+# Checked-in CRM Spore component.
+!spores/crm/module.wasm
+
 # Checked-in WebGPU component fixture for the ignored GPU test.
 !crates/soil-webgpu/fixtures/hello-compute.wasm
 

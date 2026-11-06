@@ -158,6 +158,34 @@ source
 source_id
 ```
 
+## CRM Spore and namespaces
+
+The CRM domain is a Spore, not a host. It reads only namespaced records:
+
+```text
+crm        shared CRM: accounts, companies, projects, activities, opportunities
+contacts   personal contacts
+calls      personal call/activity records
+messages   personal conversation threads/messages
+```
+
+```text
+spores/crm
+  accounts
+  account <account-id>
+  timeline <account-id> [limit]
+  pipeline
+```
+
+The host maps namespace names to books and enforces read/write per namespace.
+The Spore never sees a book path. Contacts, calls and mail stay in personal
+books; the shared CRM holds the relationship and references them by stable id
+or contact token.
+
+Roles are a host policy layer: the host links only the namespace grants the
+current principal's Mycelium roles allow. Unibus/records sync remains
+host-mediated transport, not a Spore import.
+
 ## Timeline
 
 The account/contact view includes a unified timeline built from CRM activities

@@ -1,0 +1,9 @@
+// CRM Spore: reads CRM, contact, call and conversation namespaces through
+// soil:records. The host maps namespace names to books and enforces grants.
+package fungos:crm@0.1.0;
+
+world crm {
+  import soil:records/records@0.1.0;
+
+  export run: func(args: list<string>) -> result<_, string>;
+}

@@ -97,6 +97,9 @@ a real component pushes bounded PCM into a cpal host. See
 [`crates/soil-sdk`](crates/soil-sdk); its first feature, `audio`, provides
 `Output`, `write_all`, `tone` and `play_tone`. See
 [`docs/soil-sdk.md`](docs/soil-sdk.md).
+The CRM is a Spore over namespaced records, not a host: [`spores/crm`](spores/crm)
+reads `crm`, `contacts`, `calls` and `messages` namespaces, while the host maps
+those names to books and enforces grants. See [`docs/crm.md`](docs/crm.md).
 The reusable WASI p2 profile is [`crates/soil-wasi-host`](crates/soil-wasi-host):
 `wasi:http` incoming/outgoing, `wasi:sockets` with per-use CIDR policy, clocks,
 random, filesystem preopens and a per-request store. `soil-wasi-http` serves a
