@@ -167,6 +167,10 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        if let Some(live) = &mut self.live {
+            live.set_scale(window.scale_factor() as f32);
+            self.scene = live.scene();
+        }
         self.window = Some(window.clone());
         self.last_tick = Instant::now();
         window.focus_window();
@@ -191,6 +195,16 @@ impl ApplicationHandler for App {
                     window.request_redraw();
                 }
             }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(live) = &mut self.live {
+                    live.set_scale(scale_factor as f32);
+                    self.scene = live.scene();
+                    self.dirty = true;
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state().into();
             }
@@ -206,6 +220,25 @@ impl ApplicationHandler for App {
                     (position.x as f32, position.y as f32)
                 };
                 self.pointer = Point { x, y }.clamp_unit();
+                if let Some(live) = &mut self.live {
+                    let spec = (live.spec().width, live.spec().height);
+                    live.set_pointer(Some((self.pointer.x * spec.0, self.pointer.y * spec.1)));
+                    self.scene = live.scene();
+                    self.dirty = true;
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(live) = &mut self.live {
+                    live.set_pointer(None);
+                    self.scene = live.scene();
+                    self.dirty = true;
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let phase = match state {

@@ -11,6 +11,8 @@ fn main() -> anyhow::Result<()> {
     let mut time = 0.0f32;
     let mut width = 1200u32;
     let mut height = 840u32;
+    let mut scale = 1.0f32;
+    let mut pointer = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--spec" => spec_path = args.next(),
@@ -25,6 +27,21 @@ fn main() -> anyhow::Result<()> {
                 width = args
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("--width needs a number"))?
+                    .parse()?
+            }
+            "--pointer" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--pointer needs X,Y"))?;
+                let (x, y) = value
+                    .split_once(',')
+                    .ok_or_else(|| anyhow::anyhow!("--pointer needs X,Y"))?;
+                pointer = Some((x.parse()?, y.parse()?));
+            }
+            "--scale" => {
+                scale = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--scale needs a number"))?
                     .parse()?
             }
             "--height" => {
@@ -43,6 +60,8 @@ fn main() -> anyhow::Result<()> {
     width = width.min(4096);
     height = height.min(4096);
     let mut live = LiveViz::new(spec);
+    live.set_scale(scale);
+    live.set_pointer(pointer);
     if time > 0.0 {
         live.advance(time);
     }

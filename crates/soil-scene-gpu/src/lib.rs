@@ -577,11 +577,12 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
             soil_scene::Content::Area(area) => {
                 let color = rgb_or_ink(theme, area.rgb, area.ink);
                 let alpha = area.opacity.clamp(0.0, 1.0);
+                let base_alpha = area.base_opacity.unwrap_or(alpha).clamp(0.0, 1.0);
                 for pair in area.points.windows(2) {
                     let (x1, y1) = (x + pair[0][0] * w, y + pair[0][1] * h);
                     let (x2, y2) = (x + pair[1][0] * w, y + pair[1][1] * h);
                     let base = y + area.baseline * h;
-                    push_segment(
+                    push_segment_gradient(
                         &mut out,
                         [x1, y1],
                         [x2, y2],
@@ -589,6 +590,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                         [x1, base],
                         color,
                         alpha,
+                        base_alpha,
                     );
                 }
             }
@@ -894,13 +896,35 @@ fn push_segment(
     color: [u8; 3],
     alpha: f32,
 ) {
-    let rgba = [
+    push_segment_gradient(out, a, b, c, d, color, alpha, alpha);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_segment_gradient(
+    out: &mut Vec<Vertex>,
+    a: [f32; 2],
+    b: [f32; 2],
+    c: [f32; 2],
+    d: [f32; 2],
+    color: [u8; 3],
+    top_alpha: f32,
+    base_alpha: f32,
+) {
+    let rgb = [
         color[0] as f32 / 255.0,
         color[1] as f32 / 255.0,
         color[2] as f32 / 255.0,
-        alpha,
     ];
-    for point in [a, b, c, a, c, d] {
+    let top = [rgb[0], rgb[1], rgb[2], top_alpha];
+    let base = [rgb[0], rgb[1], rgb[2], base_alpha];
+    for (point, rgba) in [
+        (a, top),
+        (b, top),
+        (c, base),
+        (a, top),
+        (c, base),
+        (d, base),
+    ] {
         out.push(Vertex {
             pos: [point[0] / 4.0, point[1] / 4.0],
             color: rgba,
@@ -1143,6 +1167,8 @@ fn load_font() -> Option<Font> {
     load_font_path(
         [
             std::env::var("SOIL_SCENE_FONT").ok(),
+            Some("/System/Library/Fonts/SFNS.ttf".into()),
+            Some("/System/Library/Fonts/Supplemental/Avenir Next.ttc".into()),
             Some("/System/Library/Fonts/Supplemental/Arial.ttf".into()),
             Some("/System/Library/Fonts/Supplemental/Arial Unicode.ttf".into()),
             Some("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".into()),
@@ -1249,6 +1275,7 @@ mod tests {
                 ink: Some(soil_scene::Ink::Primary),
                 rgb: None,
                 opacity: 0.5,
+                base_opacity: Some(0.0),
             }),
         }]);
         let frame = render(&scene, 200, 120, Theme::default()).expect("render");

@@ -182,6 +182,7 @@ fn an_area_is_a_bounded_scene_primitive() {
             ink: Some(Ink::Primary),
             rgb: None,
             opacity: 0.4,
+            base_opacity: None,
         }),
     }]);
     scene.validate().expect("valid area");

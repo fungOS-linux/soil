@@ -246,6 +246,8 @@ pub struct LiveViz {
     last_update: Instant,
     atlas_points: Vec<(f32, f32, usize)>,
     hidden: Vec<Vec<bool>>,
+    scale: f32,
+    pointer: Option<(f32, f32)>,
 }
 
 impl LiveViz {
@@ -278,11 +280,24 @@ impl LiveViz {
             last_update: Instant::now(),
             atlas_points,
             hidden,
+            scale: 1.0,
+            pointer: None,
         }
     }
 
     pub fn spec(&self) -> &LiveSpec {
         &self.spec
+    }
+
+    /// Physical pixels per logical spec pixel. The host sets this from the
+    /// window scale factor so text stays crisp instead of shrinking on Retina.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = scale.clamp(0.5, 4.0);
+    }
+
+    /// Pointer position in spec/logical pixels.
+    pub fn set_pointer(&mut self, pointer: Option<(f32, f32)>) {
+        self.pointer = pointer;
     }
 
     /// Advance by an explicit delta, for a host that already owns the clock.
@@ -305,7 +320,13 @@ impl LiveViz {
     pub fn scene(&self) -> Scene {
         let mut nodes = Vec::with_capacity(512);
         let gap = self.spec.gap.max(0.0);
-        let mut painter = Painter::new(&mut nodes, self.spec.width, self.spec.height, self.theme);
+        let mut painter = Painter::new(
+            &mut nodes,
+            self.spec.width,
+            self.spec.height,
+            self.theme,
+            self.scale,
+        );
         for (layer_index, layer) in self.spec.layers.iter().enumerate() {
             match layer {
                 LayerSpec::Chart(spec) => {
@@ -314,7 +335,7 @@ impl LiveViz {
                         .get(layer_index)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]);
-                    draw_chart(&mut painter, spec, self.time, gap, hidden);
+                    draw_chart(&mut painter, spec, self.time, gap, hidden, self.pointer);
                 }
                 LayerSpec::Graph(spec) => draw_graph(&mut painter, spec, self.time, gap),
                 LayerSpec::Map(spec) => draw_map(&mut painter, spec, self.time, gap),
@@ -390,16 +411,18 @@ struct Painter<'a> {
     width: f32,
     height: f32,
     theme: Theme,
+    scale: f32,
     z: f32,
 }
 
 impl<'a> Painter<'a> {
-    fn new(nodes: &'a mut Vec<Node>, width: f32, height: f32, theme: Theme) -> Self {
+    fn new(nodes: &'a mut Vec<Node>, width: f32, height: f32, theme: Theme, scale: f32) -> Self {
         Self {
             nodes,
             width: width.max(1.0),
             height: height.max(1.0),
             theme,
+            scale,
             z: 0.0,
         }
     }
@@ -417,7 +440,7 @@ impl<'a> Painter<'a> {
         8.0 * h / self.height
     }
     fn ts(&self, size: f32) -> f32 {
-        size / (self.theme.body * 1.25).max(1.0)
+        size * self.scale / (self.theme.body * 1.25).max(1.0)
     }
 
     fn rect(
@@ -538,6 +561,7 @@ impl<'a> Painter<'a> {
                 ink: None,
                 rgb: Some(color),
                 opacity,
+                base_opacity: Some(0.0),
             }),
         });
     }
@@ -647,7 +671,21 @@ fn source_params(source: Option<&str>, index: usize) -> (f32, f32, f32) {
     }
 }
 
-fn draw_chart(painter: &mut Painter, spec: &ChartSpec, time: f32, gap: f32, hidden: &[bool]) {
+fn chart_value(base: f32, amplitude: f32, phase: f32, point: usize, time: f32) -> f32 {
+    let x = point as f32;
+    let wave =
+        (x * 0.055 + time * 1.35 + phase).sin() + (x * 0.19 + time * 2.1 + phase).sin() * 0.14;
+    base + wave * amplitude
+}
+
+fn draw_chart(
+    painter: &mut Painter,
+    spec: &ChartSpec,
+    time: f32,
+    gap: f32,
+    hidden: &[bool],
+    pointer: Option<(f32, f32)>,
+) {
     let r = layer_rect(&spec.rect, painter.width, painter.height, gap);
     let style = &spec.style;
     panel(painter, &spec.id, &r, spec.title.as_deref());
@@ -748,11 +786,8 @@ fn draw_chart(painter: &mut Painter, spec: &ChartSpec, time: f32, gap: f32, hidd
             .unwrap_or(CHART_COLORS[index % CHART_COLORS.len()]);
         let mut points = Vec::with_capacity(CHART_POINTS);
         for point in 0..CHART_POINTS {
-            let x = point as f32;
-            let wave = (x * 0.055 + time * 1.35 + phase).sin()
-                + (x * 0.19 + time * 2.1 + phase).sin() * 0.14;
-            let y = base + wave * amplitude;
-            points.push((sx(x), sy(y)));
+            let y = chart_value(base, amplitude, phase, point, time);
+            points.push((sx(point as f32), sy(y)));
         }
         if series.smooth {
             points = smooth(&points, style.smooth_steps);
@@ -769,11 +804,18 @@ fn draw_chart(painter: &mut Painter, spec: &ChartSpec, time: f32, gap: f32, hidd
         }
         if style.glow > 0.0 {
             painter.polyline(
-                &format!("{}-{}-glow", spec.id, index),
+                &format!("{}-{}-glow-outer", spec.id, index),
                 &points,
-                paint + style.glow_width,
+                paint + style.glow_width * 1.7,
                 color,
-                style.glow,
+                style.glow * 0.35,
+            );
+            painter.polyline(
+                &format!("{}-{}-glow-inner", spec.id, index),
+                &points,
+                paint + style.glow_width * 0.8,
+                color,
+                style.glow * 0.72,
             );
         }
         if series.kind == SeriesKind::Scatter {
@@ -816,6 +858,102 @@ fn draw_chart(painter: &mut Painter, spec: &ChartSpec, time: f32, gap: f32, hidd
             10.0,
             [180, 190, 205],
         );
+    }
+
+    if let Some((px, py)) = pointer
+        && px >= left
+        && px <= left + plot_w
+        && py >= top
+        && py <= plot_bottom
+    {
+        let data_x = xlo + (px - left) / plot_w * (xhi - xlo);
+        let nearest = (((data_x - xlo) / (xhi - xlo)) * (CHART_POINTS - 1) as f32)
+            .round()
+            .clamp(0.0, (CHART_POINTS - 1) as f32) as usize;
+        let cx = sx(nearest as f32);
+        painter.polyline(
+            &format!("{}-crosshair", spec.id),
+            &[(cx, top), (cx, plot_bottom)],
+            1.0,
+            [205, 214, 244],
+            0.34,
+        );
+        let mut rows = Vec::new();
+        for (index, series) in spec.series.iter().enumerate() {
+            if hidden.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            let (base, amplitude, phase) = source_params(series.source.as_deref(), index);
+            let value = chart_value(base, amplitude, phase, nearest, time);
+            let color = series
+                .color
+                .unwrap_or(CHART_COLORS[index % CHART_COLORS.len()]);
+            let y = sy(value);
+            painter.points(
+                &format!("{}-{}-hover", spec.id, index),
+                &[(cx, y)],
+                6.0,
+                color,
+                1.0,
+            );
+            let label = series
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("series {}", index + 1));
+            rows.push((label, color, value));
+        }
+        if !rows.is_empty() {
+            let width = 156.0;
+            let height = 24.0 + rows.len() as f32 * 18.0;
+            let tx = (cx + 14.0).min(left + plot_w - width).max(left);
+            let ty = (py - height - 10.0)
+                .max(top + 4.0)
+                .min(plot_bottom - height);
+            painter.rect(
+                &format!("{}-tooltip", spec.id),
+                tx,
+                ty,
+                width,
+                height,
+                [26, 26, 46],
+                0.94,
+                8.0,
+            );
+            painter.text(
+                &format!("{}-tooltip-title", spec.id),
+                &format!("x {:.0}", nearest as f32),
+                tx + 10.0,
+                ty + 7.0,
+                10.0,
+                [180, 190, 205],
+            );
+            for (row, (label, color, value)) in rows.iter().enumerate() {
+                let y = ty + 25.0 + row as f32 * 18.0;
+                painter.points(
+                    &format!("{}-tooltip-dot-{row}", spec.id),
+                    &[(tx + 13.0, y + 6.0)],
+                    7.0,
+                    *color,
+                    1.0,
+                );
+                painter.text(
+                    &format!("{}-tooltip-label-{row}", spec.id),
+                    label,
+                    tx + 22.0,
+                    y,
+                    10.0,
+                    [205, 214, 244],
+                );
+                painter.text(
+                    &format!("{}-tooltip-value-{row}", spec.id),
+                    &format!("{value:.1}"),
+                    tx + width - 48.0,
+                    y,
+                    10.0,
+                    *color,
+                );
+            }
+        }
     }
 }
 

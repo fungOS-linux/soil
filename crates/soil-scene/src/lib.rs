@@ -530,6 +530,10 @@ pub struct Area {
     pub rgb: Option<[u8; 3]>,
     #[serde(default = "opaque")]
     pub opacity: f32,
+    /// Alpha at the baseline. `None` keeps `opacity` flat; `Some(0.0)` fades
+    /// the fill out toward the baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_opacity: Option<f32>,
 }
 
 impl Area {
@@ -545,6 +549,12 @@ impl Area {
         finite(self.opacity)?;
         if !(0.0..=1.0).contains(&self.opacity) {
             return Err(Error::invalid("area opacity must be 0..=1"));
+        }
+        if let Some(base) = self.base_opacity {
+            finite(base)?;
+            if !(0.0..=1.0).contains(&base) {
+                return Err(Error::invalid("area base opacity must be 0..=1"));
+            }
         }
         Ok(())
     }
