@@ -41,8 +41,24 @@ pub struct LiveSpec {
     /// app's natural density; larger values show fewer, bigger elements.
     #[serde(default = "unit_float")]
     pub ui_scale: f32,
+    /// Optional automatic panel grid. When present, layer `rect` values are
+    /// ignored and panels are laid out in declaration order.
+    #[serde(default)]
+    pub grid: Option<GridSpec>,
     #[serde(default)]
     pub layers: Vec<LayerSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GridSpec {
+    #[serde(default)]
+    pub columns: Option<usize>,
+    #[serde(default)]
+    pub rows: Option<usize>,
+    #[serde(default)]
+    pub gap: Option<f32>,
+    #[serde(default)]
+    pub padding: Option<f32>,
 }
 
 fn unit_float() -> f32 {
@@ -451,6 +467,36 @@ impl LiveViz {
         self.pointer = pointer;
     }
 
+    fn linked_cursor(&self, width: f32, height: f32, gap: f32) -> Option<LinkedCursor> {
+        let (px, py) = self.pointer?;
+        let phase = viewport_phase(&self.history, self.time);
+        for (index, layer) in self.spec.layers.iter().enumerate() {
+            let LayerSpec::Chart(spec) = layer else {
+                continue;
+            };
+            let r = self.rect_for(index, &spec.rect, width, height, gap);
+            let layout = chart_layout(spec, &r);
+            if px < layout.left
+                || px > layout.left + layout.plot_w
+                || py < layout.top
+                || py > layout.plot_bottom
+            {
+                continue;
+            }
+            let xhi = (CHART_POINTS - 1) as f32;
+            let data_x = (px - layout.left) / layout.plot_w * xhi;
+            let sample = (data_x + phase)
+                .round()
+                .clamp(0.0, (CHART_POINTS - 1) as f32) as usize;
+            return Some(LinkedCursor {
+                layer: index,
+                sample,
+                tooltip: Some((px, py)),
+            });
+        }
+        None
+    }
+
     /// Advance by an explicit delta, for a host that already owns the clock.
     pub fn advance(&mut self, dt: f32) -> Scene {
         let next = self.time + dt.clamp(0.0, 0.25);
@@ -489,7 +535,15 @@ impl LiveViz {
             self.theme,
             self.scale * self.ui_scale,
         );
+        let cursor = self.linked_cursor(width, height, gap);
         for (layer_index, layer) in self.spec.layers.iter().enumerate() {
+            let rect = match layer {
+                LayerSpec::Chart(spec) => &spec.rect,
+                LayerSpec::Graph(spec) => &spec.rect,
+                LayerSpec::Map(spec) => &spec.rect,
+                LayerSpec::Atlas(spec) => &spec.rect,
+            };
+            let r = self.rect_for(layer_index, rect, width, height, gap);
             match layer {
                 LayerSpec::Chart(spec) => {
                     let hidden = self
@@ -497,20 +551,28 @@ impl LiveViz {
                         .get(layer_index)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]);
+                    let layer_cursor = cursor.map(|cursor| LinkedCursor {
+                        tooltip: if cursor.layer == layer_index {
+                            cursor.tooltip
+                        } else {
+                            None
+                        },
+                        ..cursor
+                    });
                     draw_chart(
                         &mut painter,
                         spec,
                         self.time,
-                        gap,
+                        r,
                         hidden,
-                        self.pointer,
+                        layer_cursor,
                         &self.history,
                     );
                 }
-                LayerSpec::Graph(spec) => draw_graph(&mut painter, spec, self.time, gap),
-                LayerSpec::Map(spec) => draw_map(&mut painter, spec, self.time, gap),
+                LayerSpec::Graph(spec) => draw_graph(&mut painter, spec, self.time, r),
+                LayerSpec::Map(spec) => draw_map(&mut painter, spec, self.time, r),
                 LayerSpec::Atlas(spec) => {
-                    draw_atlas(&mut painter, spec, self.time, gap, &self.atlas_points)
+                    draw_atlas(&mut painter, spec, self.time, r, &self.atlas_points)
                 }
             }
         }
@@ -533,6 +595,39 @@ impl LiveViz {
         }
     }
 
+    fn rect_for(
+        &self,
+        index: usize,
+        rect: &RectSpec,
+        width: f32,
+        height: f32,
+        gap: f32,
+    ) -> LayerRect {
+        let Some(grid) = &self.spec.grid else {
+            return layer_rect(rect, width, height, gap);
+        };
+        let count = self.spec.layers.len().max(1);
+        let columns = grid
+            .columns
+            .unwrap_or(if count > 4 { 3 } else { 2 })
+            .clamp(1, count);
+        let rows = grid.rows.unwrap_or(count.div_ceil(columns)).max(1);
+        let cell_gap = grid.gap.unwrap_or(gap).max(0.0);
+        let padding = grid.padding.unwrap_or(0.0).max(0.0);
+        let cell_w = (width - padding * 2.0 - cell_gap * (columns.saturating_sub(1)) as f32)
+            / columns as f32;
+        let cell_h =
+            (height - padding * 2.0 - cell_gap * (rows.saturating_sub(1)) as f32) / rows as f32;
+        let column = index % columns;
+        let row = index / columns;
+        LayerRect {
+            x: padding + column as f32 * (cell_w + cell_gap),
+            y: padding + row as f32 * (cell_h + cell_gap),
+            w: cell_w.max(1.0),
+            h: cell_h.max(1.0),
+        }
+    }
+
     /// Hit-test the chart legend band. Coordinates are window pixels.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitAction> {
         let gap = self.spec.gap.max(0.0);
@@ -541,7 +636,7 @@ impl LiveViz {
             let LayerSpec::Chart(spec) = layer else {
                 continue;
             };
-            let r = layer_rect(&spec.rect, width, height, gap);
+            let r = self.rect_for(layer_index, &spec.rect, width, height, gap);
             let layout = chart_layout(spec, &r);
             let Some(first) = layout.legend.first() else {
                 continue;
@@ -1305,6 +1400,13 @@ struct LegendItem {
     width: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LinkedCursor {
+    layer: usize,
+    sample: usize,
+    tooltip: Option<(f32, f32)>,
+}
+
 #[derive(Debug, Clone)]
 struct ChartLayout {
     left: f32,
@@ -1327,6 +1429,13 @@ fn approx_text_width(text: &str, size: f32) -> f32 {
             }
         })
         .sum()
+}
+
+fn viewport_phase(samples: &VecDeque<Sample>, time: f32) -> f32 {
+    samples
+        .back()
+        .map(|sample| ((time - sample.time) / SAMPLE_SECONDS).clamp(0.0, 1.0))
+        .unwrap_or(0.0)
 }
 
 fn chart_layout(spec: &ChartSpec, r: &LayerRect) -> ChartLayout {
@@ -1390,12 +1499,11 @@ fn draw_chart(
     painter: &mut Painter,
     spec: &ChartSpec,
     time: f32,
-    gap: f32,
+    r: LayerRect,
     hidden: &[bool],
-    pointer: Option<(f32, f32)>,
+    cursor: Option<LinkedCursor>,
     samples: &VecDeque<Sample>,
 ) {
-    let r = layer_rect(&spec.rect, painter.width, painter.height, gap);
     let style = &spec.style;
     panel(painter, &spec.id, &r, spec.title.as_deref());
     if let Some(subtitle) = &spec.subtitle {
@@ -1794,16 +1902,8 @@ fn draw_chart(
         );
     }
 
-    if let Some((px, py)) = pointer
-        && px >= left
-        && px <= left + plot_w
-        && py >= top
-        && py <= plot_bottom
-    {
-        let data_x = xlo + (px - left) / plot_w * (xhi - xlo);
-        let nearest = (data_x + phase)
-            .round()
-            .clamp(0.0, (CHART_POINTS - 1) as f32) as usize;
+    if let Some(cursor) = cursor {
+        let nearest = cursor.sample.min(CHART_POINTS - 1);
         let cx = sx(nearest as f32);
         painter.polyline(
             &format!("{}-crosshair", spec.id),
@@ -1833,7 +1933,9 @@ fn draw_chart(
                 .unwrap_or_else(|| format!("series {}", index + 1));
             rows.push((label, color, value));
         }
-        if !rows.is_empty() {
+        if let Some((_px, py)) = cursor.tooltip
+            && !rows.is_empty()
+        {
             let width = 156.0;
             let height = 24.0 + rows.len() as f32 * 18.0;
             let tx = (cx + 14.0).min(left + plot_w - width).max(left);
@@ -1892,8 +1994,7 @@ fn draw_chart(
     }
 }
 
-fn draw_graph(painter: &mut Painter, spec: &GraphSpec, time: f32, gap: f32) {
-    let r = layer_rect(&spec.rect, painter.width, painter.height, gap);
+fn draw_graph(painter: &mut Painter, spec: &GraphSpec, time: f32, r: LayerRect) {
     panel(painter, &spec.id, &r, spec.title.as_deref());
     let count = spec.node_count.max(3).min(12);
     let cx = r.x + r.w * 0.5;
@@ -1958,8 +2059,7 @@ fn draw_graph(painter: &mut Painter, spec: &GraphSpec, time: f32, gap: f32) {
     }
 }
 
-fn draw_map(painter: &mut Painter, spec: &MapSpec, time: f32, gap: f32) {
-    let r = layer_rect(&spec.rect, painter.width, painter.height, gap);
+fn draw_map(painter: &mut Painter, spec: &MapSpec, time: f32, r: LayerRect) {
     panel(painter, &spec.id, &r, spec.title.as_deref());
     let pad = 22.0;
     let plot_top = r.y + 42.0;
@@ -2076,10 +2176,9 @@ fn draw_atlas(
     painter: &mut Painter,
     spec: &AtlasSpec,
     time: f32,
-    gap: f32,
+    r: LayerRect,
     base_points: &[(f32, f32, usize)],
 ) {
-    let r = layer_rect(&spec.rect, painter.width, painter.height, gap);
     panel(painter, &spec.id, &r, spec.title.as_deref());
     let pad = 20.0;
     let plot_top = r.y + 42.0;
@@ -2288,6 +2387,48 @@ mod tests {
         let scene = live.advance(0.016);
         scene.validate().expect("valid scene");
         assert!(scene.nodes.len() > 20);
+    }
+
+    #[test]
+    fn auto_grid_places_layers_in_declaration_order() {
+        let mut spec: LiveSpec = serde_json::from_str(SPEC).expect("spec");
+        spec.grid = Some(GridSpec {
+            columns: Some(2),
+            rows: Some(1),
+            gap: Some(10.0),
+            padding: Some(4.0),
+        });
+        let live = LiveViz::new(spec);
+        let first = live.rect_for(0, &RectSpec::default(), 800.0, 600.0, 8.0);
+        let second = live.rect_for(1, &RectSpec::default(), 800.0, 600.0, 8.0);
+        assert_eq!(first.x, 4.0);
+        assert_eq!(first.y, 4.0);
+        assert!(second.x > first.x + first.w);
+        assert_eq!(second.y, first.y);
+        assert_eq!(first.w, second.w);
+    }
+
+    #[test]
+    fn linked_cursor_uses_the_hovered_chart_sample() {
+        let mut spec: LiveSpec = serde_json::from_str(SPEC).expect("spec");
+        spec.grid = None;
+        let mut live = LiveViz::new(spec);
+        let chart = match &live.spec.layers[0] {
+            LayerSpec::Chart(chart) => chart,
+            _ => panic!("chart"),
+        };
+        let (width, height) = live.design_size();
+        let rect = layer_rect(&chart.rect, width, height, live.spec.gap);
+        let layout = chart_layout(chart, &rect);
+        live.set_pointer(Some((
+            layout.left + layout.plot_w * 0.5,
+            layout.top + layout.plot_h * 0.5,
+        )));
+        let cursor = live
+            .linked_cursor(width, height, live.spec.gap)
+            .expect("cursor");
+        assert!(cursor.tooltip.is_some());
+        assert!(cursor.sample < CHART_POINTS);
     }
 
     #[test]
