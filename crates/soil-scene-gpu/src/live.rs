@@ -112,6 +112,8 @@ pub struct ChartSpec {
     pub subtitle: Option<String>,
     #[serde(default)]
     pub series: Vec<SeriesSpec>,
+    #[serde(default)]
+    pub annotations: Vec<AnnotationSpec>,
     /// Draw the interactive legend. Lua can hide it per chart.
     #[serde(default = "yes")]
     pub legend: bool,
@@ -121,6 +123,59 @@ pub struct ChartSpec {
     pub y_min: Option<f32>,
     #[serde(default)]
     pub y_max: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum AnnotationSpec {
+    Line(LineAnnotation),
+    Band(BandAnnotation),
+    Threshold(ThresholdAnnotation),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LineAnnotation {
+    /// Seconds into the incident cycle.
+    pub at: f32,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    #[serde(default = "annotation_opacity")]
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BandAnnotation {
+    /// Start and end, in seconds into the incident cycle.
+    pub from: f32,
+    pub to: f32,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    #[serde(default = "band_opacity")]
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ThresholdAnnotation {
+    /// Data-space y value.
+    pub value: f32,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    #[serde(default = "annotation_opacity")]
+    pub opacity: f32,
+}
+
+fn annotation_opacity() -> f32 {
+    0.7
+}
+
+fn band_opacity() -> f32 {
+    0.08
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1125,10 +1180,10 @@ fn metrics(elapsed: f32) -> Metrics {
     let cpu = clamp(25.0 + gc_pressure + noise(3.0, elapsed, 6.0), 0.0, 100.0);
     let gc_jitter = (memory - 55.0).max(0.0) * 2.0;
     let p50 = (45.0 + gc_jitter + noise(5.0, elapsed, 7.0)).max(0.0);
-    let p95_multiplier = 1.8 + (memory - 70.0).max(0.0) * 0.06;
+    let p95_multiplier = 1.8 + (memory - 70.0).max(0.0) * 0.03;
     let p95 = p50 * p95_multiplier + noise(10.0, elapsed, 8.0);
-    let p99_multiplier = 1.5 + (memory - 75.0).max(0.0) * 0.08;
-    let p99 = p95 * p99_multiplier + noise(20.0, elapsed, 9.0);
+    let p99_multiplier = 1.5 + (memory - 75.0).max(0.0) * 0.03;
+    let p99 = (p95 * p99_multiplier + noise(20.0, elapsed, 9.0)).min(950.0);
     let hold_factor = (p95 - 100.0).max(0.0) * 0.5;
     let active = clamp(80.0 + hold_factor + noise(3.0, elapsed, 10.0), 0.0, 200.0);
     let waiting = ((active - 180.0) * 3.0 + noise(2.0, elapsed, 11.0)).max(0.0);
@@ -1297,6 +1352,12 @@ fn chart_bounds(spec: &ChartSpec, hidden: &[bool], samples: &VecDeque<Sample>) -
     if bar_lo.is_finite() {
         lo = lo.min(bar_lo);
         hi = hi.max(bar_hi);
+    }
+    for annotation in &spec.annotations {
+        if let AnnotationSpec::Threshold(threshold) = annotation {
+            lo = lo.min(threshold.value);
+            hi = hi.max(threshold.value);
+        }
     }
     if !lo.is_finite() || !hi.is_finite() {
         lo = 0.0;
@@ -1565,6 +1626,18 @@ fn draw_chart(
         .unwrap_or(0.0);
     let sx = |x: f32| left + (x - phase - xlo) / (xhi - xlo) * plot_w;
     let sy = |y: f32| plot_bottom - (y - ylo) / (yhi - ylo) * plot_h;
+    let first_time = samples.front().map(|sample| sample.time).unwrap_or(0.0);
+    let last_time = samples.back().map(|sample| sample.time).unwrap_or(0.0);
+    let cycle_x = |at: f32| -> Option<f32> {
+        let base = at - INCIDENT_OFFSET;
+        let k = ((first_time - base) / INCIDENT_CYCLE).ceil();
+        let target = base + k * INCIDENT_CYCLE;
+        if target < first_time - 0.0001 || target > last_time + 0.0001 {
+            None
+        } else {
+            Some(sx((target - first_time) / SAMPLE_SECONDS))
+        }
+    };
     let y_step = nice_step(yhi - ylo, 6);
     let y_ticks = (((yhi - ylo) / y_step).round() as usize).clamp(1, 12);
     for tick in 0..=y_ticks {
@@ -1611,6 +1684,26 @@ fn draw_chart(
             plot_bottom + 8.0,
             style.label_size,
             [145, 155, 170],
+        );
+    }
+
+    for (index, annotation) in spec.annotations.iter().enumerate() {
+        let AnnotationSpec::Band(band) = annotation else {
+            continue;
+        };
+        let (Some(x0), Some(x1)) = (cycle_x(band.from), cycle_x(band.to)) else {
+            continue;
+        };
+        let color = band.color.unwrap_or([234, 179, 8]);
+        painter.rect(
+            &format!("{}-annotation-band-{index}", spec.id),
+            x0.min(x1),
+            top,
+            (x0 - x1).abs().max(1.0),
+            plot_h,
+            color,
+            band.opacity.clamp(0.0, 1.0),
+            0.0,
         );
     }
 
@@ -1827,6 +1920,78 @@ fn draw_chart(
                     );
                 }
             }
+        }
+    }
+
+    for (index, annotation) in spec.annotations.iter().enumerate() {
+        match annotation {
+            AnnotationSpec::Line(line) => {
+                let Some(x) = cycle_x(line.at) else {
+                    continue;
+                };
+                let color = line.color.unwrap_or([234, 179, 8]);
+                painter.rect(
+                    &format!("{}-annotation-line-{index}", spec.id),
+                    x,
+                    top,
+                    1.0,
+                    plot_h,
+                    color,
+                    line.opacity.clamp(0.0, 1.0),
+                    0.0,
+                );
+                painter.rect(
+                    &format!("{}-annotation-mark-{index}", spec.id),
+                    x - 2.0,
+                    top,
+                    4.0,
+                    4.0,
+                    color,
+                    1.0,
+                    1.0,
+                );
+                if let Some(label) = &line.label {
+                    let width = approx_text_width(label, 9.0);
+                    let label_x = (x + 5.0).min(left + plot_w - width - 4.0).max(left + 4.0);
+                    painter.text(
+                        &format!("{}-annotation-label-{index}", spec.id),
+                        label,
+                        label_x,
+                        top + 5.0,
+                        9.0,
+                        color,
+                    );
+                }
+            }
+            AnnotationSpec::Threshold(threshold) => {
+                if threshold.value < ylo || threshold.value > yhi {
+                    continue;
+                }
+                let y = sy(threshold.value);
+                let color = threshold.color.unwrap_or([239, 68, 68]);
+                painter.rect(
+                    &format!("{}-annotation-threshold-{index}", spec.id),
+                    left,
+                    y,
+                    plot_w,
+                    1.0,
+                    color,
+                    threshold.opacity.clamp(0.0, 1.0),
+                    0.0,
+                );
+                if let Some(label) = &threshold.label {
+                    let width = approx_text_width(label, 9.0);
+                    painter.text(
+                        &format!("{}-annotation-label-{index}", spec.id),
+                        label,
+                        (left + plot_w - width - 6.0).max(left + 4.0),
+                        (y - 11.0).max(top + 2.0),
+                        9.0,
+                        color,
+                    );
+                }
+            }
+            AnnotationSpec::Band(_) => {}
         }
     }
 
@@ -2387,6 +2552,41 @@ mod tests {
         let scene = live.advance(0.016);
         scene.validate().expect("valid scene");
         assert!(scene.nodes.len() > 20);
+    }
+
+    #[test]
+    fn cycle_annotations_become_scene_nodes() {
+        let mut spec: LiveSpec = serde_json::from_str(SPEC).expect("spec");
+        if let LayerSpec::Chart(chart) = &mut spec.layers[0] {
+            chart.annotations = vec![
+                AnnotationSpec::Line(LineAnnotation {
+                    at: 132.0,
+                    label: Some("event".into()),
+                    color: Some([255, 0, 0]),
+                    opacity: 1.0,
+                }),
+                AnnotationSpec::Threshold(ThresholdAnnotation {
+                    value: 100.0,
+                    label: Some("SLO".into()),
+                    color: Some([255, 255, 0]),
+                    opacity: 1.0,
+                }),
+            ];
+        }
+        let mut live = LiveViz::new(spec);
+        let scene = live.seek(100.0);
+        assert!(
+            scene
+                .nodes
+                .iter()
+                .any(|node| node.id == "latency-annotation-line-0")
+        );
+        assert!(
+            scene
+                .nodes
+                .iter()
+                .any(|node| node.id == "latency-annotation-threshold-1")
+        );
     }
 
     #[test]
