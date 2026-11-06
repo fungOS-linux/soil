@@ -3986,6 +3986,7 @@ dependencies = [
  "soil-scene",
  "soil-vt",
  "wgpu",
+ "winit",
 ]
 
 [[package]]

@@ -17,7 +17,12 @@ serde_json = "1"
 soil-scene = { path = "../soil-scene" }
 soil-vt = { path = "../soil-vt" }
 wgpu = "27"
+winit = "0.30"
 
 [[bin]]
 name = "soil-scene-gpu"
 path = "src/main.rs"
+
+[[bin]]
+name = "soil-viz"
+path = "src/bin/soil-viz.rs"
