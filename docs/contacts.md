@@ -7,6 +7,7 @@ The Contacts Spore owns personal contact editing. CRM does not edit contacts.
 ```text
 spores/contacts
   list
+  view [selected]
   show <id|token>
   add <id> <first> <last> <email> [phone] [title]
   set <id|token> <field> <value>
@@ -37,4 +38,8 @@ contact body never enter the shared CRM by default.
 ## UI
 
 `spores/contacts/ui/editor.lua` renders the personal contact rail, detail,
-token and explicit unshare actions.
+token and explicit unshare actions from the records-backed `view` action. There
+is no separate contact snapshot store.
+
+Contacts use the standard `fungos.contacts/contact` vCard-shaped record schema.
+The contact token is the record `uid`.

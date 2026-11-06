@@ -25,6 +25,7 @@ const COMPANY_SCHEMA: &str = "fungos.crm/company@1";
 const ACCOUNT_SCHEMA: &str = "fungos.crm/account@1";
 const ACCOUNT_COMPANY_SCHEMA: &str = "fungos.crm/account-company@1";
 const CONTACT_SCHEMA: &str = "fungos.crm/contact@1";
+const CONTACTS_SCHEMA: &str = "fungos.contacts/contact";
 const ASSIGNMENT_SCHEMA: &str = "fungos.crm/account-contact@1";
 const PROJECTION_SCHEMA: &str = "fungos.crm/account-contact-projection@1";
 const PROJECT_SCHEMA: &str = "fungos.crm/project@1";
@@ -218,6 +219,10 @@ impl Dataset {
         self.all().filter(move |row| row.schema == schema)
     }
 
+    fn contact_rows(&self) -> impl Iterator<Item = &Row> + '_ {
+        self.all().filter(|row| is_contact_schema(&row.schema))
+    }
+
     fn accounts(&self) -> Result<Value, String> {
         let companies = rows_by_id(self.rows(COMPANY_SCHEMA));
         let mut accounts = Vec::new();
@@ -343,10 +348,10 @@ impl Dataset {
 
     fn contact(&self, id_or_token: &str) -> Result<Value, String> {
         let contact = self
-            .rows(CONTACT_SCHEMA)
-            .find(|row| row.id == id_or_token || row.text("contact_token") == id_or_token)
+            .contact_rows()
+            .find(|row| row.id == id_or_token || contact_token(row) == id_or_token)
             .ok_or_else(|| format!("contact {id_or_token} not found"))?;
-        let token = contact.text("contact_token");
+        let token = contact_token(contact);
         let assignments = self
             .rows(ASSIGNMENT_SCHEMA)
             .filter(|link| link.text("contact_id") == contact.id || link.text("contact_token") == token)
@@ -377,11 +382,11 @@ impl Dataset {
         )?;
         Ok(json!({
             "id": contact.id,
-            "name": contact.text("name"),
-            "first_name": contact.text("first_name"),
-            "last_name": contact.text("last_name"),
-            "email": contact.text("email"),
-            "phone": contact.text("phone"),
+            "name": contact_name(contact),
+            "first_name": contact_first_name(contact),
+            "last_name": contact_last_name(contact),
+            "email": contact_email(contact),
+            "phone": contact_phone(contact),
             "title": contact.text("title"),
             "contact_token": token,
             "accounts": account_values,
@@ -508,7 +513,7 @@ impl Dataset {
     }
 
     fn contacts_for(&self, account_id: &str) -> Vec<Value> {
-        let contacts = rows_by_id(self.rows(CONTACT_SCHEMA));
+        let contacts = rows_by_id(self.contact_rows());
         let projections = self.rows(PROJECTION_SCHEMA).collect::<Vec<_>>();
         self.rows(ASSIGNMENT_SCHEMA)
             .filter(|assignment| assignment.text("account_id") == account_id)
@@ -522,10 +527,10 @@ impl Dataset {
                 if let Some(contact) = contact {
                     json!({
                         "id": contact.id,
-                        "name": contact.text("name"),
-                        "first_name": contact.text("first_name"),
-                        "email": contact.text("email"),
-                        "phone": contact.text("phone"),
+                        "name": contact_name(contact),
+                        "first_name": contact_first_name(contact),
+                        "email": contact_email(contact),
+                        "phone": contact_phone(contact),
                         "title": contact.text("title"),
                         "contact_token": token,
                         "role": assignment.text("role"),
@@ -590,7 +595,7 @@ impl Dataset {
 
     fn timeline(&self, filter: &TimelineFilter, limit: usize) -> Result<Vec<Event>, String> {
         let accounts = rows_by_id(self.rows(ACCOUNT_SCHEMA));
-        let contacts = rows_by_id(self.rows(CONTACT_SCHEMA));
+        let contacts = rows_by_id(self.contact_rows());
         let projects = rows_by_id(self.rows(PROJECT_SCHEMA));
         let threads = rows_by_id(self.rows(THREAD_SCHEMA));
         let mut companies_by_account: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -679,7 +684,7 @@ impl Dataset {
                     }
                 }
                 if let Some(contact) = contacts.get(entity) {
-                    let token = contact.text("contact_token");
+                    let token = contact_token(contact);
                     if !token.is_empty() {
                         contact_tokens.insert(token.to_string());
                     }
@@ -864,7 +869,7 @@ fn link_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
     }
     let contact = records::get(&key(CONTACTS, contact_id))
         .map_err(|error| format!("contact {contact_id}: {error:?}"))?;
-    if contact.schema != CONTACT_SCHEMA {
+    if !is_contact_schema(&contact.schema) {
         return Err(format!("{contact_id} is {}, not a contact", contact.schema));
     }
     let body: Value = serde_json::from_slice(&contact.body)
@@ -873,7 +878,8 @@ fn link_contact(data: &Dataset, args: &[String]) -> Result<Value, String> {
         .get("contact_token")
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| format!("contact {contact_id} has no contact_token"))?;
+        .or_else(|| body.get("uid").and_then(Value::as_str).filter(|token| !token.is_empty()))
+        .ok_or_else(|| format!("contact {contact_id} has no contact token/uid"))?;
     let assignment_id = format!("ac-{account_id}-{contact_id}");
     let stored = put_record(
         &data.crm_namespace,
@@ -1097,6 +1103,58 @@ fn write_audit(
         }),
     )?;
     Ok(())
+}
+
+fn is_contact_schema(schema: &str) -> bool {
+    schema == CONTACT_SCHEMA || schema == CONTACTS_SCHEMA
+}
+
+fn contact_token(row: &Row) -> &str {
+    let token = row.text("contact_token");
+    if token.is_empty() { row.text("uid") } else { token }
+}
+
+fn contact_name(row: &Row) -> &str {
+    let name = row.text("name");
+    if name.is_empty() { row.text("display_name") } else { name }
+}
+
+fn contact_first_name(row: &Row) -> &str {
+    let name = row.text("first_name");
+    if name.is_empty() { row.text("given_name") } else { name }
+}
+
+fn contact_last_name(row: &Row) -> &str {
+    let name = row.text("last_name");
+    if name.is_empty() { row.text("family_name") } else { name }
+}
+
+fn contact_email(row: &Row) -> String {
+    let email = row.text("email");
+    if !email.is_empty() {
+        return email.to_string();
+    }
+    row.field("emails")
+        .as_array()
+        .and_then(|values| values.first())
+        .and_then(|value| value.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn contact_phone(row: &Row) -> String {
+    let phone = row.text("phone");
+    if !phone.is_empty() {
+        return phone.to_string();
+    }
+    row.field("phones")
+        .as_array()
+        .and_then(|values| values.first())
+        .and_then(|value| value.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn parse_crm(args: Vec<String>) -> Result<(String, Vec<String>), String> {

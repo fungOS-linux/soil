@@ -1,4 +1,4 @@
--- Contacts UI. Pure projection over the snapshot; emits action intents only.
+-- Contacts UI. Pure projection over a records-backed view; emits action intents only.
 -- Contacts are personal. Sharing is explicit and only projects first name + token.
 local ui = require("fungos.ui")
 local action = require("fungos.action")
@@ -11,18 +11,18 @@ local function clip(value, limit)
   return value:sub(1, limit - 1) .. "…"
 end
 
-local function selected_contact(snapshot)
-  for _, contact in ipairs(snapshot.contacts or {}) do
-    if contact.selected or contact.id == snapshot.selected then return contact end
+local function selected_contact(view)
+  for _, contact in ipairs(view.contacts or {}) do
+    if contact.selected or contact.id == view.selected then return contact end
   end
-  return (snapshot.contacts or {})[1]
+  return (view.contacts or {})[1]
 end
 
-local function rail(ctx, snapshot)
+local function rail(ctx, view)
   local children = {
     ui.text("contacts-label", "CONTACTS", { size = 9, height = 16, ink = "muted" }),
   }
-  for index, contact in ipairs(snapshot.contacts or {}) do
+  for index, contact in ipairs(view.contacts or {}) do
     ui.push(children, ui.button("contact-" .. index,
       clip(contact.name or contact.email or contact.id, 28), {
         height = 28,
@@ -31,7 +31,7 @@ local function rail(ctx, snapshot)
         action = action.intent("contacts.select", { id = contact.id }),
       }))
   end
-  if #(snapshot.contacts or {}) == 0 then
+  if #(view.contacts or {}) == 0 then
     ui.push(children, ui.text("contacts-empty", "No contacts found.", {
       size = 10, height = 24, ink = "muted",
     }))
@@ -39,8 +39,8 @@ local function rail(ctx, snapshot)
   return ui.column("contacts-rail", { width = 240, flex_shrink = 0, gap = 2 }, children)
 end
 
-local function detail(ctx, snapshot)
-  local contact = snapshot.contact or selected_contact(snapshot) or {}
+local function detail(ctx, view)
+  local contact = view.contact or selected_contact(view) or {}
   local children = {
     ui.text("contacts-title", contact.name or "Contact", { size = 22, height = 30, ink = "primary" }),
     ui.text("contacts-email", contact.email or "", { size = 11, height = 20, ink = "muted" }),
@@ -57,7 +57,7 @@ local function detail(ctx, snapshot)
       size = 10, height = 20, ink = "primary",
     }))
   end
-  for index, share in ipairs(snapshot.shared or {}) do
+  for index, share in ipairs(view.shared or {}) do
     if share.contact_token == contact.contact_token then
       ui.push(children, ui.button("contacts-unshare-" .. index,
         "Unshare from " .. tostring(share.account_id), {
@@ -73,10 +73,10 @@ local function detail(ctx, snapshot)
   return ui.column("contacts-detail", { flex_grow = 1, gap = 3 }, children)
 end
 
-function M.render(ctx, snapshot)
+function M.render(ctx, view)
   return ui.row("contacts-root", { flex_grow = 1, gap = 4 }, {
-    rail(ctx, snapshot),
-    detail(ctx, snapshot),
+    rail(ctx, view),
+    detail(ctx, view),
   })
 end
 

@@ -143,6 +143,10 @@ fn contacts_spore_edits_and_shares_explicitly() -> Result<()> {
     args.extend(["shared"]);
     run(&bindings, &mut store, &args)?;
 
+    let mut args = ns.to_vec();
+    args.extend(["view", "c-ada"]);
+    run(&bindings, &mut store, &args)?;
+
     let check = Store::open(root.path(), &root.path().join("device_id"))?;
     assert_eq!(
         check
@@ -163,7 +167,7 @@ fn contacts_spore_edits_and_shares_explicitly() -> Result<()> {
     let store = Store::open(root.path(), &root.path().join("device_id"))?;
     let contact = store.get("personal/test/contacts", "c-ada")?;
     assert_eq!(contact.fields["title"], "VP Engineering");
-    assert_eq!(contact.fields["contact_token"], "ct-c-ada");
+    assert_eq!(contact.fields["uid"], "ct-c-ada");
     assert!(
         store
             .get("team/test/crm", "proj-espo:account:a1-c-ada")

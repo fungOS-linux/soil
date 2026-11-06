@@ -19,7 +19,7 @@ wit_bindgen::generate!({ path: "wit", world: "contacts", generate_all });
 use serde_json::{Value, json};
 use soil::records::records;
 
-const CONTACT_SCHEMA: &str = "fungos.crm/contact@1";
+const CONTACT_SCHEMA: &str = "fungos.contacts/contact";
 const ACCOUNT_SCHEMA: &str = "fungos.crm/account@1";
 const PROJECTION_SCHEMA: &str = "fungos.crm/account-contact-projection@1";
 const AUDIT_SCHEMA: &str = "fungos.audit/event@1";
@@ -37,6 +37,10 @@ impl Guest for Component {
         let action = args.first().map(String::as_str).unwrap_or("list");
         match action {
             "list" => print_json("contacts", &list(&contacts)?),
+            "view" => {
+                let selected = args.get(1).map(String::as_str);
+                print_json("view", &view(&contacts, &crm, selected)?);
+            }
             "show" => {
                 let id = args.get(1).ok_or_else(|| "usage: show <id|token>".to_string())?;
                 print_json("contact", &show(&contacts, id)?);
@@ -61,6 +65,7 @@ impl Guest for Component {
             "help" => print_json("help", &json!({
                 "actions": [
                     "list",
+                    "view [selected]",
                     "show <id|token>",
                     "add <id> <first> <last> <email> [phone] [title]",
                     "set <id|token> <field> <value>",
@@ -127,6 +132,44 @@ fn list(namespace: &str) -> Result<Value, String> {
     Ok(json!({ "contacts": contacts }))
 }
 
+fn view(contacts: &str, crm: &str, selected: Option<&str>) -> Result<Value, String> {
+    let rows = load_contacts(contacts)?;
+    let mut list = rows
+        .iter()
+        .map(|(entry, body)| {
+            let mut value = contact_json(&entry.key.id, body);
+            value["selected"] = Value::Bool(selected == Some(entry.key.id.as_str()));
+            value
+        })
+        .collect::<Vec<_>>();
+    list.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    let contact = selected
+        .and_then(|selected| rows.iter().find(|(entry, body)| {
+            entry.key.id == selected
+                || body.get("uid").and_then(Value::as_str) == Some(selected)
+        }))
+        .map(|(entry, body)| {
+            let mut value = contact_json(&entry.key.id, body);
+            value["revision"] = json!(entry.revision);
+            value
+        })
+        .or_else(|| {
+            rows.first().map(|(entry, body)| {
+                let mut value = contact_json(&entry.key.id, body);
+                value["revision"] = json!(entry.revision);
+                value
+            })
+        })
+        .unwrap_or(Value::Null);
+    let shared = shared(crm)?;
+    Ok(json!({
+        "selected": selected,
+        "contacts": list,
+        "contact": contact,
+        "shared": shared.get("contacts").cloned().unwrap_or_else(|| json!([])),
+    }))
+}
+
 fn show(namespace: &str, id_or_token: &str) -> Result<Value, String> {
     let (entry, body) = find_contact(namespace, id_or_token)?;
     let mut value = contact_json(&entry.key.id, &body);
@@ -148,15 +191,19 @@ fn add(namespace: &str, args: &[String]) -> Result<Value, String> {
     let title = args.get(6).cloned().unwrap_or_default();
     let token = format!("ct-{id}");
     let body = json!({
-        "first_name": first,
-        "last_name": last,
-        "name": format!("{first} {last}").trim(),
-        "email": email,
-        "phone": phone,
+        "display_name": format!("{first} {last}").trim(),
+        "given_name": first,
+        "family_name": last,
+        "organization": "",
         "title": title,
-        "contact_token": token,
-        "source": "contacts",
-        "source_id": id,
+        "emails": if email.is_empty() { json!([]) } else { json!([{"label": "work", "value": email}]) },
+        "phones": if phone.is_empty() { json!([]) } else { json!([{"label": "work", "value": phone}]) },
+        "addresses": [],
+        "urls": [],
+        "note": "",
+        "birthday": "",
+        "uid": token,
+        "raw_vcard": "",
     });
     let stored = put(namespace, id, CONTACT_SCHEMA, body.clone())?;
     write_audit(namespace, namespace, "contacts.add", id, CONTACT_SCHEMA, stored.revision, None, Some(body))?;
@@ -177,17 +224,22 @@ fn set(namespace: &str, args: &[String]) -> Result<Value, String> {
     let value = args.get(3).cloned().unwrap_or_default();
     if !matches!(
         field.as_str(),
-        "first_name" | "last_name" | "name" | "email" | "phone" | "title" | "description" | "address" | "contact_token"
+        "given_name" | "family_name" | "display_name" | "organization" | "title" | "note" | "birthday" | "email" | "phone" | "uid"
     ) {
         return Err(format!("set: unsupported field {field}"));
     }
     let (entry, mut body) = find_contact(namespace, id_or_token)?;
     let before = body.get(field).cloned().unwrap_or(Value::Null);
-    body[field] = Value::String(value.clone());
-    if field == "first_name" || field == "last_name" {
-        let first = body.get("first_name").and_then(Value::as_str).unwrap_or_default();
-        let last = body.get("last_name").and_then(Value::as_str).unwrap_or_default();
-        body["name"] = Value::String(format!("{first} {last}").trim().to_string());
+    match field.as_str() {
+        "email" => body["emails"] = labeled_values(&value),
+        "phone" => body["phones"] = labeled_values(&value),
+        "given_name" | "family_name" => {
+            body[field] = Value::String(value.clone());
+            let first = body.get("given_name").and_then(Value::as_str).unwrap_or_default();
+            let last = body.get("family_name").and_then(Value::as_str).unwrap_or_default();
+            body["display_name"] = Value::String(format!("{first} {last}").trim().to_string());
+        }
+        _ => body[field] = Value::String(value.clone()),
     }
     let stored = put(namespace, &entry.key.id, CONTACT_SCHEMA, body)?;
     write_audit(
@@ -208,6 +260,14 @@ fn set(namespace: &str, args: &[String]) -> Result<Value, String> {
     }))
 }
 
+fn labeled_values(value: &str) -> Value {
+    if value.is_empty() {
+        json!([])
+    } else {
+        json!([{ "label": "work", "value": value }])
+    }
+}
+
 fn share(contacts: &str, crm: &str, args: &[String]) -> Result<Value, String> {
     let account_id = args
         .get(1)
@@ -223,15 +283,15 @@ fn share(contacts: &str, crm: &str, args: &[String]) -> Result<Value, String> {
     }
     let (entry, contact) = find_contact(contacts, contact_ref)?;
     let token = contact
-        .get("contact_token")
+        .get("uid")
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| format!("contact {} has no contact_token", entry.key.id))?;
+        .ok_or_else(|| format!("contact {} has no uid", entry.key.id))?;
     let first_name = args
         .get(3)
         .cloned()
         .filter(|name| !name.is_empty())
-        .or_else(|| contact.get("first_name").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| contact.get("given_name").and_then(Value::as_str).map(str::to_string))
         .unwrap_or_else(|| token.to_string());
     let projection_id = format!("proj-{account_id}-{}", entry.key.id);
     let body = json!({
@@ -319,7 +379,7 @@ fn find_contact(namespace: &str, id_or_token: &str) -> Result<(records::Entry, V
             let body: Value = serde_json::from_slice(&entry.body)
                 .map_err(|error| format!("decode {}: {error}", entry.key.id))?;
             if entry.key.id == id_or_token
-                || body.get("contact_token").and_then(Value::as_str) == Some(id_or_token)
+                || body.get("uid").and_then(Value::as_str) == Some(id_or_token)
             {
                 return Ok((entry, body));
             }
@@ -362,16 +422,38 @@ fn load_schema(namespace: &str, schema: &str) -> Result<Vec<(records::Entry, Val
 }
 
 fn contact_json(id: &str, body: &Value) -> Value {
+    let first = body.get("given_name").and_then(Value::as_str).unwrap_or_default();
+    let last = body.get("family_name").and_then(Value::as_str).unwrap_or_default();
+    let name = body
+        .get("display_name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{first} {last}").trim().to_string());
+    let email = labeled_value(body.get("emails"));
+    let phone = labeled_value(body.get("phones"));
     json!({
         "id": id,
-        "name": body.get("name").cloned().unwrap_or(Value::Null),
-        "first_name": body.get("first_name").cloned().unwrap_or(Value::Null),
-        "last_name": body.get("last_name").cloned().unwrap_or(Value::Null),
-        "email": body.get("email").cloned().unwrap_or(Value::Null),
-        "phone": body.get("phone").cloned().unwrap_or(Value::Null),
+        "name": name,
+        "first_name": first,
+        "last_name": last,
+        "email": email,
+        "phone": phone,
         "title": body.get("title").cloned().unwrap_or(Value::Null),
-        "contact_token": body.get("contact_token").cloned().unwrap_or(Value::Null),
+        "organization": body.get("organization").cloned().unwrap_or(Value::Null),
+        "note": body.get("note").cloned().unwrap_or(Value::Null),
+        "contact_token": body.get("uid").cloned().unwrap_or(Value::Null),
+        "uid": body.get("uid").cloned().unwrap_or(Value::Null),
     })
+}
+
+fn labeled_value(values: Option<&Value>) -> Value {
+    values
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+        .and_then(|value| value.get("value"))
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn put(namespace: &str, id: &str, schema: &str, body: Value) -> Result<records::Entry, String> {

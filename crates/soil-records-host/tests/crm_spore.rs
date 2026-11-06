@@ -101,9 +101,13 @@ fn seed(root: &std::path::Path) -> Result<()> {
         &mut store,
         contacts,
         "c-ada",
-        "fungos.crm/contact@1",
+        "fungos.contacts/contact",
         json!({
-            "first_name": "Ada", "last_name": "Lovelace", "name": "Ada Lovelace", "email": "ada@acme.example", "contact_token": "t-ada"
+            "display_name": "Ada Lovelace", "given_name": "Ada", "family_name": "Lovelace",
+            "organization": "Acme", "title": "CTO",
+            "emails": [{"label": "work", "value": "ada@acme.example"}],
+            "phones": [], "addresses": [], "urls": [], "note": "", "birthday": "",
+            "uid": "t-ada", "raw_vcard": ""
         }),
     )?;
     put(

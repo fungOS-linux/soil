@@ -11,6 +11,7 @@ crm namespace        only explicit first-name + token projections
 
 ```text
 list
+view [selected]
 show <id|token>
 add <id> <first> <last> <email> [phone] [title]
 set <id|token> <field> <value>
@@ -45,8 +46,12 @@ Email, phone, notes and the rest of the contact body never enter the shared CRM.
 ## UI
 
 `ui/editor.lua` renders the personal contact rail, contact detail, token, and
-explicit unshare actions. Contact editing is this Spore's job; the CRM only
-links to contacts by id/token.
+explicit unshare actions. It consumes the records-backed `view` action; there is
+no separate contact snapshot store. Contact editing is this Spore's job; the CRM
+only links to contacts by id/token.
+
+Records use `fungos.contacts/contact` (vCard-shaped). The contact token is the
+record `uid`.
 
 ## Build
 
