@@ -158,6 +158,22 @@ source
 source_id
 ```
 
+## Timeline
+
+The account/contact view includes a unified timeline built from CRM activities
+and linked conversation messages.
+
+```sh
+cargo run -p soil-crm-host -- timeline   --root ~/.local/share/fungos/records   --book personal/avery/crm   --timeline-book personal/avery/chat   --account a-acme
+```
+
+Messages are joined through `fungos.graph/link` mention records, so the CRM does
+not copy message bodies. The inspector fetches the same projection from
+`/api/crm/timeline`.
+
+The timeline is a derived view, not a new authority. See
+[Unified timeline](timeline.md) for the Git and audit-log design.
+
 ## Mock CRM
 
 Start with deterministic mock data before importing real Espo records:
