@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use soil_crm_host::{
-    TimelineQuery, assign_company, default_root, link_contact, seed_mock, snapshot, timeline,
-    unassign_company, unlink_contact,
+    assign_company, default_root, link_contact, seed_mock, snapshot, unassign_company,
+    unlink_contact,
 };
 
 #[derive(Parser)]
@@ -72,40 +72,12 @@ enum Cmd {
         #[arg(long)]
         company: String,
     },
-    /// Print a unified CRM/conversation timeline.
-    Timeline {
-        #[arg(long)]
-        root: Option<PathBuf>,
-        #[arg(long, default_value = "personal/avery/crm")]
-        book: String,
-        /// Additional records book that may contain conversation records.
-        #[arg(long = "timeline-book", action = clap::ArgAction::Append)]
-        timeline_book: Vec<String>,
-        #[arg(long)]
-        account: Option<String>,
-        #[arg(long)]
-        company: Option<String>,
-        #[arg(long)]
-        project: Option<String>,
-        #[arg(long)]
-        contact: Option<String>,
-        /// Include private events. The default is the team projection.
-        #[arg(long)]
-        private: bool,
-        #[arg(long, default_value_t = 100)]
-        limit: usize,
-        #[arg(long)]
-        before_ms: Option<i64>,
-    },
     /// Serve a read-only local CRM inspector.
     Serve {
         #[arg(long)]
         root: Option<PathBuf>,
         #[arg(long, default_value = "personal/avery/crm")]
         book: String,
-        /// Additional records book that may contain conversation records.
-        #[arg(long = "timeline-book", action = clap::ArgAction::Append)]
-        timeline_book: Vec<String>,
         #[arg(long, default_value = "127.0.0.1:8790")]
         listen: String,
     },
@@ -163,69 +135,15 @@ fn main() -> anyhow::Result<()> {
             unassign_company(&root, &book, &account, &company)?;
             println!("unassigned {account} from {company}");
         }
-        Cmd::Timeline {
-            root,
-            book,
-            timeline_book,
-            account,
-            company,
-            project,
-            contact,
-            private,
-            limit,
-            before_ms,
-        } => {
+        Cmd::Serve { root, book, listen } => {
             let root = root.unwrap_or_else(default_root);
-            let books = timeline_books(&book, &timeline_book);
-            let events = timeline(
-                &root,
-                &books,
-                &TimelineQuery {
-                    account_id: account,
-                    company_id: company,
-                    project_id: project,
-                    contact_token: contact,
-                    team: !private,
-                    before_ms,
-                    limit,
-                },
-            )?;
-            println!("{}", serde_json::to_string_pretty(&events)?);
-        }
-        Cmd::Serve {
-            root,
-            book,
-            timeline_book,
-            listen,
-        } => {
-            let root = root.unwrap_or_else(default_root);
-            serve(
-                &root,
-                &book,
-                &timeline_books(&book, &timeline_book),
-                &listen,
-            )?;
+            serve(&root, &book, &listen)?;
         }
     }
     Ok(())
 }
 
-fn timeline_books(book: &str, extra: &[String]) -> Vec<String> {
-    let mut books = vec![book.to_string()];
-    for book in extra {
-        if !books.iter().any(|current| current == book) {
-            books.push(book.clone());
-        }
-    }
-    books
-}
-
-fn serve(
-    root: &std::path::Path,
-    book: &str,
-    timeline_books: &[String],
-    listen: &str,
-) -> anyhow::Result<()> {
+fn serve(root: &std::path::Path, book: &str, listen: &str) -> anyhow::Result<()> {
     let server = tiny_http::Server::http(listen).map_err(|error| anyhow::anyhow!("{error}"))?;
     println!(
         "soil crm: http://{listen}/  book={book} root={}",
@@ -233,32 +151,7 @@ fn serve(
     );
     for request in server.incoming_requests() {
         let url = request.url().to_string();
-        if url.starts_with("/api/crm/timeline") {
-            let query = query_params(&url);
-            let body = match timeline(
-                root,
-                timeline_books,
-                &TimelineQuery {
-                    account_id: query.get("account").cloned(),
-                    company_id: query.get("company").cloned(),
-                    project_id: query.get("project").cloned(),
-                    contact_token: query.get("contact").cloned(),
-                    team: query
-                        .get("team")
-                        .is_none_or(|value| value != "0" && value != "false"),
-                    before_ms: query.get("before_ms").and_then(|value| value.parse().ok()),
-                    limit: query
-                        .get("limit")
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(100),
-                },
-            ) {
-                Ok(events) => serde_json::json!({ "events": events }),
-                Err(error) => serde_json::json!({ "error": error.to_string() }),
-            };
-            let text = serde_json::to_string(&body)?;
-            respond(request, "application/json", text.as_bytes())?;
-        } else if url.starts_with("/api/crm") {
+        if url.starts_with("/api/crm") {
             let view = if url.contains("view=private") {
                 "private"
             } else {
@@ -277,20 +170,6 @@ fn serve(
         }
     }
     Ok(())
-}
-
-fn query_params(url: &str) -> std::collections::BTreeMap<String, String> {
-    let mut params = std::collections::BTreeMap::new();
-    let Some(query) = url.split_once('?').map(|(_, query)| query) else {
-        return params;
-    };
-    for pair in query.split('&') {
-        let Some((key, value)) = pair.split_once('=') else {
-            continue;
-        };
-        params.insert(key.to_string(), value.to_string());
-    }
-    params
 }
 
 fn respond(request: tiny_http::Request, content_type: &str, body: &[u8]) -> anyhow::Result<()> {
@@ -346,7 +225,7 @@ h3 { margin:26px 0 10px; font-size:12px; text-transform:uppercase; letter-spacin
   <section id="detail"><p class="muted">Loading…</p></section>
 </main>
 <script>
-let data = null, companyId = null, selected = null, currentView = 'team';
+let data = null, companyId = null, selected = null;
 const esc = (value) => String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function currentCompany() {
   return (data?.companies || []).find(company => company.id === companyId);
@@ -357,7 +236,6 @@ async function load(view) {
   document.getElementById('team').classList.toggle('active', view === 'team');
   document.getElementById('private').classList.toggle('active', view === 'private');
   document.getElementById('book').textContent = view + ' projection';
-  currentView = view;
   const companies = data.companies || [];
   if (!companyId || !companies.some(company => company.id === companyId)) {
     companyId = companies[0]?.id || null;
@@ -423,21 +301,7 @@ function render() {
     <h3>Projects</h3>${(account.projects || []).map(p => `<div class="row"><b>${esc(p.name)}</b> <span class="pill">${esc(p.status)}</span> <span class="pill">${esc(p.company_role || 'owner')}</span><div class="muted">${esc(p.kind || '')} · due ${esc(p.due_at || '—')}</div><div>${esc(p.summary)}</div></div>`).join('') || '<p class="muted">None</p>'}
     <h3>Opportunities</h3>${(account.opportunities || []).map(o => `<div class="row"><b>${esc(o.name)}</b> <span class="pill">${esc(o.stage)}</span><div class="muted">$${Number(o.amount || 0).toLocaleString()} · close ${esc(o.close_date || '—')}</div></div>`).join('') || '<p class="muted">None</p>'}
     <h3>Activity</h3>${(account.activities || []).map(a => `<div class="row"><b>${esc(a.name)}</b> <span class="pill">${esc(a.kind)}</span><div class="muted">${esc(a.occurred_at)} · ${esc(a.contact_token || '')}${a.project_id ? ' · ' + esc(a.project_id) : ''}</div><div>${esc(a.description)}</div></div>`).join('') || '<p class="muted">None</p>'}
-    <h3>Timeline</h3><div id="timeline"><p class="muted">Loading…</p></div>`;
-  loadTimeline(account.id);
-}
-async function loadTimeline(accountId) {
-  const target = document.getElementById('timeline');
-  if (!target) return;
-  const response = await fetch('/api/crm/timeline?team=' + (currentView === 'team' ? '1' : '0') + '&account=' + encodeURIComponent(accountId));
-  const body = await response.json();
-  if (!target.isConnected) return;
-  const events = body.events || [];
-  target.innerHTML = events.map(event => `<div class="row">
-    <div><b>${esc(event.title)}</b> <span class="pill">${esc(event.kind)}</span></div>
-    <div class="muted">${esc(new Date(event.at_ms).toLocaleString())}${event.actor ? ' · ' + esc(event.actor) : ''}${event.channel ? ' · ' + esc(event.channel) : ''}</div>
-    <div>${esc(event.summary)}</div>
-  </div>`).join('') || '<p class="muted">No timeline events.</p>';
+    <h3>Timeline</h3><p class="muted">Open the CRM Spore for the unified timeline.</p>`;
 }
 function setView(view) { load(view); }
 load('team');

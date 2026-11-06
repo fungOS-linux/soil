@@ -248,6 +248,12 @@ fn crm_spore_reads_namespaced_records() -> Result<()> {
         .call_run(&mut store, &["accounts".into()])?
         .map_err(anyhow::Error::msg)?;
     bindings
+        .call_run(&mut store, &["contact".into(), "c-ada".into()])?
+        .map_err(anyhow::Error::msg)?;
+    bindings
+        .call_run(&mut store, &["project".into(), "proj-acme".into()])?
+        .map_err(anyhow::Error::msg)?;
+    bindings
         .call_run(
             &mut store,
             &[

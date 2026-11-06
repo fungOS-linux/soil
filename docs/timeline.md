@@ -1,7 +1,6 @@
 # Unified timeline
 
-Status: **CRM + conversation timeline implemented; Git and audit adapters are
-next.**
+Status: **timeline lives in the CRM Spore; Git and audit adapters are next.**
 
 The timeline is a derived projection. It does not own history.
 
@@ -33,15 +32,17 @@ contact_tokens[]
 visibility
 ```
 
-The first implementation is in `crates/soil-crm-host`:
+The first implementation is `spores/crm` over namespaced records:
 
-```rust
-pub fn timeline(
-    root: &Path,
-    books: &[String],
-    query: &TimelineQuery,
-) -> Result<Vec<TimelineEvent>>
+```text
+crm       shared CRM records
+contacts  personal contacts
+calls     personal call/activity records
+messages  personal conversation records
 ```
+
+The host maps namespaces to books and enforces grants. The Spore never sees a
+book path or a cross-book cursor.
 
 ## CRM sources
 
@@ -80,23 +81,11 @@ exclusive `(at_ms, id)` semantics as conversations.
 
 ## CLI
 
-```sh
-cargo run -p soil-crm-host -- timeline \
-  --root ~/.local/share/fungos/records \
-  --book personal/avery/crm \
-  --timeline-book personal/avery/chat \
-  --account a-acme \
-  --limit 50
-```
-
-```sh
-cargo run -p soil-crm-host -- serve ...
-```
-
-The inspector shows a per-account timeline and fetches:
-
 ```text
-GET /api/crm/timeline?team=1&account=a-acme&limit=50
+timeline <account-id> [limit]
+account <account-id>
+contact <contact-id>
+project <project-id>
 ```
 
 ## Git log is a source, not the timeline

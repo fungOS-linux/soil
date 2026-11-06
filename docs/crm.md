@@ -191,19 +191,21 @@ host-mediated transport, not a Spore import.
 
 ## Timeline
 
-The account/contact view includes a unified timeline built from CRM activities
-and linked conversation messages.
+The CRM Spore owns the unified timeline:
 
-```sh
-cargo run -p soil-crm-host -- timeline   --root ~/.local/share/fungos/records   --book personal/avery/crm   --timeline-book personal/avery/chat   --account a-acme
+```text
+timeline <account-id> [limit]
+account <account-id>   includes the first 25 events
+contact <contact-id>   includes the contact timeline
+project <project-id>   includes the project timeline
 ```
 
-Messages are joined through `fungos.graph/link` mention records, so the CRM does
-not copy message bodies. The inspector fetches the same projection from
-`/api/crm/timeline`.
+It joins CRM activities with linked conversation messages. Messages are matched
+through `fungos.graph/link` mention records, so the CRM does not copy message
+bodies. The timeline is a derived view, not a new authority.
 
-The timeline is a derived view, not a new authority. See
-[Unified timeline](timeline.md) for the Git and audit-log design.
+`soil-crm-host` no longer serves timeline data or fetches cross-book messages.
+See [Unified timeline](timeline.md) for the Git and audit-log design.
 
 ## Mock CRM
 
@@ -312,7 +314,7 @@ See [EspoCRM import](crm-espo.md).
 
 ```text
 CRM Spore over collection `crm`; no soil:crm WIT
-brand -> account -> project -> timeline
+brand -> account -> project -> detail
 graph panel from soil:graph
 team book mapping + first-name projections
 task and artifact records

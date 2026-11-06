@@ -18,6 +18,8 @@ linked.
 ```text
 accounts
 account <account-id>
+contact <contact-id|contact-token>
+project <project-id>
 timeline <account-id> [limit]
 pipeline
 activity add <id> <account-id> <kind> <title> <occurred-at> [summary]

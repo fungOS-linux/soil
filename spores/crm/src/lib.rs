@@ -28,6 +28,7 @@ const CONTACT_SCHEMA: &str = "fungos.crm/contact@1";
 const ASSIGNMENT_SCHEMA: &str = "fungos.crm/account-contact@1";
 const PROJECTION_SCHEMA: &str = "fungos.crm/account-contact-projection@1";
 const PROJECT_SCHEMA: &str = "fungos.crm/project@1";
+const PROJECT_COMPANY_SCHEMA: &str = "fungos.crm/project-company@1";
 const PROJECT_ACCOUNT_SCHEMA: &str = "fungos.crm/project-account@1";
 const ACTIVITY_SCHEMA: &str = "fungos.crm/activity@1";
 const OPPORTUNITY_SCHEMA: &str = "fungos.crm/opportunity@1";
@@ -80,6 +81,13 @@ struct Event {
     visibility: String,
 }
 
+#[derive(Default)]
+struct TimelineFilter {
+    account_id: Option<String>,
+    project_id: Option<String>,
+    contact_token: Option<String>,
+}
+
 struct Dataset {
     crm: Vec<Row>,
     contacts: Vec<Row>,
@@ -104,8 +112,18 @@ impl Guest for Component {
             "timeline" => {
                 let id = args.get(1).ok_or_else(|| "usage: timeline <account-id> [limit]".to_string())?;
                 let limit = args.get(2).and_then(|value| value.parse().ok()).unwrap_or(50);
-                let events = data.timeline(Some(id), limit)?;
+                let events = data.timeline(
+                    &TimelineFilter {
+                        account_id: Some(id.clone()),
+                        ..TimelineFilter::default()
+                    },
+                    limit,
+                )?;
                 print_json("timeline", &json!({ "account_id": id, "events": events }));
+            }
+            "project" => {
+                let id = args.get(1).ok_or_else(|| "usage: project <project-id>".to_string())?;
+                print_json("project", &data.project(id)?);
             }
             "pipeline" => print_json("pipeline", &data.pipeline()),
             "activity" if args.get(1).map(String::as_str) == Some("add") => {
@@ -120,10 +138,16 @@ impl Guest for Component {
                 let value = link_contact(&data, &args)?;
                 print_json("contact", &value);
             }
+            "contact" => {
+                let id = args.get(1).ok_or_else(|| "usage: contact <contact-id|contact-token>".to_string())?;
+                print_json("contact", &data.contact(id)?);
+            }
             "help" => print_json("help", &json!({
                 "actions": [
                     "accounts",
                     "account <id>",
+                    "contact <id|token>",
+                    "project <id>",
                     "timeline <id> [limit]",
                     "pipeline",
                     "activity add <id> <account-id> <kind> <title> <occurred-at> [summary]",
@@ -210,7 +234,13 @@ impl Dataset {
             .map(opportunity_json)
             .collect::<Vec<_>>();
         let companies = self.company_links(id);
-        let events = self.timeline(Some(id), 25)?;
+        let events = self.timeline(
+            &TimelineFilter {
+                account_id: Some(id.to_string()),
+                ..TimelineFilter::default()
+            },
+            25,
+        )?;
         Ok(json!({
             "id": account.id,
             "name": account.text("name"),
@@ -255,6 +285,128 @@ impl Dataset {
             }))
             .collect::<Vec<_>>();
         json!({ "stages": stages })
+    }
+
+    fn contact(&self, id_or_token: &str) -> Result<Value, String> {
+        let contact = self
+            .rows(CONTACT_SCHEMA)
+            .find(|row| row.id == id_or_token || row.text("contact_token") == id_or_token)
+            .ok_or_else(|| format!("contact {id_or_token} not found"))?;
+        let token = contact.text("contact_token");
+        let assignments = self
+            .rows(ASSIGNMENT_SCHEMA)
+            .filter(|link| link.text("contact_id") == contact.id || link.text("contact_token") == token)
+            .collect::<Vec<_>>();
+        let accounts = rows_by_id(self.rows(ACCOUNT_SCHEMA));
+        let account_values = assignments
+            .iter()
+            .filter_map(|link| accounts.get(link.text("account_id")))
+            .map(|account| {
+                json!({
+                    "id": account.id,
+                    "name": account.text("name"),
+                    "domains": account.field("domains"),
+                })
+            })
+            .collect::<Vec<_>>();
+        let activities = self
+            .rows(ACTIVITY_SCHEMA)
+            .filter(|row| row.text("contact_token") == token)
+            .map(activity_json)
+            .collect::<Vec<_>>();
+        let events = self.timeline(
+            &TimelineFilter {
+                contact_token: Some(token.to_string()),
+                ..TimelineFilter::default()
+            },
+            50,
+        )?;
+        Ok(json!({
+            "id": contact.id,
+            "name": contact.text("name"),
+            "first_name": contact.text("first_name"),
+            "last_name": contact.text("last_name"),
+            "email": contact.text("email"),
+            "phone": contact.text("phone"),
+            "title": contact.text("title"),
+            "contact_token": token,
+            "accounts": account_values,
+            "assignments": assignments.iter().map(|link| json!({
+                "account_id": link.text("account_id"),
+                "role": link.text("role"),
+                "status": link.text("status"),
+            })).collect::<Vec<_>>(),
+            "activities": activities,
+            "timeline": events,
+        }))
+    }
+
+    fn project(&self, id: &str) -> Result<Value, String> {
+        let project = self
+            .rows(PROJECT_SCHEMA)
+            .find(|row| row.id == id)
+            .ok_or_else(|| format!("project {id} not found"))?;
+        let company = self
+            .rows(COMPANY_SCHEMA)
+            .find(|row| row.id == project.text("company_id"));
+        let accounts = rows_by_id(self.rows(ACCOUNT_SCHEMA));
+        let project_accounts = self
+            .rows(PROJECT_ACCOUNT_SCHEMA)
+            .filter(|link| link.text("project_id") == id)
+            .map(|link| {
+                let account = accounts.get(link.text("account_id"));
+                json!({
+                    "id": link.text("account_id"),
+                    "name": account.map(|account| account.text("name")).unwrap_or(""),
+                    "role": link.text("role"),
+                    "primary": link.field("primary"),
+                })
+            })
+            .collect::<Vec<_>>();
+        let participants = self
+            .rows(PROJECT_COMPANY_SCHEMA)
+            .filter(|link| link.text("project_id") == id)
+            .map(|link| json!({
+                "company_id": link.text("company_id"),
+                "role": link.text("role"),
+            }))
+            .collect::<Vec<_>>();
+        let activities = self
+            .rows(ACTIVITY_SCHEMA)
+            .filter(|row| row.text("project_id") == id)
+            .map(activity_json)
+            .collect::<Vec<_>>();
+        let opportunities = self
+            .rows(OPPORTUNITY_SCHEMA)
+            .filter(|row| row.text("project_id") == id)
+            .map(opportunity_json)
+            .collect::<Vec<_>>();
+        let events = self.timeline(
+            &TimelineFilter {
+                project_id: Some(id.to_string()),
+                ..TimelineFilter::default()
+            },
+            50,
+        )?;
+        Ok(json!({
+            "id": project.id,
+            "name": project.text("name"),
+            "kind": project.text("kind"),
+            "status": project.text("status"),
+            "summary": project.text("summary"),
+            "start_at": project.text("start_at"),
+            "due_at": project.text("due_at"),
+            "visibility": project.text("visibility"),
+            "company": company.map(|company| json!({
+                "id": company.id,
+                "name": company.text("name"),
+            })),
+            "accounts": project_accounts,
+            "participants": participants,
+            "activities": activities,
+            "opportunities": opportunities,
+            "timeline": events,
+        }))
     }
 
     fn contacts_for(&self, account_id: &str) -> Vec<Value> {
@@ -338,7 +490,7 @@ impl Dataset {
             .collect()
     }
 
-    fn timeline(&self, account_id: Option<&str>, limit: usize) -> Result<Vec<Event>, String> {
+    fn timeline(&self, filter: &TimelineFilter, limit: usize) -> Result<Vec<Event>, String> {
         let accounts = rows_by_id(self.rows(ACCOUNT_SCHEMA));
         let contacts = rows_by_id(self.rows(CONTACT_SCHEMA));
         let projects = rows_by_id(self.rows(PROJECT_SCHEMA));
@@ -477,8 +629,14 @@ impl Dataset {
             });
         }
 
-        if let Some(account_id) = account_id {
+        if let Some(account_id) = &filter.account_id {
             events.retain(|event| event.account_ids.iter().any(|id| id == account_id));
+        }
+        if let Some(project_id) = &filter.project_id {
+            events.retain(|event| event.project_ids.iter().any(|id| id == project_id));
+        }
+        if let Some(contact_token) = &filter.contact_token {
+            events.retain(|event| event.contact_tokens.iter().any(|token| token == contact_token));
         }
         events.sort_by(|left, right| {
             right
