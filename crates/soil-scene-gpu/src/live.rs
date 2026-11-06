@@ -6,6 +6,7 @@
 //! `soil_scene` every frame. There is no per-frame Lua call and no FFI stream
 //! bridge.
 
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -18,6 +19,7 @@ use crate::{Frame, Theme};
 
 const TAU: f32 = std::f32::consts::PI * 2.0;
 const CHART_POINTS: usize = 160;
+const SAMPLE_SECONDS: f32 = 0.2;
 const ATLAS_POINTS: usize = 240;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -281,12 +283,20 @@ struct LayerRect {
     h: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Sample {
+    time: f32,
+    metrics: Metrics,
+}
+
 pub struct LiveViz {
     spec: LiveSpec,
     theme: Theme,
     time: f32,
     frame: u64,
     last_update: Instant,
+    history: VecDeque<Sample>,
+    last_index: i64,
     atlas_points: Vec<(f32, f32, usize)>,
     hidden: Vec<Vec<bool>>,
     scale: f32,
@@ -315,16 +325,58 @@ impl LiveViz {
                 _ => Vec::new(),
             })
             .collect();
-        Self {
+        let mut live = Self {
             spec,
             theme: Theme::default(),
             time: 0.0,
             frame: 0,
             last_update: Instant::now(),
+            history: VecDeque::with_capacity(CHART_POINTS),
+            last_index: 0,
             atlas_points,
             hidden,
             scale: 1.0,
             pointer: None,
+        };
+        live.rebuild(0.0);
+        live
+    }
+
+    fn sample(index: i64) -> Sample {
+        let time = (index as f32 * SAMPLE_SECONDS).max(0.0);
+        Sample {
+            time,
+            metrics: metrics(time),
+        }
+    }
+
+    fn sample_index(time: f32) -> i64 {
+        // Do not lose a sample when the host clock lands a hair below a
+        // 0.2-second boundary after accumulating real deltas.
+        ((time.max(0.0) + 0.0001) / SAMPLE_SECONDS).floor() as i64
+    }
+
+    /// Fill the visible window for an absolute time. This is the only path that
+    /// changes historical samples; normal playback only appends at the sample
+    /// cadence.
+    fn rebuild(&mut self, time: f32) {
+        self.time = time.max(0.0);
+        self.last_index = Self::sample_index(self.time);
+        self.history.clear();
+        let first = self.last_index - CHART_POINTS as i64 + 1;
+        for index in first..=self.last_index {
+            self.history.push_back(Self::sample(index));
+        }
+    }
+
+    fn append_until(&mut self, time: f32) {
+        let target = Self::sample_index(time);
+        while self.last_index < target {
+            self.last_index += 1;
+            self.history.push_back(Self::sample(self.last_index));
+            if self.history.len() > CHART_POINTS {
+                self.history.pop_front();
+            }
         }
     }
 
@@ -345,7 +397,9 @@ impl LiveViz {
 
     /// Advance by an explicit delta, for a host that already owns the clock.
     pub fn advance(&mut self, dt: f32) -> Scene {
-        self.time += dt.clamp(0.0, 0.25);
+        let next = self.time + dt.clamp(0.0, 0.25);
+        self.append_until(next);
+        self.time = next;
         self.frame = self.frame.wrapping_add(1);
         self.scene()
     }
@@ -353,7 +407,7 @@ impl LiveViz {
     /// Seek to an absolute scene time. Used by deterministic frame capture;
     /// the live loop uses `tick`, which clamps a suspended process jump.
     pub fn seek(&mut self, time: f32) -> Scene {
-        self.time = time.max(0.0);
+        self.rebuild(time);
         self.frame = self.frame.wrapping_add(1);
         self.scene()
     }
@@ -386,7 +440,15 @@ impl LiveViz {
                         .get(layer_index)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]);
-                    draw_chart(&mut painter, spec, self.time, gap, hidden, self.pointer);
+                    draw_chart(
+                        &mut painter,
+                        spec,
+                        self.time,
+                        gap,
+                        hidden,
+                        self.pointer,
+                        &self.history,
+                    );
                 }
                 LayerSpec::Graph(spec) => draw_graph(&mut painter, spec, self.time, gap),
                 LayerSpec::Map(spec) => draw_map(&mut painter, spec, self.time, gap),
@@ -399,11 +461,11 @@ impl LiveViz {
     }
 
     pub fn reset(&mut self) {
-        self.time = 0.0;
         self.frame = 0;
         for layer in &mut self.hidden {
             layer.fill(false);
         }
+        self.rebuild(0.0);
     }
 
     pub fn toggle_series(&mut self, layer: usize, series: usize) {
@@ -833,7 +895,7 @@ fn panel(painter: &mut Painter, id: &str, r: &LayerRect, title: Option<&str>) {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Metrics {
     memory: f32,
     cpu: f32,
@@ -962,15 +1024,13 @@ fn source_value(source: &str, metrics: Metrics) -> Option<f32> {
     })
 }
 
-/// Each chart shows five samples per second, oldest at x=0.
-fn sample_time(now: f32, point: usize) -> f32 {
-    let span = (CHART_POINTS - 1) as f32 * 0.2;
-    (now - span + point as f32 * 0.2).max(0.0)
-}
-
-fn chart_value(source: Option<&str>, point: usize, time: f32) -> f32 {
+/// Each chart reads the same append-only resident history, oldest at x=0.
+fn chart_value(samples: &VecDeque<Sample>, source: Option<&str>, point: usize) -> f32 {
     let source = source.unwrap_or("latency.p50");
-    source_value(source, metrics(sample_time(time, point))).unwrap_or(0.0)
+    samples
+        .get(point)
+        .and_then(|sample| source_value(source, sample.metrics))
+        .unwrap_or(0.0)
 }
 
 fn series_stride(series: &SeriesSpec) -> usize {
@@ -982,15 +1042,19 @@ fn point_indices(series: &SeriesSpec) -> impl Iterator<Item = usize> {
     (0..CHART_POINTS).step_by(stride)
 }
 
-fn candle_values(series: &SeriesSpec, point: usize, time: f32) -> (f32, f32, f32, f32) {
+fn candle_values(
+    samples: &VecDeque<Sample>,
+    series: &SeriesSpec,
+    point: usize,
+) -> (f32, f32, f32, f32) {
     let close_source = series.close_source.as_deref().or(series.source.as_deref());
     let open_source = series.open_source.as_deref().or(close_source);
     let high_source = series.high_source.as_deref().or(close_source);
     let low_source = series.low_source.as_deref().or(close_source);
-    let open = chart_value(open_source, point, time);
-    let high = chart_value(high_source, point, time);
-    let low = chart_value(low_source, point, time);
-    let close = chart_value(close_source, point, time);
+    let open = chart_value(samples, open_source, point);
+    let high = chart_value(samples, high_source, point);
+    let low = chart_value(samples, low_source, point);
+    let close = chart_value(samples, close_source, point);
     (
         open,
         high.max(open).max(close),
@@ -999,28 +1063,28 @@ fn candle_values(series: &SeriesSpec, point: usize, time: f32) -> (f32, f32, f32
     )
 }
 
-fn band_values(series: &SeriesSpec, point: usize, time: f32) -> (f32, f32) {
-    let upper = chart_value(series.source.as_deref(), point, time);
+fn band_values(samples: &VecDeque<Sample>, series: &SeriesSpec, point: usize) -> (f32, f32) {
+    let upper = chart_value(samples, series.source.as_deref(), point);
     let lower = series
         .band_source
         .as_deref()
-        .map(|source| chart_value(Some(source), point, time))
+        .map(|source| chart_value(samples, Some(source), point))
         .unwrap_or(upper);
     (upper, lower)
 }
 
-fn series_value(series: &SeriesSpec, point: usize, time: f32) -> f32 {
+fn series_value(samples: &VecDeque<Sample>, series: &SeriesSpec, point: usize) -> f32 {
     match series.kind {
-        SeriesKind::Candle => candle_values(series, point, time).3,
+        SeriesKind::Candle => candle_values(samples, series, point).3,
         SeriesKind::Band => {
-            let (upper, lower) = band_values(series, point, time);
+            let (upper, lower) = band_values(samples, series, point);
             (upper + lower) * 0.5
         }
-        _ => chart_value(series.source.as_deref(), point, time),
+        _ => chart_value(samples, series.source.as_deref(), point),
     }
 }
 
-fn chart_bounds(spec: &ChartSpec, time: f32, hidden: &[bool]) -> (f32, f32) {
+fn chart_bounds(spec: &ChartSpec, hidden: &[bool], samples: &VecDeque<Sample>) -> (f32, f32) {
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
     let mut bar_lo = f32::INFINITY;
@@ -1033,14 +1097,14 @@ fn chart_bounds(spec: &ChartSpec, time: f32, hidden: &[bool]) -> (f32, f32) {
         match series.kind {
             SeriesKind::Candle => {
                 for point in point_indices(series) {
-                    let (_, high, low, _) = candle_values(series, point, time);
+                    let (_, high, low, _) = candle_values(samples, series, point);
                     lo = lo.min(low);
                     hi = hi.max(high);
                 }
             }
             SeriesKind::Band => {
                 for point in point_indices(series) {
-                    let (upper, lower) = band_values(series, point, time);
+                    let (upper, lower) = band_values(samples, series, point);
                     lo = lo.min(lower);
                     hi = hi.max(upper);
                 }
@@ -1048,7 +1112,7 @@ fn chart_bounds(spec: &ChartSpec, time: f32, hidden: &[bool]) -> (f32, f32) {
             SeriesKind::StackedArea => {
                 for point in point_indices(series) {
                     let lower = stack[point];
-                    let upper = lower + chart_value(series.source.as_deref(), point, time);
+                    let upper = lower + chart_value(samples, series.source.as_deref(), point);
                     lo = lo.min(lower);
                     hi = hi.max(upper);
                     stack[point] = upper;
@@ -1059,7 +1123,7 @@ fn chart_bounds(spec: &ChartSpec, time: f32, hidden: &[bool]) -> (f32, f32) {
                 bar_lo = bar_lo.min(baseline);
                 bar_hi = bar_hi.max(baseline);
                 for point in point_indices(series) {
-                    let value = chart_value(series.source.as_deref(), point, time);
+                    let value = chart_value(samples, series.source.as_deref(), point);
                     lo = lo.min(value);
                     hi = hi.max(value);
                 }
@@ -1067,7 +1131,7 @@ fn chart_bounds(spec: &ChartSpec, time: f32, hidden: &[bool]) -> (f32, f32) {
             _ => {
                 let source = series.source.as_deref();
                 for point in point_indices(series) {
-                    let value = chart_value(source, point, time);
+                    let value = chart_value(samples, source, point);
                     lo = lo.min(value);
                     hi = hi.max(value);
                 }
@@ -1098,9 +1162,14 @@ fn series_color(series: &SeriesSpec, index: usize) -> [u8; 3] {
         .unwrap_or(CHART_COLORS[index % CHART_COLORS.len()])
 }
 
-fn series_point_color(series: &SeriesSpec, index: usize, point: usize, time: f32) -> [u8; 3] {
+fn series_point_color(
+    samples: &VecDeque<Sample>,
+    series: &SeriesSpec,
+    index: usize,
+    point: usize,
+) -> [u8; 3] {
     if series.kind == SeriesKind::Candle {
-        let (open, _, _, close) = candle_values(series, point, time);
+        let (open, _, _, close) = candle_values(samples, series, point);
         return if close >= open {
             series.up_color.unwrap_or([34, 197, 94])
         } else {
@@ -1117,6 +1186,7 @@ fn draw_chart(
     gap: f32,
     hidden: &[bool],
     pointer: Option<(f32, f32)>,
+    samples: &VecDeque<Sample>,
 ) {
     let r = layer_rect(&spec.rect, painter.width, painter.height, gap);
     let style = &spec.style;
@@ -1168,9 +1238,16 @@ fn draw_chart(
     );
 
     let xlo = 0.0;
-    let xhi = CHART_POINTS as f32;
-    let (ylo, yhi) = chart_bounds(spec, time, hidden);
-    let sx = |x: f32| left + (x - xlo) / (xhi - xlo) * plot_w;
+    let xhi = (CHART_POINTS - 1) as f32;
+    let (ylo, yhi) = chart_bounds(spec, hidden, samples);
+    // Data values are immutable. The viewport, not the samples, moves: a real
+    // sample clock leaves a fractional phase between appends, so old marks
+    // drift left smoothly instead of being rewritten in place.
+    let phase = samples
+        .back()
+        .map(|sample| ((time - sample.time) / SAMPLE_SECONDS).clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    let sx = |x: f32| left + (x - phase - xlo) / (xhi - xlo) * plot_w;
     let sy = |y: f32| plot_bottom - (y - ylo) / (yhi - ylo) * plot_h;
     for tick in 0..=5 {
         let value = ylo + (yhi - ylo) * tick as f32 / 5.0;
@@ -1239,7 +1316,7 @@ fn draw_chart(
                 for &point in &points {
                     let lower_value = stack[point];
                     let upper_value =
-                        lower_value + chart_value(series.source.as_deref(), point, time);
+                        lower_value + chart_value(samples, series.source.as_deref(), point);
                     stack[point] = upper_value;
                     upper.push((sx(point as f32), sy(upper_value.clamp(ylo, yhi))));
                     lower.push((sx(point as f32), sy(lower_value.clamp(ylo, yhi))));
@@ -1268,7 +1345,8 @@ fn draw_chart(
                 let zero = sy(baseline);
                 let radius = series.bar_radius.unwrap_or(2.0);
                 for point in points {
-                    let value = chart_value(series.source.as_deref(), point, time).clamp(ylo, yhi);
+                    let value =
+                        chart_value(samples, series.source.as_deref(), point).clamp(ylo, yhi);
                     let y = sy(value);
                     let center = sx(point as f32);
                     let x = center - group_w * 0.5 + bar_rank as f32 * bar_w + bar_w * 0.09;
@@ -1292,7 +1370,7 @@ fn draw_chart(
                 let candles: Vec<(f32, Candle)> = points
                     .iter()
                     .map(|&point| {
-                        let (open, high, low, close) = candle_values(series, point, time);
+                        let (open, high, low, close) = candle_values(samples, series, point);
                         (
                             sx(point as f32),
                             Candle {
@@ -1318,14 +1396,14 @@ fn draw_chart(
                 let upper: Vec<(f32, f32)> = points
                     .iter()
                     .map(|&point| {
-                        let (upper, _) = band_values(series, point, time);
+                        let (upper, _) = band_values(samples, series, point);
                         (sx(point as f32), sy(upper.clamp(ylo, yhi)))
                     })
                     .collect();
                 let lower: Vec<(f32, f32)> = points
                     .iter()
                     .map(|&point| {
-                        let (_, lower) = band_values(series, point, time);
+                        let (_, lower) = band_values(samples, series, point);
                         (sx(point as f32), sy(lower.clamp(ylo, yhi)))
                     })
                     .collect();
@@ -1356,7 +1434,8 @@ fn draw_chart(
                 let mut screen: Vec<(f32, f32)> = points
                     .iter()
                     .map(|&point| {
-                        let y = chart_value(series.source.as_deref(), point, time).clamp(ylo, yhi);
+                        let y =
+                            chart_value(samples, series.source.as_deref(), point).clamp(ylo, yhi);
                         (sx(point as f32), sy(y))
                     })
                     .collect();
@@ -1487,7 +1566,7 @@ fn draw_chart(
         && py <= plot_bottom
     {
         let data_x = xlo + (px - left) / plot_w * (xhi - xlo);
-        let nearest = (((data_x - xlo) / (xhi - xlo)) * (CHART_POINTS - 1) as f32)
+        let nearest = (data_x + phase)
             .round()
             .clamp(0.0, (CHART_POINTS - 1) as f32) as usize;
         let cx = sx(nearest as f32);
@@ -1503,8 +1582,8 @@ fn draw_chart(
             if hidden.get(index).copied().unwrap_or(false) {
                 continue;
             }
-            let value = series_value(series, nearest, time);
-            let color = series_point_color(series, index, nearest, time);
+            let value = series_value(samples, series, nearest);
+            let color = series_point_color(samples, series, index, nearest);
             let y = sy(value.clamp(ylo, yhi));
             painter.points(
                 &format!("{}-{}-hover", spec.id, index),
@@ -1536,9 +1615,13 @@ fn draw_chart(
                 0.94,
                 8.0,
             );
+            let sample_time = samples
+                .get(nearest)
+                .map(|sample| sample.time)
+                .unwrap_or(0.0);
             painter.text(
                 &format!("{}-tooltip-title", spec.id),
-                &format!("x {:.0}", nearest as f32),
+                &format!("t {sample_time:.1}s"),
                 tx + 10.0,
                 ty + 7.0,
                 10.0,
@@ -1970,6 +2053,77 @@ mod tests {
         let scene = live.advance(0.016);
         scene.validate().expect("valid scene");
         assert!(scene.nodes.len() > 20);
+    }
+
+    #[test]
+    fn history_is_append_only_during_playback() {
+        let spec: LiveSpec = serde_json::from_str(SPEC).expect("spec");
+        let mut live = LiveViz::new(spec);
+        live.seek(100.0);
+        let before: Vec<(f32, f32)> = live
+            .history
+            .iter()
+            .map(|sample| (sample.time, sample.metrics.p50))
+            .collect();
+        assert_eq!(before.len(), CHART_POINTS);
+        live.advance(SAMPLE_SECONDS);
+        let after: Vec<(f32, f32)> = live
+            .history
+            .iter()
+            .map(|sample| (sample.time, sample.metrics.p50))
+            .collect();
+        assert_eq!(after.len(), CHART_POINTS);
+        assert_eq!(&before[1..], &after[..CHART_POINTS - 1]);
+        assert!(
+            (after[CHART_POINTS - 1].0 - (before[CHART_POINTS - 1].0 + SAMPLE_SECONDS)).abs()
+                < 0.0001
+        );
+    }
+
+    #[test]
+    fn between_samples_only_the_viewport_moves() {
+        let spec: LiveSpec = serde_json::from_str(SPEC).expect("spec");
+        let mut live = LiveViz::new(spec);
+        let before = live.seek(100.0);
+        let before_line = before
+            .nodes
+            .iter()
+            .find_map(|node| match &node.content {
+                Content::Polyline(line) => Some(line.points.clone()),
+                _ => None,
+            })
+            .expect("line");
+        live.advance(0.1);
+        let after = live.scene();
+        let after_line = after
+            .nodes
+            .iter()
+            .find_map(|node| match &node.content {
+                Content::Polyline(line) => Some(line.points.clone()),
+                _ => None,
+            })
+            .expect("line");
+        assert_eq!(before_line.len(), after_line.len());
+        for (before, after) in before_line.iter().zip(&after_line) {
+            assert!(
+                (before[1] - after[1]).abs() < 0.0001,
+                "y values are immutable"
+            );
+            assert!(
+                (before[0] - after[0]).abs() > 0.000001,
+                "x positions follow the viewport"
+            );
+        }
+    }
+
+    #[test]
+    fn seeking_rebuilds_the_same_window() {
+        let spec: LiveSpec = serde_json::from_str(SPEC).expect("spec");
+        let mut a = LiveViz::new(spec.clone());
+        let mut b = LiveViz::new(spec);
+        a.seek(140.0);
+        b.seek(140.0);
+        assert_eq!(a.history, b.history);
     }
 
     #[test]
