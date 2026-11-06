@@ -10,7 +10,6 @@ use bytemuck::{Pod, Zeroable};
 use fontdue::{Font, FontSettings};
 use std::collections::HashMap;
 use std::io::Read;
-use wgpu::util::DeviceExt;
 
 pub mod live;
 pub mod terminal;
@@ -165,9 +164,49 @@ pub struct Renderer {
     queue: wgpu::Queue,
     rect_pipeline: wgpu::RenderPipeline,
     text_pipeline: wgpu::RenderPipeline,
-    sampler: wgpu::Sampler,
     font: Option<Font>,
     format: wgpu::TextureFormat,
+    rect_buffer: Option<wgpu::Buffer>,
+    rect_capacity: u64,
+    rect_scratch: Vec<Vertex>,
+    text_buffer: Option<wgpu::Buffer>,
+    text_capacity: u64,
+    text_scratch: Vec<TextureVertex>,
+    atlas: Atlas,
+    atlas_texture: wgpu::Texture,
+    atlas_bind_group: wgpu::BindGroup,
+}
+
+fn ensure_vertex_buffer(
+    device: &wgpu::Device,
+    buffer: &mut Option<wgpu::Buffer>,
+    capacity: &mut u64,
+    bytes: usize,
+    label: &str,
+) {
+    let needed = bytes as u64;
+    if needed == 0 {
+        return;
+    }
+    if *capacity < needed {
+        let size = needed.next_power_of_two().max(256);
+        *buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        *capacity = size;
+    }
+}
+
+fn write_vertices<T: Pod>(queue: &wgpu::Queue, buffer: &Option<wgpu::Buffer>, data: &[T]) {
+    if data.is_empty() {
+        return;
+    }
+    if let Some(buffer) = buffer {
+        queue.write_buffer(buffer, 0, bytemuck::cast_slice(data));
+    }
 }
 
 impl Renderer {
@@ -294,14 +333,53 @@ impl Renderer {
             ..Default::default()
         });
 
+        let atlas = Atlas::new();
+        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("soil-scene-gpu text atlas"),
+            size: wgpu::Extent3d {
+                width: ATLAS_WIDTH,
+                height: ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("soil-scene-gpu text bind group"),
+            layout: &text_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
         Ok(Self {
             device,
             queue,
             rect_pipeline,
             text_pipeline,
-            sampler,
             font: load_font(),
             format,
+            rect_buffer: None,
+            rect_capacity: 0,
+            rect_scratch: Vec::new(),
+            text_buffer: None,
+            text_capacity: 0,
+            text_scratch: Vec::new(),
+            atlas,
+            atlas_texture,
+            atlas_bind_group,
         })
     }
 
@@ -358,59 +436,57 @@ impl Renderer {
         let device = &self.device;
         let queue = &self.queue;
 
-        let rects = rect_vertices(scene, width, height, theme);
-        let rect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("soil-scene-gpu rect vertices"),
-            contents: bytemuck::cast_slice(&rects),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        self.rect_scratch.clear();
+        rect_vertices(&mut self.rect_scratch, scene, width, height, theme);
+        ensure_vertex_buffer(
+            device,
+            &mut self.rect_buffer,
+            &mut self.rect_capacity,
+            self.rect_scratch.len() * std::mem::size_of::<Vertex>(),
+            "soil-scene-gpu rect vertices",
+        );
+        write_vertices(queue, &self.rect_buffer, &self.rect_scratch);
 
-        let (atlas, text_vertices) = text_atlas(scene, width, height, theme, self.font.as_mut())?;
-        let overlay_texture = device.create_texture_with_data(
-            queue,
-            &wgpu::TextureDescriptor {
-                label: Some("soil-scene-gpu text atlas"),
-                size: wgpu::Extent3d {
+        self.text_scratch.clear();
+        text_vertices(
+            &mut self.text_scratch,
+            scene,
+            width,
+            height,
+            theme,
+            &mut self.atlas,
+            self.font.as_mut(),
+        );
+        if self.atlas.dirty {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.atlas_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &self.atlas.data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(ATLAS_WIDTH),
+                    rows_per_image: Some(ATLAS_HEIGHT),
+                },
+                wgpu::Extent3d {
                     width: ATLAS_WIDTH,
                     height: ATLAS_HEIGHT,
                     depth_or_array_layers: 1,
                 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &atlas,
+            );
+            self.atlas.dirty = false;
+        }
+        ensure_vertex_buffer(
+            device,
+            &mut self.text_buffer,
+            &mut self.text_capacity,
+            self.text_scratch.len() * std::mem::size_of::<TextureVertex>(),
+            "soil-scene-gpu text vertices",
         );
-        let overlay_view = overlay_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("soil-scene-gpu text bind group"),
-            layout: &self.text_pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&overlay_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
-        let text_buffer = if text_vertices.is_empty() {
-            None
-        } else {
-            Some(
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("soil-scene-gpu text vertices"),
-                    contents: bytemuck::cast_slice(&text_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                }),
-            )
-        };
+        write_vertices(queue, &self.text_buffer, &self.text_scratch);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("soil-scene-gpu encode"),
@@ -440,16 +516,20 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if !rects.is_empty() {
+            if !self.rect_scratch.is_empty()
+                && let Some(buffer) = &self.rect_buffer
+            {
                 pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, rect_buffer.slice(..));
-                pass.draw(0..rects.len() as u32, 0..1);
-            }
-            if let Some(buffer) = &text_buffer {
-                pass.set_pipeline(&self.text_pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..text_vertices.len() as u32, 0..1);
+                pass.draw(0..self.rect_scratch.len() as u32, 0..1);
+            }
+            if !self.text_scratch.is_empty()
+                && let Some(buffer) = &self.text_buffer
+            {
+                pass.set_pipeline(&self.text_pipeline);
+                pass.set_bind_group(0, &self.atlas_bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..self.text_scratch.len() as u32, 0..1);
             }
         }
         queue.submit([encoder.finish()]);
@@ -640,8 +720,13 @@ fn heat_color(_theme: Theme, t: f32) -> [u8; 3] {
     stops[stops.len() - 1].1
 }
 
-fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) -> Vec<Vertex> {
-    let mut out = Vec::new();
+fn rect_vertices(
+    out: &mut Vec<Vertex>,
+    scene: &soil_scene::Scene,
+    width: u32,
+    height: u32,
+    theme: Theme,
+) {
     let _ = (width, height);
     for node in &scene.nodes {
         let (x, y, w, h) = world_bounds(node, &scene.nodes);
@@ -650,16 +735,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                 let color = rgb_or_ink(theme, rect.rgb, rect.ink);
                 // Scene translation is the top-left in a y-up space; scale is
                 // positive down, so the quad spans `y - h .. y`.
-                push_quad(
-                    &mut out,
-                    x,
-                    y - h,
-                    x + w,
-                    y,
-                    color,
-                    rect.opacity,
-                    rect.radius,
-                );
+                push_quad(out, x, y - h, x + w, y, color, rect.opacity, rect.radius);
             }
             soil_scene::Content::Area(area) => {
                 let color = rgb_or_ink(theme, area.rgb, area.ink);
@@ -670,7 +746,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                     let (x2, y2) = (x + pair[1][0] * w, y + pair[1][1] * h);
                     let base = y + area.baseline * h;
                     push_segment_gradient(
-                        &mut out,
+                        out,
                         [x1, y1],
                         [x2, y2],
                         [x2, base],
@@ -693,7 +769,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                     let u1 = [x + upper1[0] * w, y + upper1[1] * h];
                     let l1 = [x + lower1[0] * w, y + lower1[1] * h];
                     let l0 = [x + lower0[0] * w, y + lower0[1] * h];
-                    push_segment(&mut out, u0, u1, l1, l0, color, alpha);
+                    push_segment(out, u0, u1, l1, l0, color, alpha);
                 }
             }
             soil_scene::Content::Points(points) => {
@@ -710,7 +786,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                     let px = x + point[0] * w;
                     let py = y + point[1] * h;
                     push_quad(
-                        &mut out,
+                        out,
                         px - half_w,
                         py - half_h,
                         px + half_w,
@@ -749,7 +825,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                         let x0 = x + col as f32 * cell_w;
                         let top = y - row as f32 * cell_h;
                         push_quad(
-                            &mut out,
+                            out,
                             x0,
                             top - cell_h - 0.5,
                             x0 + cell_w + 0.5,
@@ -783,7 +859,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                         down
                     };
                     push_quad(
-                        &mut out,
+                        out,
                         cx - wick * 0.5,
                         high.min(low),
                         cx + wick * 0.5,
@@ -795,7 +871,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                     let top = open.min(close);
                     let bottom = open.max(close);
                     push_quad(
-                        &mut out,
+                        out,
                         cx - body * 0.5,
                         top,
                         cx + body * 0.5,
@@ -840,7 +916,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                     let ny = dx / length * half;
                     let segment_color = color_at((x1 + x2) * 0.5);
                     push_segment(
-                        &mut out,
+                        out,
                         [x1 + nx, y1 + ny],
                         [x2 + nx, y2 + ny],
                         [x2 - nx, y2 - ny],
@@ -851,7 +927,7 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
                 }
                 for index in 1..points.len().saturating_sub(1) {
                     push_join(
-                        &mut out,
+                        out,
                         points[index - 1],
                         points[index],
                         points[index + 1],
@@ -866,7 +942,6 @@ fn rect_vertices(scene: &soil_scene::Scene, width: u32, height: u32, theme: Them
             _ => {}
         }
     }
-    out
 }
 
 fn normalize(v: [f32; 2]) -> Option<[f32; 2]> {
@@ -1089,6 +1164,7 @@ struct Atlas {
     cursor_y: u32,
     row_height: u32,
     glyphs: HashMap<(char, u32), Option<Glyph>>,
+    dirty: bool,
 }
 
 impl Atlas {
@@ -1099,6 +1175,7 @@ impl Atlas {
             cursor_y: 1,
             row_height: 0,
             glyphs: HashMap::new(),
+            dirty: true,
         }
     }
 
@@ -1115,6 +1192,7 @@ impl Atlas {
                 advance: glyph.advance,
             });
         }
+        self.dirty = true;
         let (metrics, bitmap) = font.rasterize(ch, size);
         let glyph = if metrics.width == 0 || metrics.height == 0 {
             Some(Glyph {
@@ -1174,15 +1252,15 @@ impl Atlas {
     }
 }
 
-fn text_atlas(
+fn text_vertices(
+    out: &mut Vec<TextureVertex>,
     scene: &soil_scene::Scene,
     width: u32,
     height: u32,
     theme: Theme,
+    atlas: &mut Atlas,
     font: Option<&mut Font>,
-) -> Result<(Vec<u8>, Vec<TextureVertex>)> {
-    let mut atlas = Atlas::new();
-    let mut vertices = Vec::new();
+) {
     let mut font = font;
     for node in &scene.nodes {
         let soil_scene::Content::Text(text) = &node.content else {
@@ -1198,8 +1276,8 @@ fn text_atlas(
         let screen_y = (4.0 - y) / 8.0 * height as f32;
         let color = text.rgb.unwrap_or_else(|| ink(theme, text.ink));
         push_text_quads(
-            &mut atlas,
-            &mut vertices,
+            atlas,
+            out,
             font,
             text.text.as_str(),
             screen_x,
@@ -1210,7 +1288,6 @@ fn text_atlas(
             height,
         );
     }
-    Ok((atlas.data, vertices))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1368,6 +1445,34 @@ mod tests {
             .chunks_exact(4)
             .any(|pixel| pixel[0] > 50 || pixel[1] > 50 || pixel[2] > 50);
         assert!(lit, "text should leave visible pixels in the frame");
+    }
+
+    #[test]
+    fn repeated_frames_reuse_the_same_renderer() {
+        let scene = soil_scene::Scene::new(vec![soil_scene::Node {
+            id: "title".into(),
+            parent: None,
+            transition_ms: None,
+            transform: soil_scene::Transform {
+                translation: [-2.0, 1.0, 0.0],
+                rotation: [0.0; 3],
+                scale: [2.0, 2.0, 1.0],
+            },
+            content: soil_scene::Content::Text(soil_scene::Text {
+                text: "Reuse".into(),
+                ink: Some(soil_scene::Ink::Text),
+                rgb: None,
+                opacity: 1.0,
+            }),
+        }]);
+        let mut renderer = Renderer::new().expect("renderer");
+        let first = renderer
+            .render(&scene, 200, 120, Theme::default())
+            .expect("first");
+        let second = renderer
+            .render(&scene, 200, 120, Theme::default())
+            .expect("second");
+        assert_eq!(first.rgba, second.rgba);
     }
 
     #[test]
