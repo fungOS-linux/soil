@@ -2659,7 +2659,7 @@ mush — a sandboxed VFS shell
   head [-n N] PATH        first lines
   tail [-n N] PATH        last lines
   grep [-i] PAT TEXT...  linear search file contents
-  tgrep PATTERN [PATH...] trigram-indexed regex search
+  tgrep PATTERN [PATH...] indexed regex search over the VFS
   wc [-l|-c] PATH...      line/byte counts
   stat PATH               file metadata
   tree [DIR]              recursive listing

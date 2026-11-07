@@ -231,7 +231,8 @@ done
 and `!`, `-a`, `-o`. `read` consumes one line from piped stdin.
 
 `tgrep` uses the `soil:index` regex candidate index, then reads matching VFS
-files for line-level output. It supports `-i`, `-s`, `-F`, `-w`, `-v`, `-l`,
+files for line-level output. This is an indexed `tgrep`-style command, not yet
+a literal trigram postings implementation. It supports `-i`, `-s`, `-F`, `-w`, `-v`, `-l`,
 `-c`, `-o`, `-n`/`-N`, `-H`/`-I`, `-m N`, `-g GLOB`, `-e PATTERN`,
 `--no-index`, and `-q`.
 
