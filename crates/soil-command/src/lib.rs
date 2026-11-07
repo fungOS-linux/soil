@@ -7,6 +7,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -199,6 +200,7 @@ pub struct RunOutput {
 pub struct CommandRunner {
     engine: Engine,
     records: Option<RecordsBinding>,
+    components: Mutex<BTreeMap<PathBuf, Arc<wasmtime::component::Component>>>,
 }
 
 impl CommandRunner {
@@ -207,12 +209,32 @@ impl CommandRunner {
         config.wasm_component_model(true);
         config.epoch_interruption(true);
         let engine = Engine::new(&config)?;
-        Ok(Self { engine, records })
+        Ok(Self {
+            engine,
+            records,
+            components: Mutex::new(BTreeMap::new()),
+        })
     }
 
     pub fn run(&self, entry: &CommandEntry, request: &RunRequest) -> Result<RunOutput> {
-        let component = wasmtime::component::Component::from_file(&self.engine, &entry.module)
-            .map_err(|error| anyhow::anyhow!("load command {}: {error}", entry.module.display()))?;
+        let component = {
+            let mut cache = self
+                .components
+                .lock()
+                .map_err(|_| anyhow::anyhow!("command component cache poisoned"))?;
+            if let Some(component) = cache.get(&entry.module) {
+                component.clone()
+            } else {
+                let component = Arc::new(
+                    wasmtime::component::Component::from_file(&self.engine, &entry.module)
+                        .map_err(|error| {
+                            anyhow::anyhow!("load command {}: {error}", entry.module.display())
+                        })?,
+                );
+                cache.insert(entry.module.clone(), component.clone());
+                component
+            }
+        };
         let mut linker = wasmtime::component::Linker::<Host>::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         let records = match &self.records {
