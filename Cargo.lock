@@ -3942,6 +3942,7 @@ dependencies = [
  "rand 0.9.5",
  "rustyline",
  "serde_json",
+ "soil-command",
  "soil-inference",
  "soil-scrub",
  "soil-vfs-host",
