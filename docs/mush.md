@@ -202,6 +202,9 @@ cmd1 || cmd2       # run cmd2 only if cmd1 fails
 cmd < PATH         # stdin from a VFS file
 cmd > PATH         # stdout to a VFS file
 cmd >> PATH        # append stdout to a VFS file
+cmd 2> PATH        # stderr to a VFS file
+cmd 2>> PATH       # append stderr to a VFS file
+cmd 2>&1           # merge stderr into stdout
 *.txt, docs/*.md   # glob VFS paths; quoted globs stay literal
 $(cmd)             # command substitution
 # comment          # rest of the line
@@ -215,7 +218,13 @@ Control flow:
 if test -f docs/a.txt; then echo file; else echo missing; fi
 for x in a b; do echo item-$x; done
 while false; do echo never; done
+for x in a b c; do
+  if test "$x" = b; then continue; fi
+  echo "$x"
+done
 ```
+
+`break` and `continue` apply to the nearest enclosing loop.
 
 `test` / `[` supports `-e`, `-f`, `-d`, `-s`, `-r`, `-w`, `-x`,
 `-z`, `-n`, string `=`/`!=`, numeric `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`,
@@ -254,6 +263,8 @@ echo TEXT
 printf FORMAT [ARG...]
 test EXPR
 read [-r] [VAR]
+break
+continue
 export KEY=VALUE
 unset KEY...
 env

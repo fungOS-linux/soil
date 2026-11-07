@@ -13,6 +13,7 @@ world mush {
 
   record response {
     output: string,
+    stderr: string,
     exit: bool,
     prompt: string,
     status: s32,

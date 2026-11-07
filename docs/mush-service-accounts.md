@@ -69,7 +69,7 @@ The service accepts one newline-delimited JSON request per connection:
 Response:
 
 ```json
-{"ok":true,"output":"...","exit":false,"status":0}
+{"ok":true,"output":"...","stderr":"","exit":false,"status":0}
 ```
 
 Use the client from the service account or an explicitly authorized process:

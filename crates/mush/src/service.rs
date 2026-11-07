@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 #[derive(Debug)]
 pub struct Executed {
     pub output: String,
+    pub stderr: String,
     pub exit: bool,
     pub status: i32,
 }
@@ -90,11 +91,13 @@ where
         return Ok(());
     };
     let mut output = String::new();
+    let mut stderr = String::new();
     let mut exit = false;
     let mut status = 0;
     for line in command.lines() {
         let executed = execute(line)?;
         output.push_str(&executed.output);
+        stderr.push_str(&executed.stderr);
         exit |= executed.exit;
         status = executed.status;
         if exit {
@@ -103,7 +106,7 @@ where
     }
     write_response(
         stream,
-        &json!({"ok": true, "output": output, "exit": exit, "status": status}),
+        &json!({"ok": true, "output": output, "stderr": stderr, "exit": exit, "status": status}),
     )?;
     Ok(())
 }

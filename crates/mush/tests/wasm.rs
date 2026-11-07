@@ -59,8 +59,9 @@ fn wasm_spore_supports_mkdir_rmdir_and_files() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stdout.contains("hi"), "{stdout}");
-    assert!(stdout.contains("not-empty"), "{stdout}");
+    assert!(stderr.contains("not-empty"), "{stderr}");
     assert!(stdout.contains("/"), "{stdout}");
 }
 
@@ -293,4 +294,38 @@ fn wasm_spore_supports_control_flow_test_read_and_script_args() {
     assert!(!stdout.contains("never"), "{stdout}");
     assert!(stdout.contains("read=hello"), "{stdout}");
     assert!(stdout.contains("$HOME\n"), "{stdout}");
+}
+
+#[test]
+fn wasm_spore_supports_loop_control_and_stderr_redirection() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg(
+            "for x in a b c; do if test $x = b; then continue; fi; echo item-$x; done\n\
+             for x in a b c; do echo hit-$x; break; done\n\
+             if true; then echo branch; fi; echo after\n\
+             ls /missing 2> /stderr.txt; test -s /stderr.txt; echo redirected\n\
+             ls /missing 2>&1; echo merged\n\
+             exit",
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("item-a\nitem-c"), "{stdout}");
+    assert!(stdout.contains("hit-a"), "{stdout}");
+    assert!(!stdout.contains("hit-b"), "{stdout}");
+    assert!(stdout.contains("branch\nafter"), "{stdout}");
+    assert!(stdout.contains("redirected"), "{stdout}");
+    assert!(stdout.contains("merged"), "{stdout}");
+    assert_eq!(stdout.matches("ls: Error").count(), 1, "{stdout}");
 }

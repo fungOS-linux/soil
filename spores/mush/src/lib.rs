@@ -29,9 +29,11 @@ impl Guest for Component {
         let output = shell.load_startup();
         let prompt = shell.prompt();
         let exit = shell.exit;
+        let stderr = std::mem::take(&mut shell.err);
         *SHELL.lock().map_err(|_| "shell state poisoned")? = Some(shell);
         Ok(Response {
             output,
+            stderr,
             exit,
             prompt,
             status: 0,
@@ -44,6 +46,7 @@ impl Guest for Component {
         shell.run_line(&line);
         Ok(Response {
             output: std::mem::take(&mut shell.out),
+            stderr: std::mem::take(&mut shell.err),
             exit: shell.exit,
             prompt: shell.prompt(),
             status: shell.status,
@@ -71,12 +74,14 @@ struct Shell {
     cwd: String,
     env: BTreeMap<String, String>,
     out: String,
+    err: String,
     stdin: Vec<u8>,
     status: i32,
     exit: bool,
     source_depth: u8,
     expand_depth: u8,
     positional: Vec<String>,
+    loop_signal: Option<LoopSignal>,
 }
 
 impl Shell {
@@ -115,12 +120,14 @@ impl Shell {
             cwd: String::new(),
             env,
             out: String::new(),
+            err: String::new(),
             stdin: Vec::new(),
             status: 0,
             exit: false,
             source_depth: 0,
             expand_depth: 0,
             positional: vec!["mush".into()],
+            loop_signal: None,
         }
     }
 
@@ -187,10 +194,6 @@ impl Shell {
         if tokens.is_empty() {
             return self.status;
         }
-        if is_compound(tokens) {
-            self.status = self.run_compound(tokens);
-            return self.status;
-        }
         let chains = match parse_chains(tokens) {
             Ok(chains) => chains,
             Err(error) => {
@@ -213,7 +216,7 @@ impl Shell {
             } else {
                 self.run_pipeline(&pipeline)
             };
-            if self.exit {
+            if self.exit || self.loop_signal.is_some() {
                 break;
             }
         }
@@ -311,6 +314,11 @@ impl Shell {
             if self.exit {
                 break;
             }
+            match self.loop_signal.take() {
+                Some(LoopSignal::Break) => break,
+                Some(LoopSignal::Continue) => continue,
+                None => {}
+            }
         }
         status
     }
@@ -331,7 +339,15 @@ impl Shell {
                 break;
             }
             status = self.run_tokens(&tokens[do_index + 1..done_index]);
-            if self.exit || status != 0 {
+            if self.exit {
+                break;
+            }
+            match self.loop_signal.take() {
+                Some(LoopSignal::Break) => break,
+                Some(LoopSignal::Continue) => continue,
+                None => {}
+            }
+            if status != 0 {
                 break;
             }
         }
@@ -384,19 +400,40 @@ impl Shell {
                 };
             }
             let saved = std::mem::take(&mut self.out);
+            let saved_err = std::mem::take(&mut self.err);
             self.stdin = std::mem::take(&mut input);
             let result = self.run_simple(command, &args);
-            let produced = std::mem::replace(&mut self.out, saved);
+            let mut produced = std::mem::replace(&mut self.out, saved);
+            let mut produced_err = std::mem::replace(&mut self.err, saved_err);
             self.stdin.clear();
             let code = match result {
-                Ok(code) => code,
+                Ok(code) => Some(code),
                 Err(error) => {
-                    self.error(&error);
+                    produced_err.push_str("mush: ");
+                    produced_err.push_str(&error);
+                    produced_err.push('\n');
                     status = 1;
-                    break;
+                    None
                 }
             };
-            status = code;
+            if parsed.stderr_to_stdout {
+                produced.push_str(&produced_err);
+                produced_err.clear();
+            } else if let Some((append, target)) = parsed.stderr {
+                let target = self.expand_literal(&target);
+                if let Err(error) = self.redirect(&target, append, produced_err.as_bytes()) {
+                    produced_err.clear();
+                    produced_err.push_str("mush: ");
+                    produced_err.push_str(&error);
+                    produced_err.push('\n');
+                    status = 1;
+                }
+            } else {
+                self.err.push_str(&produced_err);
+            }
+            if let Some(code) = code {
+                status = code;
+            }
             if let Some((append, target)) = parsed.stdout {
                 let target = self.expand_literal(&target);
                 if let Err(error) = self.redirect(&target, append, produced.as_bytes()) {
@@ -408,6 +445,9 @@ impl Shell {
                 self.out.push_str(&produced);
             } else {
                 input = produced.into_bytes();
+            }
+            if code.is_none() {
+                break;
             }
         }
         status
@@ -422,6 +462,14 @@ impl Shell {
             }
             "true" | ":" => Ok(0),
             "false" => Ok(1),
+            "break" => {
+                self.loop_signal = Some(LoopSignal::Break);
+                Ok(0)
+            }
+            "continue" => {
+                self.loop_signal = Some(LoopSignal::Continue);
+                Ok(0)
+            }
             "exit" | "quit" => {
                 let code = match args.first() {
                     Some(value) => value
@@ -1251,7 +1299,7 @@ impl Shell {
         let output = command_abi::run(name, args, &stdin, cwd.as_deref())
             .map_err(|error| format!("{name}: {error}"))?;
         self.out.push_str(&String::from_utf8_lossy(&output.stdout));
-        self.out.push_str(&String::from_utf8_lossy(&output.stderr));
+        self.err.push_str(&String::from_utf8_lossy(&output.stderr));
         Ok(output.code)
     }
 
@@ -1787,6 +1835,15 @@ enum Op {
     In,
     Out,
     Append,
+    Err,
+    ErrAppend,
+    ErrToOut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopSignal {
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1878,6 +1935,24 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
                 push_word(&mut tokens, &mut word, &mut glob, &mut expand);
                 tokens.push(Token::Op(Op::In));
             }
+            '2' if word.is_empty() && chars.peek() == Some(&'>') => {
+                chars.next();
+                match chars.peek() {
+                    Some('>') => {
+                        chars.next();
+                        tokens.push(Token::Op(Op::ErrAppend));
+                    }
+                    Some('&') => {
+                        chars.next();
+                        if chars.next() == Some('1') {
+                            tokens.push(Token::Op(Op::ErrToOut));
+                        } else {
+                            return Err("only 2>&1 is supported for stderr merge".into());
+                        }
+                    }
+                    _ => tokens.push(Token::Op(Op::Err)),
+                }
+            }
             '>' => {
                 push_word(&mut tokens, &mut word, &mut glob, &mut expand);
                 if chars.peek() == Some(&'>') {
@@ -1929,9 +2004,20 @@ fn parse_chains(tokens: &[Token]) -> Result<Vec<(ChainOp, Vec<Token>)>, String> 
     let mut chains = Vec::new();
     let mut current = Vec::new();
     let mut operator = ChainOp::Always;
+    let mut depth = 0usize;
+    let mut at_start = true;
     for token in tokens {
         match token {
-            Token::Op(Op::Semi | Op::And | Op::Or) => {
+            Token::Word(word) => {
+                if at_start && matches!(word.text.as_str(), "if" | "for" | "while") {
+                    depth += 1;
+                } else if at_start && matches!(word.text.as_str(), "fi" | "done") {
+                    depth = depth.saturating_sub(1);
+                }
+                at_start = matches!(word.text.as_str(), "then" | "do" | "else" | "elif");
+                current.push(token.clone());
+            }
+            Token::Op(Op::Semi | Op::And | Op::Or) if depth == 0 => {
                 if current.is_empty() {
                     return Err("empty command".into());
                 }
@@ -1943,8 +2029,20 @@ fn parse_chains(tokens: &[Token]) -> Result<Vec<(ChainOp, Vec<Token>)>, String> 
                 };
                 chains.push((operator, std::mem::take(&mut current)));
                 operator = next;
+                at_start = true;
             }
-            _ => current.push(token.clone()),
+            Token::Op(Op::Semi) => {
+                at_start = true;
+                current.push(token.clone());
+            }
+            Token::Op(Op::And | Op::Or) if depth > 0 => {
+                at_start = true;
+                current.push(token.clone());
+            }
+            Token::Op(_) => {
+                at_start = false;
+                current.push(token.clone());
+            }
         }
     }
     if !current.is_empty() {
@@ -1971,12 +2069,16 @@ struct Segment {
     words: Vec<Word>,
     stdin: Option<Word>,
     stdout: Option<(bool, Word)>,
+    stderr: Option<(bool, Word)>,
+    stderr_to_stdout: bool,
 }
 
 fn parse_segment(tokens: &[Token]) -> Result<Segment, String> {
     let mut words = Vec::new();
     let mut stdin = None;
     let mut stdout = None;
+    let mut stderr = None;
+    let mut stderr_to_stdout = false;
     let mut iter = tokens.iter();
     while let Some(token) = iter.next() {
         match token {
@@ -1998,6 +2100,21 @@ fn parse_segment(tokens: &[Token]) -> Result<Segment, String> {
                     return Err("only one output redirection is supported".into());
                 }
             }
+            Token::Op(Op::Err | Op::ErrAppend) => {
+                let append = matches!(token, Token::Op(Op::ErrAppend));
+                let Some(Token::Word(target)) = iter.next() else {
+                    return Err("stderr redirection needs a path".into());
+                };
+                if stderr.replace((append, target.clone())).is_some() {
+                    return Err("only one stderr redirection is supported".into());
+                }
+            }
+            Token::Op(Op::ErrToOut) => {
+                if stderr_to_stdout || stderr.is_some() {
+                    return Err("stderr is redirected twice".into());
+                }
+                stderr_to_stdout = true;
+            }
             Token::Op(Op::Pipe | Op::And | Op::Or | Op::Semi) => {
                 return Err("unexpected operator".into());
             }
@@ -2010,6 +2127,8 @@ fn parse_segment(tokens: &[Token]) -> Result<Segment, String> {
         words,
         stdin,
         stdout,
+        stderr,
+        stderr_to_stdout,
     })
 }
 
@@ -2188,6 +2307,9 @@ Shell syntax:
   cmd < PATH              read stdin from a VFS file
   cmd > PATH              write stdout to a VFS file
   cmd >> PATH             append stdout to a VFS file
+  cmd 2> PATH             write stderr to a VFS file
+  cmd 2>> PATH            append stderr to a VFS file
+  cmd 2>&1                merge stderr into stdout
   *.txt, docs/*.md        glob VFS paths; quoted globs stay literal
   $(cmd)                  command substitution
   # comment               rest of line
@@ -2204,6 +2326,7 @@ environment; they never run host binaries.
   if ...; then ...; fi    conditional block
   for VAR in ...; do ...; done
   while ...; do ...; done
+  break / continue        leave or continue the nearest loop
   export KEY=VALUE        set an environment variable
   unset KEY...            remove environment variables
   env                     print the environment

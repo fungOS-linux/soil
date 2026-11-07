@@ -270,6 +270,7 @@ impl Runtime {
             .call_start(&mut store, &args)?
             .map_err(anyhow::Error::msg)?;
         print!("{}", response.output);
+        eprint!("{}", response.stderr);
         io::stdout().flush()?;
         Ok(Self { store, instance })
     }
@@ -436,6 +437,7 @@ fn run() -> Result<()> {
             let response = runtime.execute(line)?;
             Ok(service::Executed {
                 output: response.output,
+                stderr: response.stderr,
                 exit: response.exit,
                 status: response.status,
             })
@@ -450,7 +452,11 @@ fn run() -> Result<()> {
         }
         return mcp_server::serve(server, &mcp_token, |line| {
             let response = runtime.execute(line)?;
-            Ok((response.output, response.exit, response.status))
+            Ok((
+                format!("{}{}", response.output, response.stderr),
+                response.exit,
+                response.status,
+            ))
         });
     }
 
@@ -458,6 +464,7 @@ fn run() -> Result<()> {
         for line in command.lines() {
             let response = runtime.execute(line)?;
             print!("{}", response.output);
+            eprint!("{}", response.stderr);
             if response.exit {
                 return Ok(());
             }
@@ -468,6 +475,7 @@ fn run() -> Result<()> {
     if let Some(script) = script {
         let response = runtime.execute(&format!("source {script}"))?;
         print!("{}", response.output);
+        eprint!("{}", response.stderr);
         return Ok(());
     }
 
@@ -521,6 +529,9 @@ fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
     } else if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
         if let Some(output) = response.get("output").and_then(serde_json::Value::as_str) {
             print!("{output}");
+        }
+        if let Some(stderr) = response.get("stderr").and_then(serde_json::Value::as_str) {
+            eprint!("{stderr}");
         }
     } else {
         let error = response
@@ -631,6 +642,7 @@ fn run_interactive(runtime: &mut Runtime, history: &Path) -> Result<()> {
                 }
                 let response = runtime.execute(line)?;
                 print!("{}", response.output);
+                eprint!("{}", response.stderr);
                 io::stdout().flush()?;
                 if response.exit {
                     break;
@@ -661,6 +673,7 @@ fn run_lines(runtime: &mut Runtime) -> Result<()> {
         }
         let response = runtime.execute(line.trim_end_matches(['\r', '\n']))?;
         print!("{}", response.output);
+        eprint!("{}", response.stderr);
         io::stdout().flush()?;
         if response.exit {
             break;
