@@ -1,0 +1,46 @@
+// Publication intent for a durable event bus.
+//
+// A Spore states the fact it observed; the host owns the transport, the
+// schema for the kind, deduplication, retries, and delivery. Unibus is the
+// current host adapter. There is no subscribe operation and no stream: a
+// consumer is a different process with its own grant.
+package fungos:events@0.1.0;
+
+interface publisher {
+  record event {
+    /// Dotted, versioned kind, for example `confluence.webhook.received.v1`.
+    kind: string,
+    /// JSON object. The host enforces the kind's size and schema.
+    body: list<u8>,
+    /// Stable at-least-once key. The host may use it to collapse redelivery.
+    idempotency-key: option<string>,
+  }
+
+  record receipt {
+    /// Host/transport request id for the accepted fact.
+    request-id: string,
+    /// True when the idempotency key was already accepted.
+    duplicate: bool,
+  }
+
+  enum error {
+    /// The kind or grant is not allowed for this Spore.
+    denied,
+    /// The kind or body is malformed for its schema.
+    invalid,
+    /// The event exceeds the host's size budget.
+    over-budget,
+    /// No event backend is configured, or it is unreachable.
+    unavailable,
+  }
+
+  publish: func(event: event) -> result<receipt, error>;
+}
+
+world guest {
+  import publisher;
+}
+
+world host {
+  import publisher;
+}

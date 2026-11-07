@@ -8,8 +8,11 @@ Unibus fact:
 confluence.webhook.received.v1
 ```
 
-There is no separate Confluence Spore in this slice. Unibus is the pub/sub
-contract; Elmers and other consumers subscribe to the kind.
+There are two ingress modes. The native `serve` mode keeps the original axum
+handler. The `spore` mode runs a compiled `wasi:http` component on the Soil
+HTTP surface and publishes through the same Unibus kind; it is the shape the
+host is converging on. Unibus is the pub/sub contract; Elmers and other
+consumers subscribe to the kind.
 
 ## Run against a local Unibus router
 
@@ -78,6 +81,32 @@ requests return the original request id and do not publish twice.
 
 The in-memory dedupe table is intentionally small in this slice. A durable
 outbox is the next step before production.
+
+## Spore mode
+
+```sh
+cargo run -p soil-confluence -- spore \
+  --listen 127.0.0.1:8788 \
+  --unibus-config /tmp/soil-confluence-e2e/confluence.json \
+  --spore crates/soil-wasi-host/fixtures/confluence.wasm \
+  --host confluence.soil \
+  --tenant default
+```
+
+The host owns the listener, the route grant (`POST /webhooks/`), the 64 KiB
+body ceiling, the Unibus session, and the tenant stamp. The Spore owns the
+provider semantics: it verifies the Standard Webhooks signature through
+`soil:creds` (the secret never enters wasm), checks clock skew against the
+host-attested receive time, and emits one `fungos:events` publication. The
+host overwrites any `tenant` the guest supplies.
+
+`CONFLUENCE_WEBHOOK_SECRET` is bound to the `confluence.webhook` credential
+name by default; `--credential-name` changes it. A missing secret is a startup
+error, not an unsigned fallback.
+
+A normalized event over the 64 KiB `fungos:events` budget is rejected with
+`503`; content-addressed spill is the next change. The route ceiling is 64 KiB
+by default and is set with `--max-body-bytes`.
 
 ## Iroh
 

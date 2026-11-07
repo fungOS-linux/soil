@@ -3,6 +3,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -11,6 +12,11 @@ use iroh::{EndpointId, SecretKey};
 use serde_json::Value;
 use soil_confluence::{
     AppState, ConfluenceConfig, UnibusPublisher, bind_iroh, push_iroh, relay_router, router,
+    spore::{ConfluenceBus, ConfluenceEventSink},
+};
+use soil_wasi_host::{
+    GatewayRoute, HttpGatewayBuilder, HttpService, StaticCredentials, UnibusBus, WasiHostBuilder,
+    WasiHostPolicy,
 };
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -23,10 +29,20 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SporeTransport {
+    /// `fungos:events` publication intent (interim Spore).
+    Events,
+    /// `soil:unibus` poll/publish edge.
+    Bus,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Accept webhooks and publish Confluence events to Unibus.
     Serve(ServeArgs),
+    /// Run the Confluence Spore on the Soil HTTP surface.
+    Spore(SporeArgs),
     /// Send one webhook frame to a Confluence Iroh listener.
     Push(PushArgs),
     /// Accept local HTTP and forward it to a Confluence Iroh listener.
@@ -39,6 +55,11 @@ struct ServeArgs {
     listen: SocketAddr,
     #[arg(long)]
     unibus_config: PathBuf,
+    /// Extra hub endpoints for sparse-hub failover, tried in order after the
+    /// config's `hub_endpoint`. Repeat for each hub (pris, batty, studio, ...).
+    /// The first hub that registers wins.
+    #[arg(long)]
+    unibus_hub: Vec<String>,
     #[arg(long, default_value = "default")]
     tenant: String,
     #[arg(long, env = "CONFLUENCE_WEBHOOK_SECRET")]
@@ -57,6 +78,43 @@ struct ServeArgs {
     iroh_peer: Vec<String>,
     #[arg(long)]
     iroh_allow_any: bool,
+}
+
+#[derive(Parser)]
+struct SporeArgs {
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    listen: SocketAddr,
+    #[arg(long)]
+    unibus_config: PathBuf,
+    /// Extra hub endpoints for sparse-hub failover, tried in order after the
+    /// config's `hub_endpoint`. Repeat for each hub (pris, batty, studio, ...).
+    #[arg(long)]
+    unibus_hub: Vec<String>,
+    /// Transport the Spore imports: `events` for `fungos:events` (interim)
+    /// or `bus` for `soil:unibus`. Both are wired when both are configured;
+    /// the active Spore's WIT decides which one it calls.
+    #[arg(long, value_enum, default_value_t = SporeTransport::Events)]
+    transport: SporeTransport,
+    #[arg(long, default_value = "default")]
+    tenant: String,
+    /// The compiled `wasi:http` Confluence component.
+    #[arg(long)]
+    spore: PathBuf,
+    /// Public or internal hostname this ingress answers for.
+    #[arg(long, default_value = "confluence.soil")]
+    host: String,
+    /// Spore identity reported to `fungos:http-context`.
+    #[arg(long, default_value = "dev.fungos.confluence")]
+    spore_name: String,
+    /// `soil:creds` name bound to the provider webhook secret.
+    #[arg(long, default_value = "confluence.webhook")]
+    credential_name: String,
+    #[arg(long, env = "CONFLUENCE_WEBHOOK_SECRET")]
+    webhook_secret: Option<String>,
+    #[arg(long, default_value_t = 64 * 1024)]
+    max_body_bytes: usize,
+    #[arg(long, default_value_t = 10_000)]
+    request_timeout_ms: u64,
 }
 
 #[derive(Parser)]
@@ -90,15 +148,15 @@ async fn main() -> Result<()> {
         .init();
     match Cli::parse().command {
         Command::Serve(args) => serve(args).await,
+        Command::Spore(args) => serve_spore(args).await,
         Command::Push(args) => push(args).await,
         Command::Relay(args) => relay(args).await,
     }
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
-    let publisher = Arc::new(UnibusPublisher::connect(load_unibus_config(
-        &args.unibus_config,
-    )?)?);
+    let config = load_unibus_config(&args.unibus_config)?;
+    let publisher = Arc::new(connect_publisher(&config, &args.unibus_hub)?);
     let webhook_secret = non_empty(args.webhook_secret).map(String::into_bytes);
     let ingress_token = non_empty(args.ingress_token);
     ensure!(
@@ -151,6 +209,75 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .context("serve confluence HTTP")
 }
 
+async fn serve_spore(args: SporeArgs) -> Result<()> {
+    let secret = non_empty(args.webhook_secret)
+        .context("--webhook-secret or CONFLUENCE_WEBHOOK_SECRET is required")?;
+    let wasm = fs::read(&args.spore)
+        .with_context(|| format!("read Spore component {}", args.spore.display()))?;
+    let config = load_unibus_config(&args.unibus_config)?;
+    let publisher = Arc::new(connect_publisher(&config, &args.unibus_hub)?);
+    let sink = Arc::new(ConfluenceEventSink::new(
+        args.tenant.clone(),
+        publisher.clone(),
+    ));
+
+    // The second session serves the `soil:unibus` Spore. It is opened lazily
+    // so the interim `fungos:events` Spore keeps working on fleets where the
+    // bus Spore is not yet deployed; both share the tenant/dedupe policy.
+    let bus = match args.transport {
+        SporeTransport::Events => None,
+        SporeTransport::Bus => {
+            let inner = Arc::new(
+                UnibusBus::connect_any(&config, &hub_endpoints(&config, &args.unibus_hub))
+                    .context("connect soil:unibus hub")?,
+            );
+            tracing::info!(hub = %inner.hub_endpoint(), "soil:unibus hub connected");
+            Some(Arc::new(ConfluenceBus::new(args.tenant.clone(), inner)))
+        }
+    };
+
+    let mut credentials = StaticCredentials::new();
+    credentials.insert_hmac(
+        args.credential_name.clone(),
+        secret.into_bytes(),
+        "verify provider webhooks",
+    )?;
+    let mut builder = WasiHostBuilder::new(WasiHostPolicy::default())
+        .credential_provider(Arc::new(credentials))
+        .event_sink(sink);
+    if let Some(bus) = bus {
+        builder = builder.bus(bus);
+    }
+    let service = Arc::new(HttpService::from_bytes_named(
+        args.spore_name.clone(),
+        &wasm,
+        builder,
+    )?);
+
+    let route = GatewayRoute::new([http::Method::POST], "/webhooks/")
+        .context("grant POST /webhooks/")?
+        .max_body_bytes(args.max_body_bytes);
+    let gateway = HttpGatewayBuilder::new()
+        .max_body_bytes(args.max_body_bytes)
+        .request_timeout(Duration::from_millis(args.request_timeout_ms))
+        .vhost(args.host.clone(), args.spore_name.clone(), service, [route])
+        .context("grant the Confluence vhost")?
+        .build()
+        .context("build the Confluence HTTP gateway")?;
+
+    let listener = TcpListener::bind(args.listen)
+        .await
+        .with_context(|| format!("bind Spore HTTP listener {}", args.listen))?;
+    tracing::info!(
+        addr = %args.listen,
+        host = %args.host,
+        spore = %args.spore_name,
+        tenant = %args.tenant,
+        "confluence Spore ingress listening"
+    );
+    Arc::new(gateway).serve(listener).await
+}
+
 async fn push(args: PushArgs) -> Result<()> {
     let endpoint_id: EndpointId = args.endpoint_id.parse().context("parse endpoint id")?;
     let body = read_body(&args.body)?;
@@ -169,6 +296,21 @@ async fn relay(args: RelayArgs) -> Result<()> {
     axum::serve(listener, relay_router(endpoint_id, args.addr))
         .await
         .context("serve confluence relay")
+}
+
+fn connect_publisher(config: &ClientConfig, extra_hubs: &[String]) -> Result<UnibusPublisher> {
+    let hubs = hub_endpoints(config, extra_hubs);
+    // A single endpoint needs the direct path so the hub in the error names
+    // the fleet; `connect_any` already treats length-1 the same way.
+    UnibusPublisher::connect_any(config, &hubs)
+}
+
+/// Ordered hub list: the config's `hub_endpoint` first, then `--unibus-hub`
+/// extras in flag order. First to register wins; the order is the priority.
+fn hub_endpoints(config: &ClientConfig, extra_hubs: &[String]) -> Vec<String> {
+    let mut hubs = vec![config.hub_endpoint.clone()];
+    hubs.extend(extra_hubs.iter().cloned());
+    hubs
 }
 
 fn load_unibus_config(path: &Path) -> Result<ClientConfig> {

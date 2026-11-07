@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 standardwebhooks = "1.0.1"
+soil-wasi-host = { path = "../soil-wasi-host" }
 subtle = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

@@ -1,9 +1,7 @@
 # `soil:unibus@0.1.0` — the Spore-facing bus edge
 
-Status: **contract, 2026-11-07.** `soil-wasi-host` implements `bus.publish` /
+Status: **wired, 2026-11-07.** `soil-wasi-host` implements `bus.publish` /
 `bus.poll` over `UnibusPublisher` and `UnibusBus`; `MemoryBus` backs tests.
-The adapter is implemented and tested in the Delta worktree; the WIT + `soil-abi`
-registration land here as the contract.
 
 ## What the contract is
 

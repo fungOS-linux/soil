@@ -29,6 +29,8 @@ use subtle::ConstantTimeEq;
 use unibus::client::ClientConfig;
 use unibus_sdk::{Publish, Session};
 
+pub mod spore;
+
 pub const EVENT_KIND: &str = "confluence.webhook.received.v1";
 pub const MAX_BODY: usize = 64 * 1024;
 pub const IROH_ALPN: &[u8] = b"fungos/confluence/webhook/1";
@@ -77,6 +79,40 @@ impl UnibusPublisher {
         Ok(Self {
             session: Mutex::new(Session::connect(config)?),
         })
+    }
+
+    /// Connect by trying `endpoints` in order, cloning `base` with each
+    /// `hub_endpoint` in turn. See [`soil_wasi_host::UnibusBus::connect_any`]
+    /// for the fleet guidance; the same ordered failover applies here for the
+    /// native `serve` path so pris/batty hosts survive a single hub outage.
+    pub fn connect_any(base: &ClientConfig, endpoints: &[String]) -> Result<Self> {
+        anyhow::ensure!(
+            !endpoints.is_empty(),
+            "at least one hub endpoint is required"
+        );
+        let mut last_error = None;
+        for endpoint in endpoints {
+            let mut config = base.clone();
+            config.hub_endpoint = endpoint.clone();
+            match Session::connect(config) {
+                Ok(session) => {
+                    return Ok(Self {
+                        session: Mutex::new(session),
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(hub = %endpoint, "unibus hub unavailable, trying next: {error:#}");
+                    last_error = Some(error);
+                }
+            }
+        }
+        let detail = last_error
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_else(|| "no hub was tried".to_string());
+        anyhow::bail!(
+            "all unibus hubs unreachable ({}): {detail}",
+            endpoints.join(", ")
+        )
     }
 }
 

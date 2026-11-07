@@ -1,0 +1,56 @@
+// Host-mediated credentials.
+//
+// A Spore names a credential and asks the host to sign or verify. Secret bytes
+// never enter the guest: `resolve` returns an opaque handle, and every
+// operation is re-checked against the host's grant and expiry on use.
+//
+// The host adapter for this interface is Geode (Mycelium). This contract is
+// deliberately smaller than a key store: no enumeration, no read, no export.
+package soil:creds@1.0.0;
+
+interface creds {
+  record handle {
+    /// Opaque host id. Never a secret, path, or key name the guest can forge.
+    id: string,
+    /// Why the host granted this handle, for display and audit.
+    purpose: string,
+    /// Absolute expiry in host wall-clock milliseconds, when bounded.
+    expires-at-ms: option<u64>,
+  }
+
+  enum algorithm {
+    hmac-sha256,
+    ed25519,
+  }
+
+  enum error {
+    /// The credential does not exist or the host did not grant it.
+    denied,
+    /// The handle, algorithm, or signature is malformed.
+    invalid,
+    /// The credential existed but is past its host-side expiry.
+    expired,
+    /// No credential backend is configured, or the backend is unreachable.
+    unavailable,
+  }
+
+  /// Resolve a granted credential name to an opaque handle.
+  resolve: func(name: string) -> result<handle, error>;
+
+  /// Sign a message with a resolved handle.
+  sign: func(handle: handle, algorithm: algorithm, message: list<u8>)
+    -> result<list<u8>, error>;
+
+  /// Verify a signature with a resolved handle. A mismatched signature is
+  /// `ok(false)`, not an error; errors describe the credential or request.
+  verify: func(handle: handle, algorithm: algorithm, message: list<u8>, signature: list<u8>)
+    -> result<bool, error>;
+}
+
+world guest {
+  import creds;
+}
+
+world host {
+  import creds;
+}

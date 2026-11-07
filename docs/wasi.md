@@ -19,6 +19,9 @@ wasi:http/types
 wasi:io
 wasi:random
 wasi:sockets
+fungos:http-context
+fungos:events
+soil:creds
 ```
 
 WASI describes the shape. Soil supplies the authority. The default policy is
@@ -91,6 +94,55 @@ let builder = WasiHostBuilder::new(policy)
 
 There is no ambient filesystem. Host paths never appear in the guest.
 
+## Request context
+
+`fungos:http-context` supplies the facts the host owns for one invocation:
+
+```wit
+record request-context {
+  request-id: string,
+  spore: string,
+  route: string,
+  peer: option<string>,
+  tls-peer: option<string>,
+  received-at-ms: u64,
+}
+```
+
+`spore` and `route` come from the host's grant table, not from a request
+header. `peer` is the accepted transport address; `tls-peer` is set only after
+the listener verifies a client certificate. Calling `current()` outside an
+HTTP invocation traps instead of returning a fabricated context.
+
+## Credentials
+
+`soil:creds` keeps secrets in the host:
+
+```wit
+resolve: func(name: string) -> result<handle, error>;
+sign:    func(handle, algorithm, message) -> result<list<u8>, error>;
+verify:  func(handle, algorithm, message, signature) -> result<bool, error>;
+```
+
+There is no `read`, `list`, or `export`. `handle.id` is an opaque grant
+reference; the provider re-checks the grant and expiry on every operation, so
+a guest cannot extend a handle by editing the record it received. HMAC-SHA256
+and Ed25519 are implemented by `StaticCredentials`; a Geode adapter implements
+the same trait by resolving through Mycelium.
+
+## Events
+
+`fungos:events` is publication intent, not a broker client:
+
+```wit
+publish: func(event: event) -> result<receipt, error>;
+```
+
+The guest supplies a kind, a JSON body, and an optional idempotency key. The
+host enforces the size ceiling, deduplicates the key, and hands the fact to its
+`EventSink`. Unibus is the production sink; `MemoryEventSink` is for tests. No
+address, session, token, or subscription crosses the boundary.
+
 ## HTTP service
 
 `HttpService` runs a component that exports
@@ -116,6 +168,30 @@ policy
 
 The guest owns only the handler. A fresh WASI store is created for each request,
 so request state cannot leak between requests.
+
+## Vhost gateway
+
+`HttpGateway` puts several Spores behind one listener with explicit grants:
+
+```rust
+let gateway = HttpGatewayBuilder::new()
+    .max_body_bytes(64 * 1024)
+    .vhost(
+        "confluence.soil",
+        "dev.fungos.confluence",
+        service,
+        [GatewayRoute::new([Method::POST], "/webhooks/")?],
+    )?
+    .build()?;
+```
+
+Each request is resolved by Host header, then by the longest matching path
+grant, then by method. Unknown hosts return `404` without naming the grant
+table; a known path with the wrong method returns `405` and `Allow`. A declared
+`Content-Length` over the route ceiling is rejected with `413` before the guest
+runs. Chunked bodies stop at the ceiling and surface a body-stream error to the
+guest, never a truncated body. The gateway sets `HttpContext` for the chosen
+vhost and route.
 
 ## CLI
 
@@ -152,11 +228,37 @@ Useful flags:
 ```text
 crates/soil-wasi-host/fixtures/echo/
   wasip2 component exporting wasi:http/incoming-handler
+crates/soil-wasi-host/fixtures/context/
+  reads fungos:http-context over the same surface
+crates/soil-wasi-host/fixtures/confluence/
+  verifies soil:creds and publishes fungos:events
 ```
 
 The built `fixtures/echo.wasm` is used by `tests/http_service.rs` to verify the
 host listener, request construction, guest call, response outparam, and body
-streaming end to end.
+streaming end to end. `fixtures/context.wasm` proves the context import.
+`fixtures/confluence.wasm` is the first full ingress: a Standard Webhooks
+signature check through `soil:creds`, a host-attested request id and receive
+time, and exactly one `confluence.webhook.received.v1` fact through
+`fungos:events`.
+
+## Confluence ingress
+
+```sh
+cargo run -p soil-confluence -- spore \
+  --listen 127.0.0.1:8787 \
+  --unibus-config /tmp/confluence.json \
+  --spore crates/soil-wasi-host/fixtures/confluence.wasm \
+  --host confluence.soil \
+  --tenant tenant-a
+```
+
+The host reads `CONFLUENCE_WEBHOOK_SECRET`, resolves it as the
+`confluence.webhook` credential, and binds the vhost to the compiled Spore. The
+Spore verifies `webhook-id.webhook-timestamp.body`, rejects more than five
+minutes of clock skew, normalizes the delivery, and publishes one event. The
+host stamps `tenant`; a value from the guest is overwritten. TLS termination,
+SNI routing, Iroh transport, and the Unibus session stay in the host.
 
 ## Bridge use
 
@@ -171,13 +273,13 @@ bridge
   -> soil:records
 ```
 
-Still host-owned:
+The generic profile already supplies vhost, path, method, body-ceiling and
+deadline policy. Still host-owned:
 
 ```text
 appservice token verification
-route allowlist
-request size limits
 media budget
+per-route authentication or mTLS
 TLS termination
 ```
 
@@ -189,8 +291,9 @@ WASI profile, not in the Spore.
 ```text
 HTTP/1.1 only       no HTTP/2 server yet
 no TLS listener     terminate TLS in the host/proxy
-no per-route auth   add a bridge policy hook
-no body cap yet     add before exposing to untrusted bridges
+no per-route auth   add an auth policy hook
+no response cap     request bodies are capped; responses are not yet
+event budget        64 KiB normalized event; CID spill is next
 no graceful stop    host process restart is the current lifecycle
 ```
 

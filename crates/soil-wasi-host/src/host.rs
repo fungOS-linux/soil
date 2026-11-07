@@ -3,6 +3,7 @@
 use std::{
     future::Future,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::Result;
@@ -14,7 +15,13 @@ use wasmtime_wasi_http::{
     WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
 };
 
-use crate::policy::{HttpPolicy, WasiHostPolicy};
+use crate::{
+    context::HttpContext,
+    creds::CredentialProvider,
+    events::EventSink,
+    policy::{HttpPolicy, WasiHostPolicy},
+    unibus::Bus,
+};
 
 /// One preopened host directory.
 #[derive(Clone, Debug)]
@@ -25,7 +32,7 @@ pub struct Preopen {
 }
 
 /// Builder for a per-request [`WasiHost`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct WasiHostBuilder {
     policy: WasiHostPolicy,
     args: Vec<String>,
@@ -33,6 +40,9 @@ pub struct WasiHostBuilder {
     inherit_env: bool,
     inherit_stdio: bool,
     preopens: Vec<Preopen>,
+    credentials: Option<Arc<dyn CredentialProvider>>,
+    events: Option<Arc<dyn EventSink>>,
+    bus: Option<Arc<dyn Bus>>,
 }
 
 impl WasiHostBuilder {
@@ -86,6 +96,33 @@ impl WasiHostBuilder {
         &self.policy
     }
 
+    /// Attach the host-side credential backend exposed as `soil:creds`.
+    ///
+    /// Without a provider, every `resolve`, `sign`, and `verify` call fails
+    /// with `unavailable`; credentials are denied rather than defaulted.
+    pub fn credential_provider(mut self, provider: Arc<dyn CredentialProvider>) -> Self {
+        self.credentials = Some(provider);
+        self
+    }
+
+    /// Attach the host-side event transport exposed as `fungos:events`.
+    ///
+    /// Without a sink, `publish` fails with `unavailable`; a Spore cannot fall
+    /// back to opening its own connection.
+    pub fn event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.events = Some(sink);
+        self
+    }
+
+    /// Attach the host-side bus exposed as `soil:unibus`.
+    ///
+    /// Without a bus, `publish` and `poll` fail with `unavailable`; a Spore
+    /// cannot fall back to opening its own connection.
+    pub fn bus(mut self, bus: Arc<dyn Bus>) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
     /// Create fresh WASI state for one component invocation.
     pub fn build(&self) -> Result<WasiHost> {
         let mut wasi = WasiCtxBuilder::new();
@@ -110,6 +147,10 @@ impl WasiHostBuilder {
             hooks: HttpHooks {
                 policy: self.policy.http.clone(),
             },
+            context: None,
+            credentials: self.credentials.clone(),
+            events: self.events.clone(),
+            bus: self.bus.clone(),
         })
     }
 
@@ -125,11 +166,37 @@ pub struct WasiHost {
     http: WasiHttpCtx,
     table: ResourceTable,
     hooks: HttpHooks,
+    context: Option<HttpContext>,
+    credentials: Option<Arc<dyn CredentialProvider>>,
+    events: Option<Arc<dyn EventSink>>,
+    bus: Option<Arc<dyn Bus>>,
 }
 
 impl WasiHost {
     pub fn new(policy: WasiHostPolicy) -> Result<Self> {
         WasiHostBuilder::new(policy).build()
+    }
+
+    /// Set the context reported by `fungos:http-context/current`.
+    pub fn set_http_context(&mut self, context: HttpContext) {
+        self.context = Some(context);
+    }
+
+    /// The current request context, when this store belongs to an HTTP call.
+    pub fn http_context(&self) -> Option<&HttpContext> {
+        self.context.as_ref()
+    }
+
+    pub(crate) fn credential_provider(&self) -> Option<Arc<dyn CredentialProvider>> {
+        self.credentials.clone()
+    }
+
+    pub(crate) fn event_sink(&self) -> Option<Arc<dyn EventSink>> {
+        self.events.clone()
+    }
+
+    pub(crate) fn bus(&self) -> Option<Arc<dyn Bus>> {
+        self.bus.clone()
     }
 }
 
