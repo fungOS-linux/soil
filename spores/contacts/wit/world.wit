@@ -1,9 +1,0 @@
-// Contacts Spore: manages personal contacts and explicit first-name/token
-// projections into a chosen CRM namespace.
-package fungos:contacts@0.1.0;
-
-world contacts {
-  import soil:records/records@0.1.0;
-
-  export run: func(args: list<string>) -> result<_, string>;
-}

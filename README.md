@@ -78,8 +78,8 @@ through a bounded core-Wasm ABI by the S22 runtime. See
 [`docs/abi-core-wasm.md`](docs/abi-core-wasm.md).
 
 The first host-backed capability is BLE: [`crates/soil-ble-host`](crates/soil-ble-host)
-runs the [`spores/colmi-ring`](spores/colmi-ring) protocol Spore against a real
-radio on desktop. See [`spores/colmi-ring/README.md`](spores/colmi-ring/README.md).
+runs the [COLMI ring Spore](https://github.com/ajmwagar/spores/tree/main/spores/colmi-ring)
+against a real radio on desktop.
 
 Canvas is the cross-platform owner; Spores never submit UI trees.
 [`crates/soil-runtime`](crates/soil-runtime) is the S22 reference host (wasmtime
@@ -120,7 +120,8 @@ JNI proof.
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo check -p viewer-spore --target wasm32-wasip2
-cargo check --manifest-path spores/colmi-ring/Cargo.toml --target wasm32-wasip2
+cargo check --manifest-path ../ajmwagar/spores/spores/colmi-ring/Cargo.toml \
+  --target wasm32-wasip2
 ```
 
 The capability contracts parse as WIT, and the Viewer state machine has no host
