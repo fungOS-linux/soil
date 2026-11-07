@@ -103,6 +103,10 @@ impl Shell {
                 }
             } else if let Some(value) = arg.strip_prefix("--home=") {
                 env.insert("HOME".into(), value.into());
+            } else if let Some(value) = arg.strip_prefix("--principal=") {
+                env.insert("MUSH_PRINCIPAL".into(), value.into());
+                env.insert("USER".into(), value.into());
+                env.insert("LOGNAME".into(), value.into());
             }
         }
         Self {

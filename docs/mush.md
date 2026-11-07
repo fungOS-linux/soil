@@ -73,6 +73,37 @@ This installs the **host** launcher named `mush`. It does not create
 `/bin/mush` inside the VFS, and it does not turn the host process into a
 container. The Spore remains the sandboxed part.
 
+## Config and doctor
+
+Mush reads `~/.config/fungos/mush/config.toml` unless `--config PATH` or
+`MUSH_CONFIG` overrides it. CLI flags win over environment variables, which
+win over the config file.
+
+```toml
+root = "~/fungos-node"
+command_root = "~/.local/share/fungos/commands"
+records_root = "~/.local/share/fungos/records"
+records_book = "personal/avery/marbles"
+records_collection = "marbles"
+principal = "mycelium:agent:ajmwagar/codex-1"
+socket = "~/.local/share/fungos/mush.sock"
+```
+
+```sh
+mush doctor
+```
+
+`doctor` reports the effective VFS root, command root, records binding, Spore
+source, principal and service socket. Missing roots are errors, not silent
+fallbacks.
+
+## Service mode
+
+`mush --serve` binds a `0600` Unix socket and accepts one JSON command request
+per connection. It refuses to replace an existing socket and checks the peer
+UID against the service account. See
+[service accounts](mush-service-accounts.md) for the `ajmwagar-agents` layout.
+
 ## Interactive editing
 
 When stdin is a terminal, Mush uses `rustyline`:

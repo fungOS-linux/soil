@@ -283,7 +283,10 @@ fn wasm_spore_supports_control_flow_test_read_and_script_args() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("name=s.mush first=alpha count=2"), "{stdout}");
+    assert!(
+        stdout.contains("name=s.mush first=alpha count=2"),
+        "{stdout}"
+    );
     assert!(stdout.contains("file\n"), "{stdout}");
     assert!(stdout.contains("math\n"), "{stdout}");
     assert!(stdout.contains("item-a\nitem-b"), "{stdout}");
