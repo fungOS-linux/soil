@@ -4,7 +4,7 @@
 //! The radio transport (btleplug / BlueZ / CoreBluetooth) and the signed lease
 //! stay in the host; framing and command semantics stay in the Spore.
 //!
-//! See `spores/colmi-ring/README.md` for the target matrix and lease model.
+//! See `ajmwagar/spores/spores/colmi-ring/README.md` for the target matrix and lease model.
 
 mod ble;
 mod session;

@@ -22,6 +22,7 @@ tiny_http = "0.12"
 ureq = { version = "2", features = ["json"] }
 fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "bcd2bc682662467d1371a2c9f8436e08934132d9" }
 soil-vfs-host = { path = "../soil-vfs-host" }
+soil-command = { path = "../soil-command" }
 tempfile = "3"
 wasmtime = { version = "50", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }

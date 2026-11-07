@@ -212,11 +212,9 @@ fn decode(value: &str) -> std::result::Result<Vec<u8>, String> {
         return Err("hex value has odd length".into());
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    // Stepped indices rather than `chunks_exact`: the pair is the unit here, and
-    // an index that is always in range says that without a chunk type.
-    for index in (0..bytes.len()).step_by(2) {
-        let high = nibble(bytes[index])?;
-        let low = nibble(bytes[index + 1])?;
+    for pair in bytes.as_chunks::<2>().0 {
+        let high = nibble(pair[0])?;
+        let low = nibble(pair[1])?;
         out.push((high << 4) | low);
     }
     Ok(out)

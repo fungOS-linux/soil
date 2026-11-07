@@ -666,9 +666,10 @@ mod tests {
         let width = 128u32;
         let height = 128u32;
         let mut surface = CanvasSurface::new(width, height).unwrap();
-        // A solid red layer, built in one allocation: `chunks_exact_mut` here was
-        // a loop whose only job was to write the same four bytes.
-        let rgba = [255u8, 0, 0, 255].repeat((width * height) as usize);
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            *pixel = [255, 0, 0, 255];
+        }
         surface
             .set_surface_layer(Some(SurfaceLayer {
                 rgba,

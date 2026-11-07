@@ -16,6 +16,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use rustyline::{DefaultEditor, error::ReadlineError};
+use soil::command::command as command_abi;
+use soil_command::{CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
 use soil_inference::{GeodeResolver, SoilConfig};
 use soil_vfs_host::{VfsHost, index, vfs, vfs_mut};
 use wasmtime::component::{Component, Linker, ResourceTable};
@@ -28,14 +30,95 @@ struct Host {
     vfs: VfsHost,
     wasi: WasiCtx,
     table: ResourceTable,
+    commands: CommandHost,
+}
+
+struct CommandHost {
+    root: PathBuf,
+    runner: CommandRunner,
+}
+
+impl CommandHost {
+    fn new(root: PathBuf, records: Option<RecordsBinding>) -> Result<Self> {
+        Ok(Self {
+            root,
+            runner: CommandRunner::new(records)?,
+        })
+    }
+
+    fn registry(&self) -> Result<CommandRegistry> {
+        if self.root.is_dir() {
+            CommandRegistry::scan(&self.root)
+        } else {
+            Ok(CommandRegistry::empty(&self.root))
+        }
+    }
+
+    fn list(&self) -> Result<Vec<command_abi::Command>> {
+        Ok(self
+            .registry()?
+            .entries()
+            .map(|entry| command_abi::Command {
+                name: entry.name.clone(),
+                version: entry.version.clone(),
+                summary: entry.summary.clone(),
+            })
+            .collect())
+    }
+
+    fn path(&self) -> Result<Vec<String>> {
+        Ok(self
+            .registry()?
+            .path()
+            .into_iter()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn run(
+        &self,
+        name: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        cwd: Option<String>,
+    ) -> Result<command_abi::Output> {
+        let registry = self.registry()?;
+        let entry = registry
+            .get(name)
+            .cloned()
+            .with_context(|| format!("command not found: {name}"))?;
+        let mut env = vec![("TERM".into(), "dumb".into())];
+        if let Some(cwd) = &cwd {
+            env.push(("PWD".into(), cwd.clone()));
+        }
+        let output = self.runner.run(
+            &entry,
+            &RunRequest {
+                args,
+                stdin,
+                env,
+                cwd,
+            },
+        )?;
+        Ok(command_abi::Output {
+            code: output.code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
 }
 
 impl Host {
-    fn new(root: &std::path::Path) -> Result<Self> {
+    fn new(
+        root: &std::path::Path,
+        command_root: PathBuf,
+        records: Option<RecordsBinding>,
+    ) -> Result<Self> {
         Ok(Self {
             vfs: VfsHost::open(root)?,
             wasi: WasiCtxBuilder::new().inherit_stdio().build(),
             table: ResourceTable::new(),
+            commands: CommandHost::new(command_root, records)?,
         })
     }
 }
@@ -91,6 +174,28 @@ impl index::Host for Host {
     }
 }
 
+impl command_abi::Host for Host {
+    fn commands(&mut self) -> Vec<command_abi::Command> {
+        self.commands.list().unwrap_or_default()
+    }
+
+    fn path(&mut self) -> Vec<String> {
+        self.commands.path().unwrap_or_default()
+    }
+
+    fn run(
+        &mut self,
+        name: String,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        cwd: Option<String>,
+    ) -> Result<command_abi::Output, String> {
+        self.commands
+            .run(&name, args, stdin, cwd)
+            .map_err(|error| format!("{error:#}"))
+    }
+}
+
 impl vfs_mut::Host for Host {
     fn write(
         &mut self,
@@ -129,7 +234,13 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn open(root: &std::path::Path, wasm: &[u8], term: &str) -> Result<Self> {
+    fn open(
+        root: &std::path::Path,
+        wasm: &[u8],
+        term: &str,
+        command_root: PathBuf,
+        records: Option<RecordsBinding>,
+    ) -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         let engine = Engine::new(&config)?;
@@ -138,7 +249,7 @@ impl Runtime {
         soil_vfs_host::add_to_linker::<Host>(&mut linker)?;
         soil_vfs_host::add_mutation_to_linker::<Host>(&mut linker)?;
         let component = Component::new(&engine, wasm)?;
-        let host = Host::new(root)?;
+        let host = Host::new(root, command_root, records)?;
         let mut store = Store::new(&engine, host);
         let instance = Mush::instantiate(&mut store, &component, &linker)?;
         let args = vec![format!("--term={term}")];
@@ -196,7 +307,29 @@ fn run() -> Result<()> {
         .unwrap_or_else(|| root.join(".fungos/mush-history"));
     let bytes =
         std::fs::read(&wasm).with_context(|| format!("read Mush component {}", wasm.display()))?;
-    let mut runtime = Runtime::open(&root, &bytes, &term)?;
+    let command_root = take_option(&mut args, "--command-root")
+        .or_else(|| std::env::var("FUNGOS_COMMAND_ROOT").ok())
+        .map(|value| expand_home(&value))
+        .unwrap_or_else(|| expand_home("~/.local/share/fungos/commands"));
+    let records_root = take_option(&mut args, "--records-root")
+        .or_else(|| std::env::var("FUNGOS_RECORDS_ROOT").ok())
+        .map(|value| expand_home(&value));
+    let records_book = take_option(&mut args, "--records-book")
+        .or_else(|| std::env::var("FUNGOS_RECORDS_BOOK").ok());
+    let records_collection = take_option(&mut args, "--records-collection")
+        .or_else(|| std::env::var("FUNGOS_RECORDS_COLLECTION").ok());
+    let records = match (records_root, records_book, records_collection) {
+        (Some(root), Some(book), Some(collection)) => Some(RecordsBinding {
+            root,
+            book,
+            collection,
+        }),
+        (None, None, None) => None,
+        _ => anyhow::bail!(
+            "records binding needs --records-root, --records-book and --records-collection"
+        ),
+    };
+    let mut runtime = Runtime::open(&root, &bytes, &term, command_root, records)?;
 
     if let Some(command) = command {
         for line in command.lines() {

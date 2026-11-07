@@ -84,7 +84,8 @@ fn run() -> Result<()> {
         &RunRequest {
             args: args[i + 1..].to_vec(),
             stdin,
-            env: std::env::vars().collect(),
+            // Commands do not inherit the host environment.
+            env: Vec::new(),
             cwd: None,
         },
     )?;

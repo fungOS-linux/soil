@@ -1,0 +1,3 @@
+[submodule "spores-public"]
+	path = spores-public
+	url = git@github.com:fungOS-linux/spores.git

@@ -1,8 +1,0 @@
-// DFM report Spore: the module carries no capability imports of its own.
-// The findings are handed to the Lua UI as a snapshot by the host; the 3D view
-// is the native `soil-dfm-viz` surface, not something the Spore renders.
-package fungos:dfm@0.1.0;
-
-world dfm {
-  export run: func(args: list<string>) -> result<_, string>;
-}

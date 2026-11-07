@@ -42,11 +42,10 @@ struct Cli {
     command: Cmd,
 }
 
-// A clap subcommand tree is built once from argv and dropped; the size of the
-// largest variant costs nothing at runtime, and `Permit` is a box of arguments
-// clap's derive cannot wrap in a `Box` without a manual `Args` impl.
-#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
+// A CLI command is parsed once from argv, so the size difference between the
+// variant that carries arguments and the ones that do not buys nothing to fix.
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Generate a persistent Unibus endpoint key.
     Keygen {
@@ -298,7 +297,10 @@ async fn run_peer(config_path: PathBuf) -> anyhow::Result<()> {
     }
     let dispatch_store = Arc::new(tokio::sync::Mutex::new(dispatch_store));
     let listener = IrohListener::new(endpoint.clone(), session_config(&config, verifier.clone()));
-    let host = RecordPeerHost::from_shared(
+    // Mutated only when the notify adapter wraps it, so the flag is conditional
+    // on the same feature rather than always present.
+    #[cfg_attr(not(feature = "notify"), allow(unused_mut))]
+    let mut host = RecordPeerHost::from_shared(
         listener,
         host_store,
         PeerEndpoint {
@@ -306,15 +308,12 @@ async fn run_peer(config_path: PathBuf) -> anyhow::Result<()> {
             producer_id: config.local_producer.clone(),
         },
     );
-    // Shadow rather than mutate: with `notify` off there is no second
-    // assignment, and an unused `mut` is a warning the build treats as an error.
     #[cfg(feature = "notify")]
     let notify = make_notify_adapter(&config)?;
     #[cfg(feature = "notify")]
-    let host = match &notify {
-        Some(adapter) => host.with_notify(Arc::clone(adapter)),
-        None => host,
-    };
+    if let Some(adapter) = &notify {
+        host = host.with_notify(Arc::clone(adapter));
+    }
     let transport = IrohTransport::new(endpoint.clone(), session_config(&config, verifier.clone()));
     eprintln!("soil-sync: producer={}", config.local_producer);
     eprintln!(
@@ -366,29 +365,28 @@ async fn supervise(
         ticker.tick().await;
         let now = now_ms();
         #[cfg(feature = "notify")]
-        if let Some(adapter) = &notify {
-            if now.saturating_sub(last_notify_flush) >= 5_000
-                && adapter.has_pending(now).unwrap_or(false)
-            {
-                last_notify_flush = now;
-                for peer in &config.peers {
-                    let candidate = candidate_for(&config, peer, now_s());
-                    if let Ok(assertion) = verifier.assertion(now_s()) {
-                        match soil_sync_host::flush_notify_with_transport(
-                            &transport, &candidate, &assertion, adapter, now, 100,
-                        )
-                        .await
-                        {
-                            Ok(sent) if sent > 0 => {
-                                eprintln!("soil-sync: notify/{} sent={sent}", peer.producer_id)
-                            }
-                            Ok(_) => {}
-                            Err(error) => {
-                                eprintln!(
-                                    "soil-sync: notify/{} flush failed: {error:#}",
-                                    peer.producer_id
-                                )
-                            }
+        if let Some(adapter) = &notify
+            && now.saturating_sub(last_notify_flush) >= 5_000
+            && adapter.has_pending(now).unwrap_or(false)
+        {
+            last_notify_flush = now;
+            for peer in &config.peers {
+                let candidate = candidate_for(&config, peer, now_s());
+                if let Ok(assertion) = verifier.assertion(now_s()) {
+                    match soil_sync_host::flush_notify_with_transport(
+                        &transport, &candidate, &assertion, adapter, now, 100,
+                    )
+                    .await
+                    {
+                        Ok(sent) if sent > 0 => {
+                            eprintln!("soil-sync: notify/{} sent={sent}", peer.producer_id)
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            eprintln!(
+                                "soil-sync: notify/{} flush failed: {error:#}",
+                                peer.producer_id
+                            )
                         }
                     }
                 }

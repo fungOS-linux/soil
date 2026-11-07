@@ -239,7 +239,9 @@ impl records::Host for NamespacedRecordsHost {
         }
 
         // A delete keeps the schema the record already had; there is no single
-        // host schema to fall back to when a namespace has none.
+        // host schema to fall back to when a namespace has none. An empty schema
+        // on a live write was already rejected above, so the live branch below
+        // never sees one.
         let schema = if entry.schema.is_empty() {
             current
                 .as_ref()
