@@ -5,7 +5,7 @@ use base64::Engine as _;
 use http::Method;
 use serde_json::Value;
 use soil_wasi_host::{
-    Algorithm, CredentialProvider, GatewayRoute, HttpGatewayBuilder, HttpService, MemoryEventSink,
+    Algorithm, CredentialProvider, GatewayRoute, HttpGatewayBuilder, HttpService, MemoryBus,
     StaticCredentials, WasiHostBuilder, WasiHostPolicy,
 };
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -37,7 +37,7 @@ fn signature(credentials: &StaticCredentials, id: &str, timestamp: i64, body: &s
 }
 
 async fn start(
-    sink: Arc<MemoryEventSink>,
+    sink: Arc<MemoryBus>,
 ) -> (
     std::net::SocketAddr,
     JoinHandle<anyhow::Result<()>>,
@@ -50,7 +50,7 @@ async fn start(
     let credentials = Arc::new(credentials);
     let builder = WasiHostBuilder::new(WasiHostPolicy::default())
         .credential_provider(credentials.clone())
-        .event_sink(sink);
+        .bus(sink);
     let service = Arc::new(
         HttpService::from_bytes_named("dev.fungos.confluence", CONFLUENCE, builder).unwrap(),
     );
@@ -73,7 +73,7 @@ async fn start(
 
 #[tokio::test]
 async fn verifies_signs_and_publishes_one_event() {
-    let sink = Arc::new(MemoryEventSink::default());
+    let sink = Arc::new(MemoryBus::default());
     let (address, task, credentials) = start(sink.clone()).await;
 
     let body = r#"{"action":"opened","page":{"id":"123"}}"#;
@@ -99,14 +99,10 @@ async fn verifies_signs_and_publishes_one_event() {
     assert_eq!(reply["duplicate"], false);
     assert_eq!(reply["request_id"], "local-1");
 
-    let events = sink.events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].kind, "confluence.webhook.received.v1");
-    assert_eq!(
-        events[0].idempotency_key.as_deref(),
-        Some("provider-a:delivery-1")
-    );
-    let event: Value = serde_json::from_slice(&events[0].body).unwrap();
+    let frames = sink.frames();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].kind, "confluence.webhook.received.v1");
+    let event: Value = serde_json::from_slice(&frames[0].body).unwrap();
     assert_eq!(event["provider"], "provider-a");
     assert_eq!(event["delivery_id"], "delivery-1");
     assert_eq!(event["event_type"], "page_updated");
@@ -116,22 +112,26 @@ async fn verifies_signs_and_publishes_one_event() {
         "tenant is host-stamped: {event}"
     );
 
+    // `soil:unibus` has no duplicate receipt: with a raw `MemoryBus` (no
+    // `ConfluenceBus` dedupe), a redelivery is a second accepted frame and
+    // still a 202. Delivery dedupe lives in `ConfluenceBus` and is proven in
+    // `soil-confluence`.
     let duplicate = send(
         address,
         &post("confluence.test", "/webhooks/provider-a", body, &headers),
     )
     .await;
-    assert!(duplicate.starts_with("HTTP/1.1 200"), "{duplicate}");
+    assert!(duplicate.starts_with("HTTP/1.1 202"), "{duplicate}");
     let reply: Value = serde_json::from_str(&response_body(&duplicate)).unwrap();
-    assert_eq!(reply["duplicate"], true);
-    assert_eq!(sink.events().len(), 1);
+    assert_eq!(reply["request_id"], "local-2");
+    assert_eq!(sink.frames().len(), 2);
 
     task.abort();
 }
 
 #[tokio::test]
 async fn rejects_bad_signatures_stale_timestamps_and_wrong_methods() {
-    let sink = Arc::new(MemoryEventSink::default());
+    let sink = Arc::new(MemoryBus::default());
     let (address, task, credentials) = start(sink.clone()).await;
 
     let body = r#"{"action":"opened"}"#;
@@ -186,13 +186,13 @@ async fn rejects_bad_signatures_stale_timestamps_and_wrong_methods() {
     .await;
     assert!(response.starts_with("HTTP/1.1 404"), "{response}");
 
-    assert!(sink.events().is_empty());
+    assert!(sink.frames().is_empty());
     task.abort();
 }
 
 #[tokio::test]
 async fn rejects_oversized_and_non_object_bodies() {
-    let sink = Arc::new(MemoryEventSink::default());
+    let sink = Arc::new(MemoryBus::default());
     let (address, task, credentials) = start(sink.clone()).await;
 
     // The gateway rejects on Content-Length before reading; do not write the
@@ -221,6 +221,6 @@ async fn rejects_oversized_and_non_object_bodies() {
     .await;
     assert!(response.starts_with("HTTP/1.1 415"), "{response}");
 
-    assert!(sink.events().is_empty());
+    assert!(sink.frames().is_empty());
     task.abort();
 }

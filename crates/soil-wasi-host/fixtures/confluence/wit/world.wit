@@ -8,5 +8,5 @@ package soil:confluence-fixture@0.1.0;
 world confluence {
   import fungos:http-context/context@0.1.0;
   import soil:creds/creds@1.0.0;
-  import fungos:events/publisher@0.1.0;
+  import soil:unibus/bus@0.1.0;
 }

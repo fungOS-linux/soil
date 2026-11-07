@@ -20,8 +20,8 @@ wasi:io
 wasi:random
 wasi:sockets
 fungos:http-context
-fungos:events
 soil:creds
+soil:unibus
 ```
 
 WASI describes the shape. Soil supplies the authority. The default policy is
@@ -132,15 +132,16 @@ the same trait by resolving through Mycelium.
 
 ## Events
 
-`fungos:events` is publication intent, not a broker client:
+`soil:unibus` is bounded poll/publish over the Unibus, not a broker client:
 
 ```wit
-publish: func(event: event) -> result<receipt, error>;
+publish: func(kind, body, destination, ttl-ms) -> result<receipt, error>;
+poll:    func(kinds, cursor, limit) -> result<page, error>;
 ```
 
-The guest supplies a kind, a JSON body, and an optional idempotency key. The
-host enforces the size ceiling, deduplicates the key, and hands the fact to its
-`EventSink`. Unibus is the production sink; `MemoryEventSink` is for tests. No
+The guest supplies a kind and a JSON-object body. The host enforces the size
+ceiling, deduplicates on content where the policy requires it, and hands the
+fact to its `Bus`. Unibus is the production bus; `MemoryBus` is for tests. No
 address, session, token, or subscription crosses the boundary.
 
 ## HTTP service
@@ -231,7 +232,7 @@ crates/soil-wasi-host/fixtures/echo/
 crates/soil-wasi-host/fixtures/context/
   reads fungos:http-context over the same surface
 crates/soil-wasi-host/fixtures/confluence/
-  verifies soil:creds and publishes fungos:events
+  verifies soil:creds and publishes soil:unibus
 ```
 
 The built `fixtures/echo.wasm` is used by `tests/http_service.rs` to verify the
@@ -240,7 +241,7 @@ streaming end to end. `fixtures/context.wasm` proves the context import.
 `fixtures/confluence.wasm` is the first full ingress: a Standard Webhooks
 signature check through `soil:creds`, a host-attested request id and receive
 time, and exactly one `confluence.webhook.received.v1` fact through
-`fungos:events`.
+`soil:unibus`.
 
 ## Confluence ingress
 

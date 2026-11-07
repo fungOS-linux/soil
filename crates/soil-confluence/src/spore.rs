@@ -3,16 +3,8 @@
 //! The Spore verifies the provider signature and normalizes the delivery; it
 //! never sees the tenant, the Unibus session, or a token. This adapter stamps
 //! the host-selected tenant, validates the event shape, and publishes exactly
-//! one fact per delivery. Two transports share the same policy:
-//!
-//! * [`ConfluenceEventSink`] for the interim `fungos:events` Spore, which
-//!   carries an explicit idempotency key and a `duplicate` receipt.
-//! * [`ConfluenceBus`] for `soil:unibus`, which deduplicates on
-//!   `provider` + `delivery_id` content rather than a separate key field.
-//!
-//! Both collapse redelivery to a single Unibus fact. They differ only in how
-//! the receipt the guest sees is shaped. Keep both until the Spore fixture
-//! moves to `soil:unibus`; then retire the `fungos:events` Spore.
+//! one fact per delivery on `soil:unibus`, deduplicating on
+//! `provider` + `delivery_id` content.
 
 use std::{
     collections::HashMap,
@@ -20,28 +12,11 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use soil_wasi_host::{Bus, BusError, BusReceipt, Event, EventError, EventSink, Receipt};
+use soil_wasi_host::{Bus, BusError, BusReceipt};
 
-use crate::{ConfluenceEvent, EVENT_KIND, MAX_BODY, Publisher};
+use crate::{ConfluenceEvent, EVENT_KIND, MAX_BODY};
 
-/// Unibus-backed sink for `confluence.webhook.received.v1`.
-pub struct ConfluenceEventSink {
-    tenant: String,
-    publisher: Arc<dyn Publisher>,
-    seen: Mutex<HashMap<String, String>>,
-}
-
-impl ConfluenceEventSink {
-    pub fn new(tenant: impl Into<String>, publisher: Arc<dyn Publisher>) -> Self {
-        Self {
-            tenant: tenant.into(),
-            publisher,
-            seen: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-/// Parse, validate, and tenant-stamp a Spore body. Shared by both transports.
+/// Parse, validate, and tenant-stamp a Spore body.
 ///
 /// Returns the deduplication key (`provider` + `delivery_id`) and the stamped
 /// event. The guest `tenant`, if present, is overwritten: tenant is host
@@ -86,12 +61,6 @@ impl std::fmt::Display for ConfluencePolicyError {
 
 impl std::error::Error for ConfluencePolicyError {}
 
-impl From<ConfluencePolicyError> for EventError {
-    fn from(_: ConfluencePolicyError) -> Self {
-        EventError::Invalid
-    }
-}
-
 impl From<ConfluencePolicyError> for BusError {
     fn from(_: ConfluencePolicyError) -> Self {
         BusError::Invalid
@@ -99,7 +68,7 @@ impl From<ConfluencePolicyError> for BusError {
 }
 
 /// Check the `seen` map for a duplicate, inserting `request_id` on first
-/// publish. Shared by both transports; only the receipt shape differs.
+/// publish.
 fn dedupe(
     seen: &Mutex<HashMap<String, String>>,
     key: &str,
@@ -115,48 +84,6 @@ fn dedupe(
     }
     guard.insert(key.to_string(), request_id.clone());
     Ok(None)
-}
-
-impl EventSink for ConfluenceEventSink {
-    fn publish(&self, event: &Event) -> Result<Receipt, EventError> {
-        if event.kind != EVENT_KIND {
-            return Err(EventError::Denied);
-        }
-        if event.body.len() > MAX_BODY {
-            return Err(EventError::OverBudget);
-        }
-        let Some(key) = event.idempotency_key.clone() else {
-            return Err(EventError::Invalid);
-        };
-        let (content_key, event) = stamp_and_validate(&self.tenant, &event.body)?;
-        // `fungos:events` carries an explicit key; the content key and the
-        // guest key must agree. A mismatch is a guest bug, not a retry.
-        if key != content_key {
-            return Err(EventError::Invalid);
-        }
-        let publisher = Arc::clone(&self.publisher);
-        let event_clone = event.clone();
-        let outcome = dedupe(&self.seen, &key, || {
-            publisher.publish(&event_clone).map_err(|error| {
-                tracing::warn!(%error, provider = %event_clone.provider, "confluence publish failed");
-                "unavailable".to_string()
-            })
-        })
-        .map_err(|_| EventError::Unavailable)?;
-        if let Some(request_id) = outcome {
-            return Ok(Receipt {
-                request_id,
-                duplicate: true,
-            });
-        }
-        // The first publish inserted the request id; recover it for the receipt.
-        let seen = self.seen.lock().map_err(|_| EventError::Unavailable)?;
-        let request_id = seen.get(&key).cloned().ok_or(EventError::Unavailable)?;
-        Ok(Receipt {
-            request_id,
-            duplicate: false,
-        })
-    }
 }
 
 /// `soil:unibus` policy for `confluence.webhook.received.v1`.
@@ -244,22 +171,6 @@ impl Bus for ConfluenceBus {
 mod tests {
     use super::*;
 
-    #[derive(Default)]
-    struct MockPublisher {
-        events: Mutex<Vec<ConfluenceEvent>>,
-        fail: bool,
-    }
-
-    impl Publisher for MockPublisher {
-        fn publish(&self, event: &ConfluenceEvent) -> anyhow::Result<String> {
-            if self.fail {
-                anyhow::bail!("unibus down");
-            }
-            self.events.lock().unwrap().push(event.clone());
-            Ok(format!("request-{}", self.events.lock().unwrap().len()))
-        }
-    }
-
     fn bus_body(id: &str) -> Vec<u8> {
         json!({
             "provider": "provider-a",
@@ -272,43 +183,6 @@ mod tests {
         })
         .to_string()
         .into_bytes()
-    }
-
-    fn event(id: &str) -> Event {
-        Event {
-            kind: EVENT_KIND.to_string(),
-            body: json!({
-                "provider": "provider-a",
-                "delivery_id": id,
-                "event_type": "page_updated",
-                "received_at_ms": 1_790_000_000_000u64,
-                "headers": {"content-type": "application/json"},
-                "body": {"action": "opened"},
-                "tenant": "guest-value"
-            })
-            .to_string()
-            .into_bytes(),
-            idempotency_key: Some(format!("provider-a:{id}")),
-        }
-    }
-
-    #[test]
-    fn stamps_the_host_tenant_and_deduplicates() {
-        let publisher = Arc::new(MockPublisher::default());
-        let sink = ConfluenceEventSink::new("tenant-a", publisher.clone());
-        let first = sink.publish(&event("delivery-1")).unwrap();
-        assert!(!first.duplicate);
-        assert_eq!(first.request_id, "request-1");
-        {
-            let events = publisher.events.lock().unwrap();
-            assert_eq!(events.len(), 1);
-            assert_eq!(events[0].tenant, "tenant-a");
-            assert_eq!(events[0].provider, "provider-a");
-        }
-        let second = sink.publish(&event("delivery-1")).unwrap();
-        assert!(second.duplicate);
-        assert_eq!(second.request_id, first.request_id);
-        assert_eq!(publisher.events.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -361,28 +235,48 @@ mod tests {
     }
 
     #[test]
-    fn rejects_other_kinds_missing_fields_and_publish_failures() {
-        let publisher = Arc::new(MockPublisher::default());
-        let sink = ConfluenceEventSink::new("tenant-a", publisher);
+    fn confluence_bus_rejects_missing_fields_and_inner_failures() {
+        use soil_wasi_host::MemoryBus;
 
-        let mut wrong_kind = event("delivery-1");
-        wrong_kind.kind = "confluence.other.v1".into();
-        assert_eq!(sink.publish(&wrong_kind).unwrap_err(), EventError::Denied);
+        struct FailingBus;
 
-        let mut missing = event("delivery-1");
-        missing.body = br#"{"provider":"provider-a"}"#.to_vec();
-        assert_eq!(sink.publish(&missing).unwrap_err(), EventError::Invalid);
+        impl soil_wasi_host::Bus for FailingBus {
+            fn publish(
+                &self,
+                _kind: &str,
+                _body: &[u8],
+                _destination: Option<&str>,
+                _ttl_ms: u64,
+            ) -> std::result::Result<soil_wasi_host::BusReceipt, BusError> {
+                Err(BusError::Unavailable)
+            }
 
-        let failing = ConfluenceEventSink::new(
-            "tenant-a",
-            Arc::new(MockPublisher {
-                fail: true,
-                ..Default::default()
-            }),
-        );
+            fn poll(
+                &self,
+                _kinds: &[String],
+                _cursor: Option<&str>,
+                _limit: u32,
+            ) -> std::result::Result<soil_wasi_host::Page, BusError> {
+                Ok(soil_wasi_host::Page {
+                    frames: Vec::new(),
+                    next: None,
+                })
+            }
+        }
+
+        let bus = ConfluenceBus::new("tenant-a", Arc::new(MemoryBus::default()));
         assert_eq!(
-            failing.publish(&event("delivery-2")).unwrap_err(),
-            EventError::Unavailable
+            bus.publish(EVENT_KIND, br#"{"provider":"a"}"#, None, 0)
+                .unwrap_err(),
+            BusError::Invalid
+        );
+
+        let failing = ConfluenceBus::new("tenant-a", Arc::new(FailingBus));
+        assert_eq!(
+            failing
+                .publish(EVENT_KIND, &bus_body("delivery-2"), None, 0)
+                .unwrap_err(),
+            BusError::Unavailable
         );
     }
 }

@@ -18,7 +18,6 @@ use wasmtime_wasi_http::{
 use crate::{
     context::HttpContext,
     creds::CredentialProvider,
-    events::EventSink,
     policy::{HttpPolicy, WasiHostPolicy},
     unibus::Bus,
 };
@@ -41,7 +40,6 @@ pub struct WasiHostBuilder {
     inherit_stdio: bool,
     preopens: Vec<Preopen>,
     credentials: Option<Arc<dyn CredentialProvider>>,
-    events: Option<Arc<dyn EventSink>>,
     bus: Option<Arc<dyn Bus>>,
 }
 
@@ -105,15 +103,6 @@ impl WasiHostBuilder {
         self
     }
 
-    /// Attach the host-side event transport exposed as `fungos:events`.
-    ///
-    /// Without a sink, `publish` fails with `unavailable`; a Spore cannot fall
-    /// back to opening its own connection.
-    pub fn event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
-        self.events = Some(sink);
-        self
-    }
-
     /// Attach the host-side bus exposed as `soil:unibus`.
     ///
     /// Without a bus, `publish` and `poll` fail with `unavailable`; a Spore
@@ -149,7 +138,6 @@ impl WasiHostBuilder {
             },
             context: None,
             credentials: self.credentials.clone(),
-            events: self.events.clone(),
             bus: self.bus.clone(),
         })
     }
@@ -168,7 +156,6 @@ pub struct WasiHost {
     hooks: HttpHooks,
     context: Option<HttpContext>,
     credentials: Option<Arc<dyn CredentialProvider>>,
-    events: Option<Arc<dyn EventSink>>,
     bus: Option<Arc<dyn Bus>>,
 }
 
@@ -189,10 +176,6 @@ impl WasiHost {
 
     pub(crate) fn credential_provider(&self) -> Option<Arc<dyn CredentialProvider>> {
         self.credentials.clone()
-    }
-
-    pub(crate) fn event_sink(&self) -> Option<Arc<dyn EventSink>> {
-        self.events.clone()
     }
 
     pub(crate) fn bus(&self) -> Option<Arc<dyn Bus>> {

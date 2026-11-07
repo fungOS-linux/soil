@@ -5,10 +5,9 @@
 //! session, the credential, hub selection, and the retention window. There is
 //! no raw socket, no peer id, and no token at this boundary.
 //!
-//! `fungos:events` remains the one-way publication intent with an explicit
-//! idempotency key. `soil:unibus` is the poll/publish edge for Spores that
-//! observe as well as publish. Hosts may bridge the two: a `fungos:events`
-//! Spore can sit on top of the same session a `soil:unibus` Spore observes.
+//! `soil:unibus` is the poll/publish edge for Spores that observe as well as
+//! publish. It is the only publication surface; `fungos:events` was
+//! retired in its favor.
 //!
 //! # Sparse hubs
 //!

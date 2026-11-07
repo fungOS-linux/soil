@@ -26,7 +26,7 @@ use wasmtime_wasi_http::{
 
 use crate::{
     context::HttpContext,
-    creds, events,
+    creds,
     host::{WasiHost, WasiHostBuilder},
     unibus,
 };
@@ -77,7 +77,6 @@ impl HttpService {
             .context("link wasi:http")?;
         crate::context::add_to_linker(&mut linker)?;
         creds::add_to_linker(&mut linker)?;
-        events::add_to_linker(&mut linker)?;
         unibus::add_to_linker(&mut linker)?;
         let pre = ProxyPre::new(linker.instantiate_pre(&component)?)
             .map_err(anyhow::Error::from)

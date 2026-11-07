@@ -12,7 +12,7 @@ use iroh::{EndpointId, SecretKey};
 use serde_json::Value;
 use soil_confluence::{
     AppState, ConfluenceConfig, UnibusPublisher, bind_iroh, push_iroh, relay_router, router,
-    spore::{ConfluenceBus, ConfluenceEventSink},
+    spore::ConfluenceBus,
 };
 use soil_wasi_host::{
     GatewayRoute, HttpGatewayBuilder, HttpService, StaticCredentials, UnibusBus, WasiHostBuilder,
@@ -27,14 +27,6 @@ use unibus::client::ClientConfig;
 struct Cli {
     #[command(subcommand)]
     command: Command,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum SporeTransport {
-    /// `fungos:events` publication intent (interim Spore).
-    Events,
-    /// `soil:unibus` poll/publish edge.
-    Bus,
 }
 
 #[derive(Subcommand)]
@@ -90,11 +82,6 @@ struct SporeArgs {
     /// config's `hub_endpoint`. Repeat for each hub (pris, batty, studio, ...).
     #[arg(long)]
     unibus_hub: Vec<String>,
-    /// Transport the Spore imports: `events` for `fungos:events` (interim)
-    /// or `bus` for `soil:unibus`. Both are wired when both are configured;
-    /// the active Spore's WIT decides which one it calls.
-    #[arg(long, value_enum, default_value_t = SporeTransport::Events)]
-    transport: SporeTransport,
     #[arg(long, default_value = "default")]
     tenant: String,
     /// The compiled `wasi:http` Confluence component.
@@ -215,26 +202,12 @@ async fn serve_spore(args: SporeArgs) -> Result<()> {
     let wasm = fs::read(&args.spore)
         .with_context(|| format!("read Spore component {}", args.spore.display()))?;
     let config = load_unibus_config(&args.unibus_config)?;
-    let publisher = Arc::new(connect_publisher(&config, &args.unibus_hub)?);
-    let sink = Arc::new(ConfluenceEventSink::new(
-        args.tenant.clone(),
-        publisher.clone(),
-    ));
-
-    // The second session serves the `soil:unibus` Spore. It is opened lazily
-    // so the interim `fungos:events` Spore keeps working on fleets where the
-    // bus Spore is not yet deployed; both share the tenant/dedupe policy.
-    let bus = match args.transport {
-        SporeTransport::Events => None,
-        SporeTransport::Bus => {
-            let inner = Arc::new(
-                UnibusBus::connect_any(&config, &hub_endpoints(&config, &args.unibus_hub))
-                    .context("connect soil:unibus hub")?,
-            );
-            tracing::info!(hub = %inner.hub_endpoint(), "soil:unibus hub connected");
-            Some(Arc::new(ConfluenceBus::new(args.tenant.clone(), inner)))
-        }
-    };
+    let inner = Arc::new(
+        UnibusBus::connect_any(&config, &hub_endpoints(&config, &args.unibus_hub))
+            .context("connect soil:unibus hub")?,
+    );
+    tracing::info!(hub = %inner.hub_endpoint(), "soil:unibus hub connected");
+    let bus = Arc::new(ConfluenceBus::new(args.tenant.clone(), inner));
 
     let mut credentials = StaticCredentials::new();
     credentials.insert_hmac(
@@ -242,12 +215,9 @@ async fn serve_spore(args: SporeArgs) -> Result<()> {
         secret.into_bytes(),
         "verify provider webhooks",
     )?;
-    let mut builder = WasiHostBuilder::new(WasiHostPolicy::default())
+    let builder = WasiHostBuilder::new(WasiHostPolicy::default())
         .credential_provider(Arc::new(credentials))
-        .event_sink(sink);
-    if let Some(bus) = bus {
-        builder = builder.bus(bus);
-    }
+        .bus(bus);
     let service = Arc::new(HttpService::from_bytes_named(
         args.spore_name.clone(),
         &wasm,

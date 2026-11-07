@@ -7,7 +7,7 @@
 //! * `wasi:http` incoming and outgoing through `wasmtime-wasi-http`;
 //! * `fungos:http-context` for host-attested invocation facts;
 //! * `soil:creds` for host-held signing and verification;
-//! * `fungos:events` for publication intent;
+//! * `soil:unibus` for bounded poll/publish over the bus;
 //! * Soil-owned policy around origins, CIDRs, DNS, preopens and field limits;
 //! * [`HttpGateway`] for vhost, route, method, body and deadline grants.
 //!
@@ -17,7 +17,6 @@
 
 pub mod context;
 pub mod creds;
-pub mod events;
 mod gateway;
 mod host;
 mod policy;
@@ -28,7 +27,6 @@ pub use context::HttpContext;
 pub use creds::{
     Algorithm, CredentialError, CredentialProvider, ResolvedHandle, StaticCredentials,
 };
-pub use events::{Event, EventError, EventSink, MAX_EVENT_BODY, MemoryEventSink, Receipt};
 pub use gateway::{GatewayRoute, GatewayVhost, HttpGateway, HttpGatewayBuilder, IngressError};
 pub use host::{Preopen, WasiHost, WasiHostBuilder};
 pub use policy::{HttpPolicy, NetworkPolicy, WasiHostPolicy};
@@ -48,7 +46,6 @@ pub const WASI_PROFILE: &[&str] = &[
     "wasi:io",
     "wasi:random",
     "wasi:sockets",
-    "fungos:events",
     "fungos:http-context",
     "soil:creds",
     "soil:unibus",
