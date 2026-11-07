@@ -155,7 +155,20 @@ cmd >> PATH        # append stdout to a VFS file
 $(cmd)             # command substitution
 # comment          # rest of the line
 $?                 # previous status
+$0, $1, $#, $@     # script name, arguments, count, all arguments
 ```
+
+Control flow:
+
+```sh
+if test -f docs/a.txt; then echo file; else echo missing; fi
+for x in a b; do echo item-$x; done
+while false; do echo never; done
+```
+
+`test` / `[` supports `-e`, `-f`, `-d`, `-s`, `-r`, `-w`, `-x`,
+`-z`, `-n`, string `=`/`!=`, numeric `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`,
+and `!`, `-a`, `-o`. `read` consumes one line from piped stdin.
 
 `cat`, `grep`, `head`, `tail` and `wc` read piped stdin when no path is given.
 `printf` supports `%s`, `%d`, `%i`, `%b`, `%%`, and the usual backslash escapes.
@@ -185,9 +198,11 @@ cp [-r] FROM TO
 search QUERY
 commands
 which COMMAND
-source SCRIPT
+source SCRIPT [ARG...]
 echo TEXT
 printf FORMAT [ARG...]
+test EXPR
+read [-r] [VAR]
 export KEY=VALUE
 unset KEY...
 env

@@ -74,6 +74,7 @@ struct Shell {
     exit: bool,
     source_depth: u8,
     expand_depth: u8,
+    positional: Vec<String>,
 }
 
 impl Shell {
@@ -113,6 +114,7 @@ impl Shell {
             exit: false,
             source_depth: 0,
             expand_depth: 0,
+            positional: vec!["mush".into()],
         }
     }
 
@@ -121,12 +123,7 @@ impl Shell {
             match self.read_file(candidate) {
                 Ok(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
-                    for line in text.lines() {
-                        self.run_line(line);
-                        if self.exit {
-                            break;
-                        }
-                    }
+                    self.run_script(&text);
                     break;
                 }
                 Err(_) => continue,
@@ -148,12 +145,52 @@ impl Shell {
                 return;
             }
         };
-        let chains = match parse_chains(&tokens) {
+        self.run_tokens(&tokens);
+    }
+
+    fn run_script(&mut self, text: &str) {
+        let mut buffer = String::new();
+        for line in text.lines() {
+            if !buffer.is_empty() {
+                buffer.push('\n');
+            }
+            buffer.push_str(line);
+            let Ok(tokens) = tokenize(&buffer) else {
+                self.run_line(&buffer);
+                buffer.clear();
+                continue;
+            };
+            if tokens.is_empty() {
+                buffer.clear();
+                continue;
+            }
+            if block_depth(&tokens) == 0 {
+                self.run_line(&buffer);
+                buffer.clear();
+                if self.exit {
+                    return;
+                }
+            }
+        }
+        if !buffer.trim().is_empty() {
+            self.run_line(&buffer);
+        }
+    }
+
+    fn run_tokens(&mut self, tokens: &[Token]) -> i32 {
+        if tokens.is_empty() {
+            return self.status;
+        }
+        if is_compound(tokens) {
+            self.status = self.run_compound(tokens);
+            return self.status;
+        }
+        let chains = match parse_chains(tokens) {
             Ok(chains) => chains,
             Err(error) => {
                 self.error(&error);
                 self.status = 2;
-                return;
+                return self.status;
             }
         };
         for (operator, pipeline) in chains {
@@ -165,11 +202,134 @@ impl Shell {
             if !should_run {
                 continue;
             }
-            self.status = self.run_pipeline(&pipeline);
+            self.status = if is_compound(&pipeline) {
+                self.run_compound(&pipeline)
+            } else {
+                self.run_pipeline(&pipeline)
+            };
             if self.exit {
                 break;
             }
         }
+        self.status
+    }
+
+    fn run_compound(&mut self, tokens: &[Token]) -> i32 {
+        match tokens.first().and_then(token_word) {
+            Some("if") => self.run_if(tokens),
+            Some("for") => self.run_for(tokens),
+            Some("while") => self.run_while(tokens),
+            _ => {
+                self.error("unsupported compound command");
+                2
+            }
+        }
+    }
+
+    fn run_if(&mut self, tokens: &[Token]) -> i32 {
+        let Some(then_index) = find_block_marker(tokens, 1, &["then"]) else {
+            self.error("if: missing then");
+            return 2;
+        };
+        let Some(branch_index) = find_block_marker(tokens, then_index + 1, &["elif", "else", "fi"])
+        else {
+            self.error("if: missing fi");
+            return 2;
+        };
+        let mut status = self.run_tokens(&tokens[1..then_index]);
+        if status == 0 {
+            return self.run_tokens(&tokens[then_index + 1..branch_index]);
+        }
+        let mut branch = branch_index;
+        loop {
+            match tokens.get(branch).and_then(token_word) {
+                Some("fi") => return status,
+                Some("else") => {
+                    let Some(fi_index) = find_block_marker(tokens, branch + 1, &["fi"]) else {
+                        self.error("if: missing fi");
+                        return 2;
+                    };
+                    return self.run_tokens(&tokens[branch + 1..fi_index]);
+                }
+                Some("elif") => {
+                    let Some(next_then) = find_block_marker(tokens, branch + 1, &["then"]) else {
+                        self.error("elif: missing then");
+                        return 2;
+                    };
+                    let Some(next_branch) =
+                        find_block_marker(tokens, next_then + 1, &["elif", "else", "fi"])
+                    else {
+                        self.error("elif: missing fi");
+                        return 2;
+                    };
+                    status = self.run_tokens(&tokens[branch + 1..next_then]);
+                    if status == 0 {
+                        return self.run_tokens(&tokens[next_then + 1..next_branch]);
+                    }
+                    branch = next_branch;
+                }
+                _ => {
+                    self.error("if: malformed branch");
+                    return 2;
+                }
+            }
+        }
+    }
+
+    fn run_for(&mut self, tokens: &[Token]) -> i32 {
+        let Some(name) = tokens.get(1).and_then(token_word) else {
+            self.error("for: missing variable name");
+            return 2;
+        };
+        let Some(do_index) = find_block_marker(tokens, 2, &["do"]) else {
+            self.error("for: missing do");
+            return 2;
+        };
+        let Some(done_index) = find_block_marker(tokens, do_index + 1, &["done"]) else {
+            self.error("for: missing done");
+            return 2;
+        };
+        let mut values = Vec::new();
+        for token in &tokens[2..do_index] {
+            if let Token::Word(word) = token {
+                if word.text != "in" {
+                    values.push(word.text.clone());
+                }
+            }
+        }
+        let mut status = 0;
+        for value in values {
+            let value = self.expand_dynamic(&value);
+            self.env.insert(name.to_string(), value);
+            status = self.run_tokens(&tokens[do_index + 1..done_index]);
+            if self.exit {
+                break;
+            }
+        }
+        status
+    }
+
+    fn run_while(&mut self, tokens: &[Token]) -> i32 {
+        let Some(do_index) = find_block_marker(tokens, 1, &["do"]) else {
+            self.error("while: missing do");
+            return 2;
+        };
+        let Some(done_index) = find_block_marker(tokens, do_index + 1, &["done"]) else {
+            self.error("while: missing done");
+            return 2;
+        };
+        let mut status = 0;
+        for _ in 0..10_000 {
+            status = self.run_tokens(&tokens[1..do_index]);
+            if status != 0 {
+                break;
+            }
+            status = self.run_tokens(&tokens[do_index + 1..done_index]);
+            if self.exit || status != 0 {
+                break;
+            }
+        }
+        status
     }
 
     fn run_pipeline(&mut self, tokens: &[Token]) -> i32 {
@@ -201,7 +361,7 @@ impl Shell {
             };
             let args = words[1..].to_vec();
             if let Some(target) = parsed.stdin {
-                let target = self.expand_dynamic(&target.text);
+                let target = self.expand_literal(&target);
                 let path = match self.resolve(&target) {
                     Ok(path) => path,
                     Err(error) => {
@@ -232,7 +392,7 @@ impl Shell {
             };
             status = code;
             if let Some((append, target)) = parsed.stdout {
-                let target = self.expand_dynamic(&target.text);
+                let target = self.expand_literal(&target);
                 if let Err(error) = self.redirect(&target, append, produced.as_bytes()) {
                     self.error(&error);
                     status = 1;
@@ -302,6 +462,9 @@ impl Shell {
                 Ok(0)
             }
             "printf" => self.printf(args).map(|_| 0),
+            "test" => self.test_status(args),
+            "[" => self.test_bracket(args),
+            "read" => self.read(args),
             "export" | "set" => self.set_env(args).map(|_| 0),
             "unset" => self.unset_env(args).map(|_| 0),
             "env" => {
@@ -968,14 +1131,11 @@ impl Shell {
         let path = self.resolve(arg)?;
         let bytes = self.read_file(&path)?;
         let text = String::from_utf8(bytes).map_err(|_| "source: script is not UTF-8")?;
+        let saved = std::mem::replace(&mut self.positional, args.to_vec());
         self.source_depth += 1;
-        for line in text.lines() {
-            self.run_line(line);
-            if self.exit {
-                break;
-            }
-        }
+        self.run_script(&text);
         self.source_depth -= 1;
+        self.positional = saved;
         Ok(())
     }
 
@@ -1022,13 +1182,21 @@ impl Shell {
     }
 
     fn expand_word(&mut self, word: &Word) -> Result<Vec<String>, String> {
-        let text = self.expand_dynamic(&word.text);
+        let text = self.expand_literal(word);
         if !word.glob || !text.bytes().any(|byte| matches!(byte, b'*' | b'?' | b'[')) {
             return Ok(vec![text]);
         }
         match self.glob(&text) {
             Ok(matches) if !matches.is_empty() => Ok(matches),
             _ => Ok(vec![text]),
+        }
+    }
+
+    fn expand_literal(&mut self, word: &Word) -> String {
+        if word.expand {
+            self.expand_dynamic(&word.text)
+        } else {
+            word.text.clone()
         }
     }
 
@@ -1079,6 +1247,117 @@ impl Shell {
         self.out.push_str(&String::from_utf8_lossy(&output.stdout));
         self.out.push_str(&String::from_utf8_lossy(&output.stderr));
         Ok(output.code)
+    }
+
+    fn test_bracket(&self, args: &[String]) -> Result<i32, String> {
+        let Some(last) = args.last() else {
+            return Err("[ ... ]".into());
+        };
+        if last != "]" {
+            return Err("[ ... ]: missing ]".into());
+        }
+        self.test_status(&args[..args.len() - 1])
+    }
+
+    fn test_status(&self, args: &[String]) -> Result<i32, String> {
+        let value = self.eval_test(args)?;
+        Ok(if value { 0 } else { 1 })
+    }
+
+    fn eval_test(&self, args: &[String]) -> Result<bool, String> {
+        if args.is_empty() {
+            return Ok(false);
+        }
+        if args[0] == "!" {
+            return Ok(!self.eval_test(&args[1..])?);
+        }
+        if let Some(index) = args.iter().position(|arg| arg == "-a" || arg == "-o") {
+            let left = self.eval_test(&args[..index])?;
+            let right = self.eval_test(&args[index + 1..])?;
+            return Ok(if args[index] == "-a" {
+                left && right
+            } else {
+                left || right
+            });
+        }
+        match args.len() {
+            1 => Ok(!args[0].is_empty()),
+            2 => {
+                let value = &args[1];
+                Ok(match args[0].as_str() {
+                    "-e" => self.vfs_stat(value).is_some(),
+                    "-f" => self
+                        .vfs_stat(value)
+                        .is_some_and(|entry| entry.kind == Kind::File),
+                    "-d" => self
+                        .vfs_stat(value)
+                        .is_some_and(|entry| entry.kind == Kind::Directory),
+                    "-s" => self.vfs_stat(value).is_some_and(|entry| entry.size > 0),
+                    "-r" | "-w" | "-x" => self.vfs_stat(value).is_some(),
+                    "-z" => value.is_empty(),
+                    "-n" => !value.is_empty(),
+                    other => return Err(format!("test: unknown unary operator {other}")),
+                })
+            }
+            3 => {
+                let left = &args[0];
+                let right = &args[2];
+                Ok(match args[1].as_str() {
+                    "=" | "==" => left == right,
+                    "!=" => left != right,
+                    "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
+                        let left = left
+                            .parse::<i64>()
+                            .map_err(|_| format!("test: expected integer, got {left:?}"))?;
+                        let right = right
+                            .parse::<i64>()
+                            .map_err(|_| format!("test: expected integer, got {right:?}"))?;
+                        match args[1].as_str() {
+                            "-eq" => left == right,
+                            "-ne" => left != right,
+                            "-lt" => left < right,
+                            "-le" => left <= right,
+                            "-gt" => left > right,
+                            "-ge" => left >= right,
+                            _ => unreachable!(),
+                        }
+                    }
+                    other => return Err(format!("test: unknown binary operator {other}")),
+                })
+            }
+            _ => Err("test: too many arguments".into()),
+        }
+    }
+
+    fn vfs_stat(&self, path: &str) -> Option<vfs::Entry> {
+        let path = self.resolve(path).ok()?;
+        vfs::stat(&path).ok()
+    }
+
+    fn read(&mut self, args: &[String]) -> Result<i32, String> {
+        let mut index = 0;
+        if args.first().is_some_and(|arg| arg == "-r") {
+            index = 1;
+        }
+        let name = args.get(index).cloned().unwrap_or_else(|| "REPLY".into());
+        if name.is_empty() {
+            return Err("read: empty variable name".into());
+        }
+        if self.stdin.is_empty() {
+            return Ok(1);
+        }
+        let take = self
+            .stdin
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(self.stdin.len());
+        let line = self.stdin.drain(..take).collect::<Vec<_>>();
+        let value = String::from_utf8_lossy(&line)
+            .trim_end_matches(['\n', '\r'])
+            .to_string();
+        self.env.insert(name, value);
+        Ok(0)
     }
 
     fn printf(&mut self, args: &[String]) -> Result<(), String> {
@@ -1294,13 +1573,33 @@ impl Shell {
                     }
                     name.push(ch);
                 }
-                out.push_str(self.env.get(&name).map(String::as_str).unwrap_or(""));
+                out.push_str(&self.var_value(&name));
                 continue;
             }
             if chars.peek() == Some(&'?') {
                 chars.next();
                 out.push_str(&self.status.to_string());
                 continue;
+            }
+            if let Some(&next) = chars.peek() {
+                if next.is_ascii_digit() {
+                    let mut name = String::new();
+                    while let Some(&ch) = chars.peek() {
+                        if ch.is_ascii_digit() {
+                            name.push(ch);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    out.push_str(&self.var_value(&name));
+                    continue;
+                }
+                if matches!(next, '#' | '@' | '*') {
+                    chars.next();
+                    out.push_str(&self.var_value(&next.to_string()));
+                    continue;
+                }
             }
             let mut name = String::new();
             while let Some(&ch) = chars.peek() {
@@ -1314,7 +1613,7 @@ impl Shell {
             if name.is_empty() {
                 out.push('$');
             } else {
-                out.push_str(self.env.get(&name).map(String::as_str).unwrap_or(""));
+                out.push_str(&self.var_value(&name));
             }
         }
         out
@@ -1375,13 +1674,33 @@ impl Shell {
                     }
                     name.push(ch);
                 }
-                out.push_str(self.env.get(&name).map(String::as_str).unwrap_or(""));
+                out.push_str(&self.var_value(&name));
                 continue;
             }
             if chars.peek() == Some(&'?') {
                 chars.next();
                 out.push_str(&self.status.to_string());
                 continue;
+            }
+            if let Some(&next) = chars.peek() {
+                if next.is_ascii_digit() {
+                    let mut name = String::new();
+                    while let Some(&ch) = chars.peek() {
+                        if ch.is_ascii_digit() {
+                            name.push(ch);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    out.push_str(&self.var_value(&name));
+                    continue;
+                }
+                if matches!(next, '#' | '@' | '*') {
+                    chars.next();
+                    out.push_str(&self.var_value(&next.to_string()));
+                    continue;
+                }
             }
             let mut name = String::new();
             while let Some(&ch) = chars.peek() {
@@ -1395,10 +1714,30 @@ impl Shell {
             if name.is_empty() {
                 out.push('$');
             } else {
-                out.push_str(self.env.get(&name).map(String::as_str).unwrap_or(""));
+                out.push_str(&self.var_value(&name));
             }
         }
         out
+    }
+
+    fn var_value(&self, name: &str) -> String {
+        match name {
+            "0" => self.positional.first().cloned().unwrap_or_default(),
+            "#" => self.positional.len().saturating_sub(1).to_string(),
+            "@" | "*" => self
+                .positional
+                .iter()
+                .skip(1)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" "),
+            value if value.chars().all(|ch| ch.is_ascii_digit()) => value
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| self.positional.get(index).cloned())
+                .unwrap_or_default(),
+            _ => self.env.get(name).cloned().unwrap_or_default(),
+        }
     }
 
     fn error(&mut self, error: &str) {
@@ -1424,6 +1763,7 @@ fn media_type(path: &str) -> &'static str {
 struct Word {
     text: String,
     glob: bool,
+    expand: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1454,6 +1794,7 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut word = String::new();
     let mut glob = false;
+    let mut expand = true;
     let mut quote = None;
     let mut escape = false;
     let mut sub_depth = 0usize;
@@ -1495,14 +1836,18 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
         }
         match ch {
             '#' if word.is_empty() => break,
-            '\'' | '"' => quote = Some(ch),
+            '\'' => {
+                expand = false;
+                quote = Some(ch);
+            }
+            '"' => quote = Some(ch),
             '$' if chars.peek() == Some(&'(') => {
                 chars.next();
                 word.push_str("$(");
                 sub_depth += 1;
             }
             '|' => {
-                push_word(&mut tokens, &mut word, &mut glob);
+                push_word(&mut tokens, &mut word, &mut glob, &mut expand);
                 if chars.peek() == Some(&'|') {
                     chars.next();
                     tokens.push(Token::Op(Op::Or));
@@ -1513,22 +1858,22 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
             '&' => {
                 if chars.peek() == Some(&'&') {
                     chars.next();
-                    push_word(&mut tokens, &mut word, &mut glob);
+                    push_word(&mut tokens, &mut word, &mut glob, &mut expand);
                     tokens.push(Token::Op(Op::And));
                 } else {
                     return Err("background jobs are not supported".into());
                 }
             }
             ';' => {
-                push_word(&mut tokens, &mut word, &mut glob);
+                push_word(&mut tokens, &mut word, &mut glob, &mut expand);
                 tokens.push(Token::Op(Op::Semi));
             }
             '<' => {
-                push_word(&mut tokens, &mut word, &mut glob);
+                push_word(&mut tokens, &mut word, &mut glob, &mut expand);
                 tokens.push(Token::Op(Op::In));
             }
             '>' => {
-                push_word(&mut tokens, &mut word, &mut glob);
+                push_word(&mut tokens, &mut word, &mut glob, &mut expand);
                 if chars.peek() == Some(&'>') {
                     chars.next();
                     tokens.push(Token::Op(Op::Append));
@@ -1540,7 +1885,7 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
                 glob = true;
                 word.push(ch);
             }
-            ch if ch.is_whitespace() => push_word(&mut tokens, &mut word, &mut glob),
+            ch if ch.is_whitespace() => push_word(&mut tokens, &mut word, &mut glob, &mut expand),
             _ => word.push(ch),
         }
     }
@@ -1553,18 +1898,24 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
     if escape {
         word.push('\\');
     }
-    push_word(&mut tokens, &mut word, &mut glob);
+    push_word(&mut tokens, &mut word, &mut glob, &mut expand);
     Ok(tokens)
 }
 
-fn push_word(tokens: &mut Vec<Token>, word: &mut String, glob: &mut bool) {
+fn push_word(tokens: &mut Vec<Token>, word: &mut String, glob: &mut bool, expand: &mut bool) {
     if !word.is_empty() {
+        let text = std::mem::take(word);
+        let has_glob = std::mem::take(glob);
+        let has_expand = *expand;
+        *expand = true;
         tokens.push(Token::Word(Word {
-            text: std::mem::take(word),
-            glob: std::mem::take(glob),
+            text,
+            glob: has_glob,
+            expand: has_expand,
         }));
     } else {
         *glob = false;
+        *expand = true;
     }
 }
 
@@ -1654,6 +2005,71 @@ fn parse_segment(tokens: &[Token]) -> Result<Segment, String> {
         stdin,
         stdout,
     })
+}
+
+fn token_word(token: &Token) -> Option<&str> {
+    match token {
+        Token::Word(word) => Some(&word.text),
+        Token::Op(_) => None,
+    }
+}
+
+fn is_compound(tokens: &[Token]) -> bool {
+    matches!(
+        tokens.first().and_then(token_word),
+        Some("if" | "for" | "while")
+    )
+}
+
+fn find_block_marker(tokens: &[Token], from: usize, targets: &[&str]) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut at_start = true;
+    for (index, token) in tokens.iter().enumerate().skip(from) {
+        match token {
+            Token::Word(word) => {
+                if at_start && matches!(word.text.as_str(), "if" | "for" | "while") {
+                    depth += 1;
+                    at_start = false;
+                    continue;
+                }
+                if at_start && matches!(word.text.as_str(), "fi" | "done") {
+                    if depth == 1 && targets.contains(&word.text.as_str()) {
+                        return Some(index);
+                    }
+                    depth = depth.saturating_sub(1);
+                    at_start = false;
+                    continue;
+                }
+                if depth == 1 && targets.contains(&word.text.as_str()) {
+                    return Some(index);
+                }
+                at_start = matches!(word.text.as_str(), "then" | "do" | "else" | "elif");
+            }
+            Token::Op(Op::Semi) => at_start = true,
+            Token::Op(_) => at_start = false,
+        }
+    }
+    None
+}
+
+fn block_depth(tokens: &[Token]) -> usize {
+    let mut depth = 0usize;
+    let mut at_start = true;
+    for token in tokens {
+        match token {
+            Token::Word(word) => {
+                if at_start && matches!(word.text.as_str(), "if" | "for" | "while") {
+                    depth += 1;
+                } else if at_start && matches!(word.text.as_str(), "fi" | "done") {
+                    depth = depth.saturating_sub(1);
+                }
+                at_start = matches!(word.text.as_str(), "then" | "do" | "else" | "elif");
+            }
+            Token::Op(Op::Semi) => at_start = true,
+            Token::Op(_) => at_start = false,
+        }
+    }
+    depth
 }
 
 fn glob_match(pattern: &str, value: &str) -> bool {
@@ -1756,7 +2172,7 @@ mush — a sandboxed VFS shell
   search QUERY            fuzzy index search
   commands                list installed wasm commands
   which COMMAND           show a command's package identity
-  source SCRIPT           run a Mush script from the VFS
+  source SCRIPT [ARG...]  run a Mush script from the VFS
 
 Shell syntax:
   cmd1 | cmd2             pipe stdout to stdin
@@ -1770,12 +2186,18 @@ Shell syntax:
   $(cmd)                  command substitution
   # comment               rest of line
   $?                      previous command status
+  $0, $1, $#, $@          script name, arguments, count, all arguments
 
 Any other command resolves through the virtual PATH to an installed wasm
 package. Commands get explicit args, piped stdin, the VFS cwd, and no host
 environment; they never run host binaries.
   echo TEXT               print text
   printf FORMAT [ARG...]  formatted output
+  test EXPR               evaluate a condition (or [ EXPR ])
+  read [-r] [VAR]         read one line from piped stdin
+  if ...; then ...; fi    conditional block
+  for VAR in ...; do ...; done
+  while ...; do ...; done
   export KEY=VALUE        set an environment variable
   unset KEY...            remove environment variables
   env                     print the environment

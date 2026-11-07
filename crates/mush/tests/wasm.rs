@@ -252,3 +252,42 @@ fn wasm_spore_supports_globs_substitution_comments_and_printf() {
     assert!(stdout.contains("after\n"), "{stdout}");
     assert!(!stdout.contains("ignored"), "{stdout}");
 }
+
+#[test]
+fn wasm_spore_supports_control_flow_test_read_and_script_args() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg(
+            "mkdir docs\n\
+             write docs/a.txt hello\n\
+             write s.mush 'echo name=$0 first=$1 count=$#'\n\
+             source s.mush alpha beta\n\
+             if test -f docs/a.txt; then echo file; else echo missing; fi\n\
+             if [ 3 -gt 2 ]; then echo math; fi\n\
+             for x in a b; do echo item-$x; done\n\
+             while false; do echo never; done\n\
+             printf 'hello\\nworld\\n' | read x; echo read=$x\n\
+             echo '$HOME'\n\
+             exit",
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("name=s.mush first=alpha count=2"), "{stdout}");
+    assert!(stdout.contains("file\n"), "{stdout}");
+    assert!(stdout.contains("math\n"), "{stdout}");
+    assert!(stdout.contains("item-a\nitem-b"), "{stdout}");
+    assert!(!stdout.contains("never"), "{stdout}");
+    assert!(stdout.contains("read=hello"), "{stdout}");
+    assert!(stdout.contains("$HOME\n"), "{stdout}");
+}
