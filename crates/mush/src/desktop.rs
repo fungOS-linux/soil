@@ -92,6 +92,21 @@ pub fn create_at(base: &Path, id: &str, name: &str, theme: &str) -> Result<Deskt
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
     std::fs::create_dir_all(root.join("projects"))
         .with_context(|| format!("create {}", root.join("projects").display()))?;
+    write_config(&path, &desktop)?;
+    Ok(desktop)
+}
+
+pub fn add_project(id: &str, project: &str) -> Result<()> {
+    validate_id(id)?;
+    validate_id(project)?;
+    let mut desktop = load(id)?;
+    if !desktop.projects.iter().any(|existing| existing == project) {
+        desktop.projects.push(project.to_string());
+    }
+    write_config(&registry_path().join(format!("{id}.toml")), &desktop)
+}
+
+fn write_config(path: &Path, desktop: &Desktop) -> Result<()> {
     let mut text = String::new();
     text.push_str(&format!("id = \"{}\"\n", escape(&desktop.id)));
     text.push_str(&format!("name = \"{}\"\n", escape(&desktop.name)));
@@ -100,9 +115,11 @@ pub fn create_at(base: &Path, id: &str, name: &str, theme: &str) -> Result<Deskt
         escape(&desktop.root.display().to_string())
     ));
     text.push_str(&format!("theme = \"{}\"\n", escape(&desktop.theme)));
-    text.push_str("projects = \"\"\n");
-    std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
-    Ok(desktop)
+    text.push_str(&format!(
+        "projects = \"{}\"\n",
+        escape(&desktop.projects.join(","))
+    ));
+    std::fs::write(path, text).with_context(|| format!("write {}", path.display()))
 }
 
 fn parse(id: &str, text: &str) -> Result<Desktop> {
