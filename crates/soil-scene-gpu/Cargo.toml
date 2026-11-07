@@ -1,0 +1,31 @@
+[package]
+name = "soil-scene-gpu"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+bytemuck = { version = "1", features = ["derive"] }
+fontdue = "0.9"
+pollster = "0.4"
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+soil-scene = { path = "../soil-scene" }
+soil-vt = { path = "../soil-vt" }
+soil-input = { path = "../soil-input", features = ["winit"] }
+wgpu = "27"
+winit = "0.30"
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+
+[[bin]]
+name = "soil-scene-gpu"
+path = "src/main.rs"
+
+[[bin]]
+name = "soil-viz"
+path = "src/bin/soil-viz.rs"

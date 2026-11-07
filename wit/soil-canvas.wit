@@ -30,6 +30,42 @@ interface surface {
 
   use soil:input/types@1.0.0.{key, modifiers};
 
+  record rgb {
+    r: u8,
+    g: u8,
+    b: u8,
+  }
+
+  enum theme-mode {
+    light,
+    dark,
+  }
+
+  /// Theme tokens the host has already resolved. A Spore-owned renderer reads
+  /// these instead of guessing colors from a screenshot or hard-coding its own.
+  record theme {
+    mode: theme-mode,
+    background: rgb,
+    surface: rgb,
+    text: rgb,
+    muted: rgb,
+    primary: rgb,
+    success: rgb,
+    warning: rgb,
+    danger: rgb,
+    info: rgb,
+    /// Type scale in logical pixels.
+    micro: f32,
+    small: f32,
+    body: f32,
+    large: f32,
+    title: f32,
+    display: f32,
+    hero: f32,
+    space-two: f32,
+    radius: f32,
+  }
+
   record event {
     key: key,
     modifiers: modifiers,
@@ -44,10 +80,19 @@ interface surface {
     scale: f32,
     focused: bool,
     visible: bool,
+    /// The host's current theme. Present on every observation so a GPU-rendered
+    /// surface can repaint when the owner theme changes without reading pixels.
+    theme: theme,
   }
 
-  /// Render the granted owner surface. The host retains the pixels.
-  present: func() -> result<state, failure>;
+  /// Present into the space the host granted.
+  ///
+  /// `document` is a versioned payload from `soil-scene`: a scene the host
+  /// rasterizes, an RGBA frame the Spore rendered, or a lease on a GPU texture.
+  /// It is bytes rather than a WIT type on purpose -- a new node kind must not
+  /// rebuild every Spore that draws. The host validates it and refuses anything
+  /// it cannot present, naming the reason.
+  present: func(document: list<u8>) -> result<state, failure>;
 
   /// Read the current owner state without presenting.
   observe: func() -> result<state, failure>;
