@@ -3,6 +3,11 @@
 Mush is the sandboxed shell over one VFS workspace. The command engine is a
 Wasm Spore; the native `mush` process is only the host.
 
+A Mush session is intended to run inside a **Desktop**, the durable top-level
+namespace for a body of work. `--root` is currently a standalone VFS root; the
+Desktop binding adds project mounts, a records scope, and a stable identity. See
+[Desktops](desktop.md).
+
 ```sh
 mush --root ~/fungos-node \
   --wasm spores/mush/module.wasm
