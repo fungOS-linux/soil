@@ -115,6 +115,15 @@ mush request --json 'pwd'
 status. `--json` returns the full service envelope, including `status`, `exit`
 and `output`.
 
+For Operator, use the MCP endpoint:
+
+```sh
+mush mcp --listen 127.0.0.1:0
+```
+
+It exposes `mcp__mush__mush_exec` over loopback HTTP. See
+[Operator integration](mush-operator.md).
+
 ## Interactive editing
 
 When stdin is a terminal, Mush uses `rustyline`:

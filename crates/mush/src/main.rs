@@ -7,6 +7,7 @@
 mod config;
 mod gateway;
 mod mcp_gateway;
+mod mcp_server;
 mod overlay;
 mod service;
 
@@ -17,6 +18,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use rand::Rng;
 use rustyline::{DefaultEditor, error::ReadlineError};
 use soil::command::command as command_abi;
 use soil_command::{CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
@@ -307,6 +309,10 @@ fn run() -> Result<()> {
     if doctor {
         args.remove(0);
     }
+    let mcp = args.first().map(String::as_str) == Some("mcp");
+    if mcp {
+        args.remove(0);
+    }
     let serve = args.iter().any(|arg| arg == "--serve");
     args.retain(|arg| arg != "--serve");
     let config_path = take_option(&mut args, "--config")
@@ -389,6 +395,12 @@ fn run() -> Result<()> {
                 .map(|path| path.display().to_string())
         })
         .map(|value| config::expand_home(&value));
+    let listen = take_option(&mut args, "--listen")
+        .or_else(|| std::env::var("MUSH_MCP_LISTEN").ok())
+        .unwrap_or_else(|| "127.0.0.1:0".into());
+    let configured_token =
+        take_option(&mut args, "--mcp-token").or_else(|| std::env::var("MUSH_MCP_TOKEN").ok());
+    let mcp_token = configured_token.clone().unwrap_or_else(new_mcp_token);
 
     if doctor {
         return doctor_report(
@@ -430,6 +442,18 @@ fn run() -> Result<()> {
         });
     }
 
+    if mcp {
+        let server = tiny_http::Server::http(&listen)
+            .map_err(|error| anyhow::anyhow!("mcp listen {listen}: {error}"))?;
+        if configured_token.is_none() {
+            eprintln!("mush: mcp bearer token {mcp_token}");
+        }
+        return mcp_server::serve(server, &mcp_token, |line| {
+            let response = runtime.execute(line)?;
+            Ok((response.output, response.exit, response.status))
+        });
+    }
+
     if let Some(command) = command {
         for line in command.lines() {
             let response = runtime.execute(line)?;
@@ -452,6 +476,12 @@ fn run() -> Result<()> {
     } else {
         run_lines(&mut runtime)
     }
+}
+
+fn new_mcp_token() -> String {
+    let mut bytes = [0u8; 24];
+    rand::rng().fill(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
