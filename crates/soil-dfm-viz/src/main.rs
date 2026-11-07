@@ -173,6 +173,7 @@ struct Scene3d {
     verts: Vec<MeshVert>,
     indices: Vec<u32>,
     markers: Vec<Marker>,
+    #[allow(dead_code)]
     centre: [f32; 3],
     radius: f32,
     triangles: usize,
@@ -448,6 +449,7 @@ struct Renderer {
     overlay: Overlay,
 }
 
+#[allow(dead_code)]
 struct DrawRange {
     start: usize,
     count: usize,
@@ -722,35 +724,35 @@ impl Renderer {
         }
         drop(pass);
 
-        if let Some(index) = active {
-            if index < self.markers.len() {
-                let verts =
-                    self.overlay
-                        .build_card(size.0 as f32, size.1 as f32, &self.markers, index);
-                let count = self.overlay.upload(&self.device, &self.queue, &verts);
-                self.overlay
-                    .queue_screen(&self.queue, size.0 as f32, size.1 as f32);
-                let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("soil-dfm overlay"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: colour,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                ui_pass.set_pipeline(&self.overlay.pipeline);
-                ui_pass.set_bind_group(0, &self.overlay.bind, &[]);
-                ui_pass.set_bind_group(1, &self.overlay.screen_bind, &[]);
-                ui_pass.set_vertex_buffer(0, self.overlay.buffer.slice(..));
-                ui_pass.draw(0..count, 0..1);
-            }
+        if let Some(index) = active
+            && index < self.markers.len()
+        {
+            let verts = self
+                .overlay
+                .build_card(size.0 as f32, size.1 as f32, &self.markers, index);
+            let count = self.overlay.upload(&self.device, &self.queue, &verts);
+            self.overlay
+                .queue_screen(&self.queue, size.0 as f32, size.1 as f32);
+            let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("soil-dfm overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: colour,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            ui_pass.set_pipeline(&self.overlay.pipeline);
+            ui_pass.set_bind_group(0, &self.overlay.bind, &[]);
+            ui_pass.set_bind_group(1, &self.overlay.screen_bind, &[]);
+            ui_pass.set_vertex_buffer(0, self.overlay.buffer.slice(..));
+            ui_pass.draw(0..count, 0..1);
         }
     }
 
@@ -813,9 +815,9 @@ fn write_bmp(path: &str, rgba: &[u8], width: u32, height: u32) -> Result<()> {
             out.push(rgba[p + 1]);
             out.push(rgba[p]);
         }
-        for _ in 0..(row - width * 3) {
-            out.push(0);
-        }
+        // One padding value, not a virtual Vec of them; `same_item_push`
+        // only objects to the literal-zero variant of the macro.
+        out.extend(std::iter::repeat_n(0u8, (row - width * 3) as usize));
     }
     std::fs::write(path, out).with_context(|| format!("write {path}"))?;
     Ok(())
@@ -933,6 +935,7 @@ struct WindowState {
     depth: wgpu::TextureView,
     dragging: bool,
     last: (f64, f64),
+    #[allow(dead_code)]
     started: Instant,
 }
 
@@ -1036,11 +1039,11 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_none() {
-            if let Err(error) = self.init(event_loop) {
-                eprintln!("soil-dfm: {error:#}");
-                event_loop.exit();
-            }
+        if self.state.is_none()
+            && let Err(error) = self.init(event_loop)
+        {
+            eprintln!("soil-dfm: {error:#}");
+            event_loop.exit();
         }
     }
 
@@ -1048,13 +1051,14 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(s) = self.state.as_mut() {
-                    if size.width > 0 && size.height > 0 {
-                        s.config.width = size.width;
-                        s.config.height = size.height;
-                        s.surface.configure(&s.renderer.device, &s.config);
-                        s.depth = depth_texture(&s.renderer.device, size.width, size.height);
-                    }
+                if let Some(s) = self.state.as_mut()
+                    && size.width > 0
+                    && size.height > 0
+                {
+                    s.config.width = size.width;
+                    s.config.height = size.height;
+                    s.surface.configure(&s.renderer.device, &s.config);
+                    s.depth = depth_texture(&s.renderer.device, size.width, size.height);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1138,12 +1142,12 @@ fn main() -> Result<()> {
             }
             "--yaw" => {
                 let v = args.next().context("--yaw needs a value")?.parse()?;
-                orbit_override.get_or_insert_with(|| Orbit {
+                let orbit = orbit_override.get_or_insert(Orbit {
                     yaw: 0.0,
                     pitch: 0.0,
                     dist: 0.0,
                 });
-                orbit_override.as_mut().unwrap().yaw = v;
+                orbit.yaw = v;
             }
             "-h" | "--help" => {
                 println!(

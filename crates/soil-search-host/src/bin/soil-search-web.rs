@@ -37,6 +37,7 @@ struct Args {
     git_roots: Vec<PathBuf>,
     spore_roots: Vec<PathBuf>,
     mycelium_snapshot: Option<PathBuf>,
+    applications_snapshot: Option<PathBuf>,
     marbles_snapshot: Option<PathBuf>,
     marbles_store: Option<String>,
     marbles_company: Option<String>,
@@ -72,6 +73,9 @@ fn main() -> Result<()> {
     }
     if let Some(dir) = &args.mycelium_snapshot {
         service = service.with_mycelium_snapshot_dir(dir);
+    }
+    if let Some(path) = &args.applications_snapshot {
+        service = service.with_applications_snapshot(path);
     }
     if let Some(path) = &args.marbles_snapshot {
         service = service.with_marbles(soil_marbles::MarblesIndex::from_snapshot(
@@ -431,6 +435,11 @@ fn parse_args() -> Result<Option<Args>> {
             "--mycelium-snapshot" => {
                 args.mycelium_snapshot = Some(PathBuf::from(
                     iter.next().context("--mycelium-snapshot needs a value")?,
+                ));
+            }
+            "--applications-snapshot" => {
+                args.applications_snapshot = Some(PathBuf::from(
+                    iter.next().context("--applications-snapshot needs a value")?,
                 ));
             }
             "--marbles-snapshot" => {
