@@ -10,6 +10,14 @@
 //! evolves faster than an ABI should: a new node kind must never require
 //! rebuilding every Spore that renders. So the document carries its own version
 //! and the host refuses what it cannot draw.
+//!
+//! A scene is a 2D document, and 3D worlds are deliberately not part of it. A
+//! world is persistent, shared between participants, and rendered by an engine
+//! that owns materials, lighting and stereo; it reaches the host as pixels
+//! (`Present::Rgba`) or as a texture lease (`Present::GpuLease`), not as nodes.
+//! A mesh, camera or light kind here would make this crate a second 3D engine
+//! that every host then has to keep up with, and a node kind is a promise the
+//! wire has to keep.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -318,12 +326,6 @@ pub enum Content {
     GpuDense(GpuDense),
     /// A resident 3D point cloud drawn through a depth-tested GPU pipeline.
     GpuPoints3D(GpuPoints3D),
-    /// A mesh asset drawn at this node's transform.
-    Mesh(Mesh),
-    /// The view a host renders this subtree through.
-    Camera(Camera),
-    /// A light in the scene's 3D subtree.
-    Light(Light),
 }
 
 impl Content {
@@ -342,9 +344,6 @@ impl Content {
             Self::Shader(shader) => shader.validate(),
             Self::GpuDense(dense) => dense.validate(),
             Self::GpuPoints3D(points) => points.validate(),
-            Self::Mesh(mesh) => mesh.validate(),
-            Self::Camera(camera) => camera.validate(),
-            Self::Light(light) => light.validate(),
         }
     }
 }
@@ -932,126 +931,6 @@ impl Image {
     fn validate(&self) -> Result<(), Error> {
         safe_id(&self.asset, "asset")
     }
-}
-
-/// A mesh drawn at the node's transform.
-///
-/// The geometry stays a named asset, never inline: a Spore hands the host a
-/// reference and the host decides how to load it, exactly as `Image` does.
-/// Which camera and which lights apply is the host's composition decision and
-/// deliberately not a per-node field, so a producer cannot light one mesh and
-/// leave its neighbour unlit by accident.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Mesh {
-    /// An asset id the Spore declared, never a path.
-    pub asset: String,
-}
-
-/// The view a host renders this subtree through.
-///
-/// A camera is content, not a host setting: a scene that shows a model wants to
-/// choose the angle, and the host still owns the extent it is drawn into.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Camera {
-    pub projection: Projection,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Projection {
-    /// `vertical_fov_degrees` is in degrees; the near and far planes are in the
-    /// same units as the node transform.
-    Perspective {
-        vertical_fov_degrees: f32,
-        near: f32,
-        far: f32,
-    },
-    /// A fixed world height. The width follows the surface aspect, so widening
-    /// a window shows more scene instead of stretching it.
-    Orthographic { height: f32, near: f32, far: f32 },
-}
-
-/// A light in the scene's 3D subtree.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Light {
-    /// Lights everything in scope equally and from no direction.
-    Ambient { intensity: f32 },
-    /// Parallel rays, as from a distant source. `color` is linear RGB.
-    Directional { intensity: f32, color: [f32; 3] },
-    /// A point source at this node's translation. `color` is linear RGB.
-    Point { intensity: f32, color: [f32; 3] },
-}
-
-impl Mesh {
-    fn validate(&self) -> Result<(), Error> {
-        safe_id(&self.asset, "asset")
-    }
-}
-
-impl Camera {
-    fn validate(&self) -> Result<(), Error> {
-        match self.projection {
-            Projection::Perspective {
-                vertical_fov_degrees,
-                near,
-                far,
-            } => {
-                finite(vertical_fov_degrees)?;
-                if !(0.0..180.0).contains(&vertical_fov_degrees) {
-                    return Err(Error::invalid("camera fov must be 0..180 degrees"));
-                }
-                depth_planes(near, far)
-            }
-            Projection::Orthographic { height, near, far } => {
-                finite(height)?;
-                if height <= 0.0 {
-                    return Err(Error::invalid("orthographic height must be positive"));
-                }
-                depth_planes(near, far)
-            }
-        }
-    }
-}
-
-impl Light {
-    fn validate(&self) -> Result<(), Error> {
-        let (intensity, color) = match self {
-            Self::Ambient { intensity } => (*intensity, None),
-            Self::Directional { intensity, color } | Self::Point { intensity, color } => {
-                (*intensity, Some(*color))
-            }
-        };
-        finite(intensity)?;
-        if intensity < 0.0 {
-            return Err(Error::invalid("light intensity must not be negative"));
-        }
-        if let Some(color) = color {
-            for channel in color {
-                finite(channel)?;
-                if !(0.0..=1.0).contains(&channel) {
-                    return Err(Error::invalid("light color must be 0..=1"));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// A near plane behind the eye or a far plane at or before it draws nothing and
-/// usually draws it wrong, so both are refused rather than clamped.
-fn depth_planes(near: f32, far: f32) -> Result<(), Error> {
-    finite(near)?;
-    finite(far)?;
-    if near <= 0.0 {
-        return Err(Error::invalid("camera near plane must be positive"));
-    }
-    if far <= near {
-        return Err(Error::invalid("camera far plane must be beyond near"));
-    }
-    Ok(())
 }
 
 impl Shader {
