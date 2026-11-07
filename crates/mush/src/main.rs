@@ -313,6 +313,10 @@ fn run() -> Result<()> {
         .map(|value| config::expand_home(&value))
         .unwrap_or_else(config::default_path);
     let config = config::load(&config_path)?;
+    if args.first().map(String::as_str) == Some("request") {
+        args.remove(0);
+        return run_request(&config, args);
+    }
     let root = take_option(&mut args, "--root")
         .or_else(|| std::env::var("MUSH_ROOT").ok())
         .or_else(|| config.root.as_ref().map(|path| path.display().to_string()))
@@ -421,6 +425,7 @@ fn run() -> Result<()> {
             Ok(service::Executed {
                 output: response.output,
                 exit: response.exit,
+                status: response.status,
             })
         });
     }
@@ -447,6 +452,62 @@ fn run() -> Result<()> {
     } else {
         run_lines(&mut runtime)
     }
+}
+
+fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let socket = take_option(&mut args, "--socket")
+        .or_else(|| std::env::var("MUSH_SOCKET").ok())
+        .or_else(|| {
+            config
+                .socket
+                .as_ref()
+                .map(|path| path.display().to_string())
+        })
+        .map(|value| config::expand_home(&value))
+        .context("mush request needs --socket PATH or a config socket")?;
+    let json = args.iter().any(|arg| arg == "--json");
+    args.retain(|arg| arg != "--json");
+    if args.is_empty() {
+        anyhow::bail!("usage: mush request [--socket PATH] [--json] COMMAND...");
+    }
+    let command = args.join(" ");
+    let mut stream = UnixStream::connect(&socket)
+        .with_context(|| format!("connect Mush service {}", socket.display()))?;
+    stream
+        .write_all(serde_json::to_string(&serde_json::json!({"command": command}))?.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    let response: serde_json::Value = serde_json::from_str(&line).context("parse Mush response")?;
+    if json {
+        print!("{line}");
+        if !line.ends_with('\n') {
+            println!();
+        }
+    } else if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        if let Some(output) = response.get("output").and_then(serde_json::Value::as_str) {
+            print!("{output}");
+        }
+    } else {
+        let error = response
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Mush service request failed");
+        anyhow::bail!("{error}");
+    }
+    io::stdout().flush()?;
+    let status = response
+        .get("status")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32;
+    if status != 0 {
+        std::process::exit(status);
+    }
+    Ok(())
 }
 
 fn doctor_report(

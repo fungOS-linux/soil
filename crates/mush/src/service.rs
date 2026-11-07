@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 pub struct Executed {
     pub output: String,
     pub exit: bool,
+    pub status: i32,
 }
 
 pub fn serve<F>(socket: &Path, mut execute: F) -> Result<()>
@@ -90,15 +91,20 @@ where
     };
     let mut output = String::new();
     let mut exit = false;
+    let mut status = 0;
     for line in command.lines() {
         let executed = execute(line)?;
         output.push_str(&executed.output);
         exit |= executed.exit;
+        status = executed.status;
         if exit {
             break;
         }
     }
-    write_response(stream, &json!({"ok": true, "output": output, "exit": exit}))?;
+    write_response(
+        stream,
+        &json!({"ok": true, "output": output, "exit": exit, "status": status}),
+    )?;
     Ok(())
 }
 

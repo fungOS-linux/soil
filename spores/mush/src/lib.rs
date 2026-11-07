@@ -34,6 +34,7 @@ impl Guest for Component {
             output,
             exit,
             prompt,
+            status: 0,
         })
     }
 
@@ -45,6 +46,7 @@ impl Guest for Component {
             output: std::mem::take(&mut shell.out),
             exit: shell.exit,
             prompt: shell.prompt(),
+            status: shell.status,
         })
     }
 

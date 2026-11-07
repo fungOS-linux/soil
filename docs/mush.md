@@ -104,6 +104,17 @@ per connection. It refuses to replace an existing socket and checks the peer
 UID against the service account. See
 [service accounts](mush-service-accounts.md) for the `ajmwagar-agents` layout.
 
+Use the client from another process:
+
+```sh
+mush request 'mb ready --json'
+mush request --json 'pwd'
+```
+
+`mush request` prints the command output and exits with the command's shell
+status. `--json` returns the full service envelope, including `status`, `exit`
+and `output`.
+
 ## Interactive editing
 
 When stdin is a terminal, Mush uses `rustyline`:

@@ -69,7 +69,13 @@ The service accepts one newline-delimited JSON request per connection:
 Response:
 
 ```json
-{"ok":true,"output":"...","exit":false}
+{"ok":true,"output":"...","exit":false,"status":0}
+```
+
+Use the client from the service account or an explicitly authorized process:
+
+```sh
+mush request --socket ~/.local/share/fungos/mush.sock 'mb ready --json'
 ```
 
 The socket is created `0600`; an existing socket is never replaced. The service

@@ -15,6 +15,7 @@ world mush {
     output: string,
     exit: bool,
     prompt: string,
+    status: s32,
   }
 
   /// Initialize the shell and execute the VFS `mushrc` startup file.
