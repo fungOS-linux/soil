@@ -4,19 +4,20 @@ Mush is the sandboxed shell over one VFS workspace. The command engine is a
 Wasm Spore; the native `mush` process is only the host.
 
 ```sh
-mush --root ~/fungos-node \
-  --wasm spores/mush/module.wasm
+mush --root ~/fungos-node
 ```
 
-The Spore imports exactly three capabilities:
+The Spore imports four capabilities:
 
 ```text
 soil:vfs       read, stat, list
 soil:index     browse, search, KNN
 soil:vfs-mut   write, remove, mkdir, rmdir, rename
+soil:command   virtual PATH to installed wasm commands
 ```
 
-It has no host filesystem, `PATH` lookup, subprocess, or network access.
+It has no host filesystem, host `PATH`, subprocess, or network access. The
+virtual `PATH` resolves only installed wasm command packages.
 
 ## Shell state
 
@@ -51,6 +52,26 @@ mkdir notes
 ```
 
 The file is VFS content, not a host dotfile.
+
+## Install the host shell
+
+The host binary embeds `spores/mush/module.wasm`, so it does not need a sidecar
+file at runtime:
+
+```sh
+cargo build -p mush --release
+install -m755 target/release/mush ~/.local/bin/mush
+```
+
+Then:
+
+```sh
+mush --root ~/fungos-node
+```
+
+This installs the **host** launcher named `mush`. It does not create
+`/bin/mush` inside the VFS, and it does not turn the host process into a
+container. The Spore remains the sandboxed part.
 
 ## Interactive editing
 
@@ -120,6 +141,21 @@ is currently a materialized host directory, not a live FUSE mount. Operator is
 still a native process; this slice gives it VFS-derived workspace content and
 overlay apply/discard semantics, not yet a host filesystem sandbox.
 
+## Shell syntax
+
+```sh
+cmd1 | cmd2        # pipe stdout to stdin
+cmd1 ; cmd2        # sequence
+cmd1 && cmd2       # run cmd2 only if cmd1 succeeds
+cmd1 || cmd2       # run cmd2 only if cmd1 fails
+cmd < PATH         # stdin from a VFS file
+cmd > PATH         # stdout to a VFS file
+cmd >> PATH        # append stdout to a VFS file
+$?                 # previous status
+```
+
+`cat`, `grep`, `head`, `tail` and `wc` read piped stdin when no path is given.
+
 ## Commands
 
 ```text
@@ -129,20 +165,22 @@ cd [DIR|-]
 ls [-l] [DIR]
 mkdir DIR...
 rmdir DIR...
-cat PATH
+cat [PATH...]
 write PATH [TEXT...]
 append PATH [TEXT...]
 touch PATH...
-head [-n N] PATH
-tail [-n N] PATH
-grep [-i] PATTERN PATH...
-wc [-l|-c] PATH...
+head [-n N] [PATH]
+tail [-n N] [PATH]
+grep [-i] PATTERN [PATH...]
+wc [-l|-c] [PATH...]
 stat PATH
 tree [DIR]
 rm [-r] PATH...
 mv FROM TO
 cp [-r] FROM TO
 search QUERY
+commands
+which COMMAND
 source SCRIPT
 echo TEXT
 export KEY=VALUE
@@ -210,6 +248,10 @@ rm     -> namespace unlink; blob and history retained
 
 ## Host boundary
 
-`mush` opens the VFS root, links the three grants, and calls the Spore one line
-at a time. The Spore returns output, prompt, and exit state. The current host is
+`mush` opens the VFS root, links the grants, and calls the Spore one line at a
+time. The Spore returns output, prompt, and exit state. The current host is
 line-oriented; `soil:terminal` cell-grid rendering remains the next frontend.
+
+The host also owns command-package lookup. A command runs in a nested Wasmtime
+WASI instance with explicit args, piped stdin, the VFS cwd, no inherited host
+environment, and only the capabilities configured by the host.

@@ -20,11 +20,15 @@ use soil::command::command as command_abi;
 use soil_command::{CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
 use soil_inference::{GeodeResolver, SoilConfig};
 use soil_vfs_host::{VfsHost, index, vfs, vfs_mut};
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({ path: "../../spores/mush/wit", world: "mush" });
+
+/// The host binary carries the Mush Spore by default, so an installed `mush`
+/// works without a sidecar file. `--wasm PATH` remains available for dev.
+const EMBEDDED_MUSH: &[u8] = include_bytes!("../../../spores/mush/module.wasm");
 
 struct Host {
     vfs: VfsHost,
@@ -248,6 +252,7 @@ impl Runtime {
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         soil_vfs_host::add_to_linker::<Host>(&mut linker)?;
         soil_vfs_host::add_mutation_to_linker::<Host>(&mut linker)?;
+        command_abi::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         let component = Component::new(&engine, wasm)?;
         let host = Host::new(root, command_root, records)?;
         let mut store = Store::new(&engine, host);
@@ -281,6 +286,17 @@ fn main() {
 
 fn run() -> Result<()> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().map(String::as_str) == Some("--version") {
+        println!("mush {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("--help") {
+        println!(
+            "mush {}\n\nUsage:\n  mush [--root DIR] [--wasm PATH] [--command LINE] [--script PATH]\n  mush run op [OPTIONS]\n\nThe Mush Spore is embedded; --wasm overrides it for development.",
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(());
+    }
     let root = take_option(&mut args, "--root")
         .or_else(|| std::env::var("MUSH_ROOT").ok())
         .unwrap_or_else(|| "~/.local/share/fungos/vfs".into());
@@ -294,8 +310,7 @@ fn run() -> Result<()> {
     }
     let wasm = take_option(&mut args, "--wasm")
         .or_else(|| std::env::var("MUSH_WASM").ok())
-        .unwrap_or_else(|| "spores/mush/module.wasm".into());
-    let wasm = expand_home(&wasm);
+        .map(|value| expand_home(&value));
     let term = take_option(&mut args, "--term")
         .or_else(|| std::env::var("TERM").ok())
         .unwrap_or_else(|| "xterm-256color".into());
@@ -305,8 +320,11 @@ fn run() -> Result<()> {
         .or_else(|| std::env::var("MUSH_HISTORY").ok())
         .map(|value| expand_home(&value))
         .unwrap_or_else(|| root.join(".fungos/mush-history"));
-    let bytes =
-        std::fs::read(&wasm).with_context(|| format!("read Mush component {}", wasm.display()))?;
+    let bytes = match wasm {
+        Some(wasm) => std::fs::read(&wasm)
+            .with_context(|| format!("read Mush component {}", wasm.display()))?,
+        None => EMBEDDED_MUSH.to_vec(),
+    };
     let command_root = take_option(&mut args, "--command-root")
         .or_else(|| std::env::var("FUNGOS_COMMAND_ROOT").ok())
         .map(|value| expand_home(&value))

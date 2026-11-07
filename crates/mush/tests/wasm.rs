@@ -166,3 +166,48 @@ fn run_op_applies_overlay_and_respects_gitignore() {
     assert_eq!(vfs.get("src/main.rs").unwrap(), b"new");
     assert!(vfs.file("target/debug/app").unwrap().is_none());
 }
+
+#[test]
+fn wasm_spore_supports_pipelines_sequences_and_input_redirection() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg(
+            "mkdir docs\n\
+             write docs/a.txt alpha\n\
+             write docs/b.txt beta\n\
+             cat docs/a.txt | grep alpha\n\
+             echo hello | wc -l\n\
+             false || echo recovered\n\
+             true && echo ran\n\
+             false && echo skipped\n\
+             echo one; echo two\n\
+             cat < docs/a.txt\n\
+             echo x > docs/out.txt\n\
+             echo y >> docs/out.txt\n\
+             cat docs/out.txt\n\
+             false\n\
+             echo $?\n\
+             exit",
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("alpha"), "{stdout}");
+    assert!(stdout.contains("1\n"), "{stdout}");
+    assert!(stdout.contains("recovered"), "{stdout}");
+    assert!(stdout.contains("ran"), "{stdout}");
+    assert!(!stdout.contains("skipped"), "{stdout}");
+    assert!(stdout.contains("one\ntwo"), "{stdout}");
+    assert!(stdout.contains("x\ny\n"), "{stdout}");
+    assert!(stdout.trim_end().ends_with('1'), "{stdout}");
+}

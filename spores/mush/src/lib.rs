@@ -69,6 +69,8 @@ struct Shell {
     cwd: String,
     env: BTreeMap<String, String>,
     out: String,
+    stdin: Vec<u8>,
+    status: i32,
     exit: bool,
     source_depth: u8,
 }
@@ -84,7 +86,7 @@ impl Shell {
             ("TERM", "dumb"),
             ("USER", "mush"),
             ("LOGNAME", "mush"),
-            ("SHELL", "/bin/mush"),
+            ("SHELL", "mush"),
             ("MUSH_VERSION", env!("CARGO_PKG_VERSION")),
         ] {
             env.insert(key.into(), value.into());
@@ -105,6 +107,8 @@ impl Shell {
             cwd: String::new(),
             env,
             out: String::new(),
+            stdin: Vec::new(),
+            status: 0,
             exit: false,
             source_depth: 0,
         }
@@ -134,93 +138,175 @@ impl Shell {
         if line.is_empty() || line.starts_with('#') {
             return;
         }
-        let words = match split_words(line) {
-            Ok(words) => words,
+        let tokens = match tokenize(line) {
+            Ok(tokens) => tokens,
             Err(error) => {
                 self.error(&error);
+                self.status = 2;
                 return;
             }
         };
-        let (words, redirect) = match parse_redirection(words) {
-            Ok(parsed) => parsed,
+        let chains = match parse_chains(&tokens) {
+            Ok(chains) => chains,
             Err(error) => {
                 self.error(&error);
+                self.status = 2;
                 return;
             }
         };
-        let Some(command) = words.first().map(String::as_str) else {
-            return;
-        };
-        let args: Vec<String> = words[1..].iter().map(|word| self.expand(word)).collect();
-        let saved = std::mem::take(&mut self.out);
-        let result = match command {
+        for (operator, pipeline) in chains {
+            let should_run = match operator {
+                ChainOp::Always => true,
+                ChainOp::And => self.status == 0,
+                ChainOp::Or => self.status != 0,
+            };
+            if !should_run {
+                continue;
+            }
+            self.status = self.run_pipeline(&pipeline);
+            if self.exit {
+                break;
+            }
+        }
+    }
+
+    fn run_pipeline(&mut self, tokens: &[Token]) -> i32 {
+        let segments = split_tokens(tokens, Op::Pipe);
+        let mut input = Vec::new();
+        let mut status = 0;
+        let last_index = segments.len().saturating_sub(1);
+        for (index, segment) in segments.iter().enumerate() {
+            let parsed = match parse_segment(segment) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    self.error(&error);
+                    return 2;
+                }
+            };
+            let words = parsed
+                .words
+                .iter()
+                .map(|word| self.expand(word))
+                .collect::<Vec<_>>();
+            let Some(command) = words.first().map(String::as_str) else {
+                self.error("pipeline: empty command");
+                return 2;
+            };
+            let args = words[1..].to_vec();
+            if let Some(target) = parsed.stdin {
+                let target = self.expand(&target);
+                let path = match self.resolve(&target) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.error(&error);
+                        return 2;
+                    }
+                };
+                input = match self.read_file(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        self.error(&error);
+                        return 2;
+                    }
+                };
+            }
+            let saved = std::mem::take(&mut self.out);
+            self.stdin = std::mem::take(&mut input);
+            let result = self.run_simple(command, &args);
+            let produced = std::mem::replace(&mut self.out, saved);
+            self.stdin.clear();
+            let code = match result {
+                Ok(code) => code,
+                Err(error) => {
+                    self.error(&error);
+                    status = 1;
+                    break;
+                }
+            };
+            status = code;
+            if let Some((append, target)) = parsed.stdout {
+                let target = self.expand(&target);
+                if let Err(error) = self.redirect(&target, append, produced.as_bytes()) {
+                    self.error(&error);
+                    status = 1;
+                    break;
+                }
+            } else if index == last_index {
+                self.out.push_str(&produced);
+            } else {
+                input = produced.into_bytes();
+            }
+        }
+        status
+    }
+
+    fn run_simple(&mut self, command: &str, args: &[String]) -> Result<i32, String> {
+        match command {
             "help" => {
                 self.out.push_str(HELP);
                 self.out.push('\n');
-                Ok(())
+                Ok(0)
             }
+            "true" | ":" => Ok(0),
+            "false" => Ok(1),
             "exit" | "quit" => {
+                let code = match args.first() {
+                    Some(value) => value
+                        .parse::<i32>()
+                        .map_err(|_| format!("exit: invalid status {value:?}"))?,
+                    None => self.status,
+                };
                 self.exit = true;
-                Ok(())
+                Ok(code)
             }
             "pwd" => {
                 self.out.push_str(&self.display_cwd());
                 self.out.push('\n');
-                Ok(())
+                Ok(0)
             }
-            "cd" => self.cd(args.first().map(String::as_str)),
-            "ls" => self.ls(&args),
-            "mkdir" => self.mkdir(&args),
-            "find" => self.find(&args),
-            "rmdir" => self.rmdir(&args),
-            "cat" => self.cat(&args),
-            "write" => self.write(&args),
-            "append" => self.append(&args),
-            "touch" => self.touch(&args),
-            "head" => self.head(&args),
-            "tail" => self.tail(&args),
-            "grep" => self.grep(&args),
-            "wc" => self.wc(&args),
-            "stat" => self.stat(&args),
-            "tree" => self.tree(&args),
-            "rm" => self.rm(&args),
-            "mv" => self.mv(&args),
-            "cp" => self.cp(&args),
-            "search" => self.search(&args),
-            "commands" => self.list_commands(&args),
-            "which" => self.which(&args),
-            "source" => self.source(&args),
+            "cd" => self.cd(args.first().map(String::as_str)).map(|_| 0),
+            "ls" => self.ls(args).map(|_| 0),
+            "mkdir" => self.mkdir(args).map(|_| 0),
+            "find" => self.find(args).map(|_| 0),
+            "rmdir" => self.rmdir(args).map(|_| 0),
+            "cat" => self.cat(args).map(|_| 0),
+            "write" => self.write(args).map(|_| 0),
+            "append" => self.append(args).map(|_| 0),
+            "touch" => self.touch(args).map(|_| 0),
+            "head" => self.head(args).map(|_| 0),
+            "tail" => self.tail(args).map(|_| 0),
+            "grep" => self.grep(args).map(|_| 0),
+            "wc" => self.wc(args).map(|_| 0),
+            "stat" => self.stat(args).map(|_| 0),
+            "tree" => self.tree(args).map(|_| 0),
+            "rm" => self.rm(args).map(|_| 0),
+            "mv" => self.mv(args).map(|_| 0),
+            "cp" => self.cp(args).map(|_| 0),
+            "search" => self.search(args).map(|_| 0),
+            "commands" => self.list_commands(args).map(|_| 0),
+            "which" => self.which(args).map(|_| 0),
+            "source" => {
+                self.source(args)?;
+                Ok(self.status)
+            }
             "echo" => {
                 self.out.push_str(&args.join(" "));
                 self.out.push('\n');
-                Ok(())
+                Ok(0)
             }
-            "export" | "set" => self.set_env(&args),
-            "unset" => self.unset_env(&args),
+            "export" | "set" => self.set_env(args).map(|_| 0),
+            "unset" => self.unset_env(args).map(|_| 0),
             "env" => {
                 for (key, value) in &self.env {
                     self.out.push_str(&format!("{key}={value}\n"));
                 }
-                Ok(())
+                Ok(0)
             }
-            other => self.run_external(other, &args),
-        };
-        let produced = std::mem::replace(&mut self.out, saved);
-        match result {
-            Ok(()) => {
-                if let Some((append, target)) = redirect {
-                    if let Err(error) = self.redirect(&target, append, &produced) {
-                        self.error(&error);
-                    }
-                } else {
-                    self.out.push_str(&produced);
-                }
-            }
-            Err(error) => self.error(&error),
+            other => self.run_external(other, args),
         }
     }
 
-    fn redirect(&mut self, target: &str, append: bool, data: &str) -> Result<(), String> {
+    fn redirect(&mut self, target: &str, append: bool, data: &[u8]) -> Result<(), String> {
         let path = self.resolve(target)?;
         let (mut bytes, version) = match vfs::stat(&path) {
             Ok(entry) if entry.kind == Kind::Directory => {
@@ -230,7 +316,7 @@ impl Shell {
             Ok(_) => (Vec::new(), None),
             Err(_) => (Vec::new(), None),
         };
-        bytes.extend_from_slice(data.as_bytes());
+        bytes.extend_from_slice(data);
         vfs_mut::write(&path, &bytes, media_type(&path), version)
             .map_err(|error| format!("redirect {}: {error:?}", self.display(&path)))?;
         Ok(())
@@ -359,12 +445,15 @@ impl Shell {
     }
 
     fn cat(&mut self, args: &[String]) -> Result<(), String> {
-        let Some(arg) = args.first() else {
-            return Err("cat PATH".into());
-        };
-        let path = self.resolve(arg)?;
-        let bytes = self.read_file(&path)?;
-        self.out.push_str(&String::from_utf8_lossy(&bytes));
+        if args.is_empty() {
+            self.out.push_str(&String::from_utf8_lossy(&self.stdin));
+            return Ok(());
+        }
+        for arg in args {
+            let path = self.resolve(arg)?;
+            let bytes = self.read_file(&path)?;
+            self.out.push_str(&String::from_utf8_lossy(&bytes));
+        }
         Ok(())
     }
 
@@ -468,11 +557,13 @@ impl Shell {
                 return Err(format!("{name} [-n N] PATH"));
             }
         }
-        let Some(path) = path else {
-            return Err(format!("{name} [-n N] PATH"));
+        let text = match path {
+            Some(path) => {
+                let path = self.resolve(path)?;
+                String::from_utf8_lossy(&self.read_file(&path)?).to_string()
+            }
+            None => String::from_utf8_lossy(&self.stdin).to_string(),
         };
-        let path = self.resolve(path)?;
-        let text = String::from_utf8_lossy(&self.read_file(&path)?).to_string();
         let lines = text.lines().collect::<Vec<_>>();
         let start = if tail {
             lines.len().saturating_sub(count)
@@ -503,32 +594,44 @@ impl Shell {
             }
         }
         let Some(pattern) = args.get(index) else {
-            return Err("grep [-i] PATTERN PATH...".into());
+            return Err("grep [-i] PATTERN [PATH...]".into());
         };
-        if index + 1 >= args.len() {
-            return Err("grep [-i] PATTERN PATH...".into());
-        }
         let needle = if ignore_case {
             pattern.to_ascii_lowercase()
         } else {
             pattern.clone()
         };
-        for arg in &args[index + 1..] {
-            let path = self.resolve(arg)?;
-            let text = String::from_utf8_lossy(&self.read_file(&path)?).to_string();
-            for (line_no, line) in text.lines().enumerate() {
+        let paths = &args[index + 1..];
+        if paths.is_empty() {
+            for line in String::from_utf8_lossy(&self.stdin).lines() {
                 let haystack = if ignore_case {
                     line.to_ascii_lowercase()
                 } else {
                     line.to_string()
                 };
                 if haystack.contains(&needle) {
-                    self.out.push_str(&format!(
-                        "{}:{}:{}\n",
-                        self.display(&path),
-                        line_no + 1,
-                        line
-                    ));
+                    self.out.push_str(line);
+                    self.out.push('\n');
+                }
+            }
+        } else {
+            for arg in paths {
+                let path = self.resolve(arg)?;
+                let text = String::from_utf8_lossy(&self.read_file(&path)?).to_string();
+                for (line_no, line) in text.lines().enumerate() {
+                    let haystack = if ignore_case {
+                        line.to_ascii_lowercase()
+                    } else {
+                        line.to_string()
+                    };
+                    if haystack.contains(&needle) {
+                        self.out.push_str(&format!(
+                            "{}:{}:{}\n",
+                            self.display(&path),
+                            line_no + 1,
+                            line
+                        ));
+                    }
                 }
             }
         }
@@ -547,7 +650,16 @@ impl Shell {
             }
         }
         if paths.is_empty() {
-            return Err("wc [-l|-c] PATH...".into());
+            let bytes = &self.stdin;
+            let lines = bytes.iter().filter(|byte| **byte == b'\n').count();
+            if lines_only && !bytes_only {
+                self.out.push_str(&format!("{lines}\n"));
+            } else if bytes_only && !lines_only {
+                self.out.push_str(&format!("{}\n", bytes.len()));
+            } else {
+                self.out.push_str(&format!("{lines}\t{}\n", bytes.len()));
+            }
+            return Ok(());
         }
         for arg in paths {
             let path = self.resolve(arg)?;
@@ -901,20 +1013,18 @@ impl Shell {
         Ok(())
     }
 
-    fn run_external(&mut self, name: &str, args: &[String]) -> Result<(), String> {
+    fn run_external(&mut self, name: &str, args: &[String]) -> Result<i32, String> {
         let cwd = if self.cwd.is_empty() {
             None
         } else {
             Some(self.cwd.clone())
         };
-        let output = command_abi::run(name, args, &[], cwd.as_deref())
+        let stdin = std::mem::take(&mut self.stdin);
+        let output = command_abi::run(name, args, &stdin, cwd.as_deref())
             .map_err(|error| format!("{name}: {error}"))?;
         self.out.push_str(&String::from_utf8_lossy(&output.stdout));
         self.out.push_str(&String::from_utf8_lossy(&output.stderr));
-        if output.code != 0 {
-            return Err(format!("{name}: exited with status {}", output.code));
-        }
-        Ok(())
+        Ok(output.code)
     }
 
     fn set_env(&mut self, args: &[String]) -> Result<(), String> {
@@ -1067,7 +1177,7 @@ impl Shell {
             }
             if chars.peek() == Some(&'?') {
                 chars.next();
-                out.push('0');
+                out.push_str(&self.status.to_string());
                 continue;
             }
             let mut name = String::new();
@@ -1107,12 +1217,37 @@ fn media_type(path: &str) -> &'static str {
     }
 }
 
-fn split_words(line: &str) -> Result<Vec<String>, String> {
-    let mut words = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Token {
+    Word(String),
+    Op(Op),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Pipe,
+    And,
+    Or,
+    Semi,
+    In,
+    Out,
+    Append,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainOp {
+    Always,
+    And,
+    Or,
+}
+
+fn tokenize(line: &str) -> Result<Vec<Token>, String> {
+    let mut tokens = Vec::new();
     let mut word = String::new();
     let mut quote = None;
     let mut escape = false;
-    for ch in line.chars() {
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
         if escape {
             word.push(ch);
             escape = false;
@@ -1132,45 +1267,147 @@ fn split_words(line: &str) -> Result<Vec<String>, String> {
         }
         match ch {
             '\'' | '"' => quote = Some(ch),
-            ch if ch.is_whitespace() => {
-                if !word.is_empty() {
-                    words.push(std::mem::take(&mut word));
+            '|' => {
+                push_word(&mut tokens, &mut word);
+                if chars.peek() == Some(&'|') {
+                    chars.next();
+                    tokens.push(Token::Op(Op::Or));
+                } else {
+                    tokens.push(Token::Op(Op::Pipe));
                 }
             }
+            '&' => {
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    push_word(&mut tokens, &mut word);
+                    tokens.push(Token::Op(Op::And));
+                } else {
+                    return Err("background jobs are not supported".into());
+                }
+            }
+            ';' => {
+                push_word(&mut tokens, &mut word);
+                tokens.push(Token::Op(Op::Semi));
+            }
+            '<' => {
+                push_word(&mut tokens, &mut word);
+                tokens.push(Token::Op(Op::In));
+            }
+            '>' => {
+                push_word(&mut tokens, &mut word);
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                    tokens.push(Token::Op(Op::Append));
+                } else {
+                    tokens.push(Token::Op(Op::Out));
+                }
+            }
+            ch if ch.is_whitespace() => push_word(&mut tokens, &mut word),
             _ => word.push(ch),
         }
     }
     if quote.is_some() {
         return Err("unterminated quote".into());
     }
-    if !word.is_empty() {
-        words.push(word);
+    if escape {
+        word.push('\\');
     }
-    Ok(words)
+    push_word(&mut tokens, &mut word);
+    Ok(tokens)
 }
 
-fn parse_redirection(
-    mut words: Vec<String>,
-) -> Result<(Vec<String>, Option<(bool, String)>), String> {
-    let Some(index) = words.iter().position(|word| word == ">" || word == ">>") else {
-        return Ok((words, None));
-    };
-    let append = words[index] == ">>";
-    let Some(target) = words.get(index + 1).cloned() else {
-        return Err("redirection needs a path".into());
-    };
-    if words
-        .iter()
-        .skip(index + 2)
-        .any(|word| word == ">" || word == ">>")
-    {
-        return Err("only one output redirection is supported".into());
+fn push_word(tokens: &mut Vec<Token>, word: &mut String) {
+    if !word.is_empty() {
+        tokens.push(Token::Word(std::mem::take(word)));
     }
-    words.truncate(index);
+}
+
+fn parse_chains(tokens: &[Token]) -> Result<Vec<(ChainOp, Vec<Token>)>, String> {
+    let mut chains = Vec::new();
+    let mut current = Vec::new();
+    let mut operator = ChainOp::Always;
+    for token in tokens {
+        match token {
+            Token::Op(Op::Semi | Op::And | Op::Or) => {
+                if current.is_empty() {
+                    return Err("empty command".into());
+                }
+                let next = match token {
+                    Token::Op(Op::Semi) => ChainOp::Always,
+                    Token::Op(Op::And) => ChainOp::And,
+                    Token::Op(Op::Or) => ChainOp::Or,
+                    _ => unreachable!(),
+                };
+                chains.push((operator, std::mem::take(&mut current)));
+                operator = next;
+            }
+            _ => current.push(token.clone()),
+        }
+    }
+    if !current.is_empty() {
+        chains.push((operator, current));
+    } else if matches!(operator, ChainOp::And | ChainOp::Or) {
+        return Err("trailing operator needs a command".into());
+    }
+    Ok(chains)
+}
+
+fn split_tokens(tokens: &[Token], operator: Op) -> Vec<Vec<Token>> {
+    let mut parts = vec![Vec::new()];
+    for token in tokens {
+        if *token == Token::Op(operator) {
+            parts.push(Vec::new());
+        } else {
+            parts.last_mut().expect("pipeline part").push(token.clone());
+        }
+    }
+    parts
+}
+
+struct Segment {
+    words: Vec<String>,
+    stdin: Option<String>,
+    stdout: Option<(bool, String)>,
+}
+
+fn parse_segment(tokens: &[Token]) -> Result<Segment, String> {
+    let mut words = Vec::new();
+    let mut stdin = None;
+    let mut stdout = None;
+    let mut iter = tokens.iter();
+    while let Some(token) = iter.next() {
+        match token {
+            Token::Word(word) => words.push(word.clone()),
+            Token::Op(Op::In) => {
+                let Some(Token::Word(target)) = iter.next() else {
+                    return Err("input redirection needs a path".into());
+                };
+                if stdin.replace(target.clone()).is_some() {
+                    return Err("only one input redirection is supported".into());
+                }
+            }
+            Token::Op(Op::Out | Op::Append) => {
+                let append = matches!(token, Token::Op(Op::Append));
+                let Some(Token::Word(target)) = iter.next() else {
+                    return Err("redirection needs a path".into());
+                };
+                if stdout.replace((append, target.clone())).is_some() {
+                    return Err("only one output redirection is supported".into());
+                }
+            }
+            Token::Op(Op::Pipe | Op::And | Op::Or | Op::Semi) => {
+                return Err("unexpected operator".into());
+            }
+        }
+    }
     if words.is_empty() {
-        return Err("redirection needs a command".into());
+        return Err("empty command".into());
     }
-    Ok((words, Some((append, target))))
+    Ok(Segment {
+        words,
+        stdin,
+        stdout,
+    })
 }
 
 fn glob_match(pattern: &str, value: &str) -> bool {
@@ -1227,8 +1464,18 @@ mush — a sandboxed VFS shell
   which COMMAND           show a command's package identity
   source SCRIPT           run a Mush script from the VFS
 
+Shell syntax:
+  cmd1 | cmd2             pipe stdout to stdin
+  cmd1 ; cmd2             run both
+  cmd1 && cmd2            run cmd2 if cmd1 succeeds
+  cmd1 || cmd2            run cmd2 if cmd1 fails
+  cmd < PATH              read stdin from a VFS file
+  cmd > PATH              write stdout to a VFS file
+  cmd >> PATH             append stdout to a VFS file
+  $?                      previous command status
+
 Any other command resolves through the virtual PATH to an installed wasm
-package. Commands get explicit args, empty stdin, the VFS cwd, and no host
+package. Commands get explicit args, piped stdin, the VFS cwd, and no host
 environment; they never run host binaries.
   echo TEXT               print text
   export KEY=VALUE        set an environment variable
