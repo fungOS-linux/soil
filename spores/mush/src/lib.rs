@@ -8,6 +8,7 @@ wit_bindgen::generate!({ path: "wit", world: "mush", generate_all });
 
 use std::{collections::BTreeMap, sync::Mutex};
 
+use soil::command::command as command_abi;
 use soil::index::index::{self, Mode, Query};
 use soil::vfs::vfs::{self, Kind};
 use soil::vfs_mut::vfs_mut;
@@ -24,6 +25,7 @@ export!(Component);
 impl Guest for Component {
     fn start(args: Vec<String>) -> Result<Response, String> {
         let mut shell = Shell::new(args);
+        shell.refresh_command_path();
         let output = shell.load_startup();
         let prompt = shell.prompt();
         let exit = shell.exit;
@@ -78,7 +80,7 @@ impl Shell {
             ("HOME", "/"),
             ("PWD", "/"),
             ("OLDPWD", "/"),
-            ("PATH", "/bin:/usr/bin"),
+            ("PATH", "/commands"),
             ("TERM", "dumb"),
             ("USER", "mush"),
             ("LOGNAME", "mush"),
@@ -185,6 +187,8 @@ impl Shell {
             "mv" => self.mv(&args),
             "cp" => self.cp(&args),
             "search" => self.search(&args),
+            "commands" => self.list_commands(&args),
+            "which" => self.which(&args),
             "source" => self.source(&args),
             "echo" => {
                 self.out.push_str(&args.join(" "));
@@ -199,7 +203,7 @@ impl Shell {
                 }
                 Ok(())
             }
-            other => Err(format!("unknown command {other}; try help")),
+            other => self.run_external(other, &args),
         };
         let produced = std::mem::replace(&mut self.out, saved);
         match result {
@@ -855,6 +859,64 @@ impl Shell {
         Ok(())
     }
 
+    fn refresh_command_path(&mut self) {
+        let mut path = String::from("/commands");
+        for name in command_abi::path() {
+            path.push(':');
+            path.push_str(&name);
+        }
+        self.env.insert("PATH".into(), path);
+    }
+
+    fn list_commands(&mut self, args: &[String]) -> Result<(), String> {
+        if !args.is_empty() {
+            return Err("commands".into());
+        }
+        for command in command_abi::commands() {
+            self.out.push_str(&format!(
+                "{}\t{}\t{}\n",
+                command.name, command.version, command.summary
+            ));
+        }
+        Ok(())
+    }
+
+    fn which(&mut self, args: &[String]) -> Result<(), String> {
+        let Some(name) = args.first() else {
+            return Err("which COMMAND".into());
+        };
+        if args.len() != 1 {
+            return Err("which COMMAND".into());
+        }
+        let Some(command) = command_abi::commands()
+            .into_iter()
+            .find(|command| command.name == *name)
+        else {
+            return Err(format!("which: {name}: command not found"));
+        };
+        self.out.push_str(&format!(
+            "{}\t{}\t{}\n",
+            command.name, command.version, command.summary
+        ));
+        Ok(())
+    }
+
+    fn run_external(&mut self, name: &str, args: &[String]) -> Result<(), String> {
+        let cwd = if self.cwd.is_empty() {
+            None
+        } else {
+            Some(self.cwd.clone())
+        };
+        let output = command_abi::run(name, args, &[], cwd.as_deref())
+            .map_err(|error| format!("{name}: {error}"))?;
+        self.out.push_str(&String::from_utf8_lossy(&output.stdout));
+        self.out.push_str(&String::from_utf8_lossy(&output.stderr));
+        if output.code != 0 {
+            return Err(format!("{name}: exited with status {}", output.code));
+        }
+        Ok(())
+    }
+
     fn set_env(&mut self, args: &[String]) -> Result<(), String> {
         if args.is_empty() {
             for (key, value) in &self.env {
@@ -1161,7 +1223,13 @@ mush — a sandboxed VFS shell
   mv FROM TO              rename a file
   cp FROM TO              copy bytes to a new version
   search QUERY            fuzzy index search
+  commands                list installed wasm commands
+  which COMMAND           show a command's package identity
   source SCRIPT           run a Mush script from the VFS
+
+Any other command resolves through the virtual PATH to an installed wasm
+package. Commands get explicit args, empty stdin, the VFS cwd, and no host
+environment; they never run host binaries.
   echo TEXT               print text
   export KEY=VALUE        set an environment variable
   unset KEY...            remove environment variables
