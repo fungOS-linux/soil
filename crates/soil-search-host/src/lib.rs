@@ -7,7 +7,9 @@
 
 mod discovery;
 mod git;
+pub mod applications;
 pub mod graph;
+mod mru;
 mod tgrep;
 
 use std::collections::BTreeSet;
@@ -18,6 +20,7 @@ use discovery::{ApplicationIndex, PeerIndex, ServiceIndex, SporeIndex};
 use fungos_records::{Record, Store};
 use git::GitIndex;
 use graph::GraphIndex;
+use mru::{MruCache, hit_from_usage, now_ms, usage_from_hit};
 use soil_marbles::MarblesIndex;
 use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
 use tgrep::TgrepSource;
@@ -25,10 +28,44 @@ use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit/search.wit", world: "search-host" });
 
+pub use mru::{Usage, recency};
 pub use soil::search::mentions as mention_api;
 use soil::search::search as search_api;
 
 pub use soil::search::search as api;
+
+/// The wire name of a kind. One table, because the HTTP surface, the usage cache
+/// and anything else that names a kind would drift apart in a second one.
+pub fn kind_name(kind: api::Kind) -> &'static str {
+    match kind {
+        api::Kind::File => "file",
+        api::Kind::RecordEntry => "record-entry",
+        api::Kind::Repository => "repository",
+        api::Kind::Spore => "spore",
+        api::Kind::Peer => "peer",
+        api::Kind::Service => "service",
+        api::Kind::Application => "application",
+        api::Kind::Action => "action",
+        api::Kind::Task => "task",
+        api::Kind::Principal => "principal",
+    }
+}
+
+pub fn kind_from_name(name: &str) -> Option<api::Kind> {
+    Some(match name.trim() {
+        "file" => api::Kind::File,
+        "record-entry" => api::Kind::RecordEntry,
+        "repository" => api::Kind::Repository,
+        "spore" => api::Kind::Spore,
+        "peer" => api::Kind::Peer,
+        "service" => api::Kind::Service,
+        "application" => api::Kind::Application,
+        "action" => api::Kind::Action,
+        "task" => api::Kind::Task,
+        "principal" => api::Kind::Principal,
+        _ => return None,
+    })
+}
 
 const MAX_PAGE: u32 = 512;
 const MAX_MENTIONS: u32 = 64;
@@ -55,6 +92,7 @@ pub struct SearchService {
     applications: Option<ApplicationIndex>,
     marbles: Option<MarblesIndex>,
     principals: Vec<PrincipalCandidate>,
+    mru: MruCache,
     generation: u64,
 }
 
@@ -78,6 +116,7 @@ impl SearchService {
             applications: None,
             marbles: None,
             principals: Vec::new(),
+            mru: MruCache::in_memory(),
             generation: 1,
         }
     }
@@ -132,6 +171,17 @@ impl SearchService {
     /// cannot discover or add a root.
     pub fn with_spore_roots(mut self, roots: Vec<std::path::PathBuf>) -> Self {
         self.spores = Some(SporeIndex::new(roots));
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
+    /// Use an inventory the host discovered from this machine's bundles. The
+    /// dynamically scanned counterpart of `with_applications_snapshot`.
+    pub fn with_installed_applications(
+        mut self,
+        apps: &[crate::applications::InstalledApp],
+    ) -> Self {
+        self.applications = Some(ApplicationIndex::from_installed(apps));
         self.generation = self.generation.saturating_add(1);
         self
     }
@@ -193,6 +243,49 @@ impl SearchService {
         self
     }
 
+    /// Remember usage at `path`. Without this the cache is memory-only, which is
+    /// the right default for a short-lived host and for a test.
+    pub fn with_mru(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.mru = MruCache::open(path);
+        self
+    }
+
+    /// The page a launcher shows before anyone types: the host's own usage
+    /// memory, answered from the cache without touching a source or the index.
+    pub fn recent(&self, limit: u32) -> Vec<api::Hit> {
+        let limit = limit.clamp(1, MAX_PAGE) as usize;
+        self.mru
+            .recent(limit)
+            .iter()
+            .enumerate()
+            .map(|(rank, usage)| hit_from_usage(usage, rank))
+            .collect()
+    }
+
+    /// Record that a person picked a row. The host calls this where it performs
+    /// the launch, so usage counts launches rather than renders.
+    pub fn record_use(&mut self, hit: &api::Hit) -> anyhow::Result<()> {
+        self.mru.record(usage_from_hit(hit, now_ms()))
+    }
+
+    /// Sources that describe an installable world are re-read when that world
+    /// moves: a Spore installed while the launcher runs has to appear without a
+    /// restart, and a new directory only moves its parent's mtime.
+    fn reload_stale(&mut self) {
+        let mut moved = false;
+        if let Some(spores) = self.spores.as_mut() {
+            moved |= spores.reload_if_stale();
+        }
+        if let Some(applications) = self.applications.as_mut() {
+            moved |= applications.reload_if_stale();
+        }
+        if moved {
+            // A page's `generation` promises what produced it; a source that
+            // re-read itself is a new generation even without an explicit refresh.
+            self.generation = self.generation.saturating_add(1);
+        }
+    }
+
     fn sources(&self) -> u32 {
         u32::from(self.vfs.is_some())
             + u32::from(self.records.is_some())
@@ -221,6 +314,7 @@ impl SearchService {
         if query.text.trim().is_empty() {
             return Err(search_api::Error::Invalid);
         }
+        self.reload_stale();
         let kinds = if query.kinds.is_empty() {
             vec![
                 search_api::Kind::File,
@@ -268,6 +362,13 @@ impl SearchService {
             hits.extend(self.principal_hits(&query));
         }
         self.graph.enrich(&mut hits);
+        // Usage tilts rows that are otherwise tied. The Spore still owns match
+        // policy; this only says that a row someone picks every morning should
+        // beat a stranger with the same words in it.
+        let now = now_ms();
+        for hit in &mut hits {
+            hit.score = hit.score.saturating_add(self.mru.boost(&hit.id, now));
+        }
         hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
         let start = usize::try_from(query.offset).unwrap_or(usize::MAX);
         let total = hits.len();
@@ -904,6 +1005,9 @@ impl search_api::Host for SearchService {
         if let Some(spores) = self.spores.as_mut() {
             spores.refresh();
         }
+        if let Some(applications) = self.applications.as_mut() {
+            applications.refresh();
+        }
         if let Some(peers) = self.peers.as_mut() {
             peers.refresh();
         }
@@ -1132,6 +1236,140 @@ surfaces = ["canvas"]
         assert_eq!(page.hits[0].kind, search_api::Kind::Spore);
         assert_eq!(page.hits[0].title, "markdown");
         assert!(page.hits[0].id.starts_with("dev.fungos."));
+    }
+
+    fn install_spore(root: &std::path::Path, package: &str, id: &str, name: &str) {
+        let spore = root.join(package);
+        std::fs::create_dir_all(&spore).unwrap();
+        std::fs::write(
+            spore.join("spore.toml"),
+            format!(
+                r#"schema = 1
+[spore]
+id = "{id}"
+name = "{name}"
+version = "0.1.0"
+license = "MIT"
+summary = "{name} reader with a Canvas UI"
+[engine]
+soil = ">=0.1"
+target = "wasm32-wasip2"
+[module]
+path = "module.wasm"
+[ui]
+entry = "ui/editor.lua"
+[launch]
+default = "canvas"
+surfaces = ["canvas"]
+[grants]
+"soil:canvas" = "present the editor"
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn application_row(id: &str, title: &str) -> search_api::Hit {
+        search_api::Hit {
+            kind: search_api::Kind::Application,
+            id: id.into(),
+            title: title.into(),
+            subtitle: Some("Applications".into()),
+            snippet: None,
+            score: 0,
+            source: "host:applications".into(),
+            updated_at_ms: None,
+            references: Vec::new(),
+            icon: None,
+        }
+    }
+
+    /// The launcher's first frame must not wait on a source: usage memory answers
+    /// with an empty service, and it is on disk for the next summon.
+    #[test]
+    fn recents_answer_before_any_source_is_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/mru.json");
+        let mut host = SearchService::new(None, None, vec![]).with_mru(&path);
+        assert!(host.recent(8).is_empty());
+
+        host.record_use(&application_row("com.apple.Safari", "Safari"))
+            .unwrap();
+        let recent = host.recent(8);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].title, "Safari");
+        assert_eq!(recent[0].kind, search_api::Kind::Application);
+        assert_eq!(host.state().unwrap().sources, 0);
+
+        let reopened = SearchService::new(None, None, vec![]).with_mru(&path);
+        assert_eq!(reopened.recent(8)[0].id, "com.apple.Safari");
+    }
+
+    /// Two applications match equally; the one someone has picked before wins,
+    /// because the host remembers launches and the source does not.
+    #[test]
+    fn a_remembered_row_beats_an_equally_good_stranger() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = dir.path().join("applications.json");
+        std::fs::write(
+            &snapshot,
+            serde_json::json!({"applications": [
+                {"bundle_id": "com.example.astro", "name": "Astro", "subtitle": "Utilities"},
+                {"bundle_id": "com.example.astral", "name": "Astral", "subtitle": "Utilities"},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let mut host = SearchService::new(None, None, vec![]).with_applications_snapshot(&snapshot);
+        let query = || search_api::Query {
+            text: "astr".into(),
+            kinds: vec![search_api::Kind::Application],
+            mode: None,
+            offset: 0,
+            limit: 10,
+        };
+
+        let before = host.search(query()).unwrap();
+        assert_eq!(before.hits.len(), 2);
+        assert_eq!(before.hits[0].id, "com.example.astral", "title breaks the tie");
+
+        let picked = before
+            .hits
+            .iter()
+            .find(|hit| hit.id == "com.example.astro")
+            .unwrap()
+            .clone();
+        host.record_use(&picked).unwrap();
+
+        let after = host.search(query()).unwrap();
+        assert_eq!(after.hits[0].id, "com.example.astro");
+        assert!(after.hits[0].score > after.hits[1].score);
+    }
+
+    /// Installing a Spore while the launcher runs has to show up without a
+    /// restart: the new directory moves the root's mtime, which is all the
+    /// service stats before paying for a walk.
+    #[test]
+    fn a_spore_installed_while_running_appears_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host =
+            SearchService::new(None, None, vec![]).with_spore_roots(vec![dir.path().to_path_buf()]);
+        let query = || search_api::Query {
+            text: "markdown".into(),
+            kinds: vec![search_api::Kind::Spore],
+            mode: None,
+            offset: 0,
+            limit: 10,
+        };
+        let before = host.search(query()).unwrap();
+        assert!(before.hits.is_empty());
+
+        install_spore(dir.path(), "markdown", "dev.fungos.markdown", "markdown");
+
+        let after = host.search(query()).unwrap();
+        assert_eq!(after.hits.len(), 1);
+        assert_eq!(after.hits[0].id, "dev.fungos.markdown");
+        assert!(after.generation > before.generation, "a reloaded source is a new generation");
     }
 
     #[test]
