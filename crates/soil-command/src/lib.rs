@@ -97,6 +97,14 @@ pub struct CommandRegistry {
 }
 
 impl CommandRegistry {
+    /// An empty registry for hosts that start before any command is installed.
+    pub fn empty(root: impl AsRef<Path>) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+            commands: BTreeMap::new(),
+        }
+    }
+
     pub fn scan(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let mut commands = BTreeMap::new();
