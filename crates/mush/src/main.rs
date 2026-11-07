@@ -10,6 +10,7 @@ mod gateway;
 mod mcp_gateway;
 mod mcp_server;
 mod overlay;
+mod project;
 mod service;
 
 use std::{
@@ -486,7 +487,8 @@ fn run() -> Result<()> {
         return mcp_server::serve(server, &mcp_token, |line| {
             let response = runtime.execute(line)?;
             Ok((
-                format!("{}{}", response.output, response.stderr),
+                response.output,
+                response.stderr,
                 response.exit,
                 response.status,
             ))
@@ -563,6 +565,27 @@ fn run_desktop(mut args: Vec<String>) -> Result<()> {
             let theme = take_option(&mut args, "--theme").unwrap_or_else(|| "deep".into());
             let desktop = desktop::create(&id, &name, &theme)?;
             println!("{}", desktop.id);
+        }
+        "add-project" => {
+            let desktop_id = args
+                .get(1)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("usage: mush desktop add-project DESKTOP PROJECT --from PATH")
+                })?
+                .clone();
+            let project = args
+                .get(2)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("usage: mush desktop add-project DESKTOP PROJECT --from PATH")
+                })?
+                .clone();
+            let from = take_option(&mut args, "--from")
+                .or_else(|| args.get(3).cloned())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("usage: mush desktop add-project DESKTOP PROJECT --from PATH")
+                })?;
+            let (files, bytes) = project::attach(&desktop_id, &project, &from)?;
+            println!("projects/{project} ({files} files, {bytes} bytes)");
         }
         other => anyhow::bail!("unknown desktop subcommand {other:?}"),
     }

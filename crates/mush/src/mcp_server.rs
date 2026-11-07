@@ -15,7 +15,7 @@ const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 
 pub fn serve<F>(server: Server, token: &str, mut execute: F) -> Result<()>
 where
-    F: FnMut(&str) -> Result<(String, bool, i32)>,
+    F: FnMut(&str) -> Result<(String, String, bool, i32)>,
 {
     eprintln!("mush: mcp server http://{}/mcp", server.server_addr());
     for request in server.incoming_requests() {
@@ -28,7 +28,7 @@ where
 
 fn handle<F>(mut request: tiny_http::Request, token: &str, execute: &mut F) -> Result<()>
 where
-    F: FnMut(&str) -> Result<(String, bool, i32)>,
+    F: FnMut(&str) -> Result<(String, String, bool, i32)>,
 {
     if request.method().as_str() != "POST" || request.url() != "/mcp" {
         return respond(request, 404, &[], b"not found\n");
@@ -108,15 +108,17 @@ where
                     &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"command is required"}}),
                 );
             }
-            let (mut output, mut exit, mut status) = (String::new(), false, 0);
+            let (mut stdout, mut stderr, mut exit, mut status) =
+                (String::new(), String::new(), false, 0);
             for line in command.lines() {
-                let (text, line_exit, line_status) = execute(line)?;
-                output.push_str(&text);
+                let (text, stderr_text, line_exit, line_status) = execute(line)?;
+                stdout.push_str(&text);
+                stderr.push_str(&stderr_text);
                 exit |= line_exit;
                 status = line_status;
-                if output.len() > MAX_OUTPUT {
-                    output.truncate(MAX_OUTPUT);
-                    output.push_str("\n[mush: output truncated]\n");
+                if stdout.len() > MAX_OUTPUT {
+                    stdout.truncate(MAX_OUTPUT);
+                    stdout.push_str("\n[mush: output truncated]\n");
                     status = 1;
                     break;
                 }
@@ -124,6 +126,7 @@ where
                     break;
                 }
             }
+            let text = format!("{stdout}{stderr}");
             respond_json(
                 request,
                 200,
@@ -131,7 +134,13 @@ where
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "content": [{"type": "text", "text": output}],
+                        "content": [{"type": "text", "text": text}],
+                        "structuredContent": {
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "status": status,
+                            "exit": exit
+                        },
                         "isError": status != 0 || exit
                     }
                 }),

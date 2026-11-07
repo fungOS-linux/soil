@@ -49,8 +49,9 @@ Example arguments:
 {"command": "mb ready --json"}
 ```
 
-The response is MCP text content, combining stdout and stderr. `isError` is true
-when the command returns a non-zero shell status.
+The response includes MCP text content, combining stdout and stderr, plus
+`structuredContent` with separate `stdout`, `stderr`, `status`, and `exit`
+fields. `isError` is true when the command returns a non-zero shell status.
 
 ## Recommended placement
 
