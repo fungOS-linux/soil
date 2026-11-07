@@ -45,6 +45,17 @@ impl api::Host for Host {
     fn upsert(&mut self, entry: api::Entry) -> std::result::Result<api::Entry, api::Error> {
         self.records.get_mut().unwrap().upsert(entry)
     }
+    fn compare_and_swap(
+        &mut self,
+        key: api::Key,
+        expected: Option<api::Version>,
+        entry: api::Entry,
+    ) -> std::result::Result<api::CasResult, api::Error> {
+        self.records
+            .get_mut()
+            .unwrap()
+            .compare_and_swap(key, expected, entry)
+    }
     fn delete(&mut self, key: api::Key) -> std::result::Result<(), api::Error> {
         self.records.get_mut().unwrap().delete(key)
     }

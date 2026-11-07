@@ -188,6 +188,70 @@ impl records::Host for NamespacedRecordsHost {
         Ok(Self::entry(namespace, record))
     }
 
+    fn compare_and_swap(
+        &mut self,
+        key: records::Key,
+        expected: Option<records::Version>,
+        entry: records::Entry,
+    ) -> Result<records::CasResult, records::Error> {
+        let namespace = self.namespace(&key.collection, true)?;
+        if entry.key.collection != key.collection || entry.key.id != key.id {
+            return Err(records::Error::Invalid);
+        }
+        if key.id.is_empty() || entry.schema.is_empty() {
+            return Err(records::Error::Invalid);
+        }
+        let mut store = self.store.lock().expect("records store poisoned");
+        let current = store.get(&namespace.book, &key.id).ok();
+        let current_entry = current
+            .as_ref()
+            .map(|record| Self::entry(namespace, record.clone()));
+        let matches = match (&expected, &current) {
+            (None, None) => true,
+            (None, Some(record)) => record.deleted,
+            (Some(_), None) => return Err(records::Error::NotFound),
+            (Some(version), Some(record)) => {
+                record.updated_hlc == version.revision && record.origin == version.origin
+            }
+        };
+        if !matches {
+            return Ok(records::CasResult {
+                applied: false,
+                entry: current_entry.expect("conflict has a current entry"),
+            });
+        }
+        if entry.deleted {
+            let schema = if entry.schema.is_empty() {
+                current
+                    .as_ref()
+                    .map(|record| record.schema_id.clone())
+                    .ok_or(records::Error::Invalid)?
+            } else {
+                entry.schema.clone()
+            };
+            store
+                .delete_record(&namespace.book, &key.id, &schema, 1)
+                .map_err(|_| records::Error::Io)?;
+        } else {
+            let value: serde_json::Value =
+                serde_json::from_slice(&entry.body).map_err(|_| records::Error::Invalid)?;
+            if !value.is_object() {
+                return Err(records::Error::Invalid);
+            }
+            store
+                .put_record(&namespace.book, &key.id, &entry.schema, 1, value)
+                .map_err(|_| records::Error::Io)?;
+        }
+        let record = store
+            .get(&namespace.book, &key.id)
+            .map_err(|_| records::Error::Io)?;
+        drop(store);
+        Ok(records::CasResult {
+            applied: true,
+            entry: Self::entry(namespace, record),
+        })
+    }
+
     fn delete(&mut self, key: records::Key) -> Result<(), records::Error> {
         let namespace = self.namespace(&key.collection, true)?;
         if key.id.is_empty() {
