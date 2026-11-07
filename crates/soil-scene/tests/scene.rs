@@ -364,3 +364,132 @@ fn duplicate_gpu_resources_are_refused() {
         .expect_err("two resources cannot share an id");
     assert!(error.0.contains("duplicate"), "{error}");
 }
+
+fn node(content: Content) -> Node {
+    Node {
+        id: "n".into(),
+        parent: None,
+        transition_ms: None,
+        transform: Transform::default(),
+        content,
+    }
+}
+
+#[test]
+fn a_mesh_needs_an_asset_it_could_have_declared() {
+    Scene::new(vec![node(Content::Mesh(soil_scene::Mesh {
+        asset: "model:robot".into(),
+    }))])
+    .validate()
+    .expect("a declared asset id is legal");
+
+    // The same rule Image follows: an id, never a path.
+    let error = Scene::new(vec![node(Content::Mesh(soil_scene::Mesh {
+        asset: "../etc/passwd".into(),
+    }))])
+    .validate()
+    .expect_err("a path is not an asset id");
+    assert!(error.0.contains("safe identifier"), "{error}");
+}
+
+#[test]
+fn a_camera_refuses_planes_that_draw_nothing() {
+    let camera = |projection| node(Content::Camera(soil_scene::Camera { projection }));
+
+    Scene::new(vec![camera(soil_scene::Projection::Perspective {
+        vertical_fov_degrees: 45.0,
+        near: 0.1,
+        far: 100.0,
+    })])
+    .validate()
+    .expect("a sane perspective camera is legal");
+
+    Scene::new(vec![camera(soil_scene::Projection::Orthographic {
+        height: 8.0,
+        near: 0.1,
+        far: 100.0,
+    })])
+    .validate()
+    .expect("a sane orthographic camera is legal");
+
+    for (why, projection) in [
+        (
+            "fov is a full turn",
+            soil_scene::Projection::Perspective {
+                vertical_fov_degrees: 180.0,
+                near: 0.1,
+                far: 10.0,
+            },
+        ),
+        (
+            "fov is negative",
+            soil_scene::Projection::Perspective {
+                vertical_fov_degrees: -1.0,
+                near: 0.1,
+                far: 10.0,
+            },
+        ),
+        (
+            "near plane is at the eye",
+            soil_scene::Projection::Perspective {
+                vertical_fov_degrees: 45.0,
+                near: 0.0,
+                far: 10.0,
+            },
+        ),
+        (
+            "far plane is inside near",
+            soil_scene::Projection::Orthographic {
+                height: 8.0,
+                near: 10.0,
+                far: 1.0,
+            },
+        ),
+        (
+            "orthographic height is zero",
+            soil_scene::Projection::Orthographic {
+                height: 0.0,
+                near: 0.1,
+                far: 10.0,
+            },
+        ),
+    ] {
+        assert!(
+            Scene::new(vec![camera(projection)]).validate().is_err(),
+            "{why} must be refused"
+        );
+    }
+}
+
+#[test]
+fn a_light_refuses_negative_intensity_and_out_of_range_colour() {
+    Scene::new(vec![node(Content::Light(soil_scene::Light::Ambient {
+        intensity: 0.5,
+    }))])
+    .validate()
+    .expect("ambient light is legal");
+
+    Scene::new(vec![node(Content::Light(soil_scene::Light::Point {
+        intensity: 1.0,
+        color: [1.0, 0.5, 0.0],
+    }))])
+    .validate()
+    .expect("a coloured point light is legal");
+
+    assert!(
+        Scene::new(vec![node(Content::Light(soil_scene::Light::Directional {
+            intensity: -1.0,
+            color: [1.0, 1.0, 1.0],
+        }))])
+        .validate()
+        .is_err()
+    );
+    assert!(
+        Scene::new(vec![node(Content::Light(soil_scene::Light::Point {
+            intensity: 1.0,
+            color: [2.0, 0.0, 0.0],
+        }))])
+        .validate()
+        .is_err()
+    );
+}
