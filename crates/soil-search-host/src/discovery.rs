@@ -418,6 +418,84 @@ impl Searchable for ServiceEntry {
     }
 }
 
+/// An application installed on this host.
+///
+/// The inventory is host-local and disposable: it is rebuilt from the bundle
+/// index, it differs per machine, and nothing about it is worth syncing. Peers
+/// and services arrive as Mycelium snapshots; this one never leaves the host.
+#[derive(Clone)]
+pub struct ApplicationEntry {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    /// Host-resolved asset reference, or none when the bundle carries no icon.
+    pub icon: Option<String>,
+}
+
+impl Searchable for ApplicationEntry {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn searchable(&self) -> String {
+        format!("{} {}", self.id, self.title).to_lowercase()
+    }
+}
+
+/// A host-supplied inventory of installed applications.
+///
+/// Shape: `{ "applications": [ { "bundle_id", "name", "subtitle", "icon" } ] }`.
+/// A malformed or missing snapshot yields an empty index rather than an error:
+/// an inventory that cannot be read is not a search that cannot run.
+#[derive(Default)]
+pub struct ApplicationIndex {
+    path: Option<PathBuf>,
+    entries: Vec<ApplicationEntry>,
+}
+
+impl ApplicationIndex {
+    pub fn load(path: PathBuf) -> Self {
+        let mut index = Self {
+            path: Some(path),
+            entries: Vec::new(),
+        };
+        index.refresh();
+        index
+    }
+
+    pub fn refresh(&mut self) {
+        self.entries.clear();
+        let Some(path) = &self.path else {
+            return;
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            return;
+        };
+        for application in array_field(&value, "applications") {
+            let Some(id) = string_field(application, "bundle_id") else {
+                continue;
+            };
+            self.entries.push(ApplicationEntry {
+                title: string_field(application, "name").unwrap_or_else(|| id.clone()),
+                subtitle: string_field(application, "subtitle").unwrap_or_else(|| id.clone()),
+                icon: string_field(application, "icon"),
+                id,
+            });
+        }
+        self.entries.sort_by(|a, b| a.id.cmp(&b.id));
+        self.entries.truncate(MAX_SPORES);
+    }
+
+    pub fn search(&self, query: &str, limit: usize) -> Vec<(ApplicationEntry, u32)> {
+        search_entries(&self.entries, query, limit, 960_000)
+    }
+}
+
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }

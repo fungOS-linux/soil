@@ -42,6 +42,10 @@ struct Cli {
     command: Cmd,
 }
 
+// A clap subcommand tree is built once from argv and dropped; the size of the
+// largest variant costs nothing at runtime, and `Permit` is a box of arguments
+// clap's derive cannot wrap in a `Box` without a manual `Args` impl.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
     /// Generate a persistent Unibus endpoint key.
@@ -294,7 +298,7 @@ async fn run_peer(config_path: PathBuf) -> anyhow::Result<()> {
     }
     let dispatch_store = Arc::new(tokio::sync::Mutex::new(dispatch_store));
     let listener = IrohListener::new(endpoint.clone(), session_config(&config, verifier.clone()));
-    let mut host = RecordPeerHost::from_shared(
+    let host = RecordPeerHost::from_shared(
         listener,
         host_store,
         PeerEndpoint {
@@ -302,12 +306,15 @@ async fn run_peer(config_path: PathBuf) -> anyhow::Result<()> {
             producer_id: config.local_producer.clone(),
         },
     );
+    // Shadow rather than mutate: with `notify` off there is no second
+    // assignment, and an unused `mut` is a warning the build treats as an error.
     #[cfg(feature = "notify")]
     let notify = make_notify_adapter(&config)?;
     #[cfg(feature = "notify")]
-    if let Some(adapter) = &notify {
-        host = host.with_notify(Arc::clone(adapter));
-    }
+    let host = match &notify {
+        Some(adapter) => host.with_notify(Arc::clone(adapter)),
+        None => host,
+    };
     let transport = IrohTransport::new(endpoint.clone(), session_config(&config, verifier.clone()));
     eprintln!("soil-sync: producer={}", config.local_producer);
     eprintln!(
@@ -353,6 +360,7 @@ async fn supervise(
     let mut ticker = tokio::time::interval(poll);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_anti_entropy = 0u64;
+    #[cfg(feature = "notify")]
     let mut last_notify_flush = 0u64;
     loop {
         ticker.tick().await;

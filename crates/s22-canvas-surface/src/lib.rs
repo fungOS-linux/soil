@@ -123,15 +123,14 @@ impl CanvasSurface {
     /// Host-only imported surface. Replaces the previous layer, or clears it
     /// with `None`. Validation is bounded; the adapter owns the source pixels.
     pub fn set_surface_layer(&mut self, layer: Option<SurfaceLayer>) -> Result<(), String> {
-        if let Some(layer) = &layer {
-            if layer.width == 0
+        if let Some(layer) = &layer
+            && (layer.width == 0
                 || layer.height == 0
                 || layer.width > 4096
                 || layer.height > 4096
-                || layer.rgba.len() != (layer.width as usize * layer.height as usize * 4)
-            {
-                return Err("surface layer is empty, oversized, or not RGBA8".into());
-            }
+                || layer.rgba.len() != (layer.width as usize * layer.height as usize * 4))
+        {
+            return Err("surface layer is empty, oversized, or not RGBA8".into());
         }
         self.surface_layer = layer;
         self.surface_texture = None;
@@ -667,10 +666,9 @@ mod tests {
         let width = 128u32;
         let height = 128u32;
         let mut surface = CanvasSurface::new(width, height).unwrap();
-        let mut rgba = vec![0u8; (width * height * 4) as usize];
-        for pixel in rgba.chunks_exact_mut(4) {
-            pixel.copy_from_slice(&[255, 0, 0, 255]);
-        }
+        // A solid red layer, built in one allocation: `chunks_exact_mut` here was
+        // a loop whose only job was to write the same four bytes.
+        let rgba = [255u8, 0, 0, 255].repeat((width * height) as usize);
         surface
             .set_surface_layer(Some(SurfaceLayer {
                 rgba,

@@ -112,7 +112,7 @@ impl SystemAllowlist {
 }
 
 pub fn key_id(public_key_hex: &str) -> Result<String> {
-    let bytes = decode(public_key_hex).map_err(|error| Error::Signature(error))?;
+    let bytes = decode(public_key_hex).map_err(Error::Signature)?;
     if bytes.len() != 32 {
         return Err(Error::Signature("publisher key is not 32 bytes".into()));
     }
@@ -169,14 +169,14 @@ pub fn verify(
             "publisher statement is not current".into(),
         ));
     }
-    let key_bytes = decode(&statement.publisher_key).map_err(|error| Error::Signature(error))?;
+    let key_bytes = decode(&statement.publisher_key).map_err(Error::Signature)?;
     let key_array: [u8; 32] = key_bytes
         .as_slice()
         .try_into()
         .map_err(|_| Error::Signature("publisher key is not 32 bytes".into()))?;
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&key_array)
         .map_err(|error| Error::Signature(error.to_string()))?;
-    let signature_bytes = decode(&envelope.signature).map_err(|error| Error::Signature(error))?;
+    let signature_bytes = decode(&envelope.signature).map_err(Error::Signature)?;
     let signature_array: [u8; 64] = signature_bytes
         .as_slice()
         .try_into()
@@ -207,13 +207,16 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn decode(value: &str) -> std::result::Result<Vec<u8>, String> {
-    if value.len() % 2 != 0 {
+    let bytes = value.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return Err("hex value has odd length".into());
     }
-    let mut out = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
-        let high = nibble(pair[0])?;
-        let low = nibble(pair[1])?;
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    // Stepped indices rather than `chunks_exact`: the pair is the unit here, and
+    // an index that is always in range says that without a chunk type.
+    for index in (0..bytes.len()).step_by(2) {
+        let high = nibble(bytes[index])?;
+        let low = nibble(bytes[index + 1])?;
         out.push((high << 4) | low);
     }
     Ok(out)

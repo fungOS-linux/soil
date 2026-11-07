@@ -1,4 +1,6 @@
 //! Combined CLI grants use real battery Wasm + actual owner; no input bypass.
+mod common;
+
 use fungos_device_hal::{
     keypad::KeypadRing,
     keypad_transport::{decode_request, encode_response},
@@ -11,8 +13,7 @@ use std::{
 };
 #[test]
 fn combined_battery_simple_jarvis_keypad_cli_and_passive_outer() {
-    let dir = std::env::temp_dir().join(format!("soil-nav-cli-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::work_dir("nav-cli");
     let guest = dir.join("battery.wasm");
     std::fs::write(&guest, BATTERY_CANVAS_GUEST).unwrap();
     let socket = dir.join("keys.sock");

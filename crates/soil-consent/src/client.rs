@@ -80,6 +80,19 @@ mod tests {
     use crate::{Kind, Scope};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
+    /// A Unix socket path has a hard limit (104 bytes on macOS), and the default
+    /// temp dir there is longer than that on its own. Bind under `/tmp` with a
+    /// short name so these tests measure the permission and round-trip logic
+    /// rather than `SUN_LEN`.
+    fn short_socket() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("sc")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let path = dir.path().join("s.sock");
+        (dir, path)
+    }
+
     fn request() -> Request {
         Request {
             id: "req-client".into(),
@@ -99,10 +112,8 @@ mod tests {
 
     #[test]
     fn rejects_broad_socket_permissions_and_accepts_private_ones() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
+        let (dir, path) = short_socket();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = dir.path().join("consent.sock");
         let _listener = UnixListener::bind(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(crate::wire::validate_socket(&path).is_ok());
@@ -112,9 +123,8 @@ mod tests {
 
     #[test]
     fn client_round_trips_a_decision_and_checks_request_id() {
-        let dir = tempfile::tempdir().unwrap();
+        let (dir, path) = short_socket();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = dir.path().join("consent.sock");
         let listener = UnixListener::bind(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let server = std::thread::spawn(move || {

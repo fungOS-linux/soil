@@ -4,7 +4,7 @@
 // `soil:vfs`, records from `soil:records`, and actions from their owning host
 // capability. A hit is a locator plus display metadata; the caller fetches the
 // authoritative object through the source capability.
-package soil:search@0.5.0;
+package soil:search@0.6.0;
 
 interface search {
   enum kind {
@@ -14,6 +14,9 @@ interface search {
     spore,
     peer,
     service,
+    /// An application installed on this host. Host-local by construction: the
+    /// inventory differs per machine, is cheap to rebuild, and is never synced.
+    application,
     action,
     task,
     principal,
@@ -59,7 +62,7 @@ interface search {
 
   record hit {
     kind: kind,
-    /// Source-local locator: a VFS path, `book/entity`, or action id.
+    /// Source-local locator: a VFS path, `book/entity`, action id, or bundle id.
     id: string,
     title: string,
     subtitle: option<string>,
@@ -72,6 +75,10 @@ interface search {
     /// Bounded graph references attached to this hit. Empty when the host has
     /// no graph index for the object.
     references: list<reference>,
+    /// Host-resolved icon, as an asset reference (`asset:sha256:…`). A locator,
+    /// not bytes: Canvas resolves it on the render path, and a missing icon is a
+    /// named placeholder rather than a hole in a row.
+    icon: option<string>,
   }
 
   record page {

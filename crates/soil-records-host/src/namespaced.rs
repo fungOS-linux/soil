@@ -188,6 +188,93 @@ impl records::Host for NamespacedRecordsHost {
         Ok(Self::entry(namespace, record))
     }
 
+    fn compare_and_swap(
+        &mut self,
+        key: records::Key,
+        expected: Option<records::Version>,
+        entry: records::Entry,
+    ) -> Result<records::CasResult, records::Error> {
+        let namespace = self.namespace(&key.collection, true)?;
+        if key.id.is_empty() {
+            return Err(records::Error::Invalid);
+        }
+        if entry.key.collection != key.collection || entry.key.id != key.id {
+            return Err(records::Error::Invalid);
+        }
+        // Decode before taking the store lock so a malformed body fails without
+        // holding it.
+        let body = if entry.deleted {
+            None
+        } else {
+            if entry.schema.is_empty() {
+                return Err(records::Error::Invalid);
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(&entry.body).map_err(|_| records::Error::Invalid)?;
+            if !value.is_object() {
+                return Err(records::Error::Invalid);
+            }
+            Some(value)
+        };
+
+        let mut store = self.store.lock().expect("records store poisoned");
+        let current = store.get(&namespace.book, &key.id).ok();
+        let current_entry = current
+            .as_ref()
+            .map(|record| Self::entry(namespace, record.clone()));
+        let matches = match (&expected, &current) {
+            (None, None) => true,
+            // A tombstone is absent for create-if-absent semantics.
+            (None, Some(record)) => record.deleted,
+            (Some(_), None) => return Err(records::Error::NotFound),
+            (Some(version), Some(record)) => {
+                record.updated_hlc == version.revision && record.origin == version.origin
+            }
+        };
+        if !matches {
+            return Ok(records::CasResult {
+                applied: false,
+                entry: current_entry.expect("conflict has a current entry"),
+            });
+        }
+
+        // A delete keeps the schema the record already had; there is no single
+        // host schema to fall back to when a namespace has none.
+        let schema = if entry.schema.is_empty() {
+            current
+                .as_ref()
+                .map(|record| record.schema_id.clone())
+                .ok_or(records::Error::Invalid)?
+        } else {
+            entry.schema.clone()
+        };
+
+        if entry.deleted {
+            store
+                .delete_record(&namespace.book, &key.id, &schema, 1)
+                .map_err(|_| records::Error::Io)?;
+        } else {
+            store
+                .put_record(
+                    &namespace.book,
+                    &key.id,
+                    &schema,
+                    1,
+                    body.expect("a live write has a body"),
+                )
+                .map_err(|_| records::Error::Io)?;
+        }
+
+        let record = store
+            .get(&namespace.book, &key.id)
+            .map_err(|_| records::Error::Io)?;
+        drop(store);
+        Ok(records::CasResult {
+            applied: true,
+            entry: Self::entry(namespace, record),
+        })
+    }
+
     fn delete(&mut self, key: records::Key) -> Result<(), records::Error> {
         let namespace = self.namespace(&key.collection, true)?;
         if key.id.is_empty() {

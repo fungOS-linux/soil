@@ -100,9 +100,15 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("inference", &["models", "complete", "open-stream", "state"])],
     },
     Contract {
+        file: "wit/soil-spore.wit",
+        source: include_str!("../../../wit/soil-spore.wit"),
+        package: "soil:spore@0.1.0",
+        interfaces: &[("catalog", &["entries", "launch"])],
+    },
+    Contract {
         file: "wit/soil-search.wit",
         source: include_str!("../../../wit/soil-search.wit"),
-        package: "soil:search@0.5.0",
+        package: "soil:search@0.6.0",
         interfaces: &[
             ("search", &["search", "state", "refresh"]),
             ("mentions", &["suggest"]),

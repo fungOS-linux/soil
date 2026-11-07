@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use discovery::{PeerIndex, ServiceIndex, SporeIndex};
+use discovery::{ApplicationIndex, PeerIndex, ServiceIndex, SporeIndex};
 use fungos_records::{Record, Store};
 use git::GitIndex;
 use graph::GraphIndex;
@@ -52,6 +52,7 @@ pub struct SearchService {
     spores: Option<SporeIndex>,
     peers: Option<PeerIndex>,
     services: Option<ServiceIndex>,
+    applications: Option<ApplicationIndex>,
     marbles: Option<MarblesIndex>,
     principals: Vec<PrincipalCandidate>,
     generation: u64,
@@ -74,6 +75,7 @@ impl SearchService {
             spores: None,
             peers: None,
             services: None,
+            applications: None,
             marbles: None,
             principals: Vec::new(),
             generation: 1,
@@ -164,6 +166,18 @@ impl SearchService {
         self
     }
 
+    /// Add the host-local installed-application inventory.
+    ///
+    /// This is the one discovery source that is never synced: the inventory is
+    /// rebuilt from the bundle index, differs per machine, and is worth nothing
+    /// to another host. A Spore cannot add a path or an application; the host
+    /// supplies the snapshot.
+    pub fn with_applications_snapshot(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.applications = Some(ApplicationIndex::load(path.into()));
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
     /// Add a host-granted Marbles snapshot. The host decides store, company,
     /// project scope and freshness; search never runs `mb` itself.
     pub fn with_marbles(mut self, index: MarblesIndex) -> Self {
@@ -187,6 +201,7 @@ impl SearchService {
             + u32::from(self.spores.is_some())
             + u32::from(self.peers.is_some())
             + u32::from(self.services.is_some())
+            + u32::from(self.applications.is_some())
             + u32::from(self.marbles.is_some())
             + u32::from(!self.principals.is_empty())
     }
@@ -214,6 +229,7 @@ impl SearchService {
                 search_api::Kind::Spore,
                 search_api::Kind::Peer,
                 search_api::Kind::Service,
+                search_api::Kind::Application,
                 search_api::Kind::Task,
                 search_api::Kind::Principal,
             ]
@@ -238,6 +254,9 @@ impl SearchService {
         }
         if kinds.contains(&search_api::Kind::Service) {
             hits.extend(self.service_hits(&query));
+        }
+        if kinds.contains(&search_api::Kind::Application) {
+            hits.extend(self.application_hits(&query));
         }
         if kinds.contains(&search_api::Kind::Action) {
             hits.extend(self.action_hits(&query));
@@ -287,6 +306,7 @@ impl SearchService {
                     source: "tgrep".into(),
                     updated_at_ms: None,
                     references: Vec::new(),
+                    icon: None,
                 })
                 .collect());
         }
@@ -322,6 +342,7 @@ impl SearchService {
                 source: "vfs".into(),
                 updated_at_ms: None,
                 references: Vec::new(),
+                icon: None,
             })
             .collect())
     }
@@ -347,6 +368,7 @@ impl SearchService {
                 source: "git".into(),
                 updated_at_ms: None,
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -368,6 +390,7 @@ impl SearchService {
                 source: format!("spore:{}", entry.root),
                 updated_at_ms: None,
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -389,6 +412,7 @@ impl SearchService {
                 source: "mycelium:peers".into(),
                 updated_at_ms: entry.updated_at_ms,
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -410,6 +434,29 @@ impl SearchService {
                 source: "mycelium:services".into(),
                 updated_at_ms: entry.updated_at_ms,
                 references: Vec::new(),
+                icon: None,
+            })
+            .collect()
+    }
+
+    fn application_hits(&self, query: &search_api::Query) -> Vec<search_api::Hit> {
+        let Some(applications) = &self.applications else {
+            return Vec::new();
+        };
+        applications
+            .search(&query.text, MAX_PAGE as usize)
+            .into_iter()
+            .map(|(entry, score)| search_api::Hit {
+                kind: search_api::Kind::Application,
+                id: entry.id,
+                title: entry.title,
+                subtitle: Some(entry.subtitle),
+                snippet: None,
+                score,
+                source: "host:applications".into(),
+                updated_at_ms: None,
+                references: Vec::new(),
+                icon: entry.icon,
             })
             .collect()
     }
@@ -430,6 +477,7 @@ impl SearchService {
                 source: "git".into(),
                 updated_at_ms: None,
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -595,6 +643,7 @@ impl SearchService {
                 source: "marbles".into(),
                 updated_at_ms: Some(issue.updated_at.max(0) as u64 * 1000),
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -639,6 +688,7 @@ impl SearchService {
                 source: "principal".into(),
                 updated_at_ms: None,
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -812,6 +862,7 @@ fn record_hit(record: Record, needle: &str, index: usize) -> search_api::Hit {
         source: format!("records:{}", record.book_id),
         updated_at_ms: Some(record.updated_hlc),
         references: Vec::new(),
+        icon: None,
     }
 }
 
@@ -1156,6 +1207,74 @@ surfaces = ["canvas"]
         assert_eq!(page.hits.len(), 1);
         assert_eq!(page.hits[0].kind, search_api::Kind::Service);
         assert_eq!(page.hits[0].id, "unibus/viewer");
+    }
+
+    #[test]
+    fn a_host_local_application_inventory_is_found_and_carries_its_icon() {
+        let dir = tempfile::tempdir().unwrap();
+        let applications = dir.path().join("applications.json");
+        std::fs::write(
+            &applications,
+            serde_json::json!({
+                "applications": [
+                    {
+                        "bundle_id": "com.apple.Safari",
+                        "name": "Safari",
+                        "subtitle": "com.apple.Safari",
+                        "icon": "asset:sha256:aa11"
+                    },
+                    { "bundle_id": "com.tinyspeck.slackmacgap", "name": "Slack" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut host =
+            SearchService::new(None, None, vec![]).with_applications_snapshot(&applications);
+
+        let page = host
+            .search(search_api::Query {
+                text: "safari".into(),
+                kinds: vec![search_api::Kind::Application],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].kind, search_api::Kind::Application);
+        // The locator is a bundle id, not a path the Spore could steer.
+        assert_eq!(page.hits[0].id, "com.apple.Safari");
+        assert_eq!(page.hits[0].source, "host:applications");
+        assert_eq!(page.hits[0].icon.as_deref(), Some("asset:sha256:aa11"));
+
+        // An application with no icon is still a row: the renderer falls back to
+        // a monogram, it does not drop the hit.
+        let page = host
+            .search(search_api::Query {
+                text: "slack".into(),
+                kinds: vec![search_api::Kind::Application],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].icon, None);
+
+        // The inventory is host-granted, not ambient: without the snapshot the
+        // kind yields nothing rather than inventing a list.
+        let mut bare = SearchService::new(None, None, vec![]);
+        let page = bare
+            .search(search_api::Query {
+                text: "safari".into(),
+                kinds: vec![search_api::Kind::Application],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert!(page.hits.is_empty());
     }
 
     #[test]

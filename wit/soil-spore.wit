@@ -1,0 +1,44 @@
+// Installed Spore catalog and host-owned launch.
+//
+// A Spore never scans the filesystem, starts a process, or chooses a window.
+// The host validates packages, maps them to a launch target, and performs the
+// launch outside the guest.
+package soil:spore@0.1.0;
+
+interface catalog {
+  enum error {
+    denied,
+    not-found,
+    invalid,
+    unsupported,
+    io,
+  }
+
+  record entry {
+    id: string,
+    name: string,
+    version: string,
+    summary: string,
+    /// Optional Canvas workspace id supplied by host policy.
+    workspace: option<string>,
+    default-surface: string,
+    surfaces: list<string>,
+  }
+
+  record launched {
+    id: string,
+    surface: string,
+    target: string,
+  }
+
+  entries: func() -> result<list<entry>, error>;
+  launch: func(id: string, surface: string) -> result<launched, error>;
+}
+
+world spore-host {
+  import catalog;
+}
+
+world guest {
+  import catalog;
+}
