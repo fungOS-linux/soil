@@ -70,7 +70,8 @@ settings.save(&value)?;
 ```
 
 - `local::Json<T>` is device-only.
-- `synced::Json<T>` is per-app, per-user, replicated and encrypted by the host.
+- `synced::Json<T>` is per-app, per-user, and replicated by the host. The
+  current records slice is not yet end-to-end encrypted.
 - `load`, `load_or_default`, `load_with_meta`, `save`, `save_if_generation`,
   `delete`, `list_keys`, `sync_state`.
 - `soil-sdk-codec` provides the `Codec` trait and `JsonCodec`.

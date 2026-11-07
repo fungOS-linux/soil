@@ -3934,6 +3934,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-appdata-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "fungos-records",
+ "serde_json",
+ "tempfile",
+ "wasmtime",
+]
+
+[[package]]
 name = "soil-ble-host"
 version = "0.1.0"
 dependencies = [
@@ -3951,19 +3963,6 @@ dependencies = [
 [[package]]
 name = "soil-canvas-input"
 version = "0.1.0"
-
-[[package]]
-name = "soil-dfm-viz"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "fontdue",
- "pollster",
- "serde_json",
- "wgpu",
- "winit",
-]
 
 [[package]]
 name = "soil-input"
