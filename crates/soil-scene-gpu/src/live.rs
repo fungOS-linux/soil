@@ -7,15 +7,18 @@
 //! bridge.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use soil_scene::{
-    Area, Band, Candle, Candles, Content, Heatmap, Node, Points, Polyline, Rect, Scene, Text,
-    Transform,
+    Area, Band, Candle, Candles, Content, DenseResource, GpuDense, GpuDenseMode, GpuPoints3D,
+    GpuResource, Heatmap, Node, PointCloudResource, Points, Polyline, Rect, Scene, Text, Transform,
 };
 use sysinfo::{ProcessesToUpdate, System};
 
+use crate::gpu::{camera_view_proj, project_to};
 use crate::{Frame, Theme};
 
 const TAU: f32 = std::f32::consts::PI * 2.0;
@@ -24,6 +27,14 @@ const SAMPLE_SECONDS: f32 = 0.2;
 const ATLAS_POINTS: usize = 240;
 const INCIDENT_CYCLE: f32 = 240.0;
 const INCIDENT_OFFSET: f32 = 32.0;
+
+/// A new LiveViz invalidates resident GPU buffers even when the Lua spec keeps
+/// the same resource id across a hot reload.
+static NEXT_GPU_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_gpu_generation() -> u64 {
+    NEXT_GPU_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LiveSpec {
@@ -521,8 +532,7 @@ fn default_point_size() -> f32 {
 
 #[derive(Debug, Clone)]
 struct DenseData {
-    raw: Vec<[f32; 2]>,
-    sampled: Vec<[f32; 2]>,
+    resource: Arc<GpuResource>,
 }
 
 impl DenseData {
@@ -539,14 +549,29 @@ impl DenseData {
                 + 0.03 * (t * TAU * 311.0 + seed * 4.1).sin();
             raw.push([t, y]);
         }
-        let sampled = lttb(&raw, spec.threshold.clamp(2, 200_000));
-        Self { raw, sampled }
+        let resource = Arc::new(GpuResource::Dense(DenseResource {
+            id: spec.id.clone(),
+            generation: next_gpu_generation(),
+            points: raw,
+        }));
+        Self { resource }
+    }
+
+    fn raw(&self) -> &[[f32; 2]] {
+        match self.resource.as_ref() {
+            GpuResource::Dense(resource) => &resource.points,
+            GpuResource::PointCloud(_) => &[],
+        }
+    }
+
+    fn raw_len(&self) -> usize {
+        self.raw().len()
     }
 }
 
 #[derive(Debug, Clone)]
 struct CloudData {
-    points: Vec<[f32; 4]>,
+    resource: Arc<GpuResource>,
 }
 
 impl CloudData {
@@ -565,7 +590,19 @@ impl CloudData {
             let z = radius * phi.sin() * theta.sin();
             points.push([x, y, z, hash01(i * 5.13 + spec.seed as f32 * 0.73)]);
         }
-        Self { points }
+        let resource = Arc::new(GpuResource::PointCloud(PointCloudResource {
+            id: spec.id.clone(),
+            generation: next_gpu_generation(),
+            points,
+        }));
+        Self { resource }
+    }
+
+    fn point_count(&self) -> usize {
+        match self.resource.as_ref() {
+            GpuResource::PointCloud(resource) => resource.points.len(),
+            GpuResource::Dense(resource) => resource.points.len(),
+        }
     }
 }
 
@@ -574,50 +611,6 @@ fn hash01(mut value: f32) -> f32 {
     value *= value + 33.33;
     value = (value * (value + value)).fract();
     value
-}
-
-fn lttb(points: &[[f32; 2]], threshold: usize) -> Vec<[f32; 2]> {
-    if threshold >= points.len() || threshold < 3 {
-        return points.to_vec();
-    }
-    let mut out = Vec::with_capacity(threshold);
-    out.push(points[0]);
-    let every = (points.len() - 2) as f32 / (threshold - 2) as f32;
-    let mut anchor = 0usize;
-    for bucket in 0..threshold - 2 {
-        let start = ((bucket as f32 * every).floor() as usize + 1).min(points.len() - 2);
-        let end = (((bucket + 1) as f32 * every).floor() as usize + 1).min(points.len() - 1);
-        let next_start = (((bucket + 1) as f32 * every).floor() as usize + 1).min(points.len() - 1);
-        let next_end = (((bucket + 2) as f32 * every).floor() as usize + 1).min(points.len());
-        let mut avg = [0.0f32; 2];
-        let mut n = 0.0f32;
-        for point in &points[next_start.min(points.len() - 1)..next_end] {
-            avg[0] += point[0];
-            avg[1] += point[1];
-            n += 1.0;
-        }
-        if n > 0.0 {
-            avg[0] /= n;
-            avg[1] /= n;
-        }
-        let ax = points[anchor][0];
-        let ay = points[anchor][1];
-        let mut best = start;
-        let mut best_area = -1.0f32;
-        for index in start..=end.min(points.len() - 1) {
-            let area = ((ax - avg[0]) * (points[index][1] - ay)
-                - (ax - points[index][0]) * (avg[1] - ay))
-                .abs();
-            if area > best_area {
-                best_area = area;
-                best = index;
-            }
-        }
-        out.push(points[best]);
-        anchor = best;
-    }
-    out.push(points[points.len() - 1]);
-    out
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1083,7 +1076,19 @@ impl LiveViz {
             }
         }
         self.last_scene_time = self.time;
-        Scene::new(nodes)
+        let gpu = self
+            .dense
+            .iter()
+            .flatten()
+            .map(|data| data.resource.clone())
+            .chain(
+                self.clouds
+                    .iter()
+                    .flatten()
+                    .map(|data| data.resource.clone()),
+            )
+            .collect();
+        Scene::with_gpu(nodes, gpu)
     }
 
     pub fn reset(&mut self) {
@@ -1215,6 +1220,84 @@ impl<'a> Painter<'a> {
     }
     fn ts(&self, size: f32) -> f32 {
         size * self.scale / (self.theme.body * 1.25).max(1.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gpu_dense(
+        &mut self,
+        id: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        resource: &str,
+        mode: GpuDenseMode,
+        range: [f32; 4],
+        buckets: u32,
+        color: [u8; 3],
+        opacity: f32,
+        size: f32,
+    ) {
+        self.z += 0.03;
+        self.nodes.push(Node {
+            id: format!("{id}-gpu"),
+            parent: None,
+            transition_ms: Some(0),
+            transform: Transform {
+                translation: [self.nx(x), self.ny(y), self.z],
+                rotation: [0.0; 3],
+                scale: [self.sw(w.max(1.0)), self.sh(h.max(1.0)), 1.0],
+            },
+            content: Content::GpuDense(GpuDense {
+                resource: resource.into(),
+                mode,
+                range,
+                buckets,
+                ink: None,
+                rgb: Some(color),
+                opacity,
+                size,
+            }),
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gpu_points3d(
+        &mut self,
+        id: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        resource: &str,
+        yaw: f32,
+        pitch: f32,
+        zoom: f32,
+        size: f32,
+        color: [u8; 3],
+        opacity: f32,
+    ) {
+        self.z += 0.03;
+        self.nodes.push(Node {
+            id: format!("{id}-gpu"),
+            parent: None,
+            transition_ms: Some(0),
+            transform: Transform {
+                translation: [self.nx(x), self.ny(y), self.z],
+                rotation: [0.0; 3],
+                scale: [self.sw(w.max(1.0)), self.sh(h.max(1.0)), 1.0],
+            },
+            content: Content::GpuPoints3D(GpuPoints3D {
+                resource: resource.into(),
+                yaw,
+                pitch,
+                zoom,
+                size,
+                ink: None,
+                rgb: Some(color),
+                opacity,
+            }),
+        });
     }
 
     fn rect(
@@ -2795,7 +2878,7 @@ fn draw_dense_chart(painter: &mut Painter, spec: &DenseSpec, data: &DenseData, r
     let subtitle = spec
         .subtitle
         .clone()
-        .unwrap_or_else(|| "resident dense series · CPU LTTB".into());
+        .unwrap_or_else(|| "resident dense series · GPU bucket decimation".into());
     painter.text(
         &format!("{}-subtitle", spec.id),
         &subtitle,
@@ -2821,7 +2904,7 @@ fn draw_dense_chart(painter: &mut Painter, spec: &DenseSpec, data: &DenseData, r
     );
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
-    for point in &data.sampled {
+    for point in data.raw() {
         lo = lo.min(point[1]);
         hi = hi.max(point[1]);
     }
@@ -2872,30 +2955,30 @@ fn draw_dense_chart(painter: &mut Painter, spec: &DenseSpec, data: &DenseData, r
         );
     }
     let color = spec.mode_color(theme);
-    match spec.mode {
-        DenseKind::Line => {
-            let screen: Vec<(f32, f32)> = data
-                .sampled
-                .iter()
-                .map(|point| (sx(point[0]), sy(point[1])))
-                .collect();
-            painter.polyline(&format!("{}-line", spec.id), &screen, 1.4, color, 1.0);
-        }
-        DenseKind::Scatter => {
-            let screen: Vec<(f32, f32)> = data
-                .sampled
-                .iter()
-                .map(|point| (sx(point[0]), sy(point[1])))
-                .collect();
-            painter.points(&format!("{}-points", spec.id), &screen, 1.8, color, 0.82);
-        }
-    }
+    let mode = match spec.mode {
+        DenseKind::Line => GpuDenseMode::Line,
+        DenseKind::Scatter => GpuDenseMode::Scatter,
+    };
+    painter.gpu_dense(
+        &spec.id,
+        left,
+        top,
+        plot_w,
+        plot_h,
+        data.resource.id(),
+        mode,
+        [0.0, ylo, 1.0, yhi],
+        spec.threshold.clamp(2, 200_000) as u32,
+        color,
+        1.0,
+        2.0,
+    );
     painter.text(
         &format!("{}-density", spec.id),
         &format!(
-            "{} → {} marks",
-            format_count(data.raw.len()),
-            format_count(data.sampled.len())
+            "{} → {} GPU buckets",
+            format_count(data.raw_len()),
+            format_count(spec.threshold.clamp(2, 200_000))
         ),
         left,
         bottom + 20.0,
@@ -2932,58 +3015,48 @@ fn draw_pointcloud3d(
             theme.muted,
         );
     }
-    let cx = r.x + r.w * 0.5;
-    let cy = r.y + r.h * 0.56;
-    let scale = r.h.min(r.w) * 0.38;
+    let left = r.x + 16.0;
+    let top = r.y + 48.0;
+    let plot_w = (r.w - 32.0).max(16.0);
+    let plot_h = (r.h - 72.0).max(16.0);
     let yaw = time * 0.32 + spec.seed as f32 * 0.013;
     let pitch = spec.pitch.clamp(-1.2, 1.2);
-    let (syaw, cyaw) = yaw.sin_cos();
-    let (spitch, cpitch) = pitch.sin_cos();
-    let project = |point: [f32; 3]| {
-        let x1 = point[0] * cyaw + point[2] * syaw;
-        let z1 = -point[0] * syaw + point[2] * cyaw;
-        let y1 = point[1] * cpitch - z1 * spitch;
-        let z2 = point[1] * spitch + z1 * cpitch;
-        let depth = 1.0 / (1.0 + z2 * 0.75);
-        (cx + x1 * scale * depth, cy - y1 * scale * depth, z2)
-    };
-    for (index, axis) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-        .iter()
-        .enumerate()
-    {
-        let (x, y, _) = project([0.0, 0.0, 0.0]);
-        let (ex, ey, _) = project(*axis);
-        let color = [theme.danger, theme.success, theme.info][index];
-        painter.polyline(
-            &format!("{}-axis-{index}", spec.id),
-            &[(x, y), (ex, ey)],
-            1.2,
-            color,
-            0.55,
-        );
-    }
-    let mut marks: Vec<(f32, f32, f32)> = cloud
-        .points
-        .iter()
-        .map(|point| {
-            let (x, y, depth) = project([point[0], point[1], point[2]]);
-            (x, y, depth)
-        })
-        .collect();
-    marks.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-    painter.points(
-        &format!("{}-cloud", spec.id),
-        &marks
-            .iter()
-            .map(|mark| (mark.0, mark.1))
-            .collect::<Vec<_>>(),
+    painter.gpu_points3d(
+        &spec.id,
+        left,
+        top,
+        plot_w,
+        plot_h,
+        cloud.resource.id(),
+        yaw,
+        pitch,
+        1.0,
         spec.size,
         theme.info,
-        0.78,
+        0.82,
     );
+    let camera = camera_view_proj(yaw, pitch, 1.0, plot_w / plot_h.max(1.0));
+    let rect = [left, top, plot_w, plot_h];
+    if let Some((x, y)) = project_to(&camera, [0.0, 0.0, 0.0], rect) {
+        for (index, axis) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+            .iter()
+            .enumerate()
+        {
+            if let Some((ex, ey)) = project_to(&camera, *axis, rect) {
+                let color = [theme.danger, theme.success, theme.info][index];
+                painter.polyline(
+                    &format!("{}-axis-{index}", spec.id),
+                    &[(x, y), (ex, ey)],
+                    1.2,
+                    color,
+                    0.55,
+                );
+            }
+        }
+    }
     painter.text(
         &format!("{}-density", spec.id),
-        &format!("{} projected points", format_count(cloud.points.len())),
+        &format!("{} GPU-projected points", format_count(cloud.point_count())),
         r.x + 16.0,
         r.y + r.h - 20.0,
         9.0,
@@ -3541,20 +3614,6 @@ mod tests {
         let scene = live.advance(0.016);
         scene.validate().expect("valid scene");
         assert!(scene.nodes.len() > 20);
-    }
-
-    #[test]
-    fn lttb_keeps_endpoints_and_the_requested_budget() {
-        let points: Vec<[f32; 2]> = (0..10_000)
-            .map(|index| {
-                let x = index as f32 / 9_999.0;
-                [x, (x * 31.0).sin()]
-            })
-            .collect();
-        let sampled = lttb(&points, 500);
-        assert_eq!(sampled.len(), 500);
-        assert_eq!(sampled[0], points[0]);
-        assert_eq!(sampled[sampled.len() - 1], points[points.len() - 1]);
     }
 
     #[test]

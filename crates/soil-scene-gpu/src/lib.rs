@@ -11,6 +11,7 @@ use fontdue::{Font, FontSettings};
 use std::collections::HashMap;
 use std::io::Read;
 
+mod gpu;
 pub mod live;
 pub mod terminal;
 pub mod window;
@@ -166,6 +167,10 @@ pub struct Renderer {
     text_pipeline: wgpu::RenderPipeline,
     font: Option<Font>,
     format: wgpu::TextureFormat,
+    samples: u32,
+    gpu: gpu::GpuState,
+    depth: Option<wgpu::Texture>,
+    depth_size: (u32, u32, u32),
     rect_buffer: Option<wgpu::Buffer>,
     rect_capacity: u64,
     rect_scratch: Vec<Vertex>,
@@ -280,7 +285,7 @@ impl Renderer {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
+            depth_stencil: Some(gpu::depth_state(false)),
             multisample: wgpu::MultisampleState {
                 count: samples,
                 ..Default::default()
@@ -317,7 +322,7 @@ impl Renderer {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
+            depth_stencil: Some(gpu::depth_state(false)),
             multisample: wgpu::MultisampleState {
                 count: samples,
                 ..Default::default()
@@ -364,6 +369,8 @@ impl Renderer {
             ],
         });
 
+        let gpu = gpu::GpuState::new(&device, format, samples)?;
+
         Ok(Self {
             device,
             queue,
@@ -371,6 +378,10 @@ impl Renderer {
             text_pipeline,
             font: load_font(),
             format,
+            samples,
+            gpu,
+            depth: None,
+            depth_size: (0, 0, 0),
             rect_buffer: None,
             rect_capacity: 0,
             rect_scratch: Vec::new(),
@@ -418,6 +429,32 @@ impl Renderer {
         self.draw_to_inner(scene, width, height, theme, target, Some(resolve))
     }
 
+    fn ensure_depth(&mut self, width: u32, height: u32) -> wgpu::TextureView {
+        let key = (width, height, self.samples);
+        if self.depth.is_none() || self.depth_size != key {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("soil-scene-gpu depth"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: self.samples,
+                dimension: wgpu::TextureDimension::D2,
+                format: gpu::DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.depth = Some(texture);
+            self.depth_size = key;
+        }
+        self.depth
+            .as_ref()
+            .expect("depth texture")
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
     fn draw_to_inner(
         &mut self,
         scene: &soil_scene::Scene,
@@ -433,8 +470,12 @@ impl Renderer {
             "frame extent is outside 1..=4096"
         );
         scene.validate().map_err(|error| anyhow::anyhow!(error))?;
+        let depth = self.ensure_depth(width, height);
         let device = &self.device;
         let queue = &self.queue;
+        let gpu_draws = self
+            .gpu
+            .prepare(device, queue, scene, width, height, theme)?;
 
         self.rect_scratch.clear();
         rect_vertices(&mut self.rect_scratch, scene, width, height, theme);
@@ -512,7 +553,14 @@ impl Renderer {
                         },
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
@@ -523,6 +571,7 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..self.rect_scratch.len() as u32, 0..1);
             }
+            self.gpu.draw(&mut pass, &gpu_draws);
             if !self.text_scratch.is_empty()
                 && let Some(buffer) = &self.text_buffer
             {
@@ -649,11 +698,15 @@ fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
     ]
 }
 
-fn rgb_or_ink(theme: Theme, rgb: Option<[u8; 3]>, semantic: Option<soil_scene::Ink>) -> [u8; 3] {
+pub(crate) fn rgb_or_ink(
+    theme: Theme,
+    rgb: Option<[u8; 3]>,
+    semantic: Option<soil_scene::Ink>,
+) -> [u8; 3] {
     rgb.unwrap_or_else(|| ink(theme, semantic))
 }
 
-fn ink(theme: Theme, ink: Option<soil_scene::Ink>) -> [u8; 3] {
+pub(crate) fn ink(theme: Theme, ink: Option<soil_scene::Ink>) -> [u8; 3] {
     match ink.unwrap_or(soil_scene::Ink::Text) {
         soil_scene::Ink::Text => theme.text,
         soil_scene::Ink::Muted => theme.muted,
@@ -667,7 +720,10 @@ fn ink(theme: Theme, ink: Option<soil_scene::Ink>) -> [u8; 3] {
     }
 }
 
-fn world_bounds(node: &soil_scene::Node, nodes: &[soil_scene::Node]) -> (f32, f32, f32, f32) {
+pub(crate) fn world_bounds(
+    node: &soil_scene::Node,
+    nodes: &[soil_scene::Node],
+) -> (f32, f32, f32, f32) {
     let (mut x, mut y) = (node.transform.translation[0], node.transform.translation[1]);
     let (mut w, mut h) = (node.transform.scale[0], node.transform.scale[1]);
     let mut parent = node.parent.as_deref();

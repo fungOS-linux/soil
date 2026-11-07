@@ -70,10 +70,7 @@ fn main() -> std::io::Result<()> {
 }
 
 /// Block until the host asks for a frame, returning `(now_ms, dt_ms)`.
-fn wait_for_frame(
-    reader: &mut BufReader<UnixStream>,
-    _started: &Instant,
-) -> Option<(u64, u64)> {
+fn wait_for_frame(reader: &mut BufReader<UnixStream>, _started: &Instant) -> Option<(u64, u64)> {
     let mut line = String::new();
     loop {
         line.clear();
@@ -194,6 +191,7 @@ fn frame(t: f32) -> Scene {
         Node {
             id: "ground".into(),
             parent: None,
+            transition_ms: None,
             transform: Transform {
                 scale: [8.0, 8.0, 1.0],
                 ..Default::default()
@@ -208,6 +206,7 @@ fn frame(t: f32) -> Scene {
         Node {
             id: "orbit".into(),
             parent: None,
+            transition_ms: None,
             transform: Transform {
                 translation: [x, y, 0.2],
                 scale: [0.9, 0.9, 1.0],
@@ -226,6 +225,7 @@ fn frame(t: f32) -> Scene {
         Node {
             id: "plasma".into(),
             parent: None,
+            transition_ms: None,
             // Scene placement is a top-left corner, y up: a 7.2x4.4 node centred
             // in an 8x8 space starts at (-3.6, 2.2).
             transform: Transform {
@@ -243,6 +243,7 @@ fn frame(t: f32) -> Scene {
         Node {
             id: "title".into(),
             parent: None,
+            transition_ms: None,
             transform: Transform {
                 translation: [-3.5, 3.2, 0.3],
                 scale: [0.9, 0.9, 1.0],
@@ -258,6 +259,7 @@ fn frame(t: f32) -> Scene {
         Node {
             id: "hint".into(),
             parent: None,
+            transition_ms: None,
             transform: Transform {
                 translation: [-3.5, -3.4, 0.3],
                 scale: [0.7, 0.7, 1.0],

@@ -12,6 +12,7 @@
 //! and the host refuses what it cannot draw.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 pub mod shm;
 
@@ -23,6 +24,9 @@ pub const SCENE_VERSION: u32 = 1;
 pub const MAX_NODES: usize = 4096;
 pub const MAX_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+/// Resident GPU resources are host-local and never count against the wire
+/// payload. This is their own ceiling so a bad producer cannot exhaust memory.
+pub const MAX_GPU_POINTS: usize = 10_000_000;
 
 /// The only failure this crate produces: a document the host will not draw.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +109,12 @@ pub struct Scene {
     /// flicker. A window has a ground unless its Spore asks for the composite.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transparent: bool,
+    /// Resident buffers for GPU-backed content. These are deliberately not on
+    /// the wire: a scene captured from a document cannot smuggle a million
+    /// points through JSON, and a browser host can upload the same resources
+    /// through a native binding instead.
+    #[serde(skip)]
+    pub gpu: Vec<Arc<GpuResource>>,
 }
 
 impl Scene {
@@ -113,6 +123,17 @@ impl Scene {
             schema: SCENE_VERSION,
             nodes,
             transparent: false,
+            gpu: Vec::new(),
+        }
+    }
+
+    /// Attach resident GPU resources. The nodes refer to them by id.
+    pub fn with_gpu(nodes: Vec<Node>, gpu: Vec<Arc<GpuResource>>) -> Self {
+        Self {
+            schema: SCENE_VERSION,
+            nodes,
+            transparent: false,
+            gpu,
         }
     }
 
@@ -129,12 +150,35 @@ impl Scene {
                 self.nodes.len()
             )));
         }
+        let mut resource_ids = std::collections::BTreeSet::new();
+        for resource in &self.gpu {
+            resource.validate()?;
+            if !resource_ids.insert(resource.id()) {
+                return Err(Error::invalid(format!(
+                    "duplicate GPU resource id {:?}",
+                    resource.id()
+                )));
+            }
+        }
         let mut seen = std::collections::BTreeSet::new();
         for node in &self.nodes {
             if !seen.insert(node.id.as_str()) {
                 return Err(Error::invalid(format!("duplicate node id {:?}", node.id)));
             }
             node.validate()?;
+            let resource = match &node.content {
+                Content::GpuDense(dense) => Some(dense.resource.as_str()),
+                Content::GpuPoints3D(points) => Some(points.resource.as_str()),
+                _ => None,
+            };
+            if let Some(resource) = resource
+                && !resource_ids.contains(resource)
+            {
+                return Err(Error::invalid(format!(
+                    "node {:?} names missing GPU resource {resource:?}",
+                    node.id
+                )));
+            }
         }
         // A parent must exist and must precede its child: the renderer draws in
         // order, so a forward reference is a scene that draws differently
@@ -267,6 +311,10 @@ pub enum Content {
     /// OHLC candles, one primitive instead of a wick and body node each.
     Candles(Candles),
     Shader(Shader),
+    /// A resident dense series decimated by a GPU compute pass.
+    GpuDense(GpuDense),
+    /// A resident 3D point cloud drawn through a depth-tested GPU pipeline.
+    GpuPoints3D(GpuPoints3D),
 }
 
 impl Content {
@@ -283,6 +331,8 @@ impl Content {
             Self::Heatmap(heatmap) => heatmap.validate(),
             Self::Candles(candles) => candles.validate(),
             Self::Shader(shader) => shader.validate(),
+            Self::GpuDense(dense) => dense.validate(),
+            Self::GpuPoints3D(points) => points.validate(),
         }
     }
 }
@@ -538,6 +588,198 @@ impl Candles {
         }
         Ok(())
     }
+}
+
+/// A resident dense series. The points are local `(x, y)` values, normally
+/// normalized to 0..1 in x and data-space in y.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DenseResource {
+    pub id: String,
+    #[serde(default)]
+    pub generation: u64,
+    pub points: Vec<[f32; 2]>,
+}
+
+/// A resident 3D point cloud. Each point is `[x, y, z, intensity]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PointCloudResource {
+    pub id: String,
+    #[serde(default)]
+    pub generation: u64,
+    pub points: Vec<[f32; 4]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GpuResource {
+    Dense(DenseResource),
+    PointCloud(PointCloudResource),
+}
+
+impl GpuResource {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Dense(resource) => &resource.id,
+            Self::PointCloud(resource) => &resource.id,
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        match self {
+            Self::Dense(resource) => resource.generation,
+            Self::PointCloud(resource) => resource.generation,
+        }
+    }
+
+    pub fn point_count(&self) -> usize {
+        match self {
+            Self::Dense(resource) => resource.points.len(),
+            Self::PointCloud(resource) => resource.points.len(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        safe_id(self.id(), "GPU resource")?;
+        match self {
+            Self::Dense(resource) => {
+                if resource.points.len() < 2 || resource.points.len() > MAX_GPU_POINTS {
+                    return Err(Error::invalid("dense resource needs 2..=10,000,000 points"));
+                }
+                for point in &resource.points {
+                    finite(point[0])?;
+                    finite(point[1])?;
+                }
+            }
+            Self::PointCloud(resource) => {
+                if resource.points.len() < 1 || resource.points.len() > MAX_GPU_POINTS {
+                    return Err(Error::invalid("point cloud needs 1..=10,000,000 points"));
+                }
+                for point in &resource.points {
+                    for value in point {
+                        finite(*value)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PartialEq for GpuResource {
+    fn eq(&self, other: &Self) -> bool {
+        self.id() == other.id() && self.generation() == other.generation()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuDenseMode {
+    #[default]
+    Line,
+    Scatter,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuDense {
+    /// Resource id in [`Scene::gpu`].
+    pub resource: String,
+    #[serde(default)]
+    pub mode: GpuDenseMode,
+    /// Data-space range: `[x_min, y_min, x_max, y_max]`.
+    #[serde(default = "unit_range")]
+    pub range: [f32; 4],
+    /// Number of buckets the compute pass reduces to. The output has one point
+    /// per bucket.
+    #[serde(default = "default_buckets")]
+    pub buckets: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ink: Option<Ink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgb: Option<[u8; 3]>,
+    #[serde(default = "opaque")]
+    pub opacity: f32,
+    /// Point diameter in logical pixels for scatter mode.
+    #[serde(default = "default_gpu_point_size")]
+    pub size: f32,
+}
+
+impl GpuDense {
+    fn validate(&self) -> Result<(), Error> {
+        safe_id(&self.resource, "GPU dense resource")?;
+        for value in self.range {
+            finite(value)?;
+        }
+        if self.range[2] <= self.range[0] || self.range[3] <= self.range[1] {
+            return Err(Error::invalid("GPU dense range must be increasing"));
+        }
+        if !(2..=200_000).contains(&self.buckets) {
+            return Err(Error::invalid("GPU dense buckets must be 2..=200000"));
+        }
+        finite(self.opacity)?;
+        if !(0.0..=1.0).contains(&self.opacity) {
+            return Err(Error::invalid("GPU dense opacity must be 0..=1"));
+        }
+        if !self.size.is_finite() || self.size <= 0.0 {
+            return Err(Error::invalid("GPU dense point size must be positive"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuPoints3D {
+    /// Resource id in [`Scene::gpu`].
+    pub resource: String,
+    #[serde(default)]
+    pub yaw: f32,
+    #[serde(default)]
+    pub pitch: f32,
+    #[serde(default = "unit")]
+    pub zoom: f32,
+    /// Point diameter in logical pixels.
+    #[serde(default = "default_gpu_point_size")]
+    pub size: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ink: Option<Ink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgb: Option<[u8; 3]>,
+    #[serde(default = "opaque")]
+    pub opacity: f32,
+}
+
+impl GpuPoints3D {
+    fn validate(&self) -> Result<(), Error> {
+        safe_id(&self.resource, "GPU point cloud resource")?;
+        for value in [self.yaw, self.pitch, self.zoom, self.size, self.opacity] {
+            finite(value)?;
+        }
+        if self.zoom <= 0.0 {
+            return Err(Error::invalid("GPU point cloud zoom must be positive"));
+        }
+        if self.size <= 0.0 {
+            return Err(Error::invalid("GPU point cloud size must be positive"));
+        }
+        if !(0.0..=1.0).contains(&self.opacity) {
+            return Err(Error::invalid("GPU point cloud opacity must be 0..=1"));
+        }
+        Ok(())
+    }
+}
+
+const fn unit_range() -> [f32; 4] {
+    [0.0, 0.0, 1.0, 1.0]
+}
+
+const fn default_buckets() -> u32 {
+    4_000
+}
+
+const fn default_gpu_point_size() -> f32 {
+    2.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
