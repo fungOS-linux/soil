@@ -6,7 +6,12 @@
 
 wit_bindgen::generate!({ path: "wit", world: "mush", generate_all });
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
+
+use regex::{Regex, RegexBuilder};
 
 use soil::command::command as command_abi;
 use soil::index::index::{self, Mode, Query};
@@ -15,6 +20,8 @@ use soil::vfs_mut::vfs_mut;
 
 const MAX_SCRIPT_DEPTH: u8 = 8;
 const READ_CHUNK: u32 = 64 * 1024;
+const MAX_TGREP_FILES: usize = 20_000;
+const MAX_TGREP_MATCHES: usize = 20_000;
 
 static SHELL: Mutex<Option<Shell>> = Mutex::new(None);
 
@@ -67,6 +74,153 @@ impl Guest for Component {
                 .as_ref()
                 .and_then(|shell| shell.env.get(&name).cloned())
         })
+    }
+}
+
+struct TgrepOptions {
+    pattern: String,
+    extra_patterns: Vec<String>,
+    paths: Vec<String>,
+    ignore_case: Option<bool>,
+    fixed: bool,
+    word: bool,
+    invert: bool,
+    files_only: bool,
+    files_without_match: bool,
+    count: bool,
+    only_matching: bool,
+    line_numbers: bool,
+    with_filename: Option<bool>,
+    quiet: bool,
+    no_index: bool,
+    glob: Option<String>,
+    max_count: usize,
+}
+
+impl TgrepOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            pattern: String::new(),
+            extra_patterns: Vec::new(),
+            paths: Vec::new(),
+            ignore_case: None,
+            fixed: false,
+            word: false,
+            invert: false,
+            files_only: false,
+            files_without_match: false,
+            count: false,
+            only_matching: false,
+            line_numbers: true,
+            with_filename: None,
+            quiet: false,
+            no_index: false,
+            glob: None,
+            max_count: 0,
+        };
+        let mut index = 0;
+        let mut pattern_seen = false;
+        let mut after_dashdash = false;
+        while index < args.len() {
+            let arg = &args[index];
+            if !after_dashdash && arg == "--" {
+                after_dashdash = true;
+                index += 1;
+                continue;
+            }
+            if !after_dashdash && arg.starts_with('-') && arg != "-" {
+                match arg.as_str() {
+                    "-i" => options.ignore_case = Some(true),
+                    "-s" => options.ignore_case = Some(false),
+                    "-F" => options.fixed = true,
+                    "-w" => options.word = true,
+                    "-v" => options.invert = true,
+                    "-l" => options.files_only = true,
+                    "--files-without-match" => options.files_without_match = true,
+                    "-c" => options.count = true,
+                    "-o" => options.only_matching = true,
+                    "-n" => options.line_numbers = true,
+                    "-N" => options.line_numbers = false,
+                    "-H" => options.with_filename = Some(true),
+                    "-I" => options.with_filename = Some(false),
+                    "-q" => options.quiet = true,
+                    "--no-index" => options.no_index = true,
+                    "-e" => {
+                        index += 1;
+                        let value = args.get(index).ok_or("tgrep: -e needs a pattern")?;
+                        options.extra_patterns.push(value.clone());
+                    }
+                    "-m" => {
+                        index += 1;
+                        let value = args.get(index).ok_or("tgrep: -m needs a number")?;
+                        options.max_count = value
+                            .parse()
+                            .map_err(|_| format!("tgrep: invalid max count {value:?}"))?;
+                    }
+                    "-g" => {
+                        index += 1;
+                        options.glob =
+                            Some(args.get(index).ok_or("tgrep: -g needs a glob")?.clone());
+                    }
+                    other => return Err(format!("tgrep: unsupported option {other}")),
+                }
+                index += 1;
+                continue;
+            }
+            if !pattern_seen {
+                options.pattern = arg.clone();
+                pattern_seen = true;
+            } else {
+                options.paths.push(arg.clone());
+            }
+            index += 1;
+        }
+        if !pattern_seen || options.pattern.is_empty() {
+            return Err("tgrep PATTERN [PATH...]".into());
+        }
+        Ok(options)
+    }
+
+    fn regex(&self) -> Result<Regex, String> {
+        let mut parts = Vec::new();
+        for pattern in std::iter::once(&self.pattern).chain(self.extra_patterns.iter()) {
+            let text = if self.fixed {
+                regex::escape(pattern)
+            } else {
+                pattern.clone()
+            };
+            parts.push(text);
+        }
+        let mut pattern = parts.join("|");
+        if self.word {
+            pattern = format!(r"\b(?:{pattern})\b");
+        }
+        let case_insensitive = self
+            .ignore_case
+            .unwrap_or_else(|| pattern.chars().all(|ch| !ch.is_uppercase()));
+        RegexBuilder::new(&pattern)
+            .case_insensitive(case_insensitive)
+            .size_limit(1 << 20)
+            .build()
+            .map_err(|error| format!("tgrep: invalid pattern: {error}"))
+    }
+
+    fn index_pattern(&self) -> String {
+        // The host index is case-insensitive. It is a candidate filter only;
+        // the local regex below makes the final case decision.
+        let mut parts = Vec::new();
+        for pattern in std::iter::once(&self.pattern).chain(self.extra_patterns.iter()) {
+            parts.push(if self.fixed {
+                regex::escape(pattern)
+            } else {
+                pattern.clone()
+            });
+        }
+        let mut pattern = parts.join("|");
+        if self.word {
+            pattern = format!(r"\b(?:{pattern})\b");
+        }
+        pattern
     }
 }
 
@@ -497,6 +651,7 @@ impl Shell {
             "head" => self.head(args).map(|_| 0),
             "tail" => self.tail(args).map(|_| 0),
             "grep" => self.grep(args).map(|_| 0),
+            "tgrep" => self.tgrep(args),
             "wc" => self.wc(args).map(|_| 0),
             "stat" => self.stat(args).map(|_| 0),
             "tree" => self.tree(args).map(|_| 0),
@@ -1149,6 +1304,218 @@ impl Shell {
             }
         }
         Ok(())
+    }
+
+    fn tgrep(&mut self, args: &[String]) -> Result<i32, String> {
+        let options = TgrepOptions::parse(args)?;
+        let regex = options.regex()?;
+        let index_pattern = options.index_pattern();
+        let roots = if options.paths.is_empty() {
+            vec![self.cwd.clone()]
+        } else {
+            options.paths.clone()
+        };
+        let mut matched = false;
+        let mut emitted = 0usize;
+        for root_arg in roots {
+            let root = self.resolve(&root_arg)?;
+            let (paths, is_file) = match vfs::stat(&root) {
+                Ok(entry) if entry.kind == Kind::File => (vec![root.clone()], true),
+                Ok(_) => {
+                    let paths = if options.no_index || options.invert || options.files_without_match
+                    {
+                        self.collect_vfs_files(&root)?
+                    } else {
+                        match self.tgrep_candidates(&index_pattern, &root) {
+                            Ok(paths) => paths,
+                            Err(_) => self.collect_vfs_files(&root)?,
+                        }
+                    };
+                    (paths, false)
+                }
+                Err(error) => {
+                    return Err(format!("tgrep {}: {error:?}", self.display(&root)));
+                }
+            };
+            for path in paths {
+                if let Some(glob) = &options.glob {
+                    let name = path.rsplit('/').next().unwrap_or(&path);
+                    if !glob_match(glob, &path) && !glob_match(glob, name) {
+                        continue;
+                    }
+                }
+                let bytes = match self.read_file(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) if is_file => {
+                        return Err(format!("tgrep {}: {error}", self.display(&path)));
+                    }
+                    Err(_) => continue,
+                };
+                if bytes.len() > 8 * 1024 * 1024 || bytes.contains(&0) {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&bytes);
+                let display = self.display(&path);
+                let show_name = options.with_filename.unwrap_or(true);
+                let mut file_matches = 0usize;
+                for (line_index, line) in text.lines().enumerate() {
+                    let line_matches = regex.find_iter(line).collect::<Vec<_>>();
+                    let line_has_match = !line_matches.is_empty();
+                    let wanted = if options.invert {
+                        !line_has_match
+                    } else {
+                        line_has_match
+                    };
+                    if !wanted {
+                        continue;
+                    }
+                    matched = true;
+                    if options.quiet {
+                        break;
+                    }
+                    if options.files_only {
+                        self.out.push_str(&display);
+                        self.out.push('\n');
+                        emitted += 1;
+                        break;
+                    }
+                    file_matches += 1;
+                    if options.count || options.files_without_match {
+                        if options.max_count > 0 && file_matches >= options.max_count {
+                            break;
+                        }
+                        continue;
+                    }
+                    if options.only_matching && !options.invert {
+                        for found in &line_matches {
+                            let prefix = if show_name {
+                                format!("{display}:")
+                            } else {
+                                String::new()
+                            };
+                            if options.line_numbers {
+                                self.out.push_str(&format!(
+                                    "{prefix}{}:{}\n",
+                                    line_index + 1,
+                                    &line[found.start()..found.end()]
+                                ));
+                            } else {
+                                self.out.push_str(&format!(
+                                    "{prefix}{}\n",
+                                    &line[found.start()..found.end()]
+                                ));
+                            }
+                            emitted += 1;
+                        }
+                    } else {
+                        let prefix = if show_name {
+                            format!("{display}:")
+                        } else {
+                            String::new()
+                        };
+                        if options.line_numbers {
+                            self.out
+                                .push_str(&format!("{prefix}{}:{line}\n", line_index + 1));
+                        } else {
+                            self.out.push_str(&format!("{prefix}{line}\n"));
+                        }
+                        emitted += 1;
+                    }
+                    if emitted > MAX_TGREP_MATCHES {
+                        return Err("tgrep: output limit exceeded".into());
+                    }
+                    if options.max_count > 0 && file_matches >= options.max_count {
+                        break;
+                    }
+                }
+                if options.count && file_matches > 0 {
+                    self.out.push_str(&format!("{display}:{file_matches}\n"));
+                    emitted += 1;
+                }
+                if options.files_without_match && file_matches == 0 {
+                    self.out.push_str(&display);
+                    self.out.push('\n');
+                    emitted += 1;
+                }
+                if options.quiet && matched {
+                    break;
+                }
+                if emitted > MAX_TGREP_MATCHES {
+                    return Err("tgrep: output limit exceeded".into());
+                }
+            }
+            if options.quiet && matched {
+                break;
+            }
+        }
+        Ok(if matched { 0 } else { 1 })
+    }
+
+    fn tgrep_candidates(&self, pattern: &str, root: &str) -> Result<Vec<String>, String> {
+        let mut paths = BTreeSet::new();
+        let mut offset = 0u64;
+        let mut retried = false;
+        loop {
+            let page = match index::search(&Query {
+                text: pattern.to_string(),
+                mode: Some(Mode::Regex),
+                parent: None,
+                media_type_prefix: None,
+                offset,
+                limit: 512,
+            }) {
+                Ok(page) => page,
+                Err(index::Error::NotReady) if !retried => {
+                    index::refresh().map_err(|error| format!("tgrep: index: {error:?}"))?;
+                    retried = true;
+                    continue;
+                }
+                Err(error) => return Err(format!("tgrep: index: {error:?}")),
+            };
+            let hit_count = page.hits.len();
+            for hit in page.hits {
+                if under_root(root, &hit.path) {
+                    paths.insert(hit.path);
+                }
+            }
+            if hit_count < 512 {
+                break;
+            }
+            offset = offset.saturating_add(hit_count as u64);
+            if paths.len() > MAX_TGREP_FILES {
+                return Err("tgrep: too many candidate files".into());
+            }
+        }
+        Ok(paths.into_iter().collect())
+    }
+
+    fn collect_vfs_files(&self, root: &str) -> Result<Vec<String>, String> {
+        let mut files = BTreeSet::new();
+        let mut stack = vec![root.to_string()];
+        while let Some(dir) = stack.pop() {
+            let mut offset = 0;
+            loop {
+                let page =
+                    vfs::ls(&dir, offset, 512).map_err(|error| format!("tgrep: {error:?}"))?;
+                for entry in page.entries {
+                    if entry.kind == Kind::Directory {
+                        if entry.name != ".fungos" {
+                            stack.push(entry.path);
+                        }
+                    } else {
+                        files.insert(entry.path);
+                    }
+                    if files.len() > MAX_TGREP_FILES {
+                        return Err("tgrep: too many files".into());
+                    }
+                }
+                match page.next {
+                    Some(next) if next > offset => offset = next,
+                    _ => break,
+                }
+            }
+        }
+        Ok(files.into_iter().collect())
     }
 
     fn search(&mut self, args: &[String]) -> Result<(), String> {
@@ -2197,6 +2564,10 @@ fn block_depth(tokens: &[Token]) -> usize {
     depth
 }
 
+fn under_root(root: &str, path: &str) -> bool {
+    root.is_empty() || path == root || path.starts_with(&format!("{root}/"))
+}
+
 fn glob_match(pattern: &str, value: &str) -> bool {
     let pattern = pattern.as_bytes();
     let value = value.as_bytes();
@@ -2287,7 +2658,8 @@ mush — a sandboxed VFS shell
   touch PATH...           create empty files
   head [-n N] PATH        first lines
   tail [-n N] PATH        last lines
-  grep [-i] PAT TEXT...  search file contents
+  grep [-i] PAT TEXT...  linear search file contents
+  tgrep PATTERN [PATH...] trigram-indexed regex search
   wc [-l|-c] PATH...      line/byte counts
   stat PATH               file metadata
   tree [DIR]              recursive listing

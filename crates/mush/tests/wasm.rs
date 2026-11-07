@@ -329,3 +329,41 @@ fn wasm_spore_supports_loop_control_and_stderr_redirection() {
     assert!(stdout.contains("merged"), "{stdout}");
     assert_eq!(stdout.matches("ls: Error").count(), 1, "{stdout}");
 }
+
+#[test]
+fn wasm_spore_supports_tgrep_over_vfs() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg(
+            "mkdir docs\n\
+             write docs/a.txt alpha beta\n\
+             append docs/a.txt gamma delta\n\
+             write docs/b.md ALPHA markdown\n\
+             tgrep alpha\n\
+             tgrep -i alpha\n\
+             tgrep -l alpha\n\
+             tgrep -g \"*.md\" alpha\n\
+             tgrep --no-index gamma docs\n\
+             tgrep definitely-not-there\n\
+             echo status=$?\n\
+             exit",
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("/docs/a.txt:1:alpha beta"), "{stdout}");
+    assert!(stdout.contains("/docs/b.md:1:ALPHA markdown"), "{stdout}");
+    assert!(stdout.contains("/docs/a.txt\n/docs/b.md"), "{stdout}");
+    assert!(stdout.contains("/docs/b.md:1:ALPHA markdown"), "{stdout}");
+    assert!(stdout.contains("status=1"), "{stdout}");
+}

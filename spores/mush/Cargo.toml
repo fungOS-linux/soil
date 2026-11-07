@@ -9,6 +9,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+regex = "1"
 wit-bindgen = "0.57"
 
 [workspace]

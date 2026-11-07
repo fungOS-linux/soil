@@ -230,6 +230,11 @@ done
 `-z`, `-n`, string `=`/`!=`, numeric `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`,
 and `!`, `-a`, `-o`. `read` consumes one line from piped stdin.
 
+`tgrep` uses the `soil:index` regex candidate index, then reads matching VFS
+files for line-level output. It supports `-i`, `-s`, `-F`, `-w`, `-v`, `-l`,
+`-c`, `-o`, `-n`/`-N`, `-H`/`-I`, `-m N`, `-g GLOB`, `-e PATTERN`,
+`--no-index`, and `-q`.
+
 `cat`, `grep`, `head`, `tail` and `wc` read piped stdin when no path is given.
 `printf` supports `%s`, `%d`, `%i`, `%b`, `%%`, and the usual backslash escapes.
 
@@ -249,6 +254,7 @@ touch PATH...
 head [-n N] [PATH]
 tail [-n N] [PATH]
 grep [-i] PATTERN [PATH...]
+tgrep [OPTIONS] PATTERN [PATH...]
 wc [-l|-c] [PATH...]
 stat PATH
 tree [DIR]
