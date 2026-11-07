@@ -1,0 +1,29 @@
+// The scene payload is data, not an interface: it is what `soil:canvas.present`
+// carries, and it is versioned inside the document so a new node kind never
+// rebuilds the Spores that draw.
+//
+// This package exists only so a Spore can ask the host what it accepts before it
+// builds a document. It deliberately does not describe the document's shape --
+// that lives in `soil-scene` (Rust) and is checked at present time, where a
+// producer can be told *why* something was refused.
+package soil:scene@1.0.0;
+
+interface payload {
+  record limits {
+    max-nodes: u32,
+    max-text-bytes: u32,
+    max-payload-bytes: u32,
+    /// Extent the host would grant right now, in physical pixels.
+    width: u32,
+    height: u32,
+    scale: f32,
+  }
+
+  /// Highest schema version the host can draw. A producer that needs newer
+  /// nodes gets `false` here instead of a failure at present time.
+  supports: func(schema: u32) -> bool;
+
+  /// Host-enforced ceilings, so a producer can budget against the same numbers
+  /// the host will refuse at rather than discovering them by trial.
+  budget: func() -> limits;
+}
