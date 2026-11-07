@@ -1316,15 +1316,20 @@ impl Shell {
         let options = TgrepOptions::parse(args)?;
         let regex = options.regex()?;
         let index_pattern = options.index_pattern();
+        let default_root = self.cwd.clone();
         let roots = if options.paths.is_empty() {
-            vec![self.cwd.clone()]
+            vec![default_root]
         } else {
             options.paths.clone()
         };
         let mut matched = false;
         let mut emitted = 0usize;
         for root_arg in roots {
-            let root = self.resolve(&root_arg)?;
+            let root = if options.paths.is_empty() {
+                root_arg.clone()
+            } else {
+                self.resolve(&root_arg)?
+            };
             let (paths, is_file) = match vfs::stat(&root) {
                 Ok(entry) if entry.kind == Kind::File => (vec![root.clone()], true),
                 Ok(_) => {
