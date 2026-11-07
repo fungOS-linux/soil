@@ -73,6 +73,7 @@ struct Shell {
     status: i32,
     exit: bool,
     source_depth: u8,
+    expand_depth: u8,
 }
 
 impl Shell {
@@ -111,6 +112,7 @@ impl Shell {
             status: 0,
             exit: false,
             source_depth: 0,
+            expand_depth: 0,
         }
     }
 
@@ -183,18 +185,23 @@ impl Shell {
                     return 2;
                 }
             };
-            let words = parsed
-                .words
-                .iter()
-                .map(|word| self.expand(word))
-                .collect::<Vec<_>>();
+            let mut words = Vec::new();
+            for word in &parsed.words {
+                match self.expand_word(word) {
+                    Ok(expanded) => words.extend(expanded),
+                    Err(error) => {
+                        self.error(&error);
+                        return 2;
+                    }
+                }
+            }
             let Some(command) = words.first().map(String::as_str) else {
                 self.error("pipeline: empty command");
                 return 2;
             };
             let args = words[1..].to_vec();
             if let Some(target) = parsed.stdin {
-                let target = self.expand(&target);
+                let target = self.expand_dynamic(&target.text);
                 let path = match self.resolve(&target) {
                     Ok(path) => path,
                     Err(error) => {
@@ -225,7 +232,7 @@ impl Shell {
             };
             status = code;
             if let Some((append, target)) = parsed.stdout {
-                let target = self.expand(&target);
+                let target = self.expand_dynamic(&target.text);
                 if let Err(error) = self.redirect(&target, append, produced.as_bytes()) {
                     self.error(&error);
                     status = 1;
@@ -294,6 +301,7 @@ impl Shell {
                 self.out.push('\n');
                 Ok(0)
             }
+            "printf" => self.printf(args).map(|_| 0),
             "export" | "set" => self.set_env(args).map(|_| 0),
             "unset" => self.unset_env(args).map(|_| 0),
             "env" => {
@@ -1013,6 +1021,52 @@ impl Shell {
         Ok(())
     }
 
+    fn expand_word(&mut self, word: &Word) -> Result<Vec<String>, String> {
+        let text = self.expand_dynamic(&word.text);
+        if !word.glob || !text.bytes().any(|byte| matches!(byte, b'*' | b'?' | b'[')) {
+            return Ok(vec![text]);
+        }
+        match self.glob(&text) {
+            Ok(matches) if !matches.is_empty() => Ok(matches),
+            _ => Ok(vec![text]),
+        }
+    }
+
+    fn glob(&self, pattern: &str) -> Result<Vec<String>, String> {
+        let (prefix, base) = match pattern.rfind('/') {
+            Some(index) => (&pattern[..=index], &pattern[index + 1..]),
+            None => ("", pattern),
+        };
+        if base.is_empty() {
+            return Ok(vec![pattern.to_string()]);
+        }
+        let dir_text = if prefix.is_empty() {
+            "."
+        } else {
+            prefix.trim_end_matches('/')
+        };
+        let dir = self.resolve(dir_text)?;
+        let mut matches = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = vfs::ls(&dir, offset, 512).map_err(|error| format!("glob: {error:?}"))?;
+            for entry in page.entries {
+                if entry.name.starts_with('.') && !base.starts_with('.') {
+                    continue;
+                }
+                if glob_match(base, &entry.name) {
+                    matches.push(format!("{prefix}{}", entry.name));
+                }
+            }
+            match page.next {
+                Some(next) if next > offset => offset = next,
+                _ => break,
+            }
+        }
+        matches.sort();
+        Ok(matches)
+    }
+
     fn run_external(&mut self, name: &str, args: &[String]) -> Result<i32, String> {
         let cwd = if self.cwd.is_empty() {
             None
@@ -1025,6 +1079,74 @@ impl Shell {
         self.out.push_str(&String::from_utf8_lossy(&output.stdout));
         self.out.push_str(&String::from_utf8_lossy(&output.stderr));
         Ok(output.code)
+    }
+
+    fn printf(&mut self, args: &[String]) -> Result<(), String> {
+        let Some(format) = args.first() else {
+            return Err("printf FORMAT [ARG...]".into());
+        };
+        let mut out = String::new();
+        let mut arg_index = 1;
+        let mut chars = format.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' => match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some('r') => out.push('\r'),
+                    Some('0') => out.push('\0'),
+                    Some('\\') => out.push('\\'),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                },
+                '%' => match chars.next() {
+                    Some('%') => out.push('%'),
+                    Some('s') => {
+                        out.push_str(args.get(arg_index).map(String::as_str).unwrap_or(""));
+                        arg_index += 1;
+                    }
+                    Some('d' | 'i') => {
+                        let value = args.get(arg_index).cloned().unwrap_or_default();
+                        let number = value
+                            .parse::<i64>()
+                            .map_err(|_| format!("printf: expected integer, got {value:?}"))?;
+                        out.push_str(&number.to_string());
+                        arg_index += 1;
+                    }
+                    Some('b') => {
+                        let value = args.get(arg_index).cloned().unwrap_or_default();
+                        arg_index += 1;
+                        let mut escaped = value.chars();
+                        while let Some(ch) = escaped.next() {
+                            if ch != '\\' {
+                                out.push(ch);
+                                continue;
+                            }
+                            match escaped.next() {
+                                Some('n') => out.push('\n'),
+                                Some('t') => out.push('\t'),
+                                Some('r') => out.push('\r'),
+                                Some('0') => out.push('\0'),
+                                Some('\\') => out.push('\\'),
+                                Some(other) => {
+                                    out.push('\\');
+                                    out.push(other);
+                                }
+                                None => out.push('\\'),
+                            }
+                        }
+                    }
+                    Some(other) => return Err(format!("printf: unsupported conversion %{other}")),
+                    None => return Err("printf: trailing %".into()),
+                },
+                _ => out.push(ch),
+            }
+        }
+        self.out.push_str(&out);
+        Ok(())
     }
 
     fn set_env(&mut self, args: &[String]) -> Result<(), String> {
@@ -1152,15 +1274,96 @@ impl Shell {
                 None => prompt.push('\\'),
             }
         }
-        self.expand(&prompt)
+        self.expand_env(&prompt)
     }
 
-    fn expand(&self, value: &str) -> String {
+    fn expand_env(&self, value: &str) -> String {
         let mut out = String::new();
         let mut chars = value.chars().peekable();
         while let Some(ch) = chars.next() {
             if ch != '$' {
                 out.push(ch);
+                continue;
+            }
+            if chars.peek() == Some(&'{') {
+                chars.next();
+                let mut name = String::new();
+                for ch in chars.by_ref() {
+                    if ch == '}' {
+                        break;
+                    }
+                    name.push(ch);
+                }
+                out.push_str(self.env.get(&name).map(String::as_str).unwrap_or(""));
+                continue;
+            }
+            if chars.peek() == Some(&'?') {
+                chars.next();
+                out.push_str(&self.status.to_string());
+                continue;
+            }
+            let mut name = String::new();
+            while let Some(&ch) = chars.peek() {
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    name.push(ch);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if name.is_empty() {
+                out.push('$');
+            } else {
+                out.push_str(self.env.get(&name).map(String::as_str).unwrap_or(""));
+            }
+        }
+        out
+    }
+
+    fn expand_dynamic(&mut self, value: &str) -> String {
+        let mut out = String::new();
+        let mut chars = value.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '$' {
+                out.push(ch);
+                continue;
+            }
+            if chars.peek() == Some(&'(') {
+                chars.next();
+                let mut script = String::new();
+                let mut depth = 1usize;
+                for ch in chars.by_ref() {
+                    match ch {
+                        '(' => {
+                            depth += 1;
+                            script.push(ch);
+                        }
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            script.push(ch);
+                        }
+                        _ => script.push(ch),
+                    }
+                }
+                if depth != 0 || self.expand_depth >= MAX_SCRIPT_DEPTH {
+                    out.push_str("$(");
+                    out.push_str(&script);
+                    out.push(')');
+                    continue;
+                }
+                let saved_out = std::mem::take(&mut self.out);
+                let saved_status = self.status;
+                let saved_stdin = std::mem::take(&mut self.stdin);
+                self.expand_depth += 1;
+                self.run_line(&script);
+                self.expand_depth -= 1;
+                let captured = std::mem::replace(&mut self.out, saved_out);
+                self.status = saved_status;
+                self.stdin = saved_stdin;
+                out.push_str(captured.trim_end_matches('\n'));
                 continue;
             }
             if chars.peek() == Some(&'{') {
@@ -1218,8 +1421,14 @@ fn media_type(path: &str) -> &'static str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct Word {
+    text: String,
+    glob: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
-    Word(String),
+    Word(Word),
     Op(Op),
 }
 
@@ -1244,10 +1453,20 @@ enum ChainOp {
 fn tokenize(line: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut word = String::new();
+    let mut glob = false;
     let mut quote = None;
     let mut escape = false;
+    let mut sub_depth = 0usize;
     let mut chars = line.chars().peekable();
     while let Some(ch) = chars.next() {
+        if quote == Some('\'') {
+            if ch == '\'' {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+            continue;
+        }
         if escape {
             word.push(ch);
             escape = false;
@@ -1265,10 +1484,25 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
             }
             continue;
         }
+        if sub_depth > 0 {
+            match ch {
+                '(' => sub_depth += 1,
+                ')' => sub_depth -= 1,
+                _ => {}
+            }
+            word.push(ch);
+            continue;
+        }
         match ch {
+            '#' if word.is_empty() => break,
             '\'' | '"' => quote = Some(ch),
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                word.push_str("$(");
+                sub_depth += 1;
+            }
             '|' => {
-                push_word(&mut tokens, &mut word);
+                push_word(&mut tokens, &mut word, &mut glob);
                 if chars.peek() == Some(&'|') {
                     chars.next();
                     tokens.push(Token::Op(Op::Or));
@@ -1279,22 +1513,22 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
             '&' => {
                 if chars.peek() == Some(&'&') {
                     chars.next();
-                    push_word(&mut tokens, &mut word);
+                    push_word(&mut tokens, &mut word, &mut glob);
                     tokens.push(Token::Op(Op::And));
                 } else {
                     return Err("background jobs are not supported".into());
                 }
             }
             ';' => {
-                push_word(&mut tokens, &mut word);
+                push_word(&mut tokens, &mut word, &mut glob);
                 tokens.push(Token::Op(Op::Semi));
             }
             '<' => {
-                push_word(&mut tokens, &mut word);
+                push_word(&mut tokens, &mut word, &mut glob);
                 tokens.push(Token::Op(Op::In));
             }
             '>' => {
-                push_word(&mut tokens, &mut word);
+                push_word(&mut tokens, &mut word, &mut glob);
                 if chars.peek() == Some(&'>') {
                     chars.next();
                     tokens.push(Token::Op(Op::Append));
@@ -1302,23 +1536,35 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
                     tokens.push(Token::Op(Op::Out));
                 }
             }
-            ch if ch.is_whitespace() => push_word(&mut tokens, &mut word),
+            '*' | '?' | '[' => {
+                glob = true;
+                word.push(ch);
+            }
+            ch if ch.is_whitespace() => push_word(&mut tokens, &mut word, &mut glob),
             _ => word.push(ch),
         }
     }
     if quote.is_some() {
         return Err("unterminated quote".into());
     }
+    if sub_depth > 0 {
+        return Err("unterminated command substitution".into());
+    }
     if escape {
         word.push('\\');
     }
-    push_word(&mut tokens, &mut word);
+    push_word(&mut tokens, &mut word, &mut glob);
     Ok(tokens)
 }
 
-fn push_word(tokens: &mut Vec<Token>, word: &mut String) {
+fn push_word(tokens: &mut Vec<Token>, word: &mut String, glob: &mut bool) {
     if !word.is_empty() {
-        tokens.push(Token::Word(std::mem::take(word)));
+        tokens.push(Token::Word(Word {
+            text: std::mem::take(word),
+            glob: std::mem::take(glob),
+        }));
+    } else {
+        *glob = false;
     }
 }
 
@@ -1365,9 +1611,9 @@ fn split_tokens(tokens: &[Token], operator: Op) -> Vec<Vec<Token>> {
 }
 
 struct Segment {
-    words: Vec<String>,
-    stdin: Option<String>,
-    stdout: Option<(bool, String)>,
+    words: Vec<Word>,
+    stdin: Option<Word>,
+    stdout: Option<(bool, Word)>,
 }
 
 fn parse_segment(tokens: &[Token]) -> Result<Segment, String> {
@@ -1416,13 +1662,38 @@ fn glob_match(pattern: &str, value: &str) -> bool {
     let (mut p, mut v) = (0, 0);
     let (mut star, mut mark) = (None, 0);
     while v < value.len() {
-        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == value[v]) {
-            p += 1;
+        let mut matched = false;
+        let mut next = p;
+        if p < pattern.len() {
+            match pattern[p] {
+                b'*' => {
+                    star = Some(p);
+                    p += 1;
+                    continue;
+                }
+                b'?' => {
+                    matched = true;
+                    next = p + 1;
+                }
+                b'[' => {
+                    if let Some(end) = pattern[p + 1..].iter().position(|byte| *byte == b']') {
+                        let end = p + 1 + end;
+                        matched = glob_class(&pattern[p + 1..end], value[v]);
+                        next = end + 1;
+                    } else {
+                        matched = pattern[p] == value[v];
+                        next = p + 1;
+                    }
+                }
+                byte => {
+                    matched = byte == value[v];
+                    next = p + 1;
+                }
+            }
+        }
+        if matched {
+            p = next;
             v += 1;
-        } else if p < pattern.len() && pattern[p] == b'*' {
-            star = Some(p);
-            p += 1;
-            mark = v;
         } else if let Some(star_index) = star {
             p = star_index + 1;
             mark += 1;
@@ -1435,6 +1706,29 @@ fn glob_match(pattern: &str, value: &str) -> bool {
         p += 1;
     }
     p == pattern.len()
+}
+
+fn glob_class(class: &[u8], value: u8) -> bool {
+    let (negate, mut class) = match class.first() {
+        Some(b'!') | Some(b'^') => (true, &class[1..]),
+        _ => (false, class),
+    };
+    let mut matched = false;
+    while let Some((&first, rest)) = class.split_first() {
+        if rest.len() >= 2 && rest[0] == b'-' {
+            let end = rest[1];
+            if first <= value && value <= end {
+                matched = true;
+            }
+            class = &rest[2..];
+        } else {
+            if first == value {
+                matched = true;
+            }
+            class = rest;
+        }
+    }
+    if negate { !matched } else { matched }
 }
 
 const HELP: &str = "\
@@ -1472,12 +1766,16 @@ Shell syntax:
   cmd < PATH              read stdin from a VFS file
   cmd > PATH              write stdout to a VFS file
   cmd >> PATH             append stdout to a VFS file
+  *.txt, docs/*.md        glob VFS paths; quoted globs stay literal
+  $(cmd)                  command substitution
+  # comment               rest of line
   $?                      previous command status
 
 Any other command resolves through the virtual PATH to an installed wasm
 package. Commands get explicit args, piped stdin, the VFS cwd, and no host
 environment; they never run host binaries.
   echo TEXT               print text
+  printf FORMAT [ARG...]  formatted output
   export KEY=VALUE        set an environment variable
   unset KEY...            remove environment variables
   env                     print the environment

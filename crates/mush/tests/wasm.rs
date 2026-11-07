@@ -211,3 +211,44 @@ fn wasm_spore_supports_pipelines_sequences_and_input_redirection() {
     assert!(stdout.contains("x\ny\n"), "{stdout}");
     assert!(stdout.trim_end().ends_with('1'), "{stdout}");
 }
+
+#[test]
+fn wasm_spore_supports_globs_substitution_comments_and_printf() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg(
+            "mkdir docs\n\
+             write docs/a.txt alpha\n\
+             write docs/b.md beta\n\
+             write docs/c.txt gamma\n\
+             echo docs/*.txt\n\
+             echo docs/[ab].*\n\
+             echo \"docs/*.txt\"\n\
+             echo $(echo hi)\n\
+             echo pre$(cat docs/a.txt)post\n\
+             printf '%s:%d\\n' age 42\n\
+             echo after # ignored comment\n\
+             exit",
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("docs/a.txt docs/c.txt"), "{stdout}");
+    assert!(stdout.contains("docs/a.txt docs/b.md"), "{stdout}");
+    assert!(stdout.contains("docs/*.txt\n"), "{stdout}");
+    assert!(stdout.contains("hi\n"), "{stdout}");
+    assert!(stdout.contains("prealphapost\n"), "{stdout}");
+    assert!(stdout.contains("age:42\n"), "{stdout}");
+    assert!(stdout.contains("after\n"), "{stdout}");
+    assert!(!stdout.contains("ignored"), "{stdout}");
+}

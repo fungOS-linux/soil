@@ -151,10 +151,14 @@ cmd1 || cmd2       # run cmd2 only if cmd1 fails
 cmd < PATH         # stdin from a VFS file
 cmd > PATH         # stdout to a VFS file
 cmd >> PATH        # append stdout to a VFS file
+*.txt, docs/*.md   # glob VFS paths; quoted globs stay literal
+$(cmd)             # command substitution
+# comment          # rest of the line
 $?                 # previous status
 ```
 
 `cat`, `grep`, `head`, `tail` and `wc` read piped stdin when no path is given.
+`printf` supports `%s`, `%d`, `%i`, `%b`, `%%`, and the usual backslash escapes.
 
 ## Commands
 
@@ -183,6 +187,7 @@ commands
 which COMMAND
 source SCRIPT
 echo TEXT
+printf FORMAT [ARG...]
 export KEY=VALUE
 unset KEY...
 env
