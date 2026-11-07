@@ -121,6 +121,12 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("http", &["fetch"])],
     },
     Contract {
+        file: "wit/soil-unibus.wit",
+        source: include_str!("../../../wit/soil-unibus.wit"),
+        package: "soil:unibus@0.1.0",
+        interfaces: &[("bus", &["poll", "publish"])],
+    },
+    Contract {
         file: "wit/soil-graph.wit",
         source: include_str!("../../../wit/soil-graph.wit"),
         package: "soil:graph@0.1.0",

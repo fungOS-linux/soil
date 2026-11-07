@@ -23,6 +23,7 @@ credential resolution stay in host adapters.
 | `soil:search@0.5.0` | wired | global derived search + typed mention resolver |
 | `soil:graph@0.1.0` | wired | read-only record links |
 | `soil:http@0.1.0` | wired | bounded host-mediated HTTP |
+| `soil:unibus@0.1.0` | contract | bounded poll/publish over Unibus; host adapter pending |
 | `soil:appdata@1.0.0` | contract | guest SDK exists; native host next |
 | `soil:storage@1.0.0` | contract | content-addressed asset cache |
 | `soil:media@0.1.0` | wired | playback, encoded chunks, image |
@@ -40,7 +41,9 @@ credential resolution stay in host adapters.
 
 ## Not Spore contracts
 
-- `soil:unibus` was removed. Unibus is host transport, not a guest capability.
+- `fungos:events` carries publication intent, not a session or subscription.
+  `soil:unibus` (above) is the Spore-facing poll/publish edge over the same
+  Unibus transport.
 - `soil:ringer` was merged into `soil:notify` as the `ringer` interface.
 - `soil:canvas/actions` was merged into `fungos:actions/catalog`.
 - CRM, mail, contacts, projects, tasks and calls are records schemas, not WIT.
