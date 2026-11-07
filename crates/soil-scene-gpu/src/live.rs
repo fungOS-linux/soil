@@ -46,8 +46,70 @@ pub struct LiveSpec {
     /// ignored and panels are laid out in declaration order.
     #[serde(default)]
     pub grid: Option<GridSpec>,
+    /// Optional host palette. The native host starts from `Theme::default()`.
+    #[serde(default)]
+    pub theme: Option<ThemeSpec>,
     #[serde(default)]
     pub layers: Vec<LayerSpec>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ThemeSpec {
+    #[serde(default)]
+    pub background: Option<[u8; 3]>,
+    #[serde(default)]
+    pub surface: Option<[u8; 3]>,
+    #[serde(default)]
+    pub text: Option<[u8; 3]>,
+    #[serde(default)]
+    pub muted: Option<[u8; 3]>,
+    #[serde(default)]
+    pub primary: Option<[u8; 3]>,
+    #[serde(default)]
+    pub success: Option<[u8; 3]>,
+    #[serde(default)]
+    pub warning: Option<[u8; 3]>,
+    #[serde(default)]
+    pub danger: Option<[u8; 3]>,
+    #[serde(default)]
+    pub info: Option<[u8; 3]>,
+    #[serde(default)]
+    pub body: Option<f32>,
+}
+
+impl ThemeSpec {
+    fn apply(&self, theme: &mut Theme) {
+        if let Some(value) = self.background {
+            theme.background = value;
+        }
+        if let Some(value) = self.surface {
+            theme.surface = value;
+        }
+        if let Some(value) = self.text {
+            theme.text = value;
+        }
+        if let Some(value) = self.muted {
+            theme.muted = value;
+        }
+        if let Some(value) = self.primary {
+            theme.primary = value;
+        }
+        if let Some(value) = self.success {
+            theme.success = value;
+        }
+        if let Some(value) = self.warning {
+            theme.warning = value;
+        }
+        if let Some(value) = self.danger {
+            theme.danger = value;
+        }
+        if let Some(value) = self.info {
+            theme.info = value;
+        }
+        if let Some(value) = self.body {
+            theme.body = value.max(1.0);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -81,6 +143,7 @@ pub enum LayerSpec {
     Graph(GraphSpec),
     Map(MapSpec),
     Atlas(AtlasSpec),
+    Histogram(HistogramSpec),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -214,6 +277,8 @@ pub struct SeriesSpec {
     #[serde(default)]
     pub color: Option<[u8; 3]>,
     #[serde(default)]
+    pub ink: Option<soil_scene::Ink>,
+    #[serde(default)]
     pub color2: Option<[u8; 3]>,
     #[serde(default)]
     pub width: Option<f32>,
@@ -224,6 +289,9 @@ pub struct SeriesSpec {
     /// Smooth the newest line/area/band point across the sample interval.
     #[serde(default)]
     pub interpolate: bool,
+    /// Draw line/area/band as step-after.
+    #[serde(default)]
+    pub step: bool,
     #[serde(default)]
     pub source: Option<String>,
     /// Optional lower boundary for a `band` series.
@@ -265,6 +333,8 @@ pub enum SeriesKind {
     Area,
     Scatter,
     Bar,
+    #[serde(rename = "stacked_bar")]
+    StackedBar,
     Candle,
     Band,
     #[serde(rename = "stacked_area")]
@@ -341,6 +411,44 @@ impl Default for ChartStyle {
             smooth_steps: smooth_steps(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HistogramSpec {
+    pub id: String,
+    #[serde(default)]
+    pub rect: RectSpec,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    pub source: String,
+    #[serde(default = "default_bins")]
+    pub bins: usize,
+    #[serde(default)]
+    pub min: Option<f32>,
+    #[serde(default)]
+    pub max: Option<f32>,
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    #[serde(default)]
+    pub ink: Option<soil_scene::Ink>,
+    #[serde(default = "histogram_opacity")]
+    pub opacity: f32,
+    #[serde(default = "histogram_radius")]
+    pub bar_radius: f32,
+}
+
+fn default_bins() -> usize {
+    24
+}
+
+fn histogram_opacity() -> f32 {
+    0.82
+}
+
+fn histogram_radius() -> f32 {
+    2.0
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -532,11 +640,15 @@ impl LiveViz {
             .collect();
         let viewport = (spec.width.max(1.0), spec.height.max(1.0));
         let ui_scale = spec.ui_scale.clamp(0.5, 4.0);
+        let mut theme = Theme::default();
+        if let Some(theme_spec) = &spec.theme {
+            theme_spec.apply(&mut theme);
+        }
         let system = SystemSource::new();
         let layer_count = spec.layers.len();
         let mut live = Self {
             spec,
-            theme: Theme::default(),
+            theme,
             time: 0.0,
             frame: 0,
             last_update: Instant::now(),
@@ -715,6 +827,7 @@ impl LiveViz {
                 LayerSpec::Graph(spec) => &spec.rect,
                 LayerSpec::Map(spec) => &spec.rect,
                 LayerSpec::Atlas(spec) => &spec.rect,
+                LayerSpec::Histogram(spec) => &spec.rect,
             };
             let r = self.rect_for(layer_index, rect, width, height, gap);
             match layer {
@@ -765,6 +878,7 @@ impl LiveViz {
                 LayerSpec::Atlas(spec) => {
                     draw_atlas(&mut painter, spec, self.time, r, &self.atlas_points)
                 }
+                LayerSpec::Histogram(spec) => draw_histogram(&mut painter, spec, r, &self.history),
             }
         }
         self.last_scene_time = self.time;
@@ -1213,19 +1327,43 @@ impl<'a> Painter<'a> {
     }
 }
 
-const CHART_COLORS: [[u8; 3]; 3] = [[0, 229, 255], [255, 45, 149], [176, 38, 255]];
+fn theme_palette(theme: &Theme) -> [[u8; 3]; 6] {
+    [
+        theme.info,
+        theme.primary,
+        theme.success,
+        theme.warning,
+        theme.danger,
+        theme.muted,
+    ]
+}
+
+fn ink_color(theme: &Theme, ink: soil_scene::Ink) -> [u8; 3] {
+    match ink {
+        soil_scene::Ink::Text => theme.text,
+        soil_scene::Ink::Muted => theme.muted,
+        soil_scene::Ink::Surface => theme.surface,
+        soil_scene::Ink::Background => theme.background,
+        soil_scene::Ink::Primary => theme.primary,
+        soil_scene::Ink::Success => theme.success,
+        soil_scene::Ink::Warning => theme.warning,
+        soil_scene::Ink::Danger => theme.danger,
+        soil_scene::Ink::Info => theme.info,
+    }
+}
 const GRAPH_COLORS: [[u8; 3]; 3] = [[0, 229, 255], [0, 245, 160], [255, 107, 0]];
 const MAP_COLORS: [[u8; 3]; 3] = [[0, 229, 255], [0, 245, 160], [255, 211, 0]];
 const ATLAS_COLORS: [[u8; 3]; 3] = [[0, 229, 255], [255, 45, 149], [176, 38, 255]];
 
 fn panel(painter: &mut Painter, id: &str, r: &LayerRect, title: Option<&str>) {
+    let theme = painter.theme;
     painter.rect(
         &format!("{id}-panel"),
         r.x,
         r.y,
         r.w,
         r.h,
-        [26, 26, 46],
+        theme.surface,
         0.72,
         10.0,
     );
@@ -1236,7 +1374,7 @@ fn panel(painter: &mut Painter, id: &str, r: &LayerRect, title: Option<&str>) {
             r.x + 16.0,
             r.y + 12.0,
             18.0,
-            [224, 224, 224],
+            theme.text,
         );
     }
 }
@@ -1506,6 +1644,16 @@ fn chart_bounds(spec: &ChartSpec, hidden: &[bool], samples: &VecDeque<Sample>) -
                     stack[point] = upper;
                 }
             }
+            SeriesKind::StackedBar => {
+                bar_lo = bar_lo.min(0.0);
+                for point in point_indices(series) {
+                    let lower = stack[point];
+                    let upper = lower + chart_value(samples, series.source.as_deref(), point);
+                    lo = lo.min(lower);
+                    hi = hi.max(upper);
+                    stack[point] = upper;
+                }
+            }
             SeriesKind::Bar => {
                 let baseline = series.baseline.unwrap_or(0.0);
                 bar_lo = bar_lo.min(baseline);
@@ -1607,10 +1755,15 @@ fn format_axis_value(value: f32, step: f32) -> String {
     }
 }
 
-fn series_color(series: &SeriesSpec, index: usize) -> [u8; 3] {
-    series
-        .color
-        .unwrap_or(CHART_COLORS[index % CHART_COLORS.len()])
+fn series_color(series: &SeriesSpec, index: usize, theme: &Theme) -> [u8; 3] {
+    if let Some(color) = series.color {
+        color
+    } else if let Some(ink) = series.ink {
+        ink_color(theme, ink)
+    } else {
+        let palette = theme_palette(theme);
+        palette[index % palette.len()]
+    }
 }
 
 fn series_point_color(
@@ -1618,16 +1771,17 @@ fn series_point_color(
     series: &SeriesSpec,
     index: usize,
     point: usize,
+    theme: &Theme,
 ) -> [u8; 3] {
     if series.kind == SeriesKind::Candle {
         let (open, _, _, close) = candle_values(samples, series, point);
         return if close >= open {
-            series.up_color.unwrap_or([34, 197, 94])
+            series.up_color.unwrap_or(theme.success)
         } else {
-            series.down_color.unwrap_or([239, 68, 68])
+            series.down_color.unwrap_or(theme.danger)
         };
     }
-    series_color(series, index)
+    series_color(series, index, theme)
 }
 
 #[derive(Debug, Clone)]
@@ -1744,6 +1898,7 @@ fn draw_chart(
     samples: &VecDeque<Sample>,
 ) {
     let style = &spec.style;
+    let theme = painter.theme;
     panel(painter, &spec.id, &r, spec.title.as_deref());
     if let Some(subtitle) = &spec.subtitle {
         painter.text(
@@ -1752,7 +1907,7 @@ fn draw_chart(
             r.x + 16.0,
             r.y + 36.0,
             10.0,
-            [145, 155, 170],
+            theme.muted,
         );
     }
     let layout = chart_layout(spec, &r);
@@ -1767,7 +1922,7 @@ fn draw_chart(
         top,
         plot_w,
         plot_h,
-        [17, 19, 29],
+        theme.background,
         style.plot_opacity,
         10.0,
     );
@@ -1777,7 +1932,7 @@ fn draw_chart(
         top,
         1.0,
         plot_h,
-        [145, 155, 170],
+        theme.muted,
         style.axis_opacity,
         0.0,
     );
@@ -1787,7 +1942,7 @@ fn draw_chart(
         plot_bottom,
         plot_w,
         1.0,
-        [145, 155, 170],
+        theme.muted,
         style.axis_opacity,
         0.0,
     );
@@ -1830,7 +1985,7 @@ fn draw_chart(
             y,
             plot_w,
             1.0,
-            [145, 155, 170],
+            theme.muted,
             style.grid_opacity,
             0.0,
         );
@@ -1842,7 +1997,7 @@ fn draw_chart(
             left - label_w - 10.0,
             y - style.label_size * 0.55,
             style.label_size,
-            [145, 155, 170],
+            theme.muted,
         );
     }
     for tick in 0..=4 {
@@ -1861,7 +2016,7 @@ fn draw_chart(
             (x - label_w * 0.5).max(left),
             plot_bottom + 8.0,
             style.label_size,
-            [145, 155, 170],
+            theme.muted,
         );
     }
 
@@ -1872,7 +2027,7 @@ fn draw_chart(
         let (Some(x0), Some(x1)) = (cycle_x(band.from), cycle_x(band.to)) else {
             continue;
         };
-        let color = band.color.unwrap_or([234, 179, 8]);
+        let color = band.color.unwrap_or(theme.warning);
         painter.rect(
             &format!("{}-annotation-band-{index}", spec.id),
             x0.min(x1),
@@ -1908,7 +2063,7 @@ fn draw_chart(
         if hidden.get(index).copied().unwrap_or(false) {
             continue;
         }
-        let color = series_color(series, index);
+        let color = series_color(series, index, &theme);
         let points: Vec<usize> = point_indices(series).collect();
         match series.kind {
             SeriesKind::StackedArea => {
@@ -1936,6 +2091,30 @@ fn draw_chart(
                     color,
                     0.9,
                 );
+            }
+            SeriesKind::StackedBar => {
+                let group_slot = plot_w / bar_slots;
+                let width =
+                    (group_slot * series.bar_width.unwrap_or(0.78).clamp(0.1, 1.0)).max(2.0);
+                let radius = series.bar_radius.unwrap_or(2.0);
+                for point in points {
+                    let lower = stack[point];
+                    let upper = lower + chart_value(samples, series.source.as_deref(), point);
+                    stack[point] = upper;
+                    let y0 = sy(lower.clamp(ylo, yhi));
+                    let y1 = sy(upper.clamp(ylo, yhi));
+                    let center = sx(point as f32);
+                    painter.rect(
+                        &format!("{}-{}-stack-bar-{point}", spec.id, index),
+                        center - width * 0.5,
+                        y0.min(y1),
+                        width * 0.82,
+                        (y0 - y1).abs().max(1.0),
+                        color,
+                        series.fill_opacity.unwrap_or(0.9),
+                        radius,
+                    );
+                }
             }
             SeriesKind::Bar => {
                 let group_slot = plot_w / bar_slots;
@@ -2008,6 +2187,11 @@ fn draw_chart(
                         (sx(point as f32), sy(lower.clamp(ylo, yhi)))
                     })
                     .collect();
+                let (upper, lower) = if series.step {
+                    (step_points(&upper), step_points(&lower))
+                } else {
+                    (upper, lower)
+                };
                 painter.band(
                     &format!("{}-{}-band", spec.id, index),
                     &upper,
@@ -2048,6 +2232,9 @@ fn draw_chart(
                     .collect();
                 if series.smooth {
                     screen = smooth(&screen, style.smooth_steps);
+                }
+                if series.step && series.kind != SeriesKind::Scatter {
+                    screen = step_points(&screen);
                 }
                 let paint = series.width.unwrap_or(style.line_width);
                 if series.kind == SeriesKind::Area {
@@ -2113,7 +2300,7 @@ fn draw_chart(
                 let Some(x) = cycle_x(line.at) else {
                     continue;
                 };
-                let color = line.color.unwrap_or([234, 179, 8]);
+                let color = line.color.unwrap_or(theme.warning);
                 painter.rect(
                     &format!("{}-annotation-line-{index}", spec.id),
                     x,
@@ -2151,7 +2338,7 @@ fn draw_chart(
                 let Some(x) = cycle_x(event.at) else {
                     continue;
                 };
-                let color = event.color.unwrap_or([96, 165, 250]);
+                let color = event.color.unwrap_or(theme.primary);
                 if event.line.unwrap_or(true) {
                     painter.rect(
                         &format!("{}-annotation-x-line-{index}", spec.id),
@@ -2181,7 +2368,7 @@ fn draw_chart(
                         label_y - 2.0,
                         width + 6.0,
                         12.0,
-                        [17, 19, 29],
+                        theme.background,
                         0.92,
                         2.0,
                     );
@@ -2200,7 +2387,7 @@ fn draw_chart(
                     continue;
                 }
                 let y = sy(threshold.value);
-                let color = threshold.color.unwrap_or([239, 68, 68]);
+                let color = threshold.color.unwrap_or(theme.danger);
                 painter.rect(
                     &format!("{}-annotation-threshold-{index}", spec.id),
                     left,
@@ -2234,9 +2421,9 @@ fn draw_chart(
         let color = if series.kind == SeriesKind::Candle {
             series
                 .up_color
-                .unwrap_or_else(|| series_color(series, index))
+                .unwrap_or_else(|| series_color(series, index, &theme))
         } else {
-            series_color(series, index)
+            series_color(series, index, &theme)
         };
         let hidden_series = hidden.get(index).copied().unwrap_or(false);
         let opacity = if hidden_series { 0.35 } else { 1.0 };
@@ -2249,7 +2436,7 @@ fn draw_chart(
                 color,
                 opacity,
             ),
-            SeriesKind::Bar | SeriesKind::Candle => painter.rect(
+            SeriesKind::Bar | SeriesKind::StackedBar | SeriesKind::Candle => painter.rect(
                 &format!("{}-legend-mark-{index}", spec.id),
                 item.x,
                 mid - 5.0,
@@ -2294,7 +2481,7 @@ fn draw_chart(
             if hidden_series {
                 [120, 130, 145]
             } else {
-                [180, 190, 205]
+                theme.muted
             },
         );
     }
@@ -2306,7 +2493,7 @@ fn draw_chart(
             &format!("{}-crosshair", spec.id),
             &[(cx, top), (cx, plot_bottom)],
             1.0,
-            [205, 214, 244],
+            theme.text,
             0.34,
         );
         let mut rows = Vec::new();
@@ -2315,7 +2502,7 @@ fn draw_chart(
                 continue;
             }
             let value = series_value(samples, series, nearest, phase);
-            let color = series_point_color(samples, series, index, nearest);
+            let color = series_point_color(samples, series, index, nearest, &theme);
             let y = sy(value.clamp(ylo, yhi));
             painter.points(
                 &format!("{}-{}-hover", spec.id, index),
@@ -2345,7 +2532,7 @@ fn draw_chart(
                 ty,
                 width,
                 height,
-                [26, 26, 46],
+                theme.surface,
                 0.94,
                 8.0,
             );
@@ -2359,7 +2546,7 @@ fn draw_chart(
                 tx + 10.0,
                 ty + 7.0,
                 10.0,
-                [180, 190, 205],
+                theme.muted,
             );
             for (row, (label, color, value)) in rows.iter().enumerate() {
                 let y = ty + 25.0 + row as f32 * 18.0;
@@ -2376,7 +2563,7 @@ fn draw_chart(
                     tx + 22.0,
                     y,
                     10.0,
-                    [205, 214, 244],
+                    theme.text,
                 );
                 painter.text(
                     &format!("{}-tooltip-value-{row}", spec.id),
@@ -2391,7 +2578,150 @@ fn draw_chart(
     }
 }
 
+fn draw_histogram(
+    painter: &mut Painter,
+    spec: &HistogramSpec,
+    r: LayerRect,
+    samples: &VecDeque<Sample>,
+) {
+    let theme = painter.theme;
+    panel(painter, &spec.id, &r, spec.title.as_deref());
+    if let Some(subtitle) = &spec.subtitle {
+        painter.text(
+            &format!("{}-subtitle", spec.id),
+            subtitle,
+            r.x + 16.0,
+            r.y + 36.0,
+            10.0,
+            theme.muted,
+        );
+    }
+    let left = r.x + 52.0;
+    let top = r.y + 54.0;
+    let plot_w = (r.w - 70.0).max(16.0);
+    let plot_h = (r.h - 92.0).max(16.0);
+    let bottom = top + plot_h;
+    painter.rect(
+        &format!("{}-plot", spec.id),
+        left,
+        top,
+        plot_w,
+        plot_h,
+        theme.background,
+        0.14,
+        10.0,
+    );
+    painter.rect(
+        &format!("{}-axis-y", spec.id),
+        left,
+        top,
+        1.0,
+        plot_h,
+        theme.muted,
+        0.18,
+        0.0,
+    );
+    painter.rect(
+        &format!("{}-axis-x", spec.id),
+        left,
+        bottom,
+        plot_w,
+        1.0,
+        theme.muted,
+        0.18,
+        0.0,
+    );
+
+    let mut values: Vec<f32> = (0..CHART_POINTS)
+        .map(|index| chart_value(samples, Some(&spec.source), index))
+        .filter(|value| value.is_finite())
+        .collect();
+    if values.is_empty() {
+        return;
+    }
+    let mut lo = spec
+        .min
+        .unwrap_or_else(|| values.iter().copied().fold(f32::INFINITY, f32::min));
+    let mut hi = spec
+        .max
+        .unwrap_or_else(|| values.iter().copied().fold(f32::NEG_INFINITY, f32::max));
+    if (hi - lo).abs() < f32::EPSILON {
+        let pad = hi.abs().max(1.0) * 0.5;
+        lo -= pad;
+        hi += pad;
+    }
+    let bins = spec.bins.clamp(1, 128);
+    let mut counts = vec![0.0f32; bins];
+    for value in values.drain(..) {
+        let t = ((value - lo) / (hi - lo)).clamp(0.0, 0.9999);
+        let bin = (t * bins as f32).floor() as usize;
+        counts[bin] += 1.0;
+    }
+    let max_count = counts.iter().copied().fold(1.0f32, f32::max);
+    let count_step = nice_step(max_count, 5);
+    let count_ticks = ((max_count / count_step).ceil() as usize).clamp(1, 8);
+    for tick in 0..=count_ticks {
+        let value = tick as f32 * count_step;
+        let y = bottom - value / max_count * plot_h;
+        painter.rect(
+            &format!("{}-grid-{tick}", spec.id),
+            left,
+            y,
+            plot_w,
+            1.0,
+            theme.muted,
+            0.08,
+            0.0,
+        );
+        let label = format_axis_value(value, count_step);
+        let width = approx_text_width(&label, 9.0);
+        painter.text(
+            &format!("{}-ylabel-{tick}", spec.id),
+            &label,
+            left - width - 8.0,
+            y - 5.0,
+            9.0,
+            theme.muted,
+        );
+    }
+    let bar_w = plot_w / bins as f32;
+    let color = spec
+        .color
+        .unwrap_or_else(|| spec.ink.map_or(theme.primary, |ink| ink_color(&theme, ink)));
+    for (index, count) in counts.iter().enumerate() {
+        if *count <= 0.0 {
+            continue;
+        }
+        let height = (*count / max_count * plot_h).max(1.0);
+        painter.rect(
+            &format!("{}-bar-{index}", spec.id),
+            left + index as f32 * bar_w + bar_w * 0.08,
+            bottom - height,
+            (bar_w * 0.84).max(1.0),
+            height,
+            color,
+            spec.opacity.clamp(0.0, 1.0),
+            spec.bar_radius,
+        );
+    }
+    for tick in 0..=4 {
+        let value = lo + (hi - lo) * tick as f32 / 4.0;
+        let label = format_axis_value(value, (hi - lo) / 4.0);
+        let width = approx_text_width(&label, 9.0);
+        let x = left + plot_w * tick as f32 / 4.0;
+        painter.text(
+            &format!("{}-xlabel-{tick}", spec.id),
+            &label,
+            (x - width * 0.5).clamp(left, (left + plot_w - width).max(left)),
+            bottom + 8.0,
+            9.0,
+            theme.muted,
+        );
+    }
+}
+
 fn draw_graph(painter: &mut Painter, spec: &GraphSpec, time: f32, r: LayerRect) {
+    let theme = painter.theme;
     panel(painter, &spec.id, &r, spec.title.as_deref());
     let count = spec.node_count.max(3).min(12);
     let cx = r.x + r.w * 0.5;
@@ -2413,7 +2743,7 @@ fn draw_graph(painter: &mut Painter, spec: &GraphSpec, time: f32, r: LayerRect) 
             &format!("{}-edge-{index}", spec.id),
             &[nodes[index], nodes[next]],
             1.4,
-            [145, 155, 170],
+            theme.muted,
             0.30,
         );
         if index % 2 == 0 {
@@ -2422,7 +2752,7 @@ fn draw_graph(painter: &mut Painter, spec: &GraphSpec, time: f32, r: LayerRect) 
                 &format!("{}-chord-{index}", spec.id),
                 &[nodes[index], nodes[chord]],
                 1.0,
-                [145, 155, 170],
+                theme.muted,
                 0.16,
             );
         }
@@ -2457,6 +2787,7 @@ fn draw_graph(painter: &mut Painter, spec: &GraphSpec, time: f32, r: LayerRect) 
 }
 
 fn draw_map(painter: &mut Painter, spec: &MapSpec, time: f32, r: LayerRect) {
+    let theme = painter.theme;
     panel(painter, &spec.id, &r, spec.title.as_deref());
     let pad = 22.0;
     let plot_top = r.y + 42.0;
@@ -2485,7 +2816,7 @@ fn draw_map(painter: &mut Painter, spec: &MapSpec, time: f32, r: LayerRect) {
             r.y + pad,
             1.0,
             plot_h,
-            [145, 155, 170],
+            theme.muted,
             0.08,
             0.0,
         );
@@ -2495,7 +2826,7 @@ fn draw_map(painter: &mut Painter, spec: &MapSpec, time: f32, r: LayerRect) {
             x + 3.0,
             r.y + r.h - 16.0,
             8.0,
-            [145, 155, 170],
+            theme.muted,
         );
     }
     for lat in (-80..=80).step_by(20) {
@@ -2506,7 +2837,7 @@ fn draw_map(painter: &mut Painter, spec: &MapSpec, time: f32, r: LayerRect) {
             y,
             plot_w,
             1.0,
-            [145, 155, 170],
+            theme.muted,
             0.08,
             0.0,
         );
@@ -2516,7 +2847,7 @@ fn draw_map(painter: &mut Painter, spec: &MapSpec, time: f32, r: LayerRect) {
             r.x + 3.0,
             y + 2.0,
             8.0,
-            [145, 155, 170],
+            theme.muted,
         );
     }
     let routes = [
@@ -2649,6 +2980,19 @@ fn mercator(lat: f32) -> f32 {
     (std::f32::consts::FRAC_PI_4 + (lat.to_radians()) / 2.0)
         .tan()
         .ln()
+}
+
+fn step_points(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    if points.len() < 2 {
+        return points.to_vec();
+    }
+    let mut out = Vec::with_capacity(points.len() * 2);
+    out.push(points[0]);
+    for pair in points.windows(2) {
+        out.push((pair[1].0, pair[0].1));
+        out.push(pair[1]);
+    }
+    out
 }
 
 fn smooth(points: &[(f32, f32)], steps: usize) -> Vec<(f32, f32)> {
@@ -2784,6 +3128,45 @@ mod tests {
         let scene = live.advance(0.016);
         scene.validate().expect("valid scene");
         assert!(scene.nodes.len() > 20);
+    }
+
+    #[test]
+    fn histogram_layer_builds_scene_bars() {
+        let spec: LiveSpec = serde_json::from_str(
+            r#"{
+                "width": 800,
+                "height": 600,
+                "layers": [{
+                    "kind": "histogram",
+                    "id": "cpu-dist",
+                    "source": "system.cpu",
+                    "bins": 8
+                }]
+            }"#,
+        )
+        .expect("spec");
+        let mut live = LiveViz::new(spec);
+        let scene = live.seek(1.0);
+        scene.validate().expect("valid scene");
+        assert!(
+            scene
+                .nodes
+                .iter()
+                .any(|node| node.id.starts_with("cpu-dist-bar-"))
+        );
+    }
+
+    #[test]
+    fn theme_spec_overrides_the_host_palette() {
+        let mut theme = Theme::default();
+        ThemeSpec {
+            primary: Some([255, 0, 128]),
+            background: Some([10, 20, 30]),
+            ..ThemeSpec::default()
+        }
+        .apply(&mut theme);
+        assert_eq!(theme.primary, [255, 0, 128]);
+        assert_eq!(theme.background, [10, 20, 30]);
     }
 
     #[test]
