@@ -367,3 +367,24 @@ fn wasm_spore_supports_tgrep_over_vfs() {
     assert!(stdout.contains("/docs/b.md:1:ALPHA markdown"), "{stdout}");
     assert!(stdout.contains("status=1"), "{stdout}");
 }
+
+#[test]
+fn wasm_spore_supports_desktop_registry_and_project_mount() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg("mkdir docs\nwrite docs/a.txt hello\nexit")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("hello"), "{stdout}");
+}
