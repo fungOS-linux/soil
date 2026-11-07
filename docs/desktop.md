@@ -62,8 +62,12 @@ Desktop / Shared Desktop
        └─ project worktrees
 ```
 
-A Desktop can contain many projects. A project can be referenced by many
-Desktops. Each thread gets an independent worktree for each project it touches.
+A Desktop can contain many projects. A `ProjectRef` can be re-used in many
+Desktops, but that is a **reference**, not a shared mutable instance. Each
+Desktop attaches the same upstream repository and gets its own thread
+worktrees and checkouts. Use this for public/FOSS repositories that people want
+in more than one Desktop. Changes leave a Desktop through Git upstream, a PR,
+or an explicit assignment; they never write through another Desktop's checkout.
 
 ## Object model
 
@@ -337,6 +341,9 @@ archive
    local checkout silently.
 6. Mush `cd /projects/<name>` resolves to the thread worktree checkout, not a
    copied directory inside the Desktop VFS.
+7. Add the same public repository to two Desktops. Each Desktop creates an
+   independent thread worktree; neither Desktop can write through the other's
+   checkout.
 
 ## Non-goals
 
@@ -349,8 +356,11 @@ archive
 ## Open decisions
 
 1. Desktop IDs: opaque UUID, or `org/team/name` with an opaque suffix?
-2. Can a thread span projects from two Desktops? Recommendation: no, keep one
-   Desktop scope per thread and create a new thread when crossing scopes.
+2. Can a thread span projects from two Desktops? Recommendation: no. A
+   `ProjectRef` may be attached to many Desktops, especially for public/FOSS
+   repositories, but every use gets its own thread worktree. Do not share one
+   mutable project instance across two Desktops; cross-Desktop work goes through
+   Git upstream, a PR, or an explicit assignment.
 3. Is Desktop membership itself a `soil:records` schema, or host policy backed by
    Mycelium grants? Recommendation: manifest in records, authority in Mycelium.
 4. Does `soil:doc` become a Desktop text-buffer capability, or remain a VFS text
