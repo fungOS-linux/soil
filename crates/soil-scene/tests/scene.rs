@@ -317,3 +317,50 @@ fn chart_catalog_primitives_are_bounded() {
         .is_err()
     );
 }
+
+#[test]
+fn gpu_content_requires_a_resident_resource() {
+    use std::sync::Arc;
+    let node = Node {
+        id: "dense".into(),
+        parent: None,
+        transition_ms: None,
+        transform: Transform::default(),
+        content: Content::GpuDense(soil_scene::GpuDense {
+            resource: "points".into(),
+            mode: soil_scene::GpuDenseMode::Line,
+            range: [0.0, 0.0, 1.0, 1.0],
+            buckets: 100,
+            ink: Some(Ink::Primary),
+            rgb: None,
+            opacity: 1.0,
+            size: 2.0,
+        }),
+    };
+    assert!(Scene::new(vec![node.clone()]).validate().is_err());
+
+    let resource = Arc::new(soil_scene::GpuResource::Dense(soil_scene::DenseResource {
+        id: "points".into(),
+        generation: 1,
+        points: vec![[0.0, 0.0], [1.0, 1.0]],
+    }));
+    Scene::with_gpu(vec![node], vec![resource])
+        .validate()
+        .expect("resource is present");
+}
+
+#[test]
+fn duplicate_gpu_resources_are_refused() {
+    use std::sync::Arc;
+    let resource = || {
+        Arc::new(soil_scene::GpuResource::Dense(soil_scene::DenseResource {
+            id: "points".into(),
+            generation: 1,
+            points: vec![[0.0, 0.0], [1.0, 1.0]],
+        }))
+    };
+    let error = Scene::with_gpu(vec![], vec![resource(), resource()])
+        .validate()
+        .expect_err("two resources cannot share an id");
+    assert!(error.0.contains("duplicate"), "{error}");
+}
