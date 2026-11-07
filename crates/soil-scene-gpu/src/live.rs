@@ -144,6 +144,8 @@ pub enum LayerSpec {
     Map(MapSpec),
     Atlas(AtlasSpec),
     Histogram(HistogramSpec),
+    Dense(DenseSpec),
+    PointCloud3D(PointCloud3DSpec),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -452,6 +454,173 @@ fn histogram_radius() -> f32 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct DenseSpec {
+    pub id: String,
+    #[serde(default)]
+    pub rect: RectSpec,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default = "default_dense_points")]
+    pub points: usize,
+    #[serde(default)]
+    pub seed: u64,
+    #[serde(default = "default_dense_threshold")]
+    pub threshold: usize,
+    #[serde(default)]
+    pub mode: DenseKind,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DenseKind {
+    #[default]
+    Line,
+    Scatter,
+}
+
+fn default_dense_points() -> usize {
+    1_000_000
+}
+
+fn default_dense_threshold() -> usize {
+    4_000
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PointCloud3DSpec {
+    pub id: String,
+    #[serde(default)]
+    pub rect: RectSpec,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default = "default_cloud_points")]
+    pub points: usize,
+    #[serde(default)]
+    pub seed: u64,
+    #[serde(default = "default_pitch")]
+    pub pitch: f32,
+    #[serde(default = "default_point_size")]
+    pub size: f32,
+}
+
+fn default_cloud_points() -> usize {
+    20_000
+}
+
+fn default_pitch() -> f32 {
+    0.35
+}
+
+fn default_point_size() -> f32 {
+    2.2
+}
+
+#[derive(Debug, Clone)]
+struct DenseData {
+    raw: Vec<[f32; 2]>,
+    sampled: Vec<[f32; 2]>,
+}
+
+impl DenseData {
+    fn new(spec: &DenseSpec) -> Self {
+        let count = spec.points.clamp(2, 5_000_000);
+        let seed = spec.seed as f32 * 0.017 + 1.0;
+        let mut raw = Vec::with_capacity(count);
+        for index in 0..count {
+            let t = index as f32 / (count - 1) as f32;
+            let y = 0.5
+                + 0.23 * (t * TAU * 3.1 + seed).sin()
+                + 0.14 * (t * TAU * 17.3 + seed * 1.7).sin()
+                + 0.06 * (t * TAU * 91.7 + seed * 2.3).sin()
+                + 0.03 * (t * TAU * 311.0 + seed * 4.1).sin();
+            raw.push([t, y]);
+        }
+        let sampled = lttb(&raw, spec.threshold.clamp(2, 200_000));
+        Self { raw, sampled }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CloudData {
+    points: Vec<[f32; 4]>,
+}
+
+impl CloudData {
+    fn new(spec: &PointCloud3DSpec) -> Self {
+        let count = spec.points.clamp(64, 500_000);
+        let mut points = Vec::with_capacity(count);
+        for index in 0..count {
+            let i = index as f32;
+            let u = hash01(i * 12.9898 + spec.seed as f32 * 0.17);
+            let v = hash01(i * 78.233 + spec.seed as f32 * 0.31);
+            let theta = u * TAU;
+            let phi = (v * 2.0 - 1.0).acos();
+            let radius = 0.72 + 0.28 * hash01(i * 37.719 + spec.seed as f32);
+            let x = radius * phi.sin() * theta.cos();
+            let y = radius * phi.cos() * 0.7;
+            let z = radius * phi.sin() * theta.sin();
+            points.push([x, y, z, hash01(i * 5.13 + spec.seed as f32 * 0.73)]);
+        }
+        Self { points }
+    }
+}
+
+fn hash01(mut value: f32) -> f32 {
+    value = (value * 0.1031).fract();
+    value *= value + 33.33;
+    value = (value * (value + value)).fract();
+    value
+}
+
+fn lttb(points: &[[f32; 2]], threshold: usize) -> Vec<[f32; 2]> {
+    if threshold >= points.len() || threshold < 3 {
+        return points.to_vec();
+    }
+    let mut out = Vec::with_capacity(threshold);
+    out.push(points[0]);
+    let every = (points.len() - 2) as f32 / (threshold - 2) as f32;
+    let mut anchor = 0usize;
+    for bucket in 0..threshold - 2 {
+        let start = ((bucket as f32 * every).floor() as usize + 1).min(points.len() - 2);
+        let end = (((bucket + 1) as f32 * every).floor() as usize + 1).min(points.len() - 1);
+        let next_start = (((bucket + 1) as f32 * every).floor() as usize + 1).min(points.len() - 1);
+        let next_end = (((bucket + 2) as f32 * every).floor() as usize + 1).min(points.len());
+        let mut avg = [0.0f32; 2];
+        let mut n = 0.0f32;
+        for point in &points[next_start.min(points.len() - 1)..next_end] {
+            avg[0] += point[0];
+            avg[1] += point[1];
+            n += 1.0;
+        }
+        if n > 0.0 {
+            avg[0] /= n;
+            avg[1] /= n;
+        }
+        let ax = points[anchor][0];
+        let ay = points[anchor][1];
+        let mut best = start;
+        let mut best_area = -1.0f32;
+        for index in start..=end.min(points.len() - 1) {
+            let area = ((ax - avg[0]) * (points[index][1] - ay)
+                - (ax - points[index][0]) * (avg[1] - ay))
+                .abs();
+            if area > best_area {
+                best_area = area;
+                best = index;
+            }
+        }
+        out.push(points[best]);
+        anchor = best;
+    }
+    out.push(points[points.len() - 1]);
+    out
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct GraphSpec {
     pub id: String,
     #[serde(default)]
@@ -602,6 +771,8 @@ pub struct LiveViz {
     history: VecDeque<Sample>,
     last_index: i64,
     system: SystemSource,
+    dense: Vec<Option<DenseData>>,
+    clouds: Vec<Option<CloudData>>,
     y_bounds: Vec<Option<(f32, f32)>>,
     last_scene_time: f32,
     atlas_points: Vec<(f32, f32, usize)>,
@@ -645,6 +816,22 @@ impl LiveViz {
             theme_spec.apply(&mut theme);
         }
         let system = SystemSource::new();
+        let dense = spec
+            .layers
+            .iter()
+            .map(|layer| match layer {
+                LayerSpec::Dense(spec) => Some(DenseData::new(spec)),
+                _ => None,
+            })
+            .collect();
+        let clouds = spec
+            .layers
+            .iter()
+            .map(|layer| match layer {
+                LayerSpec::PointCloud3D(spec) => Some(CloudData::new(spec)),
+                _ => None,
+            })
+            .collect();
         let layer_count = spec.layers.len();
         let mut live = Self {
             spec,
@@ -655,6 +842,8 @@ impl LiveViz {
             history: VecDeque::with_capacity(CHART_POINTS),
             last_index: 0,
             system,
+            dense,
+            clouds,
             y_bounds: vec![None; layer_count],
             last_scene_time: 0.0,
             atlas_points,
@@ -828,6 +1017,8 @@ impl LiveViz {
                 LayerSpec::Map(spec) => &spec.rect,
                 LayerSpec::Atlas(spec) => &spec.rect,
                 LayerSpec::Histogram(spec) => &spec.rect,
+                LayerSpec::Dense(spec) => &spec.rect,
+                LayerSpec::PointCloud3D(spec) => &spec.rect,
             };
             let r = self.rect_for(layer_index, rect, width, height, gap);
             match layer {
@@ -879,6 +1070,16 @@ impl LiveViz {
                     draw_atlas(&mut painter, spec, self.time, r, &self.atlas_points)
                 }
                 LayerSpec::Histogram(spec) => draw_histogram(&mut painter, spec, r, &self.history),
+                LayerSpec::Dense(spec) => {
+                    if let Some(data) = self.dense.get(layer_index).and_then(Option::as_ref) {
+                        draw_dense_chart(&mut painter, spec, data, r);
+                    }
+                }
+                LayerSpec::PointCloud3D(spec) => {
+                    if let Some(cloud) = self.clouds.get(layer_index).and_then(Option::as_ref) {
+                        draw_pointcloud3d(&mut painter, spec, cloud, self.time, r);
+                    }
+                }
             }
         }
         self.last_scene_time = self.time;
@@ -2578,6 +2779,218 @@ fn draw_chart(
     }
 }
 
+fn format_count(value: usize) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f32 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.0}k", value as f32 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn draw_dense_chart(painter: &mut Painter, spec: &DenseSpec, data: &DenseData, r: LayerRect) {
+    let theme = painter.theme;
+    panel(painter, &spec.id, &r, spec.title.as_deref());
+    let subtitle = spec
+        .subtitle
+        .clone()
+        .unwrap_or_else(|| "resident dense series · CPU LTTB".into());
+    painter.text(
+        &format!("{}-subtitle", spec.id),
+        &subtitle,
+        r.x + 16.0,
+        r.y + 36.0,
+        10.0,
+        theme.muted,
+    );
+    let left = r.x + 52.0;
+    let top = r.y + 54.0;
+    let plot_w = (r.w - 70.0).max(16.0);
+    let plot_h = (r.h - 92.0).max(16.0);
+    let bottom = top + plot_h;
+    painter.rect(
+        &format!("{}-plot", spec.id),
+        left,
+        top,
+        plot_w,
+        plot_h,
+        theme.background,
+        0.14,
+        10.0,
+    );
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for point in &data.sampled {
+        lo = lo.min(point[1]);
+        hi = hi.max(point[1]);
+    }
+    if !lo.is_finite() || !hi.is_finite() {
+        return;
+    }
+    let (ylo, yhi) = nice_bounds(lo, hi);
+    let sy = |y: f32| bottom - (y - ylo) / (yhi - ylo) * plot_h;
+    let sx = |x: f32| left + x * plot_w;
+    let step = nice_step(yhi - ylo, 5);
+    let ticks = (((yhi - ylo) / step).round() as usize).clamp(1, 10);
+    for tick in 0..=ticks {
+        let value = ylo + tick as f32 * step;
+        let y = sy(value);
+        painter.rect(
+            &format!("{}-grid-{tick}", spec.id),
+            left,
+            y,
+            plot_w,
+            1.0,
+            theme.muted,
+            0.08,
+            0.0,
+        );
+        let label = format_axis_value(value, step);
+        let width = approx_text_width(&label, 9.0);
+        painter.text(
+            &format!("{}-ylabel-{tick}", spec.id),
+            &label,
+            left - width - 8.0,
+            y - 5.0,
+            9.0,
+            theme.muted,
+        );
+    }
+    for tick in 0..=4 {
+        let value = tick as f32 / 4.0;
+        let x = sx(value);
+        let label = format!("{:.0}%", value * 100.0);
+        let width = approx_text_width(&label, 9.0);
+        painter.text(
+            &format!("{}-xlabel-{tick}", spec.id),
+            &label,
+            (x - width * 0.5).clamp(left, (left + plot_w - width).max(left)),
+            bottom + 8.0,
+            9.0,
+            theme.muted,
+        );
+    }
+    let color = spec.mode_color(theme);
+    match spec.mode {
+        DenseKind::Line => {
+            let screen: Vec<(f32, f32)> = data
+                .sampled
+                .iter()
+                .map(|point| (sx(point[0]), sy(point[1])))
+                .collect();
+            painter.polyline(&format!("{}-line", spec.id), &screen, 1.4, color, 1.0);
+        }
+        DenseKind::Scatter => {
+            let screen: Vec<(f32, f32)> = data
+                .sampled
+                .iter()
+                .map(|point| (sx(point[0]), sy(point[1])))
+                .collect();
+            painter.points(&format!("{}-points", spec.id), &screen, 1.8, color, 0.82);
+        }
+    }
+    painter.text(
+        &format!("{}-density", spec.id),
+        &format!(
+            "{} → {} marks",
+            format_count(data.raw.len()),
+            format_count(data.sampled.len())
+        ),
+        left,
+        bottom + 20.0,
+        9.0,
+        theme.muted,
+    );
+}
+
+impl DenseSpec {
+    fn mode_color(&self, theme: Theme) -> [u8; 3] {
+        match self.mode {
+            DenseKind::Line => theme.primary,
+            DenseKind::Scatter => theme.info,
+        }
+    }
+}
+
+fn draw_pointcloud3d(
+    painter: &mut Painter,
+    spec: &PointCloud3DSpec,
+    cloud: &CloudData,
+    time: f32,
+    r: LayerRect,
+) {
+    let theme = painter.theme;
+    panel(painter, &spec.id, &r, spec.title.as_deref());
+    if let Some(subtitle) = &spec.subtitle {
+        painter.text(
+            &format!("{}-subtitle", spec.id),
+            subtitle,
+            r.x + 16.0,
+            r.y + 36.0,
+            10.0,
+            theme.muted,
+        );
+    }
+    let cx = r.x + r.w * 0.5;
+    let cy = r.y + r.h * 0.56;
+    let scale = r.h.min(r.w) * 0.38;
+    let yaw = time * 0.32 + spec.seed as f32 * 0.013;
+    let pitch = spec.pitch.clamp(-1.2, 1.2);
+    let (syaw, cyaw) = yaw.sin_cos();
+    let (spitch, cpitch) = pitch.sin_cos();
+    let project = |point: [f32; 3]| {
+        let x1 = point[0] * cyaw + point[2] * syaw;
+        let z1 = -point[0] * syaw + point[2] * cyaw;
+        let y1 = point[1] * cpitch - z1 * spitch;
+        let z2 = point[1] * spitch + z1 * cpitch;
+        let depth = 1.0 / (1.0 + z2 * 0.75);
+        (cx + x1 * scale * depth, cy - y1 * scale * depth, z2)
+    };
+    for (index, axis) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        .iter()
+        .enumerate()
+    {
+        let (x, y, _) = project([0.0, 0.0, 0.0]);
+        let (ex, ey, _) = project(*axis);
+        let color = [theme.danger, theme.success, theme.info][index];
+        painter.polyline(
+            &format!("{}-axis-{index}", spec.id),
+            &[(x, y), (ex, ey)],
+            1.2,
+            color,
+            0.55,
+        );
+    }
+    let mut marks: Vec<(f32, f32, f32)> = cloud
+        .points
+        .iter()
+        .map(|point| {
+            let (x, y, depth) = project([point[0], point[1], point[2]]);
+            (x, y, depth)
+        })
+        .collect();
+    marks.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    painter.points(
+        &format!("{}-cloud", spec.id),
+        &marks
+            .iter()
+            .map(|mark| (mark.0, mark.1))
+            .collect::<Vec<_>>(),
+        spec.size,
+        theme.info,
+        0.78,
+    );
+    painter.text(
+        &format!("{}-density", spec.id),
+        &format!("{} projected points", format_count(cloud.points.len())),
+        r.x + 16.0,
+        r.y + r.h - 20.0,
+        9.0,
+        theme.muted,
+    );
+}
+
 fn draw_histogram(
     painter: &mut Painter,
     spec: &HistogramSpec,
@@ -3128,6 +3541,20 @@ mod tests {
         let scene = live.advance(0.016);
         scene.validate().expect("valid scene");
         assert!(scene.nodes.len() > 20);
+    }
+
+    #[test]
+    fn lttb_keeps_endpoints_and_the_requested_budget() {
+        let points: Vec<[f32; 2]> = (0..10_000)
+            .map(|index| {
+                let x = index as f32 / 9_999.0;
+                [x, (x * 31.0).sin()]
+            })
+            .collect();
+        let sampled = lttb(&points, 500);
+        assert_eq!(sampled.len(), 500);
+        assert_eq!(sampled[0], points[0]);
+        assert_eq!(sampled[sampled.len() - 1], points[points.len() - 1]);
     }
 
     #[test]
