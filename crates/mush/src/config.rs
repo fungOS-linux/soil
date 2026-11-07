@@ -16,6 +16,7 @@ pub struct Config {
     pub records_collection: Option<String>,
     pub principal: Option<String>,
     pub socket: Option<PathBuf>,
+    pub desktop: Option<String>,
 }
 
 pub fn default_path() -> PathBuf {
@@ -52,6 +53,7 @@ fn parse(text: &str) -> Result<Config> {
             "records_collection" => config.records_collection = Some(value),
             "principal" => config.principal = Some(value),
             "socket" => config.socket = Some(expand_home(&value)),
+            "desktop" => config.desktop = Some(value),
             other => anyhow::bail!(
                 "mush config line {}: unknown key {other:?}",
                 line_number + 1

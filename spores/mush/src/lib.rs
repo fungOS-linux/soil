@@ -268,6 +268,12 @@ impl Shell {
                 env.insert("MUSH_PRINCIPAL".into(), value.into());
                 env.insert("USER".into(), value.into());
                 env.insert("LOGNAME".into(), value.into());
+            } else if let Some(value) = arg.strip_prefix("--desktop=") {
+                env.insert("MUSH_DESKTOP".into(), value.into());
+            } else if let Some(value) = arg.strip_prefix("--desktop-root=") {
+                env.insert("MUSH_DESKTOP_ROOT".into(), value.into());
+            } else if let Some(value) = arg.strip_prefix("--desktop-theme=") {
+                env.insert("MUSH_DESKTOP_THEME".into(), value.into());
             }
         }
         Self {

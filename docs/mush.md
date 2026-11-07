@@ -87,6 +87,7 @@ records_book = "personal/avery/marbles"
 records_collection = "marbles"
 principal = "mycelium:agent:ajmwagar/codex-1"
 socket = "~/.local/share/fungos/mush.sock"
+desktop = "acme"
 ```
 
 ```sh
@@ -94,8 +95,23 @@ mush doctor
 ```
 
 `doctor` reports the effective VFS root, command root, records binding, Spore
-source, principal and service socket. Missing roots are errors, not silent
-fallbacks.
+source, principal, Desktop, and service socket. Missing roots are errors, not
+silent fallbacks.
+
+## Desktop
+
+`mush desktop` manages the local registry in `~/.config/fungos/desktops/`:
+
+```sh
+mush desktop create acme --name Acme --theme ocean
+mush desktop list
+mush desktop show acme
+mush --desktop acme
+```
+
+A Desktop selects a VFS root under `~/.local/share/fungos/desktops/<id>`.
+That root can later grow project worktree mounts; today it is a namespace with
+`projects/`, `notes/`, and `scratch/` directories. See [Desktops](desktop.md).
 
 ## Service mode
 

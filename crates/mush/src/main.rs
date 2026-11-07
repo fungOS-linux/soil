@@ -5,6 +5,7 @@
 //! line-oriented terminal.
 
 mod config;
+mod desktop;
 mod gateway;
 mod mcp_gateway;
 mod mcp_server;
@@ -249,6 +250,7 @@ impl Runtime {
         command_root: PathBuf,
         records: Option<RecordsBinding>,
         principal: Option<&str>,
+        desktop: Option<&desktop::Desktop>,
     ) -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
@@ -265,6 +267,11 @@ impl Runtime {
         let mut args = vec![format!("--term={term}")];
         if let Some(principal) = principal {
             args.push(format!("--principal={principal}"));
+        }
+        if let Some(desktop) = desktop {
+            args.push(format!("--desktop={}", desktop.id));
+            args.push(format!("--desktop-root={}", root.display()));
+            args.push(format!("--desktop-theme={}", desktop.theme));
         }
         let response = instance
             .call_start(&mut store, &args)?
@@ -301,7 +308,9 @@ fn run() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("--help") {
         println!(
-            "mush {}\n\nUsage:\n  mush [OPTIONS]\n  mush doctor [OPTIONS]\n  mush run op [OPTIONS]\n  mush --serve --socket PATH --root DIR [OPTIONS]\n\nThe Mush Spore is embedded; --wasm overrides it for development.\n\nOptions:\n  --root DIR                 VFS root (default: ~/.local/share/fungos/vfs)\n  --wasm PATH                development Spore override\n  --command-root DIR         wasm command package root\n  --records-root DIR         Soil records root\n  --records-book BOOK        records book, e.g. personal/avery/marbles\n  --records-collection NAME  records collection name\n  --principal ID             signed principal label for this session\n  --socket PATH              Unix socket for --serve\n  --config PATH              config file (default: ~/.config/fungos/mush/config.toml)\n  --term TERM                terminal type passed to the Spore\n  --command LINE             execute one or more command lines\n  --script PATH              source a VFS script",
+            "mush {}\n\nUsage:\n  mush [OPTIONS]\n  mush doctor [OPTIONS]\n  mush run op [OPTIONS]\n  mush --serve --socket PATH --root DIR [OPTIONS]\n\nThe Mush Spore is embedded; --wasm overrides it for development.\n\nOptions:\n  --root DIR                 VFS root (default: ~/.local/share/fungos/vfs)\n  --wasm PATH                development Spore override\n  --command-root DIR         wasm command package root\n  --records-root DIR         Soil records root\n  --records-book BOOK        records book, e.g. personal/avery/marbles\n  --records-collection NAME  records collection name\n  --principal ID             signed principal label for this session
+  --desktop ID               select a Desktop registry entry
+  --root DIR                 explicit VFS root (mutually exclusive with --desktop)\n  --socket PATH              Unix socket for --serve\n  --config PATH              config file (default: ~/.config/fungos/mush/config.toml)\n  --term TERM                terminal type passed to the Spore\n  --command LINE             execute one or more command lines\n  --script PATH              source a VFS script",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
@@ -320,15 +329,37 @@ fn run() -> Result<()> {
         .map(|value| config::expand_home(&value))
         .unwrap_or_else(config::default_path);
     let config = config::load(&config_path)?;
+    if args.first().map(String::as_str) == Some("desktop") {
+        args.remove(0);
+        return run_desktop(args);
+    }
     if args.first().map(String::as_str) == Some("request") {
         args.remove(0);
         return run_request(&config, args);
     }
-    let root = take_option(&mut args, "--root")
-        .or_else(|| std::env::var("MUSH_ROOT").ok())
-        .or_else(|| config.root.as_ref().map(|path| path.display().to_string()))
-        .unwrap_or_else(|| "~/.local/share/fungos/vfs".into());
-    let root = config::expand_home(&root);
+    let explicit_root = args.iter().any(|arg| arg == "--root");
+    let desktop_id = take_option(&mut args, "--desktop")
+        .or_else(|| std::env::var("MUSH_DESKTOP").ok())
+        .or_else(|| config.desktop.clone());
+    let desktop = match desktop_id.as_deref() {
+        Some(id) => {
+            if explicit_root {
+                anyhow::bail!("--desktop and --root are mutually exclusive");
+            }
+            Some(desktop::load(id)?)
+        }
+        None => None,
+    };
+    let root = if let Some(desktop) = &desktop {
+        desktop.root.clone()
+    } else {
+        config::expand_home(
+            &take_option(&mut args, "--root")
+                .or_else(|| std::env::var("MUSH_ROOT").ok())
+                .or_else(|| config.root.as_ref().map(|path| path.display().to_string()))
+                .unwrap_or_else(|| "~/.local/share/fungos/vfs".into()),
+        )
+    };
 
     if args.first().map(String::as_str) == Some("run")
         && args.get(1).map(String::as_str) == Some("op")
@@ -412,6 +443,7 @@ fn run() -> Result<()> {
             wasm.as_deref(),
             principal.as_deref(),
             socket.as_deref(),
+            desktop.as_ref(),
         );
     }
 
@@ -427,6 +459,7 @@ fn run() -> Result<()> {
         command_root,
         records,
         principal.as_deref(),
+        desktop.as_ref(),
     )?;
 
     if serve {
@@ -490,6 +523,50 @@ fn new_mcp_token() -> String {
     let mut bytes = [0u8; 24];
     rand::rng().fill(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn run_desktop(mut args: Vec<String>) -> Result<()> {
+    let Some(subcommand) = args.first().map(String::as_str) else {
+        anyhow::bail!("usage: mush desktop <list|show|create> [OPTIONS] [ID]");
+    };
+    match subcommand {
+        "list" => {
+            for desktop in desktop::list()? {
+                println!(
+                    "{}\t{}\t{}\ttheme={}",
+                    desktop.id,
+                    desktop.name,
+                    desktop.root.display(),
+                    desktop.theme
+                );
+            }
+        }
+        "show" => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("usage: mush desktop show ID"))?;
+            let desktop = desktop::load(id)?;
+            println!("id: {}", desktop.id);
+            println!("name: {}", desktop.name);
+            println!("root: {}", desktop.root.display());
+            println!("theme: {}", desktop.theme);
+            println!("projects: {}", desktop.projects.join(", "));
+        }
+        "create" => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("usage: mush desktop create ID [--name NAME] [--theme THEME]")
+                })?
+                .clone();
+            let name = take_option(&mut args, "--name").unwrap_or_else(|| id.clone());
+            let theme = take_option(&mut args, "--theme").unwrap_or_else(|| "deep".into());
+            let desktop = desktop::create(&id, &name, &theme)?;
+            println!("{}", desktop.id);
+        }
+        other => anyhow::bail!("unknown desktop subcommand {other:?}"),
+    }
+    Ok(())
 }
 
 fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
@@ -559,6 +636,7 @@ fn doctor_report(
     wasm: Option<&Path>,
     principal: Option<&str>,
     socket: Option<&Path>,
+    desktop: Option<&desktop::Desktop>,
 ) -> Result<()> {
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
     let uid = unsafe { libc::geteuid() };
@@ -612,6 +690,10 @@ fn doctor_report(
         "principal: {}",
         principal.unwrap_or("(not set; using the POSIX user)")
     );
+    match desktop {
+        Some(desktop) => println!("desktop: {} ({})", desktop.id, desktop.name),
+        None => println!("desktop: disabled"),
+    }
     match socket {
         Some(path) if path.exists() => println!("service socket: {} [exists]", path.display()),
         Some(path) => println!("service socket: {} [not running]", path.display()),
