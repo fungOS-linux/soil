@@ -10,6 +10,14 @@
 //! evolves faster than an ABI should: a new node kind must never require
 //! rebuilding every Spore that renders. So the document carries its own version
 //! and the host refuses what it cannot draw.
+//!
+//! A scene is a 2D document, and 3D worlds are deliberately not part of it. A
+//! world is persistent, shared between participants, and rendered by an engine
+//! that owns materials, lighting and stereo; it reaches the host as pixels
+//! (`Present::Rgba`) or as a texture lease (`Present::GpuLease`), not as nodes.
+//! A mesh, camera or light kind here would make this crate a second 3D engine
+//! that every host then has to keep up with, and a node kind is a promise the
+//! wire has to keep.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -237,6 +245,9 @@ impl Node {
 pub struct Transform {
     #[serde(default)]
     pub translation: [f32; 3],
+    /// Radians, applied X then Y then Z. The order is fixed here rather than
+    /// left to the host: two hosts that disagree about it draw the same scene
+    /// differently, and nothing in the document would say which was right.
     #[serde(default)]
     pub rotation: [f32; 3],
     #[serde(default = "unit_scale")]
