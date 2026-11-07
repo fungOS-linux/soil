@@ -1,26 +1,38 @@
 # soil-confluence
 
-Minimal webhook ingress for Unibus. It accepts an external HTTP webhook,
-verifies the provider signature, deduplicates the delivery, and publishes one
-Unibus fact:
+Confluence webhook ingress for Unibus. The ingress is a Spore on the Soil
+`wasi:http` surface; this crate is the host policy that runs it and the event
+shape consumers depend on:
 
 ```text
 confluence.webhook.received.v1
 ```
 
-There are two ingress modes. The native `serve` mode keeps the original axum
-handler. The `spore` mode runs a compiled `wasi:http` component on the Soil
-HTTP surface and publishes through the same Unibus kind; it is the shape the
-host is converging on. Unibus is the pub/sub contract; Elmers and other
-consumers subscribe to the kind.
+There is no native HTTP webhook path and no Iroh relay. Both existed while the
+ingress was being built, and both are gone: the Spore is the only ingress, so a
+signature rule cannot drift between two implementations. Provider ingress at
+the network edge belongs to `soil-edge`, which passes ciphertext.
 
-## Run against a local Unibus router
+## Shape
+
+```text
+provider
+  -> soil-edge                L4, SNI, ciphertext only
+  -> TLS terminator           Palisade, or the host ingress itself
+  -> soil-confluence spore    wasi:http + soil:creds + soil:unibus
+  -> Unibus router
+  -> any consumer
+```
+
+## Run
 
 ```sh
-cargo run -p soil-confluence -- serve \
-  --listen 127.0.0.1:8899 \
+cargo run -p soil-confluence -- spore \
+  --listen 127.0.0.1:8788 \
   --unibus-config /tmp/soil-confluence-e2e/confluence.json \
-  --webhook-secret-env CONFLUENCE_WEBHOOK_SECRET
+  --spore <dir>/confluence.wasm \
+  --host confluence.soil \
+  --tenant default
 ```
 
 The Unibus config is the normal v2 client config:
@@ -37,8 +49,10 @@ The Unibus config is the normal v2 client config:
 }
 ```
 
-Route `confluence.webhook.received.v1` to any holder of a consumer capability,
-for example:
+`--unibus-hub` adds hub endpoints after the config's `hub_endpoint`, tried in
+order; the first hub that registers wins. That is the sparse-hub failover.
+
+Route the kind to any holder of a consumer capability:
 
 ```json
 {
@@ -53,82 +67,41 @@ Then subscribe with `unibus-watch`:
 unibus-watch /tmp/soil-confluence-e2e/elmers.json confluence.webhook.received.v1
 ```
 
-## HTTP
+## Published body
 
-```text
-GET  /health
-POST /webhooks/:provider
-```
-
-The request body must be a JSON object and at most 64 KiB. The published body
-is:
+The host owns the listener, the route grant (`POST /webhooks/`), the 64 KiB
+body ceiling, the Unibus session, and the tenant stamp. The Spore owns the
+provider semantics: it verifies the Standard Webhooks signature through
+`soil:creds` (the secret never enters wasm), checks clock skew against the
+host-attested receive time, and emits one `soil:unibus` publication.
 
 ```json
 {
   "tenant": "default",
-  "provider": "github",
+  "provider": "provider-a",
   "delivery_id": "delivery-1",
-  "event_type": "push",
+  "event_type": "page_updated",
   "received_at_ms": 1790000000000,
   "headers": { "content-type": "application/json" },
   "body": { "action": "opened" }
 }
 ```
 
-A `webhook-id`/`x-github-delivery`/`x-request-id` header is the delivery id.
-If none is present, the body hash is used. Duplicate `(provider, delivery_id)`
-requests return the original request id and do not publish twice.
-
-The in-memory dedupe table is intentionally small in this slice. A durable
-outbox is the next step before production.
-
-## Spore mode
-
-```sh
-cargo run -p soil-confluence -- spore \
-  --listen 127.0.0.1:8788 \
-  --unibus-config /tmp/soil-confluence-e2e/confluence.json \
-  --spore crates/soil-wasi-host/fixtures/confluence.wasm \
-  --host confluence.soil \
-  --tenant default
-```
-
-The host owns the listener, the route grant (`POST /webhooks/`), the 64 KiB
-body ceiling, the Unibus session, and the tenant stamp. The Spore owns the
-provider semantics: it verifies the Standard Webhooks signature through
-`soil:creds` (the secret never enters wasm), checks clock skew against the
-host-attested receive time, and emits one `soil:unibus` publication. The
-host overwrites any `tenant` the guest supplies.
+`tenant` is host policy: a value the guest supplies is overwritten. Redelivery
+of the same `provider` + `delivery_id` is collapsed to one fact by
+`ConfluenceBus` and the guest sees the original acceptance.
 
 `CONFLUENCE_WEBHOOK_SECRET` is bound to the `confluence.webhook` credential
 name by default; `--credential-name` changes it. A missing secret is a startup
-error, not an unsigned fallback.
+error, not an unsigned fallback. The route ceiling is 64 KiB by default
+(`--max-body-bytes`), and an over-budget normalized event is `503`.
 
-A normalized event over the 64 KiB `soil:unibus` budget is rejected with
-`503`; content-addressed spill is the next change. The route ceiling is 64 KiB
-by default and is set with `--max-body-bytes`.
-
-## Iroh
-
-A process that cannot speak Iroh can use the relay:
-
-```sh
-cargo run -p soil-confluence -- relay \
-  --listen 127.0.0.1:8898 \
-  --endpoint-id <receiver-endpoint-id> \
-  --addr 127.0.0.1:<receiver-udp-port>
-```
-
-```text
-Worker / local caller -> HTTP relay -> Iroh -> Confluence -> Unibus
-```
-
-Start the receiver with `--iroh`; it prints its endpoint id and bound UDP
-addresses. `--iroh-peer` pins allowed endpoint ids. `--iroh-allow-any` is for
-local tests only.
+The in-memory dedupe table is intentionally small. A durable outbox is the
+next step before production.
 
 ## Tests
 
 ```sh
 cargo test -p soil-confluence
 ```
+
