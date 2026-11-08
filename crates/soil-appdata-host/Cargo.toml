@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-fungos-records = { path = "../../../records" }
+fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "eb25c69f906eee645b5507f09017a776b1f39377" }
 serde_json = "1"
 wasmtime = { version = "50", features = ["anyhow"] }
 
