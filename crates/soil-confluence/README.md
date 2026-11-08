@@ -52,6 +52,12 @@ The Unibus config is the normal v2 client config:
 `--unibus-hub` adds hub endpoints after the config's `hub_endpoint`, tried in
 order; the first hub that registers wins. That is the sparse-hub failover.
 
+`--host` is repeatable: one process can answer for several names (an internal
+`.soil` name and a public `.myc` name) without a second Unibus session. Note
+that the Mycelium HTTP gateway rewrites `Host` to the upstream address, so a
+name routed through it must also be granted as `127.0.0.1`; otherwise the Soil
+gateway answers `unknown host`.
+
 Route the kind to any holder of a consumer capability:
 
 ```json

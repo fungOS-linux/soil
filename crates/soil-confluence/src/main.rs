@@ -39,9 +39,11 @@ struct SporeArgs {
     /// The compiled `wasi:http` Confluence component.
     #[arg(long)]
     spore: PathBuf,
-    /// Public or internal hostname this ingress answers for.
+    /// Public or internal hostnames this ingress answers for. Repeatable: one
+    /// Spore can serve several names (an internal `.soil` name and a public
+    /// `.myc` name) without a second process or a second Unibus session.
     #[arg(long, default_value = "confluence.soil")]
-    host: String,
+    host: Vec<String>,
     /// Spore identity reported to `fungos:http-context`.
     #[arg(long, default_value = "dev.fungos.confluence")]
     spore_name: String,
@@ -99,11 +101,20 @@ async fn serve_spore(args: SporeArgs) -> Result<()> {
     let route = GatewayRoute::new([http::Method::POST], "/webhooks/")
         .context("grant POST /webhooks/")?
         .max_body_bytes(args.max_body_bytes);
-    let gateway = HttpGatewayBuilder::new()
+    let mut gateway = HttpGatewayBuilder::new()
         .max_body_bytes(args.max_body_bytes)
-        .request_timeout(Duration::from_millis(args.request_timeout_ms))
-        .vhost(args.host.clone(), args.spore_name.clone(), service, [route])
-        .context("grant the Confluence vhost")?
+        .request_timeout(Duration::from_millis(args.request_timeout_ms));
+    for host in &args.host {
+        gateway = gateway
+            .vhost(
+                host.clone(),
+                args.spore_name.clone(),
+                Arc::clone(&service),
+                [route.clone()],
+            )
+            .with_context(|| format!("grant the Confluence vhost {host}"))?;
+    }
+    let gateway = gateway
         .build()
         .context("build the Confluence HTTP gateway")?;
 
@@ -112,7 +123,7 @@ async fn serve_spore(args: SporeArgs) -> Result<()> {
         .with_context(|| format!("bind Spore HTTP listener {}", args.listen))?;
     tracing::info!(
         addr = %args.listen,
-        host = %args.host,
+        hosts = %args.host.join(","),
         spore = %args.spore_name,
         tenant = %args.tenant,
         "confluence Spore ingress listening"
