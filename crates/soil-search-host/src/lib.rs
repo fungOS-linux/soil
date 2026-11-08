@@ -9,14 +9,16 @@ mod discovery;
 mod git;
 pub mod applications;
 pub mod graph;
+mod launcher;
 mod mru;
+mod store;
 mod tgrep;
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use discovery::{ApplicationIndex, PeerIndex, ServiceIndex, SporeIndex};
+use discovery::{ApplicationEntry, ApplicationIndex, PeerIndex, ServiceIndex, SporeEntry, SporeIndex};
 use fungos_records::{Record, Store};
 use git::GitIndex;
 use graph::GraphIndex;
@@ -28,6 +30,7 @@ use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit/search.wit", world: "search-host" });
 
+pub use launcher::{LauncherConfig, Profile};
 pub use mru::{Usage, recency};
 pub use soil::search::mentions as mention_api;
 use soil::search::search as search_api;
@@ -93,6 +96,8 @@ pub struct SearchService {
     marbles: Option<MarblesIndex>,
     principals: Vec<PrincipalCandidate>,
     mru: MruCache,
+    launcher: LauncherConfig,
+    launcher_path: Option<std::path::PathBuf>,
     generation: u64,
 }
 
@@ -117,6 +122,8 @@ impl SearchService {
             marbles: None,
             principals: Vec::new(),
             mru: MruCache::in_memory(),
+            launcher: LauncherConfig::default(),
+            launcher_path: None,
             generation: 1,
         }
     }
@@ -266,6 +273,122 @@ impl SearchService {
     /// the launch, so usage counts launches rather than renders.
     pub fn record_use(&mut self, hit: &api::Hit) -> anyhow::Result<()> {
         self.mru.record(usage_from_hit(hit, now_ms()))
+    }
+
+    /// Remember launcher preferences at `path`.
+    pub fn with_launcher_config(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        let path = path.into();
+        self.launcher = LauncherConfig::load(&path);
+        self.launcher_path = Some(path);
+        self
+    }
+
+    pub fn launcher_config(&self) -> &LauncherConfig {
+        &self.launcher
+    }
+
+    /// Replace the launcher's preferences, clamped to what the host honours and
+    /// persisted where they were loaded from.
+    pub fn set_launcher_config(
+        &mut self,
+        config: LauncherConfig,
+    ) -> anyhow::Result<LauncherConfig> {
+        let config = config.normalized();
+        if let Some(path) = &self.launcher_path {
+            config.save(path)?;
+        }
+        self.launcher = config.clone();
+        Ok(config)
+    }
+
+    /// The surfaces a Spore declares, so a tile can say what it would open. Views
+    /// are Spore surfaces, not a kind of their own.
+    pub fn spore_surfaces(&self, id: &str) -> Option<Vec<String>> {
+        self.spores
+            .as_ref()?
+            .get(id)
+            .map(|entry| entry.surfaces.clone())
+    }
+
+    /// The wall a launcher shows at rest: pins in the order a person arranged
+    /// them, then what this device actually opens, then — on a first run — what
+    /// the sources know. Hidden kinds never appear and no id appears twice.
+    pub fn tiles(&self, limit: u32) -> Vec<api::Hit> {
+        let limit = limit.clamp(1, MAX_PAGE) as usize;
+        let mut tiles: Vec<api::Hit> = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        for pin in &self.launcher.pins {
+            let Some(hit) = self.hit_by_id(pin) else {
+                continue;
+            };
+            if self.launcher.hides(kind_name(hit.kind)) || !seen.insert(hit.id.clone()) {
+                continue;
+            }
+            tiles.push(hit);
+        }
+        let mut learned = 0;
+        for usage in self.mru.recent(usize::MAX) {
+            if self.launcher.hides(&usage.kind) || !seen.insert(usage.id.clone()) {
+                continue;
+            }
+            tiles.push(hit_from_usage(usage, tiles.len()));
+            learned += 1;
+        }
+        // A first run has no history, and a wall holding one pinned tile is not a
+        // launcher: fill from what the sources know until something is learned.
+        if learned == 0 {
+            for hit in self.fallback_tiles() {
+                if self.launcher.hides(kind_name(hit.kind)) || !seen.insert(hit.id.clone()) {
+                    continue;
+                }
+                tiles.push(hit);
+            }
+        }
+        tiles.truncate(limit);
+        tiles
+    }
+
+    /// A pinned id resolved against the sources that keep their entries in
+    /// memory. Files and records are deliberately absent: pinning one means
+    /// pinning the row a search showed, not spending a stat to redraw a tile.
+    fn hit_by_id(&self, id: &str) -> Option<api::Hit> {
+        if let Some(applications) = &self.applications
+            && let Some(entry) = applications.get(id)
+        {
+            return Some(application_hit(entry.clone(), 0));
+        }
+        if let Some(spores) = &self.spores
+            && let Some(entry) = spores.get(id)
+        {
+            return Some(spore_hit(entry.clone(), 0));
+        }
+        None
+    }
+
+    fn fallback_tiles(&self) -> Vec<api::Hit> {
+        let mut tiles = Vec::new();
+        if let Some(applications) = &self.applications {
+            tiles.extend(
+                applications
+                    .entries()
+                    .iter()
+                    .take(12)
+                    .cloned()
+                    .map(|entry| application_hit(entry, 0)),
+            );
+        }
+        if let Some(spores) = &self.spores {
+            tiles.extend(
+                spores
+                    .entries()
+                    .iter()
+                    .take(8)
+                    .cloned()
+                    .map(|entry| spore_hit(entry, 0)),
+            );
+        }
+        tiles
     }
 
     /// Sources that describe an installable world are re-read when that world
@@ -481,18 +604,7 @@ impl SearchService {
         spores
             .search(&query.text, MAX_PAGE as usize)
             .into_iter()
-            .map(|(entry, score)| search_api::Hit {
-                kind: search_api::Kind::Spore,
-                id: entry.id,
-                title: entry.name,
-                subtitle: Some(format!("{} · {}", entry.version, entry.target)),
-                snippet: (!entry.summary.is_empty()).then_some(entry.summary),
-                score,
-                source: format!("spore:{}", entry.root),
-                updated_at_ms: None,
-                references: Vec::new(),
-                icon: None,
-            })
+            .map(|(entry, score)| spore_hit(entry, score))
             .collect()
     }
 
@@ -547,18 +659,7 @@ impl SearchService {
         applications
             .search(&query.text, MAX_PAGE as usize)
             .into_iter()
-            .map(|(entry, score)| search_api::Hit {
-                kind: search_api::Kind::Application,
-                id: entry.id,
-                title: entry.title,
-                subtitle: Some(entry.subtitle),
-                snippet: None,
-                score,
-                source: "host:applications".into(),
-                updated_at_ms: None,
-                references: Vec::new(),
-                icon: entry.icon,
-            })
+            .map(|(entry, score)| application_hit(entry, score))
             .collect()
     }
 
@@ -962,6 +1063,38 @@ fn record_hit(record: Record, needle: &str, index: usize) -> search_api::Hit {
         score: 900_000u32.saturating_sub(index as u32),
         source: format!("records:{}", record.book_id),
         updated_at_ms: Some(record.updated_hlc),
+        references: Vec::new(),
+        icon: None,
+    }
+}
+
+/// One application row, wherever it came from: a query or a pinned id. Two
+/// mappings would drift, and a pinned tile would then look unlike a searched one.
+fn application_hit(entry: ApplicationEntry, score: u32) -> api::Hit {
+    api::Hit {
+        kind: api::Kind::Application,
+        id: entry.id,
+        title: entry.title,
+        subtitle: Some(entry.subtitle),
+        snippet: None,
+        score,
+        source: "host:applications".into(),
+        updated_at_ms: None,
+        references: Vec::new(),
+        icon: entry.icon,
+    }
+}
+
+fn spore_hit(entry: SporeEntry, score: u32) -> api::Hit {
+    api::Hit {
+        kind: api::Kind::Spore,
+        id: entry.id,
+        title: entry.name,
+        subtitle: Some(format!("{} · {}", entry.version, entry.target)),
+        snippet: (!entry.summary.is_empty()).then_some(entry.summary),
+        score,
+        source: format!("spore:{}", entry.root),
+        updated_at_ms: None,
         references: Vec::new(),
         icon: None,
     }

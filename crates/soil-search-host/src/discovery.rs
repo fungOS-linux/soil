@@ -117,6 +117,14 @@ impl SporeIndex {
         hash
     }
 
+    pub fn entries(&self) -> &[SporeEntry] {
+        &self.entries
+    }
+
+    pub fn get(&self, id: &str) -> Option<&SporeEntry> {
+        self.entries.iter().find(|entry| entry.id == id)
+    }
+
     pub fn search(&self, query: &str, limit: usize) -> Vec<(SporeEntry, u32)> {
         let needle = query.to_lowercase();
         let mut hits = Vec::new();
@@ -540,6 +548,14 @@ impl ApplicationIndex {
         }
         self.entries.sort_by(|a, b| a.id.cmp(&b.id));
         self.entries.truncate(MAX_SPORES);
+    }
+
+    pub fn entries(&self) -> &[ApplicationEntry] {
+        &self.entries
+    }
+
+    pub fn get(&self, id: &str) -> Option<&ApplicationEntry> {
+        self.entries.iter().find(|entry| entry.id == id)
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<(ApplicationEntry, u32)> {

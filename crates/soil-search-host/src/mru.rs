@@ -10,14 +10,13 @@
 //! file read, not a query.
 
 use std::{
-    fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 
-use crate::{api, kind_name};
+use crate::{api, kind_name, store};
 
 /// Rows kept on disk. Past this the tail is history nobody would scroll to.
 const MAX_ENTRIES: usize = 256;
@@ -74,22 +73,15 @@ impl MruCache {
         let Some(path) = &self.path else {
             return;
         };
-        let Ok(text) = fs::read_to_string(path) else {
-            return; // No file yet is the normal first run, not a failure.
-        };
-        match serde_json::from_str::<File>(&text) {
-            Ok(file) if file.version == FORMAT_VERSION => {
-                self.entries = file.entries;
-                self.entries
-                    .sort_by(|a, b| b.last_used_ms.cmp(&a.last_used_ms).then_with(|| a.id.cmp(&b.id)));
-                self.entries.truncate(MAX_ENTRIES);
-            }
-            // A cache that cannot be read is a cache that has not been written:
-            // start over rather than fail a summon over history.
-            Ok(_) | Err(_) => eprintln!(
-                "soil:search: ignoring unreadable MRU cache at {}",
-                path.display()
-            ),
+        // Missing is the normal first run; unreadable is reported by `store` and
+        // treated as absent, because a cache that cannot be parsed is history.
+        if let Some(file) = store::read::<File>(path, "MRU cache")
+            && file.version == FORMAT_VERSION
+        {
+            self.entries = file.entries;
+            self.entries
+                .sort_by(|a, b| b.last_used_ms.cmp(&a.last_used_ms).then_with(|| a.id.cmp(&b.id)));
+            self.entries.truncate(MAX_ENTRIES);
         }
     }
 
@@ -128,22 +120,13 @@ impl MruCache {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent)?;
-        }
-        let file = File {
-            version: FORMAT_VERSION,
-            entries: self.entries.clone(),
-        };
-        let body = serde_json::to_vec_pretty(&file)?;
-        // Write beside the target and rename: a summon may read this file while
-        // another process writes it, and a half-written cache is not a cache.
-        let temp = path.with_extension("tmp");
-        fs::write(&temp, body)?;
-        fs::rename(&temp, path)?;
-        Ok(())
+        store::write(
+            path,
+            &File {
+                version: FORMAT_VERSION,
+                entries: self.entries.clone(),
+            },
+        )
     }
 }
 
@@ -194,6 +177,7 @@ pub fn hit_from_usage(usage: &Usage, rank: usize) -> api::Hit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn usage(id: &str, at: u64) -> Usage {
         Usage {
