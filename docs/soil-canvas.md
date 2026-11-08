@@ -6,6 +6,11 @@ The canonical contract is [`wit/soil-canvas.wit`](../wit/soil-canvas.wit); the
 portable input normalizer is
 [`crates/soil-canvas-input`](../crates/soil-canvas-input).
 
+Canvas layouts are scoped to a **Desktop**. A Desktop owns its projects, VFS
+root, records scope, and theme; switching Desktops must switch the background,
+accent, project set, and saved Canvas layout together. See
+[Desktops](desktop.md).
+
 ## Decision
 
 - **Canvas owns the UI.** It owns the window/compositor, retained owner model,

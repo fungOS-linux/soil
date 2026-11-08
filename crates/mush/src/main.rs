@@ -7,6 +7,7 @@
 mod gateway;
 mod mcp_gateway;
 mod overlay;
+mod worktree;
 
 use std::{
     io::{self, BufRead, IsTerminal, Write},
@@ -20,7 +21,7 @@ use soil::command::command as command_abi;
 use soil_command::{CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
 use soil_inference::{GeodeResolver, SoilConfig};
 use soil_vfs_host::{VfsHost, index, vfs, vfs_mut};
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -248,6 +249,7 @@ impl Runtime {
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         soil_vfs_host::add_to_linker::<Host>(&mut linker)?;
         soil_vfs_host::add_mutation_to_linker::<Host>(&mut linker)?;
+        command_abi::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         let component = Component::new(&engine, wasm)?;
         let host = Host::new(root, command_root, records)?;
         let mut store = Store::new(&engine, host);
@@ -292,6 +294,29 @@ fn run() -> Result<()> {
         args.drain(0..2);
         return run_operator(&root, args);
     }
+
+    let state_root = take_option(&mut args, "--state-root")
+        .or_else(|| std::env::var("MUSH_STATE_ROOT").ok())
+        .map(|value| expand_home(&value))
+        .unwrap_or_else(|| root.join(".fungos/records"));
+    let worktree_book = take_option(&mut args, "--worktree-book")
+        .or_else(|| std::env::var("MUSH_WORKTREE_BOOK").ok())
+        .unwrap_or_else(|| "mush".into());
+    let worktree_collection = take_option(&mut args, "--worktree-collection")
+        .or_else(|| std::env::var("MUSH_WORKTREE_COLLECTION").ok())
+        .unwrap_or_else(|| "worktree".into());
+    if matches!(args.first().map(String::as_str), Some("worktree" | "tree")) {
+        let command = args.remove(0);
+        return worktree::run(
+            &root,
+            &command,
+            args,
+            state_root,
+            worktree_book,
+            worktree_collection,
+        );
+    }
+
     let wasm = take_option(&mut args, "--wasm")
         .or_else(|| std::env::var("MUSH_WASM").ok())
         .unwrap_or_else(|| "spores/mush/module.wasm".into());
