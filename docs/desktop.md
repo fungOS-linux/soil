@@ -248,6 +248,15 @@ Short term, Mush has one VFS root. A Desktop with multiple projects can either:
 The long-term shape is the mount table. The Desktop is the root; projects are
 mounts, not copies.
 
+### First worktree slice
+
+Mush now has `mush tree` and `mush worktree` commands for content-addressed tree
+snapshots and thread-owned worktree records. They store `thread`, `worktree`,
+`tree`, `ref`, and `checkout` records in `soil:records` and can materialize a
+tree into a VFS path. This is the substrate for the per-thread worktrees below;
+it is not yet a mount table, checkout reconciliation, or peer sync. See
+[Mush worktrees](mush.md#worktrees-and-trees).
+
 ## Threads and worktrees
 
 A thread is a conversation plus the worktrees it creates.
