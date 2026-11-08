@@ -1,7 +1,7 @@
 //! Confluence webhook handler on the Soil HTTP surface.
 //!
 //! This is the first real caller of `fungos:http-context`, `soil:creds`, and
-//! `fungos:events`. It verifies a Standard Webhooks signature without ever
+//! `soil:unibus`. It verifies a Standard Webhooks signature without ever
 //! seeing the provider secret, normalizes the delivery, and publishes one
 //! durable fact. The host owns TLS, routing, the Unibus session, and the
 //! tenant stamp.
@@ -23,14 +23,14 @@ mod capabilities {
         with: {
             "fungos:http-context/context@0.1.0": generate,
             "soil:creds/creds@1.0.0": generate,
-            "fungos:events/publisher@0.1.0": generate,
+            "soil:unibus/bus@0.1.0": generate,
         },
     });
 }
 
-use capabilities::fungos::events::publisher;
 use capabilities::fungos::http_context::context;
 use capabilities::soil::creds::creds;
+use capabilities::soil::unibus::bus;
 
 const EVENT_KIND: &str = "confluence.webhook.received.v1";
 const CREDENTIAL: &str = "confluence.webhook";
@@ -122,18 +122,17 @@ fn receive(
         return reply(response_out, 500, json_error(500), "");
     };
 
-    let event = publisher::Event {
-        kind: EVENT_KIND.to_string(),
-        body,
-        idempotency_key: Some(format!("{provider}:{webhook_id}")),
-    };
-    match publisher::publish(&event) {
+    // `soil:unibus` has no idempotency key and no duplicate flag: the host
+    // collapses redelivery on `provider` + `delivery_id` and hands the
+    // original acceptance back. Both first and redelivery are therefore an
+    // accepted 202; only the native (non-Spore) ingress distinguishes them.
+    match bus::publish(EVENT_KIND, &body, None, 0) {
         Ok(receipt) => {
-            let status = if receipt.duplicate { 200 } else { 202 };
+            let status = 202;
             let body = serde_json::json!({
                 "status": status,
                 "request_id": receipt.request_id,
-                "duplicate": receipt.duplicate,
+                "duplicate": false,
             })
             .to_string();
             reply(response_out, status, body, "")

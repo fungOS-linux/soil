@@ -133,12 +133,6 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("context", &["current"])],
     },
     Contract {
-        file: "wit/fungos-events.wit",
-        source: include_str!("../../../wit/fungos-events.wit"),
-        package: "fungos:events@0.1.0",
-        interfaces: &[("publisher", &["publish"])],
-    },
-    Contract {
         file: "wit/soil-unibus.wit",
         source: include_str!("../../../wit/soil-unibus.wit"),
         package: "soil:unibus@0.1.0",

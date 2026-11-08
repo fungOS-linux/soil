@@ -439,7 +439,8 @@ fn parse_args() -> Result<Option<Args>> {
             }
             "--applications-snapshot" => {
                 args.applications_snapshot = Some(PathBuf::from(
-                    iter.next().context("--applications-snapshot needs a value")?,
+                    iter.next()
+                        .context("--applications-snapshot needs a value")?,
                 ));
             }
             "--marbles-snapshot" => {
