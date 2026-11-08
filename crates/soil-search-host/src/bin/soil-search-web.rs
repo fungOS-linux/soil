@@ -162,9 +162,7 @@ fn main() -> Result<()> {
     });
     let listen = args.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let listener = TcpListener::bind(&listen).with_context(|| format!("bind {listen}"))?;
-    println!(
-        "soil search: http://{listen}/  sources={sources} applications={application_count}"
-    );
+    println!("soil search: http://{listen}/  sources={sources} applications={application_count}");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -481,10 +479,18 @@ fn hit_json(app: &App, hit: api::Hit, pinned: bool, surfaces: Option<&[String]>)
 /// that becomes memory, so a launcher cannot ask for a row to become frequent.
 fn record_use(stream: &mut TcpStream, app: &App, body: &[u8]) -> Result<()> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return respond_json(stream, "400 Bad Request", &json!({"error": "use needs a JSON row"}));
+        return respond_json(
+            stream,
+            "400 Bad Request",
+            &json!({"error": "use needs a JSON row"}),
+        );
     };
     let Some(id) = value.get("id").and_then(Value::as_str) else {
-        return respond_json(stream, "400 Bad Request", &json!({"error": "use needs an id"}));
+        return respond_json(
+            stream,
+            "400 Bad Request",
+            &json!({"error": "use needs an id"}),
+        );
     };
     let hit = api::Hit {
         kind: value
@@ -545,10 +551,7 @@ fn kind_name(kind: api::Kind) -> &'static str {
 }
 
 fn parse_kinds(value: String) -> Vec<api::Kind> {
-    value
-        .split(',')
-        .filter_map(kind_from_name)
-        .collect()
+    value.split(',').filter_map(kind_from_name).collect()
 }
 
 fn kind_from_name(name: &str) -> Option<api::Kind> {
@@ -700,7 +703,12 @@ fn art_initials(title: &str) -> String {
         .collect();
     match words.as_slice() {
         [] => "?".to_string(),
-        [only] => only.chars().next().unwrap_or('?').to_uppercase().to_string(),
+        [only] => only
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_uppercase()
+            .to_string(),
         [first, second, ..] => {
             let head = first.chars().next().unwrap_or('?');
             let tail = second.chars().next().unwrap_or('?');
@@ -923,7 +931,8 @@ fn parse_args() -> Result<Option<Args>> {
             }
             "--applications-snapshot" => {
                 args.applications_snapshot = Some(PathBuf::from(
-                    iter.next().context("--applications-snapshot needs a value")?,
+                    iter.next()
+                        .context("--applications-snapshot needs a value")?,
                 ));
             }
             "--no-applications" => args.no_applications = true,
@@ -938,9 +947,7 @@ fn parse_args() -> Result<Option<Args>> {
                 ));
             }
             "--mru" => {
-                args.mru = Some(PathBuf::from(
-                    iter.next().context("--mru needs a value")?,
-                ));
+                args.mru = Some(PathBuf::from(iter.next().context("--mru needs a value")?));
             }
             "--marbles-store" => {
                 args.marbles_store = Some(iter.next().context("--marbles-store needs a value")?);

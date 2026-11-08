@@ -88,7 +88,12 @@ pub fn read_bundle(bundle: &Path) -> Option<InstalledApp> {
     let bundle_id = text("CFBundleIdentifier")?;
     let name = text("CFBundleDisplayName")
         .or_else(|| text("CFBundleName"))
-        .or_else(|| bundle.file_stem().and_then(|stem| stem.to_str()).map(str::to_owned))?;
+        .or_else(|| {
+            bundle
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_owned)
+        })?;
     // `CFBundleIconName` names an asset-catalog icon, which has no file to read;
     // it is tried last so a bundle with a real `.icns` still gets its artwork.
     let icns = [text("CFBundleIconFile"), text("CFBundleIconName")]

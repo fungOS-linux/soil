@@ -138,7 +138,11 @@ mod tests {
     #[test]
     fn hidden_kinds_must_be_kinds() {
         let config = LauncherConfig {
-            hidden_kinds: vec!["application".into(), "nonsense".into(), "APPLICATION".into()],
+            hidden_kinds: vec![
+                "application".into(),
+                "nonsense".into(),
+                "APPLICATION".into(),
+            ],
             ..Default::default()
         }
         .normalized();

@@ -79,8 +79,11 @@ impl MruCache {
             && file.version == FORMAT_VERSION
         {
             self.entries = file.entries;
-            self.entries
-                .sort_by(|a, b| b.last_used_ms.cmp(&a.last_used_ms).then_with(|| a.id.cmp(&b.id)));
+            self.entries.sort_by(|a, b| {
+                b.last_used_ms
+                    .cmp(&a.last_used_ms)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
             self.entries.truncate(MAX_ENTRIES);
         }
     }
@@ -101,8 +104,11 @@ impl MruCache {
             }
             None => self.entries.push(usage),
         }
-        self.entries
-            .sort_by(|a, b| b.last_used_ms.cmp(&a.last_used_ms).then_with(|| a.id.cmp(&b.id)));
+        self.entries.sort_by(|a, b| {
+            b.last_used_ms
+                .cmp(&a.last_used_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         self.entries.truncate(MAX_ENTRIES);
         self.save()
     }

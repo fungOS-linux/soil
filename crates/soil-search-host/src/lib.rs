@@ -5,9 +5,9 @@
 //! bounded page. It does not grant access: the host supplies the roots and
 //! approved books.
 
+pub mod applications;
 mod discovery;
 mod git;
-pub mod applications;
 pub mod graph;
 mod launcher;
 mod mru;
@@ -18,7 +18,9 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use discovery::{ApplicationEntry, ApplicationIndex, PeerIndex, ServiceIndex, SporeEntry, SporeIndex};
+use discovery::{
+    ApplicationEntry, ApplicationIndex, PeerIndex, ServiceIndex, SporeEntry, SporeIndex,
+};
 use fungos_records::{Record, Store};
 use git::GitIndex;
 use graph::GraphIndex;
@@ -1464,7 +1466,10 @@ surfaces = ["canvas"]
 
         let before = host.search(query()).unwrap();
         assert_eq!(before.hits.len(), 2);
-        assert_eq!(before.hits[0].id, "com.example.astral", "title breaks the tie");
+        assert_eq!(
+            before.hits[0].id, "com.example.astral",
+            "title breaks the tie"
+        );
 
         let picked = before
             .hits
@@ -1502,7 +1507,10 @@ surfaces = ["canvas"]
         let after = host.search(query()).unwrap();
         assert_eq!(after.hits.len(), 1);
         assert_eq!(after.hits[0].id, "dev.fungos.markdown");
-        assert!(after.generation > before.generation, "a reloaded source is a new generation");
+        assert!(
+            after.generation > before.generation,
+            "a reloaded source is a new generation"
+        );
     }
 
     #[test]
