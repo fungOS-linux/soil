@@ -66,11 +66,7 @@ fn with_chrome(manifest: &str) -> String {
 }
 
 fn render(package: &Package) -> Result<soil_scene::Scene, soil_lua::Error> {
-    Spore::load(&package.root)?.render(
-        &serde_json::json!({}),
-        &Theme::new(),
-        [1200.0, 44.0],
-    )
+    Spore::load(&package.root)?.render(&serde_json::json!({}), &Theme::new(), [1200.0, 44.0])
 }
 
 #[test]
@@ -260,10 +256,7 @@ fn a_region_the_package_does_not_claim_is_refused() {
     let package = Package::new(
         "unclaimed",
         &with_chrome(&manifest("soil")),
-        &[(
-            "ui/view.lua",
-            "canvas.rect { id = 'x', ink = 'text' }\n",
-        )],
+        &[("ui/view.lua", "canvas.rect { id = 'x', ink = 'text' }\n")],
     );
     let error = Spore::load_region(&package.root, Some("dock")).unwrap_err();
     assert!(error.to_string().contains("dock"), "{error}");

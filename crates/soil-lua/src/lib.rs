@@ -196,11 +196,8 @@ impl Theme {
     /// view and runs it. Hex only: a palette a human cannot read is a palette
     /// nobody edits.
     pub fn from_source(source: &str) -> Result<Self, Error> {
-        let lua = Lua::new_with(
-            StdLib::TABLE | StdLib::STRING,
-            LuaOptions::default(),
-        )
-        .map_err(lua_error)?;
+        let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING, LuaOptions::default())
+            .map_err(lua_error)?;
         lua.sandbox(true).map_err(lua_error)?;
         let value: Value = lua
             .load(source)
@@ -211,15 +208,17 @@ impl Theme {
             Value::Table(table) => table,
             _ => return Err(Error::invalid("a theme file must return a table")),
         };
-        let Some(inks) = table.get::<Option<mlua::Table>>("inks").map_err(lua_error)? else {
+        let Some(inks) = table
+            .get::<Option<mlua::Table>>("inks")
+            .map_err(lua_error)?
+        else {
             return Err(Error::invalid("a theme file must define `inks`"));
         };
         let mut theme = Self::empty();
         for pair in inks.pairs::<String, String>() {
             let (name, value) = pair.map_err(lua_error)?;
-            let rgb = hex(&value).ok_or_else(|| {
-                Error::invalid(format!("ink {name:?} is {value:?}, not #rrggbb"))
-            })?;
+            let rgb = hex(&value)
+                .ok_or_else(|| Error::invalid(format!("ink {name:?} is {value:?}, not #rrggbb")))?;
             theme.set(name, rgb);
         }
         if theme.is_empty() {
@@ -286,9 +285,7 @@ impl Spore {
             }
             None => manifest.ui.as_ref().map(|ui| ui.entry.clone()),
         }
-        .ok_or_else(|| {
-            Error::invalid(format!("{} has no Lua to run", manifest.spore.id))
-        })?;
+        .ok_or_else(|| Error::invalid(format!("{} has no Lua to run", manifest.spore.id)))?;
 
         let relative = soil_spore::safe_relative(&entry)?;
         let source = std::fs::read_to_string(root.join(&relative))
@@ -342,8 +339,7 @@ impl Spore {
         theme: &Theme,
         extent: [f32; 2],
     ) -> Result<Scene, Error> {
-        if extent.iter().any(|value| !value.is_finite()) || extent[0] <= 0.0 || extent[1] <= 0.0
-        {
+        if extent.iter().any(|value| !value.is_finite()) || extent[0] <= 0.0 || extent[1] <= 0.0 {
             return Err(Error::invalid("extent must be two positive, finite pixels"));
         }
 

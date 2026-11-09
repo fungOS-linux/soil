@@ -76,8 +76,7 @@ fn run() -> Result<()> {
         Some(path) => {
             let source = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            serde_json::from_str(&source)
-                .with_context(|| format!("parsing {}", path.display()))?
+            serde_json::from_str(&source).with_context(|| format!("parsing {}", path.display()))?
         }
         None => serde_json::json!({}),
     };

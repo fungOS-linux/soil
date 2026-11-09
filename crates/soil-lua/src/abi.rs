@@ -214,12 +214,16 @@ pub(crate) fn install(
             .map_err(super::lua_error)?,
         )
         .map_err(super::lua_error)?;
-    lua.globals().set("canvas", canvas).map_err(super::lua_error)?;
+    lua.globals()
+        .set("canvas", canvas)
+        .map_err(super::lua_error)?;
 
     let module = lua.create_table().map_err(super::lua_error)?;
     let viewport = lua.create_table().map_err(super::lua_error)?;
     viewport.set("width", extent[0]).map_err(super::lua_error)?;
-    viewport.set("height", extent[1]).map_err(super::lua_error)?;
+    viewport
+        .set("height", extent[1])
+        .map_err(super::lua_error)?;
     module.set("viewport", viewport).map_err(super::lua_error)?;
     let theme = lua.create_table().map_err(super::lua_error)?;
     theme.set("body", 16.0).map_err(super::lua_error)?;
@@ -227,7 +231,9 @@ pub(crate) fn install(
     theme.set("micro", 10.0).map_err(super::lua_error)?;
     theme.set("radius", 10.0).map_err(super::lua_error)?;
     module.set("theme", theme).map_err(super::lua_error)?;
-    lua.globals().set("module", module).map_err(super::lua_error)?;
+    lua.globals()
+        .set("module", module)
+        .map_err(super::lua_error)?;
 
     let widget = lua.create_table().map_err(super::lua_error)?;
     widget
@@ -237,15 +243,13 @@ pub(crate) fn install(
                 .map_err(super::lua_error)?,
         )
         .map_err(super::lua_error)?;
-    lua.globals().set("widget", widget).map_err(super::lua_error)?;
+    lua.globals()
+        .set("widget", widget)
+        .map_err(super::lua_error)?;
     Ok(())
 }
 
-fn push(
-    sink: &Rc<RefCell<Vec<Prim>>>,
-    prim: mlua::Result<Prim>,
-    max: usize,
-) -> mlua::Result<()> {
+fn push(sink: &Rc<RefCell<Vec<Prim>>>, prim: mlua::Result<Prim>, max: usize) -> mlua::Result<()> {
     let prim = prim?;
     let mut sink = sink.borrow_mut();
     if sink.len() >= max {
@@ -280,9 +284,8 @@ fn resolve(
 
 fn identifier(spec: &Table) -> mlua::Result<String> {
     let id = spec.get::<Option<String>>("id")?;
-    id.filter(|id| !id.is_empty()).ok_or_else(|| {
-        mlua::Error::RuntimeError("every primitive needs an id".to_string())
-    })
+    id.filter(|id| !id.is_empty())
+        .ok_or_else(|| mlua::Error::RuntimeError("every primitive needs an id".to_string()))
 }
 
 fn coordinate(spec: &Table, key: &str, index: usize) -> mlua::Result<f32> {
