@@ -44,6 +44,10 @@ pub struct Origin {
     pub cwd: PathBuf,
     pub thread: Option<String>,
     pub delta_worktree: Option<String>,
+    /// `<mount>/worktrees/<label>/<project>`: this agent's own tree.
+    pub worktree: Option<String>,
+    /// Marquee identity from `.marbles/project.toml`, when the project has one.
+    pub marble_project: Option<String>,
     pub repo: Option<String>,
     pub desktop: Option<String>,
     pub desktop_root: Option<PathBuf>,
@@ -58,6 +62,8 @@ impl Origin {
             "cwd": self.cwd.display().to_string(),
             "thread": self.thread,
             "delta_worktree": self.delta_worktree,
+            "worktree": self.worktree,
+            "marble_project": self.marble_project,
             "repo": self.repo,
             "desktop": self.desktop,
             "desktop_root": self.desktop_root.as_ref().map(|path| path.display().to_string()),
@@ -82,7 +88,13 @@ pub fn resolve(cwd: &Path) -> Origin {
     // Three ways to learn the repository name, strongest first: Git metadata,
     // the Delta worktree directory, then the caller's place inside a Desktop's
     // `projects/` tree.
+    // A Desktop worktree is `<mount>/worktrees/<label>/<project>`: the label is
+    // the agent's own tree, the project is what it is a tree of.
+    let worktree_info = mount_match.and_then(|desktop| worktree_segment(cwd, &desktop.mount));
+    let worktree = worktree_info.as_ref().map(|(label, _)| label.clone());
+
     let repo = repo_name(cwd)
+        .or_else(|| worktree_info.as_ref().map(|(_, project)| project.clone()))
         .or_else(|| {
             delta_worktree.as_ref().and_then(|_| {
                 cwd.file_name()
@@ -91,6 +103,10 @@ pub fn resolve(cwd: &Path) -> Origin {
             })
         })
         .or_else(|| mount_match.and_then(|desktop| project_segment(cwd, &desktop.mount)));
+
+    // The marble project marker travels with the tree, so whichever project the
+    // agent is inside answers this.
+    let marble_project = marble_project_from(cwd);
 
     let matched = mount_match.or_else(|| {
         repo.as_deref().and_then(|repo| {
@@ -105,6 +121,8 @@ pub fn resolve(cwd: &Path) -> Origin {
             cwd: cwd.to_path_buf(),
             thread,
             delta_worktree,
+            worktree: None,
+            marble_project: None,
             repo,
             desktop: None,
             desktop_root: None,
@@ -130,6 +148,8 @@ pub fn resolve(cwd: &Path) -> Origin {
         cwd: cwd.to_path_buf(),
         thread,
         delta_worktree,
+        worktree,
+        marble_project,
         repo,
         desktop: Some(desktop.id.clone()),
         desktop_root: Some(desktop.root.clone()),
@@ -165,6 +185,43 @@ fn repo_name(cwd: &Path) -> Option<String> {
         }
         current = current.parent()?;
     }
+}
+
+/// `<mount>/worktrees/<label>/<project>` -> (label, project).
+fn worktree_segment(cwd: &Path, mount: &Path) -> Option<(String, String)> {
+    let mut parts = cwd.strip_prefix(mount).ok()?.components();
+    if parts.next()?.as_os_str() != "worktrees" {
+        return None;
+    }
+    let label = parts.next()?.as_os_str().to_str()?.to_string();
+    let project = parts.next()?.as_os_str().to_str()?.to_string();
+    Some((label, project))
+}
+
+/// The marbles project slug nearest to `cwd`, if the tree carries a marker.
+fn marble_project_from(cwd: &Path) -> Option<String> {
+    let mut current = Some(cwd);
+    while let Some(dir) = current {
+        for marker in [".marbles", ".marbles-local"] {
+            let path = dir.join(marker).join("project.toml");
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for line in text.lines() {
+                if let Some(value) = line.trim().strip_prefix("slug") {
+                    let slug = value
+                        .trim_start_matches([' ', '='])
+                        .trim()
+                        .trim_matches('"');
+                    if !slug.is_empty() {
+                        return Some(slug.to_string());
+                    }
+                }
+            }
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 fn path_is_under(path: &Path, base: &Path) -> bool {
@@ -211,6 +268,14 @@ pub fn run(mut args: Vec<String>) -> Result<()> {
         println!(
             "delta worktree: {}",
             origin.delta_worktree.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "worktree: {}",
+            origin.worktree.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "marble project: {}",
+            origin.marble_project.as_deref().unwrap_or("(none)")
         );
         println!("repo: {}", origin.repo.as_deref().unwrap_or("(none)"));
         println!(

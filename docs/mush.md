@@ -700,3 +700,29 @@ primitive it used rather than implying CoW everywhere.
 
 Verified on APFS: shallow clone, `clonefile` worktree, and the base clone of a
 small repository at 144K.
+
+### Resolving a worktree
+
+`mush origin` now reads the Desktop worktree shape as well:
+
+```sh
+cd ~/mnt/personal/worktrees/agent-1/addict
+mush origin
+```
+
+```text
+worktree: agent-1
+marble project: agent
+repo: addict
+desktop: personal
+mount: /Users/me/mnt/personal [mounted]
+project: /Users/me/mnt/personal/projects/addict
+```
+
+`worktree` is the label of the tree the agent is inside, `repo` is what it is a
+tree of, and `marble project` comes from the `.marbles/project.toml` nearest the
+working directory. Together with `thread` (from `DELTA_CURRENT_THREAD_ID`) that
+is the identity of a working agent: who, on what, in which tree.
+
+The thread <-> marble link is not resolved here yet; it needs the claim record,
+not the filesystem.
