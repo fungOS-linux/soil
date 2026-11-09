@@ -351,6 +351,13 @@ fn start(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // A daemon in the caller's process group dies with the terminal that
+    // started it (the hangup is sent to the foreground group), which would
+    // make it a per-terminal cache instead of a per-root one.
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     if command.spawn().is_err() {
         return false;
     }
