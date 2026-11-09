@@ -26,6 +26,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
+pub mod lease;
 pub mod publisher;
 
 pub const SCHEMA: u32 = 1;
@@ -93,6 +94,12 @@ pub struct Manifest {
     /// Spore id and signed digest; this flag is not a grant.
     #[serde(default)]
     pub system: Option<System>,
+    /// This Spore's opt-in anycast claim: the name and service kind it asks to
+    /// be reachable under. Absent means the Spore is local-only, which is the
+    /// default; a claim is only honoured when the package's publisher grant
+    /// authorizes it.
+    #[serde(default)]
+    pub anycast: Option<Anycast>,
     /// Chrome regions this Spore draws, when it draws any.
     #[serde(default)]
     pub chrome: Option<Chrome>,
@@ -192,6 +199,34 @@ pub struct Ui {
 pub struct Launch {
     pub default: String,
     pub surfaces: Vec<String>,
+}
+
+/// A Spore's opt-in claim on an anycast name.
+///
+/// This is the claim only. Whether the claim is allowed to route is decided by
+/// the publisher grant in [`publisher`], never by this table: a manifest can be
+/// edited by anyone, a signature cannot.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Anycast {
+    /// Service name the claim is published under, e.g. `confluence`.
+    pub name: String,
+    /// Service kind the router joins on, matching the gateway's route table.
+    pub kind: String,
+    /// Application protocols this Spore answers on. `soil/http/1` is HTTP.
+    #[serde(default)]
+    pub alpns: Vec<String>,
+    /// Lease lifetime in seconds. Mycelium drops a lease after 300, so a
+    /// longer claim could never be honoured; it is rejected rather than
+    /// silently clamped, because a clamp would hide a broken renewer.
+    #[serde(default = "default_lease_secs")]
+    pub ttl_secs: u64,
+}
+
+pub const MAX_LEASE_SECS: u64 = 300;
+
+const fn default_lease_secs() -> u64 {
+    240
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -297,6 +332,39 @@ impl Manifest {
             )));
         }
 
+        if let Some(anycast) = &self.anycast {
+            for (label, value) in [
+                ("anycast.name", &anycast.name),
+                ("anycast.kind", &anycast.kind),
+            ] {
+                if !lease_label(value) {
+                    return Err(Error::Invalid(format!(
+                        "{label} {value:?} must be lowercase [a-z0-9-_./:], at most 256 bytes"
+                    )));
+                }
+            }
+            if anycast.alpns.len() > 8 {
+                return Err(Error::Invalid(
+                    "anycast.alpns has more than 8 entries".into(),
+                ));
+            }
+            for alpn in &anycast.alpns {
+                if alpn.is_empty() || alpn.len() > 64 || !alpn.is_ascii() {
+                    return Err(Error::Invalid(format!(
+                        "anycast alpn {alpn:?} must be 1..=64 ascii bytes"
+                    )));
+                }
+            }
+            // Mycelium drops a lease older than 300 s and never renews it, so a
+            // longer claim is a broken renewer, not a longer lease.
+            if anycast.ttl_secs == 0 || anycast.ttl_secs > MAX_LEASE_SECS {
+                return Err(Error::Invalid(format!(
+                    "anycast.ttl_secs {} must be 1..={MAX_LEASE_SECS}",
+                    anycast.ttl_secs
+                )));
+            }
+        }
+
         for capability in self.grants.keys() {
             if !grants(capability) {
                 return Err(Error::Invalid(format!(
@@ -389,6 +457,14 @@ fn version(value: &str) -> bool {
         && parts
             .iter()
             .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn lease_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.:/".contains(&b))
 }
 
 fn grants(value: &str) -> bool {
@@ -927,7 +1003,7 @@ pub fn hex(bytes: &[u8]) -> String {
 mod chrome_tests {
     use super::*;
 
-    fn manifest(extra: &str) -> String {
+    pub(crate) fn manifest(extra: &str) -> String {
         format!(
             "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n[ui]\nentry = \"ui/main.lua\"\n[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
         )
@@ -967,5 +1043,120 @@ mod chrome_tests {
         .expect("manifest");
         let paths = manifest.declared_paths();
         assert!(paths.contains(&PathBuf::from("ui/dock.lua")));
+    }
+}
+
+#[cfg(test)]
+mod anycast_tests {
+    use super::publisher::TrustedPublisher;
+    use super::tests::manifest;
+    use super::{Error, Lock, Manifest, lease};
+
+    const CLAIM: &str = "[anycast]\nname = \"confluence\"\nkind = \"confluence\"\nalpns = [\"soil/http/1\"]\n";
+
+    fn lock() -> Lock {
+        Lock {
+            id: "dev.fungos.confluence".into(),
+            version: "0.1.0".into(),
+            files: Vec::new(),
+            digest: "sha256:abc".into(),
+        }
+    }
+
+    fn publisher() -> TrustedPublisher {
+        TrustedPublisher {
+            principal: "fleet/fpl".into(),
+            grant_id: "grant-7".into(),
+            key_id: "key-1".into(),
+        }
+    }
+
+    #[test]
+    fn a_claim_renders_a_lease_the_daemon_would_accept() {
+        let parsed = Manifest::parse(&manifest(CLAIM)).expect("claim parses");
+        let document = lease::document(
+            &parsed,
+            &lock(),
+            &publisher(),
+            "2fd5bf85",
+            &["http://10.253.0.6:8788".into()],
+            1_000,
+        )
+        .expect("lease renders");
+        let observation = &document["observations"][0];
+        assert_eq!(observation["service_id"], "service/2fd5bf85/application/confluence");
+        assert_eq!(observation["value"]["kind"], "confluence");
+        assert_eq!(observation["value"]["endpoints"][0], "http://10.253.0.6:8788");
+        assert_eq!(observation["value"]["attributes"]["grant_id"], "grant-7");
+        assert_eq!(observation["value"]["attributes"]["package_digest"], "sha256:abc");
+        // The lease the daemon accepts expires; a lease it must renew cannot
+        // carry a longer life than it is allowed to honour.
+        assert_eq!(observation["expires_at"], 1_240);
+    }
+
+    #[test]
+    fn a_lease_never_outlives_what_mycelium_honours() {
+        let too_long = Manifest::parse(&manifest(
+            "[anycast]\nname = \"confluence\"\nkind = \"confluence\"\nttl_secs = 301\n",
+        ));
+        assert!(too_long.is_err(), "301 s is a renewer that will never run");
+
+        let zero = Manifest::parse(&manifest(
+            "[anycast]\nname = \"confluence\"\nkind = \"confluence\"\nttl_secs = 0\n",
+        ));
+        assert!(zero.is_err(), "a lease with no life is not a lease");
+    }
+
+    #[test]
+    fn a_claim_must_be_addressable() {
+        let upper = Manifest::parse(&manifest(
+            "[anycast]\nname = \"Confluence\"\nkind = \"confluence\"\n",
+        ));
+        assert!(upper.is_err(), "a service label is lowercase alphanumeric");
+
+        let empty = Manifest::parse(&manifest("[anycast]\nname = \"confluence\"\nkind = \"\"\n"));
+        assert!(empty.is_err(), "a claim with no kind joins nothing");
+    }
+
+    #[test]
+    fn a_spore_without_a_claim_never_leases() {
+        let parsed = Manifest::parse(&manifest(""));
+        let plain = parsed.expect("a local Spore still parses");
+        assert!(plain.anycast.is_none());
+        let refused = lease::document(
+            &plain,
+            &lock(),
+            &publisher(),
+            "2fd5bf85",
+            &["http://10.253.0.6:8788".into()],
+            1_000,
+        );
+        assert!(matches!(refused, Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn endpoints_are_hints_without_credentials() {
+        let parsed = Manifest::parse(&manifest(CLAIM)).expect("claim parses");
+        for bad in [
+            "http://user:pw@10.0.0.1:8788",
+            "http://10.0.0.1:8788/secret",
+            "ftp://10.0.0.1:21",
+            "10.0.0.1:8788",
+        ] {
+            let refused = lease::document(
+                &parsed,
+                &lock(),
+                &publisher(),
+                "2fd5bf85",
+                &[bad.into()],
+                1_000,
+            );
+            assert!(refused.is_err(), "{bad} is not a connection hint");
+        }
+        let too_many: Vec<String> = (0..33).map(|i| format!("tcp://10.0.0.{i}:1")).collect();
+        assert!(
+            lease::document(&parsed, &lock(), &publisher(), "2fd5bf85", &too_many, 1_000).is_err(),
+            "the daemon drops an observation with more than 32 endpoints"
+        );
     }
 }
