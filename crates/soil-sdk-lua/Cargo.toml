@@ -1,0 +1,26 @@
+[package]
+name = "soil-sdk-lua"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+wit-parser = "0.233"
+
+[dev-dependencies]
+# The generated module is only real if it runs on the interpreter a guest will
+# use, so the tests execute the checked-in Lua in luna-core instead of only
+# string-matching it.
+luna-core = "4.0.2"
+tempfile = "3"
+
+[[bin]]
+name = "soil-sdk-lua"
+path = "src/bin/soil-sdk-lua.rs"
+
+[lints]
+workspace = true

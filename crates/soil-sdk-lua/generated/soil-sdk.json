@@ -1,0 +1,6535 @@
+{
+  "dispatcher": "__soil_call(interface_id, function_name, args, self)",
+  "generator": "soil-sdk-lua",
+  "packages": [
+    {
+      "docs": "Host-mediated action bus for Spores.\n\nA Spore sees a granted action catalog and emits bounded invocations. The host\nowns grants, approval, idempotency, credentials, routing, retries and audit.\nUnibus adapters implement the actions; Spores never import Unibus or open a\nconnector-specific transport.",
+      "id": "fungos:actions@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "catalog",
+              "member": "catalog",
+              "name": "catalog",
+              "params": [],
+              "resource": null,
+              "result": "result<list<descriptor>, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "invoke",
+              "member": "invoke",
+              "name": "invoke",
+              "params": [
+                {
+                  "name": "call",
+                  "type": "call"
+                }
+              ],
+              "resource": null,
+              "result": "result<receipt, error>"
+            }
+          ],
+          "id": "fungos:actions@1.0.0/actions",
+          "name": "actions",
+          "types": [
+            {
+              "cases": [
+                "none",
+                "operator",
+                "destructive"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Approval",
+              "name": "approval"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "action",
+                  "type": "string"
+                },
+                {
+                  "name": "version",
+                  "type": "u32"
+                },
+                {
+                  "name": "input",
+                  "type": "string"
+                },
+                {
+                  "name": "idempotency-key",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Call",
+              "name": "call"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "version",
+                  "type": "u32"
+                },
+                {
+                  "name": "summary",
+                  "type": "string"
+                },
+                {
+                  "name": "effect",
+                  "type": "effect"
+                },
+                {
+                  "name": "idempotency",
+                  "type": "idempotency"
+                },
+                {
+                  "name": "approval",
+                  "type": "approval"
+                },
+                {
+                  "name": "input-schema",
+                  "type": "string"
+                },
+                {
+                  "name": "output-schema",
+                  "type": "string"
+                },
+                {
+                  "name": "phases",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "provider",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "catalog-revision",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "state-revision",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Descriptor",
+              "name": "descriptor"
+            },
+            {
+              "cases": [
+                "read",
+                "write",
+                "external"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Effect",
+              "name": "effect"
+            },
+            {
+              "cases": [
+                "denied",
+                "unknown-action",
+                "unsupported-version",
+                "invalid",
+                "approval-required",
+                "unsafe-retry",
+                "over-budget",
+                "unavailable",
+                "io"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "cases": [
+                "idempotent",
+                "keyed",
+                "unsafe"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Idempotency",
+              "name": "idempotency"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "action",
+                  "type": "string"
+                },
+                {
+                  "name": "version",
+                  "type": "u32"
+                },
+                {
+                  "name": "output",
+                  "type": "string"
+                },
+                {
+                  "name": "replayed",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "Receipt",
+              "name": "receipt"
+            }
+          ]
+        },
+        {
+          "docs": "Presentation projection of the granted action catalog.\n\nThis never grants execution. A caller may render a button or parameter form\nfrom this data, then invoke through `actions.invoke`.",
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "list_actions",
+              "member": "list-actions",
+              "name": "list-actions",
+              "params": [],
+              "resource": null,
+              "result": "result<list<action>, error>"
+            }
+          ],
+          "id": "fungos:actions@1.0.0/catalog",
+          "name": "catalog",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "label",
+                  "type": "string"
+                },
+                {
+                  "name": "description",
+                  "type": "string"
+                },
+                {
+                  "name": "shortcut",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "input-schema",
+                  "type": "string"
+                },
+                {
+                  "name": "requires-input",
+                  "type": "bool"
+                },
+                {
+                  "name": "effect",
+                  "type": "effect"
+                },
+                {
+                  "name": "idempotency",
+                  "type": "idempotency"
+                },
+                {
+                  "name": "approval",
+                  "type": "approval"
+                },
+                {
+                  "name": "available",
+                  "type": "bool"
+                },
+                {
+                  "name": "reason",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "phases",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "provider",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "catalog-revision",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "state-revision",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Action",
+              "name": "action"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Approval",
+              "name": "approval",
+              "type": "approval"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Effect",
+              "name": "effect",
+              "type": "effect"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Error",
+              "name": "error",
+              "type": "error"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Idempotency",
+              "name": "idempotency",
+              "type": "idempotency"
+            }
+          ]
+        }
+      ],
+      "name": "actions",
+      "namespace": "fungos",
+      "version": "1.0.0"
+    },
+    {
+      "docs": "Private app storage.\n\nAppData is scoped to the signed Spore's app identity and the current user.\nThe Spore sees opaque keys and bytes, never a host path, table, app id, or\nanother app's namespace.\n\n`local` is device-only. `synced` is a per-app, per-user private book that\nreplicates through the native records engine. Synced AppData is not indexed\nor shareable; structured/shareable data belongs in `soil:records`.",
+      "id": "soil:appdata@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "delete",
+              "member": "delete",
+              "name": "[method]store.delete",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<store>"
+                },
+                {
+                  "name": "key",
+                  "type": "string"
+                }
+              ],
+              "resource": "store",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "generation",
+              "member": "generation",
+              "name": "[method]store.generation",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<store>"
+                }
+              ],
+              "resource": "store",
+              "result": "result<u64, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "get",
+              "member": "get",
+              "name": "[method]store.get",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<store>"
+                },
+                {
+                  "name": "key",
+                  "type": "string"
+                }
+              ],
+              "resource": "store",
+              "result": "result<option<list<u8>>, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "get_meta",
+              "member": "get-meta",
+              "name": "[method]store.get-meta",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<store>"
+                },
+                {
+                  "name": "key",
+                  "type": "string"
+                }
+              ],
+              "resource": "store",
+              "result": "result<option<meta>, error>"
+            },
+            {
+              "docs": "List metadata for keys under a prefix. Values are fetched separately.",
+              "kind": "method",
+              "lua": "list_keys",
+              "member": "list-keys",
+              "name": "[method]store.list-keys",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<store>"
+                },
+                {
+                  "name": "prefix",
+                  "type": "string"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": "store",
+              "result": "result<list<meta>, error>"
+            },
+            {
+              "docs": "Last-writer-wins per key. Returns the new generation.",
+              "kind": "method",
+              "lua": "set",
+              "member": "set",
+              "name": "[method]store.set",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<store>"
+                },
+                {
+                  "name": "key",
+                  "type": "string"
+                },
+                {
+                  "name": "value",
+                  "type": "list<u8>"
+                }
+              ],
+              "resource": "store",
+              "result": "result<u64, error>"
+            },
+            {
+              "docs": "Compare-and-set against the caller's last observed generation.",
+              "kind": "method",
+              "lua": "set_if_generation",
+              "member": "set-if-generation",
+              "name": "[method]store.set-if-generation",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<store>"
+                },
+                {
+                  "name": "key",
+                  "type": "string"
+                },
+                {
+                  "name": "value",
+                  "type": "list<u8>"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                }
+              ],
+              "resource": "store",
+              "result": "result<u64, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "sync_state",
+              "member": "sync-state",
+              "name": "[method]store.sync-state",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<store>"
+                }
+              ],
+              "resource": "store",
+              "result": "result<sync-state, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "open",
+              "member": "open",
+              "name": "open",
+              "params": [
+                {
+                  "name": "scope",
+                  "type": "scope"
+                }
+              ],
+              "resource": null,
+              "result": "result<own<store>, error>"
+            }
+          ],
+          "id": "soil:appdata@1.0.0/appdata",
+          "name": "appdata",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "not-found",
+                "over-budget",
+                "invalid",
+                "conflict",
+                "not-ready",
+                "io"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "key",
+                  "type": "string"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                },
+                {
+                  "name": "size",
+                  "type": "u64"
+                },
+                {
+                  "name": "updated-at-ms",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "Meta",
+              "name": "meta"
+            },
+            {
+              "cases": [
+                "local",
+                "synced"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Scope",
+              "name": "scope"
+            },
+            {
+              "docs": null,
+              "kind": "resource",
+              "lua": "Store",
+              "name": "store"
+            },
+            {
+              "cases": [
+                "local",
+                "syncing",
+                "synced",
+                "offline",
+                "not-ready"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "SyncState",
+              "name": "sync-state"
+            }
+          ]
+        }
+      ],
+      "name": "appdata",
+      "namespace": "soil",
+      "version": "1.0.0"
+    },
+    {
+      "docs": "Host BLE radio capability.\n\nTransport stays in Soil; the device protocol stays in the Spore. A Spore\nreceives Soil-issued device handles and characteristic UUIDs, never a MAC,\npath, socket, permission, or radio handle it can forge.\n\nLimits (Soil-enforced, not expressible in WIT):\n- at most 64 devices per scan, 8 subscribed characteristics per link\n- scan <= 30 s; next-event bounded per call; every call has a deadline\n- read <= 512 B per call; write <= 512 B per call; the Spore chunks frames\n- at most one link and one live radio lease per Soil host\n- no fs, net, clock, env, or device enumeration beyond scan results",
+      "id": "soil:ble@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Connect to a previously scanned handle. The host takes the radio lease.",
+              "kind": "freestanding",
+              "lua": "connect",
+              "member": "connect",
+              "name": "connect",
+              "params": [
+                {
+                  "name": "device",
+                  "type": "device-handle"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "disconnect",
+              "member": "disconnect",
+              "name": "disconnect",
+              "params": [],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": "Wait up to `timeout-ms` for one event; `none` means the deadline expired\nand is not an error.",
+              "kind": "freestanding",
+              "lua": "next_event",
+              "member": "next-event",
+              "name": "next-event",
+              "params": [
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<option<event>, error>"
+            },
+            {
+              "docs": "Read at most `max-bytes` from a characteristic. `0` is `invalid`.",
+              "kind": "freestanding",
+              "lua": "read",
+              "member": "read",
+              "name": "read",
+              "params": [
+                {
+                  "name": "char-uuid",
+                  "type": "string"
+                },
+                {
+                  "name": "max-bytes",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<list<u8>, error>"
+            },
+            {
+              "docs": "Active scan for `timeout-ms`, returning Soil-issued handles.",
+              "kind": "freestanding",
+              "lua": "scan",
+              "member": "scan",
+              "name": "scan",
+              "params": [
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<list<device>, error>"
+            },
+            {
+              "docs": "Discovered GATT tree on the current link.",
+              "kind": "freestanding",
+              "lua": "services",
+              "member": "services",
+              "name": "services",
+              "params": [],
+              "resource": null,
+              "result": "result<list<service>, error>"
+            },
+            {
+              "docs": "Enable notifications for a characteristic. Events are drained with\n`next-event`.",
+              "kind": "freestanding",
+              "lua": "subscribe",
+              "member": "subscribe",
+              "name": "subscribe",
+              "params": [
+                {
+                  "name": "char-uuid",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "write",
+              "member": "write",
+              "name": "write",
+              "params": [
+                {
+                  "name": "char-uuid",
+                  "type": "string"
+                },
+                {
+                  "name": "data",
+                  "type": "list<u8>"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            }
+          ],
+          "id": "soil:ble@1.0.0/ble",
+          "name": "ble",
+          "types": [
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Device",
+              "name": "device",
+              "type": "device"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "DeviceHandle",
+              "name": "device-handle",
+              "type": "device-handle"
+            },
+            {
+              "cases": [
+                "denied",
+                "not-found",
+                "not-connected",
+                "leased",
+                "timeout",
+                "over-budget",
+                "not-ready",
+                "invalid",
+                "io"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Event",
+              "name": "event",
+              "type": "event"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Service",
+              "name": "service",
+              "type": "service"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [],
+          "id": "soil:ble@1.0.0/types",
+          "name": "types",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "uuid",
+                  "type": "string"
+                },
+                {
+                  "name": "readable",
+                  "type": "bool"
+                },
+                {
+                  "name": "writable",
+                  "type": "bool"
+                },
+                {
+                  "name": "notifiable",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "Characteristic",
+              "name": "characteristic"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "handle",
+                  "type": "device-handle"
+                },
+                {
+                  "name": "name",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "rssi",
+                  "type": "option<s16>"
+                },
+                {
+                  "name": "ring-id",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Device",
+              "name": "device"
+            },
+            {
+              "docs": "Soil-issued handle for a scan result. Opaque; not an address.",
+              "kind": "type",
+              "lua": "DeviceHandle",
+              "name": "device-handle",
+              "type": "u32"
+            },
+            {
+              "cases": [
+                {
+                  "name": "notification",
+                  "type": "notification"
+                },
+                {
+                  "name": "disconnected",
+                  "type": "string"
+                }
+              ],
+              "docs": "One inbound radio event.",
+              "kind": "variant",
+              "lua": "Event",
+              "name": "event"
+            },
+            {
+              "docs": "One inbound notification. The UUID lets a Spore tell the command channel\nfrom DFU; the payload is still opaque.",
+              "fields": [
+                {
+                  "name": "char-uuid",
+                  "type": "string"
+                },
+                {
+                  "name": "data",
+                  "type": "list<u8>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Notification",
+              "name": "notification"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "uuid",
+                  "type": "string"
+                },
+                {
+                  "name": "characteristics",
+                  "type": "list<characteristic>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Service",
+              "name": "service"
+            }
+          ]
+        }
+      ],
+      "name": "ble",
+      "namespace": "soil",
+      "version": "1.0.0"
+    },
+    {
+      "docs": "Canvas is the cross-platform owner: window, compositor, layout, theme,\nrendering and input lifecycle stay in the host. A Spore is logic/data and\nasks the granted Canvas surface to present or to receive normalized input.\n\nLimits (host-enforced):\n- one granted surface per Spore; the host selects extent and display\n- one present and one input per invocation; no per-frame callback\n- input is a bounded semantic key or one printable Unicode scalar, never a\n  raw keycode, scan code or device event\n- no pixels, framebuffer, DRM handle, window handle, path or clock",
+      "id": "soil:canvas@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Release the grant. Further calls return `closed`.",
+              "kind": "freestanding",
+              "lua": "close",
+              "member": "close",
+              "name": "close",
+              "params": [],
+              "resource": null,
+              "result": "result<_, failure>"
+            },
+            {
+              "docs": "Deliver one normalized event. `generation` must match the state the\ncaller last observed; a stale generation is refused, never reordered.\nText arrives as `character`; raw keycodes and platform scan codes never\ncross this boundary.",
+              "kind": "freestanding",
+              "lua": "input",
+              "member": "input",
+              "name": "input",
+              "params": [
+                {
+                  "name": "generation",
+                  "type": "u64"
+                },
+                {
+                  "name": "event",
+                  "type": "event"
+                }
+              ],
+              "resource": null,
+              "result": "result<state, failure>"
+            },
+            {
+              "docs": "Read the current owner state without presenting.",
+              "kind": "freestanding",
+              "lua": "observe",
+              "member": "observe",
+              "name": "observe",
+              "params": [],
+              "resource": null,
+              "result": "result<state, failure>"
+            },
+            {
+              "docs": "Render the granted owner surface. The host retains the pixels.",
+              "kind": "freestanding",
+              "lua": "present",
+              "member": "present",
+              "name": "present",
+              "params": [],
+              "resource": null,
+              "result": "result<state, failure>"
+            }
+          ],
+          "id": "soil:canvas@1.0.0/surface",
+          "name": "surface",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "key",
+                  "type": "key"
+                },
+                {
+                  "name": "modifiers",
+                  "type": "modifiers"
+                }
+              ],
+              "kind": "record",
+              "lua": "Event",
+              "name": "event"
+            },
+            {
+              "cases": [
+                "denied",
+                "not-ready",
+                "stale",
+                "over-budget",
+                "invalid",
+                "closed",
+                "backend"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Failure",
+              "name": "failure"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Key",
+              "name": "key",
+              "type": "key"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Modifiers",
+              "name": "modifiers",
+              "type": "modifiers"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "generation",
+                  "type": "u64"
+                },
+                {
+                  "name": "width",
+                  "type": "u32"
+                },
+                {
+                  "name": "height",
+                  "type": "u32"
+                },
+                {
+                  "name": "scale",
+                  "type": "f32"
+                },
+                {
+                  "name": "focused",
+                  "type": "bool"
+                },
+                {
+                  "name": "visible",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "State",
+              "name": "state"
+            }
+          ]
+        }
+      ],
+      "name": "canvas",
+      "namespace": "soil",
+      "version": "1.0.0"
+    },
+    {
+      "docs": "Semantic device capabilities.\n\nRuntime uses the documented bounded core-Wasm lowering, not component\ncanonical ABI. Battery is measured, estimate is model output, and lid is a\nread-only switch observation. Grants remain per interface.",
+      "id": "soil:device@0.1.0",
+      "interfaces": [
+        {
+          "docs": "Semantic interface. Runtime uses the documented core-Wasm lowering, not\ncomponent canonical ABI. Tokens are invocation-scoped, single-use handles.",
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "read",
+              "member": "read",
+              "name": "read",
+              "params": [],
+              "resource": null,
+              "result": "snapshot"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "update_status",
+              "member": "update-status",
+              "name": "update-status",
+              "params": [
+                {
+                  "name": "token",
+                  "type": "u64"
+                }
+              ],
+              "resource": null,
+              "result": null
+            }
+          ],
+          "id": "soil:device@0.1.0/battery",
+          "name": "battery",
+          "types": [
+            {
+              "cases": [
+                "fresh",
+                "unknown",
+                "stale",
+                "denied"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Availability",
+              "name": "availability"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "token",
+                  "type": "u64"
+                },
+                {
+                  "name": "state",
+                  "type": "availability"
+                },
+                {
+                  "name": "percent",
+                  "type": "option<u8>"
+                },
+                {
+                  "name": "voltage-microvolts",
+                  "type": "option<u32>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Snapshot",
+              "name": "snapshot"
+            }
+          ]
+        },
+        {
+          "docs": "Model output, never measured SOC or kernel battery capacity. Runtime uses\nthe documented bounded core-Wasm lowering, not component canonical ABI.",
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "read",
+              "member": "read",
+              "name": "read",
+              "params": [],
+              "resource": null,
+              "result": "observation"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "update_status",
+              "member": "update-status",
+              "name": "update-status",
+              "params": [
+                {
+                  "name": "token",
+                  "type": "u64"
+                }
+              ],
+              "resource": null,
+              "result": null
+            }
+          ],
+          "id": "soil:device@0.1.0/estimate",
+          "name": "estimate",
+          "types": [
+            {
+              "cases": [
+                "fresh",
+                "unknown",
+                "stale",
+                "denied"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Availability",
+              "name": "availability"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "token",
+                  "type": "u64"
+                },
+                {
+                  "name": "state",
+                  "type": "availability"
+                },
+                {
+                  "name": "percent",
+                  "type": "option<u8>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Observation",
+              "name": "observation"
+            }
+          ]
+        },
+        {
+          "docs": "Read-only lid capability. Host grants permission per guest; never grants\nraw device access, socket selection, display policy or input injection.",
+          "functions": [
+            {
+              "docs": "Bounded diagnostic: guest requests logging its most recent read.\nNot arbitrary text and not device/display authority.",
+              "kind": "freestanding",
+              "lua": "log_change",
+              "member": "log-change",
+              "name": "log-change",
+              "params": [],
+              "resource": null,
+              "result": null
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "read",
+              "member": "read",
+              "name": "read",
+              "params": [],
+              "resource": null,
+              "result": "result<observation, failure>"
+            }
+          ],
+          "id": "soil:device@0.1.0/lid",
+          "name": "lid",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "unavailable",
+                "backend",
+                "ambiguous",
+                "resynchronizing",
+                "stale",
+                "invalid-time",
+                "disconnected",
+                "protocol"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Failure",
+              "name": "failure"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "physical-position",
+                  "type": "position"
+                },
+                {
+                  "name": "switch-asserted",
+                  "type": "bool"
+                },
+                {
+                  "name": "event-node",
+                  "type": "string"
+                },
+                {
+                  "name": "observed-monotonic-ms",
+                  "type": "u64"
+                },
+                {
+                  "name": "age-ms",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "Observation",
+              "name": "observation"
+            },
+            {
+              "cases": [
+                "unqualified",
+                "open",
+                "closed"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Position",
+              "name": "position"
+            }
+          ]
+        }
+      ],
+      "name": "device",
+      "namespace": "soil",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Read-only graph queries over explicit record links and references.\n\nThe graph is derived from records in host-approved books. A node or edge is\na locator; this contract never grants access to the target.",
+      "id": "soil:graph@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Query edges attached to `node`. Empty `rel` means every relationship.",
+              "kind": "freestanding",
+              "lua": "neighbors",
+              "member": "neighbors",
+              "name": "neighbors",
+              "params": [
+                {
+                  "name": "node",
+                  "type": "string"
+                },
+                {
+                  "name": "rel",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "direction",
+                  "type": "direction"
+                },
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<edge-page, error>"
+            },
+            {
+              "docs": "Query external identifiers attached to `node`.",
+              "kind": "freestanding",
+              "lua": "references",
+              "member": "references",
+              "name": "references",
+              "params": [
+                {
+                  "name": "node",
+                  "type": "string"
+                },
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<reference-page, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "refresh",
+              "member": "refresh",
+              "name": "refresh",
+              "params": [],
+              "resource": null,
+              "result": "result<graph-state, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "state",
+              "member": "state",
+              "name": "state",
+              "params": [],
+              "resource": null,
+              "result": "result<graph-state, error>"
+            }
+          ],
+          "id": "soil:graph@0.1.0/graph",
+          "name": "graph",
+          "types": [
+            {
+              "cases": [
+                "out",
+                "in",
+                "both"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Direction",
+              "name": "direction"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "source",
+                  "type": "string"
+                },
+                {
+                  "name": "rel",
+                  "type": "string"
+                },
+                {
+                  "name": "target",
+                  "type": "string"
+                },
+                {
+                  "name": "role",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "title",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "book",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Edge",
+              "name": "edge"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "edges",
+                  "type": "list<edge>"
+                },
+                {
+                  "name": "next",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "EdgePage",
+              "name": "edge-page"
+            },
+            {
+              "cases": [
+                "denied",
+                "not-ready",
+                "over-budget",
+                "invalid",
+                "stale",
+                "io",
+                "unsupported"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "ready",
+                  "type": "bool"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                },
+                {
+                  "name": "edges",
+                  "type": "u64"
+                },
+                {
+                  "name": "references",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "GraphState",
+              "name": "graph-state"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "kind",
+                  "type": "string"
+                },
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "rel",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "title",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Reference",
+              "name": "reference"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "references",
+                  "type": "list<reference>"
+                },
+                {
+                  "name": "next",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "ReferencePage",
+              "name": "reference-page"
+            }
+          ]
+        }
+      ],
+      "name": "graph",
+      "namespace": "soil",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Bounded host-mediated HTTP.\n\nThe guest names an absolute URL and an optional host-resolved credential\nhandle. The host checks its origin allowlist, injects the credential, refuses\nunbounded bodies and redirects, and returns one bounded response. Raw sockets,\nDNS control, proxy configuration and secret bytes never cross this boundary.",
+      "id": "soil:http@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "fetch",
+              "member": "fetch",
+              "name": "fetch",
+              "params": [
+                {
+                  "name": "request",
+                  "type": "request"
+                }
+              ],
+              "resource": null,
+              "result": "result<response, error>"
+            }
+          ],
+          "id": "soil:http@0.1.0/http",
+          "name": "http",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "invalid",
+                "over-budget",
+                "timeout",
+                "unavailable",
+                "tls",
+                "http",
+                "io",
+                "unsupported"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "value",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Header",
+              "name": "header"
+            },
+            {
+              "cases": [
+                "get",
+                "head"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Method",
+              "name": "method"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "url",
+                  "type": "string"
+                },
+                {
+                  "name": "method",
+                  "type": "method"
+                },
+                {
+                  "name": "headers",
+                  "type": "list<header>"
+                },
+                {
+                  "name": "credential",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "max-bytes",
+                  "type": "u32"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Request",
+              "name": "request"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "status",
+                  "type": "u16"
+                },
+                {
+                  "name": "final-url",
+                  "type": "string"
+                },
+                {
+                  "name": "headers",
+                  "type": "list<header>"
+                },
+                {
+                  "name": "body",
+                  "type": "list<u8>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Response",
+              "name": "response"
+            }
+          ]
+        }
+      ],
+      "name": "http",
+      "namespace": "soil",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Derived, rebuildable index over the VFS namespace.\n\nThe index is not authority. It never creates, mutates or owns a file; it\nanswers browse/search queries and returns paths. The Spore then calls\n`soil:vfs.stat`/`read` for the authoritative entry and bytes. A host may\nrebuild the index at any time and bump `generation`.",
+      "id": "soil:index@1.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Browse direct children in the requested order.",
+              "kind": "freestanding",
+              "lua": "browse",
+              "member": "browse",
+              "name": "browse",
+              "params": [
+                {
+                  "name": "parent",
+                  "type": "string"
+                },
+                {
+                  "name": "order",
+                  "type": "order"
+                },
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            },
+            {
+              "docs": "Exact KNN over the host embedding index. Returns `unsupported` when the\nhost has no embedding provider; guests never choose a model.",
+              "kind": "freestanding",
+              "lua": "knn",
+              "member": "knn",
+              "name": "knn",
+              "params": [
+                {
+                  "name": "query",
+                  "type": "knn-query"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            },
+            {
+              "docs": "Rebuild from the current VFS namespace. Hosts may also rebuild in the\nbackground; this call is the explicit refresh boundary.",
+              "kind": "freestanding",
+              "lua": "refresh",
+              "member": "refresh",
+              "name": "refresh",
+              "params": [],
+              "resource": null,
+              "result": "result<index-state, error>"
+            },
+            {
+              "docs": "Search paths, media types, metadata, and indexed text. Results are paths;\ncall `soil:vfs.stat` for authoritative entry data.",
+              "kind": "freestanding",
+              "lua": "search",
+              "member": "search",
+              "name": "search",
+              "params": [
+                {
+                  "name": "query",
+                  "type": "query"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            },
+            {
+              "docs": "Inspect index readiness and generation.",
+              "kind": "freestanding",
+              "lua": "state",
+              "member": "state",
+              "name": "state",
+              "params": [],
+              "resource": null,
+              "result": "result<index-state, error>"
+            }
+          ],
+          "id": "soil:index@1.1.0/index",
+          "name": "index",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "not-ready",
+                "over-budget",
+                "invalid",
+                "io",
+                "stale",
+                "unsupported"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "path",
+                  "type": "string"
+                },
+                {
+                  "name": "score",
+                  "type": "u32"
+                },
+                {
+                  "name": "snippet",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "matched-by",
+                  "type": "option<match-source>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Hit",
+              "name": "hit"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "ready",
+                  "type": "bool"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                },
+                {
+                  "name": "entries",
+                  "type": "u64"
+                },
+                {
+                  "name": "rebuilt-at-ms",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "IndexState",
+              "name": "index-state"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "text",
+                  "type": "string"
+                },
+                {
+                  "name": "parent",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "media-type-prefix",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "KnnQuery",
+              "name": "knn-query"
+            },
+            {
+              "cases": [
+                "path",
+                "text",
+                "ocr",
+                "metadata",
+                "embedding"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "MatchSource",
+              "name": "match-source"
+            },
+            {
+              "cases": [
+                "substring",
+                "fuzzy",
+                "full-text",
+                "semantic",
+                "regex"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Mode",
+              "name": "mode"
+            },
+            {
+              "cases": [
+                "path",
+                "path-desc",
+                "modified",
+                "modified-desc",
+                "size",
+                "size-desc"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Order",
+              "name": "order"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "hits",
+                  "type": "list<hit>"
+                },
+                {
+                  "name": "next",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "Page",
+              "name": "page"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "text",
+                  "type": "string"
+                },
+                {
+                  "name": "mode",
+                  "type": "option<mode>"
+                },
+                {
+                  "name": "parent",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "media-type-prefix",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Query",
+              "name": "query"
+            }
+          ]
+        }
+      ],
+      "name": "index",
+      "namespace": "soil",
+      "version": "1.1.0"
+    },
+    {
+      "docs": "Host-mediated language-model inference.\n\nThe host owns provider selection, endpoint discovery, authentication, model\naliases, budgets, and transport. A Spore names a model, messages, and tools.\nCredentials and provider routes never cross this boundary.",
+      "id": "soil:inference@0.2.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "cancel",
+              "member": "cancel",
+              "name": "[method]completion-stream.cancel",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<completion-stream>"
+                }
+              ],
+              "resource": "completion-stream",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": "Read the next chunk. `none` means the timeout elapsed without data.",
+              "kind": "method",
+              "lua": "next",
+              "member": "next",
+              "name": "[method]completion-stream.next",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<completion-stream>"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": "completion-stream",
+              "result": "result<option<chunk>, error>"
+            },
+            {
+              "docs": "Non-streaming completion.",
+              "kind": "freestanding",
+              "lua": "complete",
+              "member": "complete",
+              "name": "complete",
+              "params": [
+                {
+                  "name": "request",
+                  "type": "request"
+                }
+              ],
+              "resource": null,
+              "result": "result<response, error>"
+            },
+            {
+              "docs": "List models visible to this host/profile.",
+              "kind": "freestanding",
+              "lua": "models",
+              "member": "models",
+              "name": "models",
+              "params": [],
+              "resource": null,
+              "result": "result<list<model>, error>"
+            },
+            {
+              "docs": "Open a streaming completion. The returned resource is bounded by the host\nsession and must be cancelled or dropped when the guest is done.",
+              "kind": "freestanding",
+              "lua": "open_stream",
+              "member": "open-stream",
+              "name": "open-stream",
+              "params": [
+                {
+                  "name": "request",
+                  "type": "request"
+                }
+              ],
+              "resource": null,
+              "result": "result<own<completion-stream>, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "state",
+              "member": "state",
+              "name": "state",
+              "params": [],
+              "resource": null,
+              "result": "result<inference-state, error>"
+            }
+          ],
+          "id": "soil:inference@0.2.0/inference",
+          "name": "inference",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "mime-type",
+                  "type": "string"
+                },
+                {
+                  "name": "data",
+                  "type": "list<u8>"
+                },
+                {
+                  "name": "extracted-text",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Attachment",
+              "name": "attachment"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "data",
+                  "type": "list<u8>"
+                },
+                {
+                  "name": "done",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "Chunk",
+              "name": "chunk"
+            },
+            {
+              "docs": "Streaming response handle. The guest polls it at its own cadence.",
+              "kind": "resource",
+              "lua": "CompletionStream",
+              "name": "completion-stream"
+            },
+            {
+              "cases": [
+                "denied",
+                "not-ready",
+                "over-budget",
+                "invalid",
+                "unavailable",
+                "auth",
+                "io",
+                "unsupported"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "ready",
+                  "type": "bool"
+                },
+                {
+                  "name": "provider",
+                  "type": "string"
+                },
+                {
+                  "name": "model",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "InferenceState",
+              "name": "inference-state"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "role",
+                  "type": "role"
+                },
+                {
+                  "name": "content",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "name",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "tool-call-id",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "tool-calls",
+                  "type": "list<tool-call>"
+                },
+                {
+                  "name": "attachments",
+                  "type": "list<attachment>"
+                },
+                {
+                  "name": "reasoning",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Message",
+              "name": "message"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "provider",
+                  "type": "string"
+                },
+                {
+                  "name": "context-window",
+                  "type": "option<u32>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Model",
+              "name": "model"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "model",
+                  "type": "string"
+                },
+                {
+                  "name": "messages",
+                  "type": "list<message>"
+                },
+                {
+                  "name": "tools",
+                  "type": "list<tool>"
+                },
+                {
+                  "name": "max-output-tokens",
+                  "type": "option<u32>"
+                },
+                {
+                  "name": "temperature",
+                  "type": "option<f32>"
+                },
+                {
+                  "name": "prompt-cache-key",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Request",
+              "name": "request"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "model",
+                  "type": "string"
+                },
+                {
+                  "name": "message",
+                  "type": "message"
+                },
+                {
+                  "name": "finish-reason",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "usage",
+                  "type": "option<usage>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Response",
+              "name": "response"
+            },
+            {
+              "cases": [
+                "system",
+                "user",
+                "assistant",
+                "tool"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Role",
+              "name": "role"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "description",
+                  "type": "string"
+                },
+                {
+                  "name": "parameters",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Tool",
+              "name": "tool"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "arguments",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "ToolCall",
+              "name": "tool-call"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "prompt-tokens",
+                  "type": "u32"
+                },
+                {
+                  "name": "completion-tokens",
+                  "type": "u32"
+                },
+                {
+                  "name": "total-tokens",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Usage",
+              "name": "usage"
+            }
+          ]
+        }
+      ],
+      "name": "inference",
+      "namespace": "soil",
+      "version": "0.2.0"
+    },
+    {
+      "docs": "Shared normalized input types.\n\nPresentation surfaces (Canvas, Terminal, imported surfaces) use the same\nsemantic key, pointer, scroll and text vocabulary. The host owns platform\nkeycode and IME translation; guests only see these normalized values.",
+      "id": "soil:input@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [],
+          "id": "soil:input@1.0.0/types",
+          "name": "types",
+          "types": [
+            {
+              "cases": [
+                "primary",
+                "secondary",
+                "middle"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Button",
+              "name": "button"
+            },
+            {
+              "cases": [
+                {
+                  "name": "pointer-move",
+                  "type": "point"
+                },
+                {
+                  "name": "pointer-button",
+                  "type": "pointer-button"
+                },
+                {
+                  "name": "scroll",
+                  "type": "scroll"
+                },
+                {
+                  "name": "key",
+                  "type": "key-event"
+                },
+                {
+                  "name": "text",
+                  "type": "string"
+                },
+                {
+                  "name": "focus",
+                  "type": "bool"
+                }
+              ],
+              "docs": null,
+              "kind": "variant",
+              "lua": "Input",
+              "name": "input"
+            },
+            {
+              "cases": [
+                {
+                  "name": "up",
+                  "type": null
+                },
+                {
+                  "name": "down",
+                  "type": null
+                },
+                {
+                  "name": "left",
+                  "type": null
+                },
+                {
+                  "name": "right",
+                  "type": null
+                },
+                {
+                  "name": "home",
+                  "type": null
+                },
+                {
+                  "name": "end",
+                  "type": null
+                },
+                {
+                  "name": "page-up",
+                  "type": null
+                },
+                {
+                  "name": "page-down",
+                  "type": null
+                },
+                {
+                  "name": "insert",
+                  "type": null
+                },
+                {
+                  "name": "select",
+                  "type": null
+                },
+                {
+                  "name": "back",
+                  "type": null
+                },
+                {
+                  "name": "menu",
+                  "type": null
+                },
+                {
+                  "name": "info",
+                  "type": null
+                },
+                {
+                  "name": "number",
+                  "type": "u8"
+                },
+                {
+                  "name": "star",
+                  "type": null
+                },
+                {
+                  "name": "hash",
+                  "type": null
+                },
+                {
+                  "name": "call",
+                  "type": null
+                },
+                {
+                  "name": "end-call",
+                  "type": null
+                },
+                {
+                  "name": "push-to-talk",
+                  "type": null
+                },
+                {
+                  "name": "soft-left",
+                  "type": null
+                },
+                {
+                  "name": "soft-right",
+                  "type": null
+                },
+                {
+                  "name": "play-pause",
+                  "type": null
+                },
+                {
+                  "name": "rewind",
+                  "type": null
+                },
+                {
+                  "name": "fast-forward",
+                  "type": null
+                },
+                {
+                  "name": "next",
+                  "type": null
+                },
+                {
+                  "name": "previous",
+                  "type": null
+                },
+                {
+                  "name": "volume-up",
+                  "type": null
+                },
+                {
+                  "name": "volume-down",
+                  "type": null
+                },
+                {
+                  "name": "mute",
+                  "type": null
+                },
+                {
+                  "name": "f-key",
+                  "type": "u8"
+                },
+                {
+                  "name": "character",
+                  "type": "char"
+                },
+                {
+                  "name": "backspace",
+                  "type": null
+                },
+                {
+                  "name": "delete",
+                  "type": null
+                },
+                {
+                  "name": "tab",
+                  "type": null
+                },
+                {
+                  "name": "escape",
+                  "type": null
+                },
+                {
+                  "name": "enter",
+                  "type": null
+                },
+                {
+                  "name": "named",
+                  "type": "string"
+                }
+              ],
+              "docs": "Host-normalized key. `named` is an escape hatch for imported native\nsurfaces that expose stable semantic names the host cannot map further.",
+              "kind": "variant",
+              "lua": "Key",
+              "name": "key"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "key",
+                  "type": "key"
+                },
+                {
+                  "name": "modifiers",
+                  "type": "modifiers"
+                },
+                {
+                  "name": "pressed",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "KeyEvent",
+              "name": "key-event"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "shift",
+                  "type": "bool"
+                },
+                {
+                  "name": "control",
+                  "type": "bool"
+                },
+                {
+                  "name": "alt",
+                  "type": "bool"
+                },
+                {
+                  "name": "meta",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "Modifiers",
+              "name": "modifiers"
+            },
+            {
+              "docs": "Normalized surface coordinates, 0..=1.",
+              "fields": [
+                {
+                  "name": "x",
+                  "type": "f32"
+                },
+                {
+                  "name": "y",
+                  "type": "f32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Point",
+              "name": "point"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "button",
+                  "type": "button"
+                },
+                {
+                  "name": "pressed",
+                  "type": "bool"
+                },
+                {
+                  "name": "point",
+                  "type": "point"
+                }
+              ],
+              "kind": "record",
+              "lua": "PointerButton",
+              "name": "pointer-button"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "delta-x",
+                  "type": "f32"
+                },
+                {
+                  "name": "delta-y",
+                  "type": "f32"
+                },
+                {
+                  "name": "point",
+                  "type": "point"
+                }
+              ],
+              "kind": "record",
+              "lua": "Scroll",
+              "name": "scroll"
+            }
+          ]
+        }
+      ],
+      "name": "input",
+      "namespace": "soil",
+      "version": "1.0.0"
+    },
+    {
+      "docs": "Host-mediated media sources.\n\nA Spore names a host-reviewed source id. It never receives a URL, Unibus\npeer, API token, decoder handle, or raw socket. Playback is decoded and\npresented by the host; encoded access is a separate grant.",
+      "id": "soil:media@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "close",
+              "member": "close",
+              "name": "[method]encoded-stream.close",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<encoded-stream>"
+                }
+              ],
+              "resource": "encoded-stream",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "next",
+              "member": "next",
+              "name": "[method]encoded-stream.next",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<encoded-stream>"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": "encoded-stream",
+              "result": "result<option<chunk>, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "open",
+              "member": "open",
+              "name": "open",
+              "params": [
+                {
+                  "name": "source-id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<own<encoded-stream>, error>"
+            }
+          ],
+          "id": "soil:media@0.1.0/encoded",
+          "name": "encoded",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "data",
+                  "type": "list<u8>"
+                },
+                {
+                  "name": "pts-ms",
+                  "type": "u64"
+                },
+                {
+                  "name": "duration-ms",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "keyframe",
+                  "type": "bool"
+                },
+                {
+                  "name": "codec-config",
+                  "type": "option<list<u8>>"
+                },
+                {
+                  "name": "discontinuity",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "Chunk",
+              "name": "chunk"
+            },
+            {
+              "docs": "Explicit encoded access for recording, remuxing, transcoding, inspection,\nor a codec the host cannot present. Not implied by playback.",
+              "kind": "resource",
+              "lua": "EncodedStream",
+              "name": "encoded-stream"
+            },
+            {
+              "cases": [
+                "denied",
+                "unknown-source",
+                "not-ready",
+                "unsupported",
+                "over-budget",
+                "invalid",
+                "closed"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "close",
+              "member": "close",
+              "name": "[method]image.close",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<image>"
+                }
+              ],
+              "resource": "image",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "info",
+              "member": "info",
+              "name": "[method]image.info",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<image>"
+                }
+              ],
+              "resource": "image",
+              "result": "result<info, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "rgba",
+              "member": "rgba",
+              "name": "[method]image.rgba",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<image>"
+                },
+                {
+                  "name": "max-width",
+                  "type": "u32"
+                },
+                {
+                  "name": "max-height",
+                  "type": "u32"
+                }
+              ],
+              "resource": "image",
+              "result": "result<rgba, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "open",
+              "member": "open",
+              "name": "open",
+              "params": [
+                {
+                  "name": "source-id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<own<image>, error>"
+            }
+          ],
+          "id": "soil:media@0.1.0/image",
+          "name": "image",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "unknown-source",
+                "unsupported",
+                "over-budget",
+                "invalid",
+                "closed"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": "One decoded image. The host may downsample to satisfy the requested\nbounds; the returned dimensions are authoritative.",
+              "kind": "resource",
+              "lua": "Image",
+              "name": "image"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "width",
+                  "type": "u32"
+                },
+                {
+                  "name": "height",
+                  "type": "u32"
+                },
+                {
+                  "name": "media-type",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Info",
+              "name": "info"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "width",
+                  "type": "u32"
+                },
+                {
+                  "name": "height",
+                  "type": "u32"
+                },
+                {
+                  "name": "data",
+                  "type": "list<u8>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Rgba",
+              "name": "rgba"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "close",
+              "member": "close",
+              "name": "[method]playback.close",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<playback>"
+                }
+              ],
+              "resource": "playback",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "next",
+              "member": "next",
+              "name": "[method]playback.next",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<playback>"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": "playback",
+              "result": "result<option<event>, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "pause",
+              "member": "pause",
+              "name": "[method]playback.pause",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<playback>"
+                }
+              ],
+              "resource": "playback",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "play",
+              "member": "play",
+              "name": "[method]playback.play",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<playback>"
+                }
+              ],
+              "resource": "playback",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "seek",
+              "member": "seek",
+              "name": "[method]playback.seek",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<playback>"
+                },
+                {
+                  "name": "position-ms",
+                  "type": "u64"
+                }
+              ],
+              "resource": "playback",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "status",
+              "member": "status",
+              "name": "[method]playback.status",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<playback>"
+                }
+              ],
+              "resource": "playback",
+              "result": "result<status, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "open",
+              "member": "open",
+              "name": "open",
+              "params": [
+                {
+                  "name": "source-id",
+                  "type": "string"
+                },
+                {
+                  "name": "options",
+                  "type": "open-options"
+                }
+              ],
+              "resource": null,
+              "result": "result<own<playback>, error>"
+            }
+          ],
+          "id": "soil:media@0.1.0/playback",
+          "name": "playback",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "unknown-source",
+                "not-ready",
+                "unsupported",
+                "decode",
+                "over-budget",
+                "invalid",
+                "closed"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "cases": [
+                {
+                  "name": "opened",
+                  "type": "format"
+                },
+                {
+                  "name": "buffering",
+                  "type": null
+                },
+                {
+                  "name": "playing",
+                  "type": null
+                },
+                {
+                  "name": "paused",
+                  "type": null
+                },
+                {
+                  "name": "position",
+                  "type": "u64"
+                },
+                {
+                  "name": "format-changed",
+                  "type": "format"
+                },
+                {
+                  "name": "discontinuity",
+                  "type": null
+                },
+                {
+                  "name": "ended",
+                  "type": null
+                }
+              ],
+              "docs": null,
+              "kind": "variant",
+              "lua": "Event",
+              "name": "event"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "container",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "video-codec",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "audio-codec",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "width",
+                  "type": "option<u32>"
+                },
+                {
+                  "name": "height",
+                  "type": "option<u32>"
+                },
+                {
+                  "name": "duration-ms",
+                  "type": "option<u64>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Format",
+              "name": "format"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "start-ms",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "audio",
+                  "type": "bool"
+                },
+                {
+                  "name": "video",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "OpenOptions",
+              "name": "open-options"
+            },
+            {
+              "docs": "Host-owned playback. The host owns demuxing, decode, A/V clock, audio\ndevice, and presentation surface.",
+              "kind": "resource",
+              "lua": "Playback",
+              "name": "playback"
+            },
+            {
+              "cases": [
+                "idle",
+                "opening",
+                "buffering",
+                "playing",
+                "paused",
+                "ended"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "State",
+              "name": "state"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "state",
+                  "type": "state"
+                },
+                {
+                  "name": "position-ms",
+                  "type": "u64"
+                },
+                {
+                  "name": "duration-ms",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "buffered-ms",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "dropped-frames",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Status",
+              "name": "status"
+            }
+          ]
+        }
+      ],
+      "name": "media",
+      "namespace": "soil",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Mycelium-backed directory and terminal session capability.\n\nThe host owns identity, certificates, routing, jump hosts, host-key\nverification and the SSH profile. A Spore names an opaque target id obtained\nfrom `directory`; it never supplies a host, port, credential or private key.\n\nThe handles below are component-instance-scoped and unforgeable in the sense\nthat the host only accepts handles it issued. A later revision can replace\nthem with WIT resources without changing the verbs.",
+      "id": "soil:mycelium@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Fetch one visible target without listing.",
+              "kind": "freestanding",
+              "lua": "get",
+              "member": "get",
+              "name": "get",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<target, error>"
+            },
+            {
+              "docs": "List visible targets. `kind` is a display filter, not authority.",
+              "kind": "freestanding",
+              "lua": "targets",
+              "member": "targets",
+              "name": "targets",
+              "params": [
+                {
+                  "name": "kind",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "cursor",
+                  "type": "u64"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            }
+          ],
+          "id": "soil:mycelium@0.1.0/directory",
+          "name": "directory",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "invalid",
+                "not-found",
+                "not-ready",
+                "over-budget",
+                "io"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "entries",
+                  "type": "list<target>"
+                },
+                {
+                  "name": "next",
+                  "type": "option<u64>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Page",
+              "name": "page"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "label",
+                  "type": "string"
+                },
+                {
+                  "name": "kind",
+                  "type": "string"
+                },
+                {
+                  "name": "site",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "health",
+                  "type": "string"
+                },
+                {
+                  "name": "shell",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "Target",
+              "name": "target"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "close",
+              "member": "close",
+              "name": "close",
+              "params": [
+                {
+                  "name": "session",
+                  "type": "u64"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": "Run a non-interactive command for agents. No PTY, no VT semantics.",
+              "kind": "freestanding",
+              "lua": "exec",
+              "member": "exec",
+              "name": "exec",
+              "params": [
+                {
+                  "name": "target",
+                  "type": "string"
+                },
+                {
+                  "name": "argv",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<exec-result, error>"
+            },
+            {
+              "docs": "Open an interactive PTY shell through the host's Mycelium SSH profile.\n`cols` and `rows` seed the remote terminal size.",
+              "kind": "freestanding",
+              "lua": "open_shell",
+              "member": "open-shell",
+              "name": "open-shell",
+              "params": [
+                {
+                  "name": "target",
+                  "type": "string"
+                },
+                {
+                  "name": "cols",
+                  "type": "u32"
+                },
+                {
+                  "name": "rows",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<u64, error>"
+            },
+            {
+              "docs": "Read bytes from the PTY. Empty list means the timeout elapsed; `none`\nmeans the session reached EOF.",
+              "kind": "freestanding",
+              "lua": "read",
+              "member": "read",
+              "name": "read",
+              "params": [
+                {
+                  "name": "session",
+                  "type": "u64"
+                },
+                {
+                  "name": "max-bytes",
+                  "type": "u32"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<option<list<u8>>, error>"
+            },
+            {
+              "docs": "Tell the remote PTY its new window size.",
+              "kind": "freestanding",
+              "lua": "resize",
+              "member": "resize",
+              "name": "resize",
+              "params": [
+                {
+                  "name": "session",
+                  "type": "u64"
+                },
+                {
+                  "name": "cols",
+                  "type": "u32"
+                },
+                {
+                  "name": "rows",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "status",
+              "member": "status",
+              "name": "status",
+              "params": [
+                {
+                  "name": "session",
+                  "type": "u64"
+                }
+              ],
+              "resource": null,
+              "result": "result<state, error>"
+            },
+            {
+              "docs": "Write input bytes to the PTY.",
+              "kind": "freestanding",
+              "lua": "write",
+              "member": "write",
+              "name": "write",
+              "params": [
+                {
+                  "name": "session",
+                  "type": "u64"
+                },
+                {
+                  "name": "bytes",
+                  "type": "list<u8>"
+                }
+              ],
+              "resource": null,
+              "result": "result<u32, error>"
+            }
+          ],
+          "id": "soil:mycelium@0.1.0/session",
+          "name": "session",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "unknown-target",
+                "unreachable",
+                "auth-failed",
+                "not-ready",
+                "over-budget",
+                "closed",
+                "io"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "code",
+                  "type": "s32"
+                },
+                {
+                  "name": "stdout",
+                  "type": "list<u8>"
+                },
+                {
+                  "name": "stderr",
+                  "type": "list<u8>"
+                }
+              ],
+              "kind": "record",
+              "lua": "ExecResult",
+              "name": "exec-result"
+            },
+            {
+              "cases": [
+                "connecting",
+                "connected",
+                "exited",
+                "failed",
+                "closed"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Phase",
+              "name": "phase"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "phase",
+                  "type": "phase"
+                },
+                {
+                  "name": "exit-code",
+                  "type": "option<s32>"
+                },
+                {
+                  "name": "message",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "State",
+              "name": "state"
+            }
+          ]
+        }
+      ],
+      "name": "mycelium",
+      "namespace": "soil",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Host-mediated notifications, focus, history and cleanup.\n\nA publisher emits a durable notification envelope. An inbox shows and acts on\nit. Focus is a host-owned per-device policy; history is opt-in and separately\ngranted. No payload carries app identity, a URL, a credential or authority.",
+      "id": "soil:notify@1.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "clear",
+              "member": "clear",
+              "name": "clear",
+              "params": [
+                {
+                  "name": "scope",
+                  "type": "scope"
+                },
+                {
+                  "name": "value",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "older-than-ms",
+                  "type": "option<u64>"
+                }
+              ],
+              "resource": null,
+              "result": "result<u32, error>"
+            }
+          ],
+          "id": "soil:notify@1.1.0/cleanup",
+          "name": "cleanup",
+          "types": [
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Error",
+              "name": "error",
+              "type": "error"
+            },
+            {
+              "cases": [
+                "read",
+                "shown",
+                "held",
+                "all",
+                "older-than",
+                "app",
+                "category",
+                "archive"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Scope",
+              "name": "scope"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "clear",
+              "member": "clear",
+              "name": "clear",
+              "params": [],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "get",
+              "member": "get",
+              "name": "get",
+              "params": [],
+              "resource": null,
+              "result": "result<option<profile>, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "set",
+              "member": "set",
+              "name": "set",
+              "params": [
+                {
+                  "name": "profile",
+                  "type": "profile"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            }
+          ],
+          "id": "soil:notify@1.1.0/focus",
+          "name": "focus",
+          "types": [
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Error",
+              "name": "error",
+              "type": "error"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Priority",
+              "name": "priority",
+              "type": "priority"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "mode",
+                  "type": "string"
+                },
+                {
+                  "name": "until-ms",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "allow-apps",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "allow-categories",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "allow-threads",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "breakthrough",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "rollup-held",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "Profile",
+              "name": "profile"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "query",
+              "member": "query",
+              "name": "query",
+              "params": [
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            }
+          ],
+          "id": "soil:notify@1.1.0/history",
+          "name": "history",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "app-id",
+                  "type": "string"
+                },
+                {
+                  "name": "title",
+                  "type": "string"
+                },
+                {
+                  "name": "body",
+                  "type": "string"
+                },
+                {
+                  "name": "priority",
+                  "type": "priority"
+                },
+                {
+                  "name": "posted-at-ms",
+                  "type": "u64"
+                },
+                {
+                  "name": "dismissed-at-ms",
+                  "type": "option<u64>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Entry",
+              "name": "entry"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Error",
+              "name": "error",
+              "type": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "entries",
+                  "type": "list<entry>"
+                },
+                {
+                  "name": "next",
+                  "type": "option<u64>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Page",
+              "name": "page"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Priority",
+              "name": "priority",
+              "type": "priority"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "next",
+              "member": "next",
+              "name": "[method]subscription.next",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<subscription>"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": "subscription",
+              "result": "result<option<item>, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "act",
+              "member": "act",
+              "name": "act",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "action-id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "dismiss",
+              "member": "dismiss",
+              "name": "dismiss",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "query",
+              "member": "query",
+              "name": "query",
+              "params": [
+                {
+                  "name": "filter",
+                  "type": "filter"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "subscribe",
+              "member": "subscribe",
+              "name": "subscribe",
+              "params": [],
+              "resource": null,
+              "result": "result<own<subscription>, error>"
+            }
+          ],
+          "id": "soil:notify@1.1.0/inbox",
+          "name": "inbox",
+          "types": [
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Action",
+              "name": "action",
+              "type": "action"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Error",
+              "name": "error",
+              "type": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "apps",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "categories",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "include-held",
+                  "type": "bool"
+                },
+                {
+                  "name": "include-read",
+                  "type": "bool"
+                },
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Filter",
+              "name": "filter"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "app-id",
+                  "type": "string"
+                },
+                {
+                  "name": "title",
+                  "type": "string"
+                },
+                {
+                  "name": "body",
+                  "type": "string"
+                },
+                {
+                  "name": "category",
+                  "type": "string"
+                },
+                {
+                  "name": "thread",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "group-key",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "priority",
+                  "type": "priority"
+                },
+                {
+                  "name": "posted-at-ms",
+                  "type": "u64"
+                },
+                {
+                  "name": "read",
+                  "type": "bool"
+                },
+                {
+                  "name": "held",
+                  "type": "bool"
+                },
+                {
+                  "name": "sensitive",
+                  "type": "bool"
+                },
+                {
+                  "name": "actions",
+                  "type": "list<action>"
+                },
+                {
+                  "name": "summary",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Item",
+              "name": "item"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "items",
+                  "type": "list<item>"
+                },
+                {
+                  "name": "next",
+                  "type": "option<u64>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Page",
+              "name": "page"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Priority",
+              "name": "priority",
+              "type": "priority"
+            },
+            {
+              "docs": null,
+              "kind": "resource",
+              "lua": "Subscription",
+              "name": "subscription"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "publish",
+              "member": "publish",
+              "name": "publish",
+              "params": [
+                {
+                  "name": "notification",
+                  "type": "notification"
+                }
+              ],
+              "resource": null,
+              "result": "result<string, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "update",
+              "member": "update",
+              "name": "update",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "notification",
+                  "type": "notification"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "withdraw",
+              "member": "withdraw",
+              "name": "withdraw",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            }
+          ],
+          "id": "soil:notify@1.1.0/publisher",
+          "name": "publisher",
+          "types": [
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Action",
+              "name": "action",
+              "type": "action"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Context",
+              "name": "context",
+              "type": "context"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Error",
+              "name": "error",
+              "type": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "title",
+                  "type": "string"
+                },
+                {
+                  "name": "body",
+                  "type": "string"
+                },
+                {
+                  "name": "category",
+                  "type": "string"
+                },
+                {
+                  "name": "thread",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "group-key",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "expires-at-ms",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "priority-hint",
+                  "type": "option<priority>"
+                },
+                {
+                  "name": "sensitive",
+                  "type": "bool"
+                },
+                {
+                  "name": "actions",
+                  "type": "list<action>"
+                },
+                {
+                  "name": "context",
+                  "type": "option<context>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Notification",
+              "name": "notification"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Priority",
+              "name": "priority",
+              "type": "priority"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "next",
+              "member": "next",
+              "name": "[method]subscription.next",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<subscription>"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": "subscription",
+              "result": "result<option<state>, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "accept",
+              "member": "accept",
+              "name": "accept",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<state, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "decline",
+              "member": "decline",
+              "name": "decline",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<state, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "_end",
+              "member": "end",
+              "name": "end",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<state, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "get_state",
+              "member": "get-state",
+              "name": "get-state",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<state, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "incoming",
+              "member": "incoming",
+              "name": "incoming",
+              "params": [],
+              "resource": null,
+              "result": "result<own<subscription>, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "mute",
+              "member": "mute",
+              "name": "mute",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            }
+          ],
+          "id": "soil:notify@1.1.0/ringer",
+          "name": "ringer",
+          "types": [
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Action",
+              "name": "action",
+              "type": "action"
+            },
+            {
+              "cases": [
+                "denied",
+                "not-found",
+                "not-ringing",
+                "already-answered",
+                "over-budget",
+                "invalid",
+                "io",
+                "unavailable"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "cases": [
+                "call",
+                "doorbell",
+                "intercom",
+                "alarm",
+                "timer",
+                "pager"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Kind",
+              "name": "kind"
+            },
+            {
+              "cases": [
+                "ringing",
+                "accepted",
+                "declined",
+                "ended",
+                "missed"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Phase",
+              "name": "phase"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Priority",
+              "name": "priority",
+              "type": "priority"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "kind",
+                  "type": "kind"
+                },
+                {
+                  "name": "source",
+                  "type": "string"
+                },
+                {
+                  "name": "title",
+                  "type": "string"
+                },
+                {
+                  "name": "priority",
+                  "type": "priority"
+                },
+                {
+                  "name": "expires-at-ms",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "actions",
+                  "type": "list<action>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Ring",
+              "name": "ring"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "phase",
+                  "type": "phase"
+                },
+                {
+                  "name": "answered-by",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "State",
+              "name": "state"
+            },
+            {
+              "docs": null,
+              "kind": "resource",
+              "lua": "Subscription",
+              "name": "subscription"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [],
+          "id": "soil:notify@1.1.0/types",
+          "name": "types",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "label",
+                  "type": "string"
+                },
+                {
+                  "name": "destructive",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "Action",
+              "name": "action"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "summary",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "entities",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "topics",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "urgency-hint",
+                  "type": "option<priority>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Context",
+              "name": "context"
+            },
+            {
+              "cases": [
+                "denied",
+                "not-ready",
+                "invalid",
+                "over-budget",
+                "stale",
+                "io",
+                "unsupported"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "cases": [
+                "passive",
+                "active",
+                "urgent"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Priority",
+              "name": "priority"
+            }
+          ]
+        }
+      ],
+      "name": "notify",
+      "namespace": "soil",
+      "version": "1.1.0"
+    },
+    {
+      "docs": "Host-attested principal identity.\n\nMycelium identity / OIDC is the source of truth. The host verifies the\ntoken or device identity and exposes only this minimal projection. Tokens,\nrefresh credentials, raw claims and private keys never cross the boundary.\n\nA principal answers \"who\". It does not grant access; exact WIT grants and\nbook grants still decide what the caller may do and where.",
+      "id": "soil:principal@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "current",
+              "member": "current",
+              "name": "current",
+              "params": [],
+              "resource": null,
+              "result": "result<identity, error>"
+            }
+          ],
+          "id": "soil:principal@0.1.0/principal",
+          "name": "principal",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "not-ready",
+                "stale",
+                "invalid",
+                "unavailable"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "actor",
+                  "type": "string"
+                },
+                {
+                  "name": "kind",
+                  "type": "kind"
+                },
+                {
+                  "name": "display-name",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "device",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "teams",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "roles",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "Identity",
+              "name": "identity"
+            },
+            {
+              "cases": [
+                "human",
+                "agent",
+                "service"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Kind",
+              "name": "kind"
+            }
+          ]
+        }
+      ],
+      "name": "principal",
+      "namespace": "soil",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Durable, schema-tagged records with a change feed and peer sync.\n\nRecords are the storage layer for Spores that need queryable state (mail and\nchat metadata, contacts, CRM snapshots) without inventing a second database.\nThe host owns durability, revisions, tombstones, and sync. A Spore owns the\nschema and the meaning of `body`.\n\nGrants are separate: read, write, and sync. A read-only Spore cannot mutate\nor export the store.",
+      "id": "soil:records@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Merge remote changes with last-writer-wins. This never calls back into\nthe network; the Spore or host transports the page.",
+              "kind": "freestanding",
+              "lua": "apply",
+              "member": "apply",
+              "name": "apply",
+              "params": [
+                {
+                  "name": "entries",
+                  "type": "list<entry>"
+                }
+              ],
+              "resource": null,
+              "result": "result<apply-result, error>"
+            },
+            {
+              "docs": "Export changes after `since`, ordered by `(revision, origin)`. This is the\nsync producer side; pass the result to `apply` on the peer.",
+              "kind": "freestanding",
+              "lua": "changes",
+              "member": "changes",
+              "name": "changes",
+              "params": [
+                {
+                  "name": "since",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            },
+            {
+              "docs": "Conditional create/replace/delete.\n\n`expected = none` means create only if there is no live record.\n`expected = some(version)` requires the current live record to match\nexactly. On a mismatch the host returns `applied = false` and the\ncurrent entry; it never overwrites the winner. A missing record with an\nexpected version returns `not-found`.",
+              "kind": "freestanding",
+              "lua": "compare_and_swap",
+              "member": "compare-and-swap",
+              "name": "compare-and-swap",
+              "params": [
+                {
+                  "name": "key",
+                  "type": "key"
+                },
+                {
+                  "name": "expected",
+                  "type": "option<version>"
+                },
+                {
+                  "name": "entry",
+                  "type": "entry"
+                }
+              ],
+              "resource": null,
+              "result": "result<cas-result, error>"
+            },
+            {
+              "docs": "Write a tombstone. The record remains visible to `changes` until the\nhost's tombstone retention expires.",
+              "kind": "freestanding",
+              "lua": "delete",
+              "member": "delete",
+              "name": "delete",
+              "params": [
+                {
+                  "name": "key",
+                  "type": "key"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": "Read one record.",
+              "kind": "freestanding",
+              "lua": "get",
+              "member": "get",
+              "name": "get",
+              "params": [
+                {
+                  "name": "key",
+                  "type": "key"
+                }
+              ],
+              "resource": null,
+              "result": "result<entry, error>"
+            },
+            {
+              "docs": "Scan one collection in revision order. A cursor from a previous page is\nvalid until the host reports `stale`.",
+              "kind": "freestanding",
+              "lua": "scan",
+              "member": "scan",
+              "name": "scan",
+              "params": [
+                {
+                  "name": "collection",
+                  "type": "string"
+                },
+                {
+                  "name": "cursor",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            },
+            {
+              "docs": "Create or replace a local record. The host assigns `revision` and\n`origin`; the returned entry is authoritative.",
+              "kind": "freestanding",
+              "lua": "upsert",
+              "member": "upsert",
+              "name": "upsert",
+              "params": [
+                {
+                  "name": "entry",
+                  "type": "entry"
+                }
+              ],
+              "resource": null,
+              "result": "result<entry, error>"
+            }
+          ],
+          "id": "soil:records@0.1.0/records",
+          "name": "records",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "applied",
+                  "type": "u32"
+                },
+                {
+                  "name": "skipped",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "ApplyResult",
+              "name": "apply-result"
+            },
+            {
+              "docs": "Result of a conditional write. On conflict `entry` is the current\nauthoritative entry, so the caller can re-read and retry.",
+              "fields": [
+                {
+                  "name": "applied",
+                  "type": "bool"
+                },
+                {
+                  "name": "entry",
+                  "type": "entry"
+                }
+              ],
+              "kind": "record",
+              "lua": "CasResult",
+              "name": "cas-result"
+            },
+            {
+              "docs": "One stored record. `body` is opaque to the host (JSON, CBOR, or a Spore\nschema); `schema` names the body contract.\n\nLocal `upsert` ignores `revision` and `origin` and assigns both. Remote\n`apply` uses them for last-writer-wins:\n  higher `revision` wins; equal revision is broken by lexicographic\n  `origin`; a `deleted` entry is a tombstone.",
+              "fields": [
+                {
+                  "name": "key",
+                  "type": "key"
+                },
+                {
+                  "name": "schema",
+                  "type": "string"
+                },
+                {
+                  "name": "revision",
+                  "type": "u64"
+                },
+                {
+                  "name": "updated-at-ms",
+                  "type": "u64"
+                },
+                {
+                  "name": "origin",
+                  "type": "string"
+                },
+                {
+                  "name": "deleted",
+                  "type": "bool"
+                },
+                {
+                  "name": "body",
+                  "type": "list<u8>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Entry",
+              "name": "entry"
+            },
+            {
+              "cases": [
+                "denied",
+                "not-found",
+                "over-budget",
+                "invalid",
+                "stale",
+                "io",
+                "unsupported"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": "A record address. `collection` is a Spore-defined namespace\n(`email.message`, `chat.message`, `contact`); `id` is stable within it.",
+              "fields": [
+                {
+                  "name": "collection",
+                  "type": "string"
+                },
+                {
+                  "name": "id",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Key",
+              "name": "key"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "entries",
+                  "type": "list<entry>"
+                },
+                {
+                  "name": "next",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Page",
+              "name": "page"
+            },
+            {
+              "docs": "The exact revision/origin tuple returned by a local write.",
+              "fields": [
+                {
+                  "name": "revision",
+                  "type": "u64"
+                },
+                {
+                  "name": "origin",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Version",
+              "name": "version"
+            }
+          ]
+        }
+      ],
+      "name": "records",
+      "namespace": "soil",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Host-composed global search across granted local sources.\n\nThis is a derived discovery surface, not authority. Files still come from\n`soil:vfs`, records from `soil:records`, and actions from their owning host\ncapability. A hit is a locator plus display metadata; the caller fetches the\nauthoritative object through the source capability.",
+      "id": "soil:search@0.5.0",
+      "interfaces": [
+        {
+          "docs": "Typed mention resolver for `@` autocomplete.\n\nA candidate is a stable locator, never a copied display name. The caller\ninserts `token` into a document/task/record and persists it as a\n`mentions` graph link. The host resolves labels and visibility from the\nsame approved books used by search.",
+          "functions": [
+            {
+              "docs": "Resolve a prefix into typed candidates. Empty `kinds` means all supported\nkinds. `limit` is host-bounded.",
+              "kind": "freestanding",
+              "lua": "suggest",
+              "member": "suggest",
+              "name": "suggest",
+              "params": [
+                {
+                  "name": "text",
+                  "type": "string"
+                },
+                {
+                  "name": "kinds",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<list<candidate>, error>"
+            }
+          ],
+          "id": "soil:search@0.5.0/mentions",
+          "name": "mentions",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "kind",
+                  "type": "string"
+                },
+                {
+                  "name": "token",
+                  "type": "string"
+                },
+                {
+                  "name": "label",
+                  "type": "string"
+                },
+                {
+                  "name": "subtitle",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "schema",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "format",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "score",
+                  "type": "u32"
+                },
+                {
+                  "name": "visibility",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Candidate",
+              "name": "candidate"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Error",
+              "name": "error",
+              "type": "error"
+            }
+          ]
+        },
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "refresh",
+              "member": "refresh",
+              "name": "refresh",
+              "params": [],
+              "resource": null,
+              "result": "result<search-state, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "search",
+              "member": "search",
+              "name": "search",
+              "params": [
+                {
+                  "name": "query",
+                  "type": "query"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "state",
+              "member": "state",
+              "name": "state",
+              "params": [],
+              "resource": null,
+              "result": "result<search-state, error>"
+            }
+          ],
+          "id": "soil:search@0.5.0/search",
+          "name": "search",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "not-ready",
+                "over-budget",
+                "invalid",
+                "stale",
+                "io",
+                "unsupported"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "kind",
+                  "type": "kind"
+                },
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "title",
+                  "type": "string"
+                },
+                {
+                  "name": "subtitle",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "snippet",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "score",
+                  "type": "u32"
+                },
+                {
+                  "name": "source",
+                  "type": "string"
+                },
+                {
+                  "name": "updated-at-ms",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "references",
+                  "type": "list<reference>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Hit",
+              "name": "hit"
+            },
+            {
+              "cases": [
+                "file",
+                "record-entry",
+                "repository",
+                "spore",
+                "peer",
+                "service",
+                "action",
+                "task",
+                "principal"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Kind",
+              "name": "kind"
+            },
+            {
+              "cases": [
+                "substring",
+                "fuzzy",
+                "full-text",
+                "semantic",
+                "regex"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Mode",
+              "name": "mode"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "hits",
+                  "type": "list<hit>"
+                },
+                {
+                  "name": "next",
+                  "type": "option<u64>"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "Page",
+              "name": "page"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "text",
+                  "type": "string"
+                },
+                {
+                  "name": "kinds",
+                  "type": "list<kind>"
+                },
+                {
+                  "name": "mode",
+                  "type": "option<mode>"
+                },
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Query",
+              "name": "query"
+            },
+            {
+              "docs": "A typed graph reference attached to a hit. This is discovery metadata,\nnot an access grant or a fetched object.",
+              "fields": [
+                {
+                  "name": "kind",
+                  "type": "string"
+                },
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "rel",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "title",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Reference",
+              "name": "reference"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "ready",
+                  "type": "bool"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                },
+                {
+                  "name": "sources",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "SearchState",
+              "name": "search-state"
+            }
+          ]
+        }
+      ],
+      "name": "search",
+      "namespace": "soil",
+      "version": "0.5.0"
+    },
+    {
+      "docs": "Host content-addressed asset cache.\n\nA Spore names a CID, never a path, directory, URL or handle. `read` is\ngranted by `soil:storage.read` (the default) and `write` by the separate\n`soil:storage.write` grant. Writes reach a bounded host cache, never the\nasset store or the Spore Store.",
+      "id": "soil:storage@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Read the bytes named by a CIDv1 content address.\n\n`max-bytes` bounds the response: an object larger than the limit is\n`over-budget`, never a partial payload. `max-bytes == 0` is `invalid`.",
+              "kind": "freestanding",
+              "lua": "read",
+              "member": "read",
+              "name": "read",
+              "params": [
+                {
+                  "name": "cid",
+                  "type": "string"
+                },
+                {
+                  "name": "max-bytes",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<list<u8>, error>"
+            },
+            {
+              "docs": "Commit bytes to the bounded host cache under a CIDv1 address.\n\nRequires `soil:storage.write`; without it the call is `denied`. The host\nmay refuse an oversized or over-capacity write with `over-budget`. This\nnever mutates the published asset store.",
+              "kind": "freestanding",
+              "lua": "write",
+              "member": "write",
+              "name": "write",
+              "params": [
+                {
+                  "name": "cid",
+                  "type": "string"
+                },
+                {
+                  "name": "data",
+                  "type": "list<u8>"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            }
+          ],
+          "id": "soil:storage@1.0.0/storage",
+          "name": "storage",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "not-found",
+                "over-budget",
+                "invalid",
+                "io"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            }
+          ]
+        }
+      ],
+      "name": "storage",
+      "namespace": "soil",
+      "version": "1.0.0"
+    },
+    {
+      "docs": "Host-owned imported surfaces.\n\nA surface is a native view, remote stream, decoded video, browser view, or\nanother Spore's render target. The host owns the pixels/texture and composes\nthem into Canvas. A Spore receives an opaque handle, metadata, damage, and\nnormalized input only.",
+      "id": "soil:surface-import@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "close",
+              "member": "close",
+              "name": "[method]surface.close",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<surface>"
+                }
+              ],
+              "resource": "surface",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "info",
+              "member": "info",
+              "name": "[method]surface.info",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<surface>"
+                }
+              ],
+              "resource": "surface",
+              "result": "result<info, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "input",
+              "member": "input",
+              "name": "[method]surface.input",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<surface>"
+                },
+                {
+                  "name": "event",
+                  "type": "input"
+                }
+              ],
+              "resource": "surface",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "next",
+              "member": "next",
+              "name": "[method]surface.next",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<surface>"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": "surface",
+              "result": "result<option<event>, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "open",
+              "member": "open",
+              "name": "open",
+              "params": [
+                {
+                  "name": "source-id",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<own<surface>, error>"
+            }
+          ],
+          "id": "soil:surface-import@0.1.0/surface",
+          "name": "surface",
+          "types": [
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Button",
+              "name": "button",
+              "type": "button"
+            },
+            {
+              "cases": [
+                "denied",
+                "unknown-source",
+                "not-ready",
+                "unsupported",
+                "over-budget",
+                "invalid",
+                "closed",
+                "backend"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "cases": [
+                {
+                  "name": "resized",
+                  "type": "info"
+                },
+                {
+                  "name": "frame",
+                  "type": "frame"
+                },
+                {
+                  "name": "damaged",
+                  "type": "list<rect>"
+                },
+                {
+                  "name": "idle",
+                  "type": null
+                },
+                {
+                  "name": "closed",
+                  "type": null
+                }
+              ],
+              "docs": null,
+              "kind": "variant",
+              "lua": "Event",
+              "name": "event"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "u64"
+                },
+                {
+                  "name": "pts-ms",
+                  "type": "u64"
+                },
+                {
+                  "name": "damage",
+                  "type": "list<rect>"
+                },
+                {
+                  "name": "keyframe",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "Frame",
+              "name": "frame"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "kind",
+                  "type": "kind"
+                },
+                {
+                  "name": "width",
+                  "type": "u32"
+                },
+                {
+                  "name": "height",
+                  "type": "u32"
+                },
+                {
+                  "name": "scale",
+                  "type": "f32"
+                },
+                {
+                  "name": "color-space",
+                  "type": "string"
+                },
+                {
+                  "name": "alpha",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Info",
+              "name": "info"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Input",
+              "name": "input",
+              "type": "input"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "KeyEvent",
+              "name": "key-event",
+              "type": "key-event"
+            },
+            {
+              "cases": [
+                "native",
+                "remote",
+                "media",
+                "spore",
+                "retained"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Kind",
+              "name": "kind"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Modifiers",
+              "name": "modifiers",
+              "type": "modifiers"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Point",
+              "name": "point",
+              "type": "point"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "PointerButton",
+              "name": "pointer-button",
+              "type": "pointer-button"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "x",
+                  "type": "u32"
+                },
+                {
+                  "name": "y",
+                  "type": "u32"
+                },
+                {
+                  "name": "width",
+                  "type": "u32"
+                },
+                {
+                  "name": "height",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Rect",
+              "name": "rect"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Scroll",
+              "name": "scroll",
+              "type": "scroll"
+            },
+            {
+              "docs": "Host-owned surface. The host may present, encode, or composite it; the\nSpore never receives a texture or native window handle.",
+              "kind": "resource",
+              "lua": "Surface",
+              "name": "surface"
+            }
+          ]
+        }
+      ],
+      "name": "surface-import",
+      "namespace": "soil",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Host-rendered terminal surface.\n\nThe Spore owns VT parsing (for example with libghostty-vt) and submits a\nbounded cell grid. The host owns fonts, shaping, pixels, accessibility and\nthe input lifecycle. The host never receives raw escape sequences.\n\nHandles are component-instance-scoped. A later revision can replace them\nwith WIT resources.",
+      "id": "soil:terminal@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "close",
+              "member": "close",
+              "name": "close",
+              "params": [
+                {
+                  "name": "view",
+                  "type": "u64"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, failure>"
+            },
+            {
+              "docs": "Wait for one normalized key or paste. `none` means the timeout elapsed.",
+              "kind": "freestanding",
+              "lua": "next_input",
+              "member": "next-input",
+              "name": "next-input",
+              "params": [
+                {
+                  "name": "view",
+                  "type": "u64"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<option<input>, failure>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "observe",
+              "member": "observe",
+              "name": "observe",
+              "params": [
+                {
+                  "name": "view",
+                  "type": "u64"
+                }
+              ],
+              "resource": null,
+              "result": "result<state, failure>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "open",
+              "member": "open",
+              "name": "open",
+              "params": [
+                {
+                  "name": "cols",
+                  "type": "u32"
+                },
+                {
+                  "name": "rows",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<u64, failure>"
+            },
+            {
+              "docs": "Submit a complete frame. Full-frame for v0; damage regions are additive.",
+              "kind": "freestanding",
+              "lua": "present",
+              "member": "present",
+              "name": "present",
+              "params": [
+                {
+                  "name": "view",
+                  "type": "u64"
+                },
+                {
+                  "name": "frame",
+                  "type": "frame"
+                }
+              ],
+              "resource": null,
+              "result": "result<state, failure>"
+            }
+          ],
+          "id": "soil:terminal@0.1.0/surface",
+          "name": "surface",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "text",
+                  "type": "string"
+                },
+                {
+                  "name": "width",
+                  "type": "u8"
+                },
+                {
+                  "name": "style",
+                  "type": "style"
+                }
+              ],
+              "kind": "record",
+              "lua": "Cell",
+              "name": "cell"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "row",
+                  "type": "u32"
+                },
+                {
+                  "name": "column",
+                  "type": "u32"
+                },
+                {
+                  "name": "visible",
+                  "type": "bool"
+                },
+                {
+                  "name": "shape",
+                  "type": "cursor-shape"
+                }
+              ],
+              "kind": "record",
+              "lua": "Cursor",
+              "name": "cursor"
+            },
+            {
+              "cases": [
+                "block",
+                "bar",
+                "underline"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "CursorShape",
+              "name": "cursor-shape"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "key",
+                  "type": "key"
+                },
+                {
+                  "name": "modifiers",
+                  "type": "modifiers"
+                }
+              ],
+              "kind": "record",
+              "lua": "Event",
+              "name": "event"
+            },
+            {
+              "cases": [
+                "denied",
+                "not-ready",
+                "stale",
+                "over-budget",
+                "invalid",
+                "closed",
+                "backend"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Failure",
+              "name": "failure"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "cols",
+                  "type": "u32"
+                },
+                {
+                  "name": "rows",
+                  "type": "u32"
+                },
+                {
+                  "name": "cells",
+                  "type": "list<cell>"
+                },
+                {
+                  "name": "cursor",
+                  "type": "cursor"
+                },
+                {
+                  "name": "title",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "Frame",
+              "name": "frame"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "event",
+                  "type": "event"
+                },
+                {
+                  "name": "paste",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Input",
+              "name": "input"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Key",
+              "name": "key",
+              "type": "key"
+            },
+            {
+              "docs": null,
+              "kind": "type",
+              "lua": "Modifiers",
+              "name": "modifiers",
+              "type": "modifiers"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "generation",
+                  "type": "u64"
+                },
+                {
+                  "name": "cols",
+                  "type": "u32"
+                },
+                {
+                  "name": "rows",
+                  "type": "u32"
+                },
+                {
+                  "name": "focused",
+                  "type": "bool"
+                },
+                {
+                  "name": "visible",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "State",
+              "name": "state"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "fg",
+                  "type": "u32"
+                },
+                {
+                  "name": "bg",
+                  "type": "u32"
+                },
+                {
+                  "name": "bold",
+                  "type": "bool"
+                },
+                {
+                  "name": "italic",
+                  "type": "bool"
+                },
+                {
+                  "name": "underline",
+                  "type": "bool"
+                },
+                {
+                  "name": "reverse",
+                  "type": "bool"
+                },
+                {
+                  "name": "dim",
+                  "type": "bool"
+                },
+                {
+                  "name": "strikethrough",
+                  "type": "bool"
+                }
+              ],
+              "kind": "record",
+              "lua": "Style",
+              "name": "style"
+            }
+          ]
+        }
+      ],
+      "name": "terminal",
+      "namespace": "soil",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Host monotonic clock.\n\nRequires the `soil:time` grant. There is no wall clock, timezone, sleep,\ntimer thread or per-frame callback: a Spore reads elapsed time and waits on\na bounded tick. The host may return a tick earlier than requested, so callers\nmust re-check their own deadline.",
+      "id": "soil:time@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Monotonic milliseconds from an unspecified host epoch.\n\nOnly useful for measuring elapsed time. Values are not comparable across\nprocesses, host restarts or devices.",
+              "kind": "freestanding",
+              "lua": "monotonic_ms",
+              "member": "monotonic-ms",
+              "name": "monotonic-ms",
+              "params": [],
+              "resource": null,
+              "result": "result<u64, error>"
+            },
+            {
+              "docs": "Wait up to `timeout-ms` for the next host tick and return its monotonic\nmillisecond value. `0` polls without blocking; `none` means the deadline\nelapsed. A returned tick may precede the requested deadline.",
+              "kind": "freestanding",
+              "lua": "tick",
+              "member": "tick",
+              "name": "tick",
+              "params": [
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<option<u64>, error>"
+            }
+          ],
+          "id": "soil:time@1.0.0/time",
+          "name": "time",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "not-ready"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            }
+          ]
+        }
+      ],
+      "name": "time",
+      "namespace": "soil",
+      "version": "1.0.0"
+    },
+    {
+      "docs": "Bounded, explicitly granted VFS mutation.\n\nThis is a separate grant from read-only `soil:vfs`. Paths remain canonical\nworkspace-relative paths; the Spore never receives a host path, descriptor,\nprovider locator, or raw CID.",
+      "id": "soil:vfs-mut@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "mkdir",
+              "member": "mkdir",
+              "name": "mkdir",
+              "params": [
+                {
+                  "name": "path",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": "Unlink a namespace entry. Content and history are retained.",
+              "kind": "freestanding",
+              "lua": "remove",
+              "member": "remove",
+              "name": "remove",
+              "params": [
+                {
+                  "name": "path",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": "Rename a file. Directory renames are not part of this slice.",
+              "kind": "freestanding",
+              "lua": "rename",
+              "member": "rename",
+              "name": "rename",
+              "params": [
+                {
+                  "name": "source",
+                  "type": "string"
+                },
+                {
+                  "name": "target",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<write-result, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "rmdir",
+              "member": "rmdir",
+              "name": "rmdir",
+              "params": [
+                {
+                  "name": "path",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<_, error>"
+            },
+            {
+              "docs": "Create or replace one file. `expected-version` is the optimistic\nconcurrency check; `none` means create/replace unconditionally.",
+              "kind": "freestanding",
+              "lua": "write",
+              "member": "write",
+              "name": "write",
+              "params": [
+                {
+                  "name": "path",
+                  "type": "string"
+                },
+                {
+                  "name": "data",
+                  "type": "list<u8>"
+                },
+                {
+                  "name": "media-type",
+                  "type": "string"
+                },
+                {
+                  "name": "expected-version",
+                  "type": "option<u64>"
+                }
+              ],
+              "resource": null,
+              "result": "result<write-result, error>"
+            }
+          ],
+          "id": "soil:vfs-mut@0.1.0/vfs-mut",
+          "name": "vfs-mut",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "not-found",
+                "already-exists",
+                "not-directory",
+                "not-empty",
+                "conflict",
+                "over-budget",
+                "invalid",
+                "io",
+                "stale"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "path",
+                  "type": "string"
+                },
+                {
+                  "name": "version",
+                  "type": "u64"
+                },
+                {
+                  "name": "content-id",
+                  "type": "string"
+                },
+                {
+                  "name": "size",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "WriteResult",
+              "name": "write-result"
+            }
+          ]
+        }
+      ],
+      "name": "vfs-mut",
+      "namespace": "soil",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Read-only VFS namespace.\n\nThe Spore names a workspace-relative path, never a host filesystem path,\ndirectory handle, descriptor, URL or CID supplied as authority. The host\ncanonicalizes the path, enforces the workspace boundary, and applies a\nbounded page/range budget. Listing is deterministic by path; sort/search is\n`soil:index`'s job.\n\n`read` returns bytes for an already-present object or hydrates a placeholder\nthrough the host's granted content transport. The Spore never chooses the\nprovider, endpoint, token or lease. A range larger than the host budget is\n`over-budget`, never silently truncated.",
+      "id": "soil:vfs@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "List direct children of `parent` in path order.\n`parent` empty means the workspace root. `limit` is host-bounded.",
+              "kind": "freestanding",
+              "lua": "ls",
+              "member": "ls",
+              "name": "ls",
+              "params": [
+                {
+                  "name": "parent",
+                  "type": "string"
+                },
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            },
+            {
+              "docs": "Read a bounded byte range. `length == 0` is `invalid`.\nThe host hydrates a placeholder if its transport grant allows it.",
+              "kind": "freestanding",
+              "lua": "read",
+              "member": "read",
+              "name": "read",
+              "params": [
+                {
+                  "name": "path",
+                  "type": "string"
+                },
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "length",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<chunk, error>"
+            },
+            {
+              "docs": "Fetch one namespace entry without reading its bytes.",
+              "kind": "freestanding",
+              "lua": "stat",
+              "member": "stat",
+              "name": "stat",
+              "params": [
+                {
+                  "name": "path",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<entry, error>"
+            }
+          ],
+          "id": "soil:vfs@1.0.0/vfs",
+          "name": "vfs",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "offset",
+                  "type": "u64"
+                },
+                {
+                  "name": "data",
+                  "type": "list<u8>"
+                },
+                {
+                  "name": "eof",
+                  "type": "bool"
+                },
+                {
+                  "name": "content-id",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Chunk",
+              "name": "chunk"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "path",
+                  "type": "string"
+                },
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "kind",
+                  "type": "kind"
+                },
+                {
+                  "name": "size",
+                  "type": "u64"
+                },
+                {
+                  "name": "content-id",
+                  "type": "string"
+                },
+                {
+                  "name": "media-type",
+                  "type": "string"
+                },
+                {
+                  "name": "version",
+                  "type": "u64"
+                },
+                {
+                  "name": "hydration",
+                  "type": "hydration"
+                },
+                {
+                  "name": "pinned",
+                  "type": "bool"
+                },
+                {
+                  "name": "updated-at-ms",
+                  "type": "u64"
+                },
+                {
+                  "name": "child-count",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "Entry",
+              "name": "entry"
+            },
+            {
+              "cases": [
+                "denied",
+                "not-found",
+                "not-directory",
+                "is-directory",
+                "not-hydrated",
+                "over-budget",
+                "invalid",
+                "io",
+                "stale"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "cases": [
+                "present",
+                "placeholder"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Hydration",
+              "name": "hydration"
+            },
+            {
+              "cases": [
+                "file",
+                "directory"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Kind",
+              "name": "kind"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "entries",
+                  "type": "list<entry>"
+                },
+                {
+                  "name": "next",
+                  "type": "option<u64>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Page",
+              "name": "page"
+            }
+          ]
+        }
+      ],
+      "name": "vfs",
+      "namespace": "soil",
+      "version": "1.0.0"
+    },
+    {
+      "docs": "Host-owned web/Spore/retained view.\n\nThe target is an id in the host's reviewed index, never an arbitrary URL,\npath or CID supplied by wasm. The host owns the browser/Spore engine, pixels\nand capture buffer; the Spore owns presentation state and normalized actions.",
+      "id": "soil:view@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "act",
+              "member": "act",
+              "name": "[method]view.act",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<view>"
+                },
+                {
+                  "name": "action",
+                  "type": "action"
+                }
+              ],
+              "resource": "view",
+              "result": "result<state, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "capture",
+              "member": "capture",
+              "name": "[method]view.capture",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<view>"
+                },
+                {
+                  "name": "max-bytes",
+                  "type": "u32"
+                }
+              ],
+              "resource": "view",
+              "result": "result<list<u8>, error>"
+            },
+            {
+              "docs": "PNG",
+              "kind": "method",
+              "lua": "close",
+              "member": "close",
+              "name": "[method]view.close",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<view>"
+                }
+              ],
+              "resource": "view",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "observe",
+              "member": "observe",
+              "name": "[method]view.observe",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<view>"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": "view",
+              "result": "result<state, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "open",
+              "member": "open",
+              "name": "open",
+              "params": [
+                {
+                  "name": "target",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<own<view>, error>"
+            }
+          ],
+          "id": "soil:view@1.0.0/viewer",
+          "name": "viewer",
+          "types": [
+            {
+              "cases": [
+                "next",
+                "previous",
+                "first",
+                "last",
+                "select",
+                "back",
+                "fullscreen-on",
+                "fullscreen-off",
+                "fullscreen-toggle"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Action",
+              "name": "action"
+            },
+            {
+              "cases": [
+                "denied",
+                "unknown-target",
+                "not-ready",
+                "unsupported",
+                "over-budget",
+                "capture-denied",
+                "invalid",
+                "closed"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "cases": [
+                "web",
+                "spore",
+                "retained"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Kind",
+              "name": "kind"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "target",
+                  "type": "target"
+                },
+                {
+                  "name": "position",
+                  "type": "u64"
+                },
+                {
+                  "name": "count",
+                  "type": "u64"
+                },
+                {
+                  "name": "loading",
+                  "type": "bool"
+                },
+                {
+                  "name": "fullscreen",
+                  "type": "bool"
+                },
+                {
+                  "name": "generation",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "State",
+              "name": "state"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "kind",
+                  "type": "kind"
+                },
+                {
+                  "name": "title",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Target",
+              "name": "target"
+            },
+            {
+              "docs": null,
+              "kind": "resource",
+              "lua": "View",
+              "name": "view"
+            }
+          ]
+        }
+      ],
+      "name": "view",
+      "namespace": "soil",
+      "version": "1.0.0"
+    },
+    {
+      "docs": "Draft `wasi:audio` proposal, maintained in Soil while no upstream package\nexists. This is a bounded PCM sink, not the WebAudio graph API.",
+      "id": "wasi:audio@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "close",
+              "member": "close",
+              "name": "[method]output.close",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<output>"
+                }
+              ],
+              "resource": "output",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": "Wait until the host queue is empty or the bounded timeout expires.",
+              "kind": "method",
+              "lua": "drain",
+              "member": "drain",
+              "name": "[method]output.drain",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<output>"
+                },
+                {
+                  "name": "timeout-ms",
+                  "type": "u32"
+                }
+              ],
+              "resource": "output",
+              "result": "result<_, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "format",
+              "member": "format",
+              "name": "[method]output.format",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<output>"
+                }
+              ],
+              "resource": "output",
+              "result": "result<format, error>"
+            },
+            {
+              "docs": null,
+              "kind": "method",
+              "lua": "status",
+              "member": "status",
+              "name": "[method]output.status",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<output>"
+                }
+              ],
+              "resource": "output",
+              "result": "result<status, error>"
+            },
+            {
+              "docs": "Push interleaved f32 frames. Returns the number of complete frames\naccepted; zero means backpressure, not failure.",
+              "kind": "method",
+              "lua": "write",
+              "member": "write",
+              "name": "[method]output.write",
+              "params": [
+                {
+                  "name": "self",
+                  "type": "borrow<output>"
+                },
+                {
+                  "name": "frames",
+                  "type": "list<f32>"
+                }
+              ],
+              "resource": "output",
+              "result": "result<u32, error>"
+            },
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "open",
+              "member": "open",
+              "name": "open",
+              "params": [
+                {
+                  "name": "format",
+                  "type": "format"
+                }
+              ],
+              "resource": null,
+              "result": "result<own<output>, error>"
+            }
+          ],
+          "id": "wasi:audio@0.1.0/playback",
+          "name": "playback",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "not-ready",
+                "over-budget",
+                "invalid",
+                "underrun",
+                "closed",
+                "unsupported",
+                "backend"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "sample-rate",
+                  "type": "u32"
+                },
+                {
+                  "name": "channels",
+                  "type": "u8"
+                }
+              ],
+              "kind": "record",
+              "lua": "Format",
+              "name": "format"
+            },
+            {
+              "docs": null,
+              "kind": "resource",
+              "lua": "Output",
+              "name": "output"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "format",
+                  "type": "format"
+                },
+                {
+                  "name": "queued-frames",
+                  "type": "u32"
+                },
+                {
+                  "name": "underruns",
+                  "type": "u64"
+                },
+                {
+                  "name": "latency-ms",
+                  "type": "u32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Status",
+              "name": "status"
+            }
+          ]
+        }
+      ],
+      "name": "audio",
+      "namespace": "wasi",
+      "version": "0.1.0"
+    }
+  ],
+  "schema": 1
+}
