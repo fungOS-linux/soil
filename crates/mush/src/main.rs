@@ -16,6 +16,7 @@ mod origin;
 mod outcome;
 mod overlay;
 mod project;
+mod projects;
 mod service;
 mod shell;
 mod worktree;
@@ -432,6 +433,10 @@ fn run() -> Result<()> {
     if args.first().map(String::as_str) == Some("origin") {
         args.remove(0);
         return origin::run(args);
+    }
+    if args.first().map(String::as_str) == Some("projects") {
+        args.remove(0);
+        return projects::run(&config, args);
     }
     let explicit_root = args.iter().any(|arg| arg == "--root");
     let mut desktop_id = take_option(&mut args, "--desktop")

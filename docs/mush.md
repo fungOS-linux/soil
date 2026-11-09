@@ -608,3 +608,39 @@ only is accepted, so `./cargo` cannot smuggle in code from the overlay itself.
 Pipelines and redirection are handed to the Spore, which owns that parsing; a
 simple command whose program is allowlisted goes to the host. Screenshots of the
 gap: `scripts/mush-agent-parity.sh`.
+
+## What is in a Desktop
+
+An agent should ask the Desktop what it contains rather than being handed a
+hand-written list in every session.
+
+```sh
+mush projects                 # this directory's Desktop
+mush projects --desktop acme
+mush projects --json
+```
+
+```text
+project                  source    branch         state   remote
+missing-repo             missing   -              -       
+plain-dir                found     -              -       
+repo-a                   declared  master         dirty   [marbles]
+```
+
+`source` is the difference between the declared list and what is on disk:
+
+| source | meaning |
+|---|---|
+| `declared` | named in the Desktop config and present |
+| `missing` | named in the config, nothing on the projection |
+| `found` | on the projection, not named in the config |
+
+Branch, dirtiness, and remote come from the host `git` in the projection, so
+this describes what you can actually work on. A project without `.git` reports
+`-` rather than a guess, which is how the current NFS projection behaves: its
+projects are directories, not checkouts.
+
+`[marbles]` marks a project carrying a `.marbles` or `.marbles-local` directory.
+
+Not in this slice yet: joining `mush worktree` records per project, and
+resolving the marbles project id through `mb` rather than a marker directory.
