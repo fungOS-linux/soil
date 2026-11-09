@@ -269,8 +269,92 @@ Limits of this slice:
 - The mutating subcommands are host-side Mush operations; they do not run inside
   the Spore and do not require the shell component.
 
+## Host commands
+
+`mush run host` materializes the VFS into a temporary overlay, runs one
+allowlisted host command there, and applies the resulting source changes back
+to the VFS. Build outputs (`target/`, `node_modules/`, `dist/`, …) are ignored
+in both directions, so a build never writes artifacts into the VFS.
+
+```sh
+mush run host -- cargo build --release
+mush run host --cwd crates/app -- cargo test
+mush run host --no-apply -- cargo fmt --check
+```
+
+The environment starts empty and is rebuilt from a small allowlist (`PATH`,
+`HOME`, `TMPDIR`, the Rust and sccache variables, `BOB_AGENT_KEY`). Add more
+with `--allow-env NAME`. The command must be a bare name on the allowlist
+(`cargo`, `rustc`, `cc`, `clang`, `clang++`, `c++`, `git`, `make`, `cmake`,
+`ninja`, `pkg-config`); shells and paths such as `./cargo` are rejected.
+
+Exit status is preserved. `--no-apply` discards the overlay instead of writing
+changes back, and `--keep` prints the overlay path for inspection.
+
+This is a policy boundary, not a sandbox: an allowed program runs as the user
+and can read their home. It exists so a host toolchain can operate on the VFS
+view without handing the agent's secrets to it.
+
 ## Host boundary
 
 `mush` opens the VFS root, links the three grants, and calls the Spore one line
 at a time. The Spore returns output, prompt, and exit state. The current host is
 line-oriented; `soil:terminal` cell-grid rendering remains the next frontend.
+
+## Shell integration
+
+`mush sh` is the POSIX-ish entry point, and the binary also answers the two ways
+a login shell is invoked.
+
+```sh
+mush sh -c "cargo check && git status"   # one command line
+mush sh                                  # read lines from stdin
+mush -c "pwd"                            # no `sh` needed
+mush -lc "pwd"                           # a terminal's login+command form
+```
+
+The command line splits on `;`, `&&` and `||`. VFS commands (`cd`, `ls`, `cat`,
+`grep`, `mkdir`, `rm`, `mv`, `cp`, `export`, …) run inside the Spore; allowlisted
+host programs (`cargo`, `rustc`, `cc`, `git`, `make`, …) run through the overlay
+bridge. Anything else is refused with exit 127. Shell state (`pwd` and exported
+variables) is persisted per session under `<vfs-root>/.fungos/sessions/<key>.json`,
+because a terminal spawns a fresh process for every command.
+
+### Login shells
+
+A login shell is invoked as `-mush` (argv[0] with a leading dash) or with `-l`.
+Nothing sources `/etc/profile` or `~/.profile` for it, so mush builds its own
+environment: `PATH` becomes the user toolchain first (`~/.cargo/bin`,
+`/opt/homebrew/bin`, `/usr/local/bin`) followed by the system directories and
+whatever `PATH` it inherited, deduplicated and filtered to directories that
+exist. `MUSH_LOGIN=1` is set. That PATH is what the host bridge inherits, which
+is why `mush -lc "cargo build"` finds a toolchain.
+
+The Spore's own `PATH` stays `/commands:mb`: it resolves VFS commands, not host
+programs, and conflating the two would make a host binary shadow a VFS command.
+
+### Scripts and shebangs
+
+```sh
+#!/usr/local/bin/mush
+cd projects/demo
+pwd
+```
+
+`mush path/to/script.mush` runs the file line by line through the same engine.
+The `#!` line is stripped on the host — the Spore has no comment marker to skip
+it with. Scripts are host files (the kernel resolved the path); the Spore's
+`source` reads the VFS instead, so use it for VFS content.
+
+### `/bin/mush`
+
+On macOS `/bin` is on the sealed system volume: even root cannot create
+`/bin/mush` (`Operation not permitted`). Install the binary at
+`/usr/local/bin/mush` and, if `chsh` should accept it, add that path to
+`/etc/shells` (a root edit). `sshd` uses the passwd shell directly and does not
+consult `/etc/shells`; `chsh` does.
+
+A login shell of `mush` is a shell over the VFS, not over the host filesystem:
+it has no `~/.zshrc`, no host `$EDITOR`, and no host process spawn outside the
+bridge. That is the point, but it means it is the right login shell for an agent
+session, not for a human's everyday terminal.
