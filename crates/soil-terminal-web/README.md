@@ -77,6 +77,24 @@ and `~/.config/fungos/desktops/*.toml` when a `mush` binary resolves
 (`SOIL_MUSH_BIN`, `target/debug/mush`, or `mush` on `PATH`). `acme`, `desk`, and
 `personal` above are the desktops already on this machine.
 
+## Fleet
+
+When `mycelium` is available, the catalog also lists the peers from
+`mycelium peers --json` — the fleet this host can reach — and opens them with
+`ssh -tt <address>`. That is the bastion view: the browser connects to this
+host, and this host connects onward over Mycelium. The mesh address is used
+when a peer has one, so a session does not depend on the bastion's LAN.
+
+- A peer already named in `~/.ssh/config` stays on that curated alias.
+- Duplicate observations collapse to the freshest one.
+- `last_seen` is in the detail line, so a stale peer is visibly stale.
+- `[mycelium] enabled = false` in the targets file turns discovery off.
+
+SSO is deliberately not this server's job: the public `term.myc.fpl.dev` name
+should be gated by the gateway (`fpl-auth`) before the request reaches the
+loopback listener, and the listener keeps `--token` for anything that is not
+loopback.
+
 ## Mush
 
 A Mush target runs the host's embedded Spore. Two things are per desktop:

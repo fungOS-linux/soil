@@ -194,7 +194,7 @@ function applyFrame(frame) {
 
 function renderTargets() {
   targetsEl.replaceChildren();
-  const groups = [['shell', 'shells'], ['ssh', 'hosts'], ['mush', 'desktops']];
+  const groups = [['shell', 'shells'], ['ssh', 'hosts'], ['fleet', 'fleet'], ['mush', 'desktops']];
   for (const [kind, heading] of groups) {
     const items = targets.filter((target) => target.kind === kind);
     if (!items.length) continue;

@@ -3,11 +3,15 @@
 //! A target is a name, a label, and the argv to put on a pty. The catalog comes
 //! from `~/.config/fungos/terminal/targets.toml` when that file exists;
 //! otherwise it is discovered from the machine: the login shells that exist,
-//! the `Host` aliases in `~/.ssh/config`, and the desktops in
+//! the `Host` aliases in `~/.ssh/config`, the peers `mycelium peers --json`
+//! reports (the fleet this host can reach), and the desktops in
 //! `~/.config/fungos/desktops/` (when a Mush binary is available).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -16,6 +20,8 @@ use serde::Deserialize;
 pub enum Kind {
     Shell,
     Ssh,
+    /// A peer discovered through Mycelium, opened over ssh.
+    Fleet,
     Mush,
 }
 
@@ -24,6 +30,7 @@ impl Kind {
         match self {
             Kind::Shell => "shell",
             Kind::Ssh => "ssh",
+            Kind::Fleet => "fleet",
             Kind::Mush => "mush",
         }
     }
@@ -72,12 +79,27 @@ fn config_path() -> PathBuf {
 fn from_file(path: &Path) -> Result<Vec<Target>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read targets {}", path.display()))?;
-    let mut targets = parse(&text).with_context(|| format!("parse targets {}", path.display()))?;
+    let (mut targets, fleet) =
+        parse_config(&text).with_context(|| format!("parse targets {}", path.display()))?;
     if targets.is_empty() {
         anyhow::bail!("{} defines no [[target]] entries", path.display());
     }
+    if fleet {
+        append_fleet(&mut targets);
+    }
     targets.shrink_to_fit();
     Ok(targets)
+}
+
+/// The fleet is dynamic, so it is appended even when a config file pins the
+/// rest of the catalog; `[mycelium] enabled = false` turns it off.
+fn append_fleet(targets: &mut Vec<Target>) {
+    let seen: BTreeSet<String> = targets.iter().map(|target| target.name.clone()).collect();
+    for target in fleet_targets(&seen) {
+        if !targets.iter().any(|existing| existing.name == target.name) {
+            targets.push(target);
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -85,7 +107,25 @@ struct Config {
     #[serde(default)]
     mush: MushConfig,
     #[serde(default)]
+    mycelium: MyceliumConfig,
+    #[serde(default)]
     target: Vec<Entry>,
+}
+
+#[derive(Deserialize)]
+struct MyceliumConfig {
+    #[serde(default = "enabled")]
+    enabled: bool,
+}
+
+impl Default for MyceliumConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+fn enabled() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -136,6 +176,10 @@ struct Entry {
 }
 
 pub fn parse(text: &str) -> Result<Vec<Target>> {
+    Ok(parse_config(text)?.0)
+}
+
+fn parse_config(text: &str) -> Result<(Vec<Target>, bool)> {
     let config: Config = toml::from_str(text)?;
     let mut targets = Vec::with_capacity(config.target.len());
     let mut seen = BTreeSet::new();
@@ -146,7 +190,7 @@ pub fn parse(text: &str) -> Result<Vec<Target>> {
         }
         targets.push(target);
     }
-    Ok(targets)
+    Ok((targets, config.mycelium.enabled))
 }
 
 impl Entry {
@@ -173,6 +217,12 @@ impl Entry {
                 command.push(host.clone());
                 let detail = self.detail.unwrap_or_else(|| format!("ssh {host}"));
                 (command, detail)
+            }
+            Kind::Fleet => {
+                anyhow::bail!(
+                    "target {:?}: fleet targets come from `mycelium peers`, not the config",
+                    self.name
+                );
             }
             Kind::Mush => {
                 let desktop = self.desktop;
@@ -262,6 +312,12 @@ fn discover() -> Result<Vec<Target>> {
                 command: vec!["ssh".into(), "-tt".into(), alias],
             });
         }
+        for target in fleet_targets(&seen) {
+            if !seen.insert(target.name.clone()) {
+                continue;
+            }
+            targets.push(target);
+        }
         for target in desktop_targets(&home) {
             if !seen.insert(target.name.clone()) {
                 continue;
@@ -295,6 +351,168 @@ fn ssh_hosts(path: &Path) -> Vec<String> {
         }
     }
     hosts
+}
+
+#[derive(Deserialize)]
+struct Peer {
+    #[serde(default)]
+    hello: Option<PeerHello>,
+    #[serde(default)]
+    hardware: Option<PeerHardware>,
+    #[serde(default)]
+    last_seen: u64,
+    #[serde(default)]
+    observed_endpoints: Vec<PeerEndpoint>,
+}
+
+#[derive(Deserialize)]
+struct PeerHello {
+    #[serde(default)]
+    hostname: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PeerHardware {
+    #[serde(default)]
+    hostname: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PeerEndpoint {
+    address: String,
+}
+
+/// The fleet the host can reach: every Mycelium peer with a hostname and an
+/// address, freshest first. A peer already named in `~/.ssh/config` is left to
+/// that curated alias.
+fn fleet_targets(seen: &BTreeSet<String>) -> Vec<Target> {
+    let Some(json) = mycelium_peers() else {
+        return Vec::new();
+    };
+    peers_to_targets(&json, now_unix(), seen)
+}
+
+fn peers_to_targets(json: &str, now: u64, seen: &BTreeSet<String>) -> Vec<Target> {
+    let Ok(peers) = serde_json::from_str::<Vec<Peer>>(json) else {
+        return Vec::new();
+    };
+    let mut best: BTreeMap<String, (u64, String, String)> = BTreeMap::new();
+    for peer in peers {
+        let host = peer
+            .hello
+            .and_then(|hello| hello.hostname)
+            .or_else(|| peer.hardware.and_then(|hardware| hardware.hostname));
+        let Some(host) = host.filter(|host| !host.is_empty()) else {
+            continue;
+        };
+        let Some(address) = pick_address(&peer.observed_endpoints) else {
+            continue;
+        };
+        if seen.iter().any(|name| name.eq_ignore_ascii_case(&host)) {
+            continue;
+        }
+        let key = host.to_ascii_lowercase();
+        match best.get_mut(&key) {
+            Some(entry) if peer.last_seen <= entry.0 => {}
+            Some(entry) => *entry = (peer.last_seen, host, address),
+            None => {
+                best.insert(key, (peer.last_seen, host, address));
+            }
+        }
+    }
+    let mut entries: Vec<_> = best.into_values().collect();
+    entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    entries
+        .into_iter()
+        .map(|(last_seen, host, address)| Target {
+            name: format!("fleet:{host}"),
+            label: host,
+            kind: Kind::Fleet,
+            detail: format!("mycelium · {address} · {}", age(now, last_seen)),
+            command: vec!["ssh".into(), "-tt".into(), address],
+        })
+        .collect()
+}
+
+/// A mesh address beats a LAN address: it works from wherever the bastion is.
+fn pick_address(endpoints: &[PeerEndpoint]) -> Option<String> {
+    endpoints
+        .iter()
+        .map(|endpoint| endpoint.address.trim())
+        .find(|address| address.starts_with("100."))
+        .or_else(|| {
+            endpoints
+                .iter()
+                .map(|endpoint| endpoint.address.trim())
+                .find(|address| !address.is_empty())
+        })
+        .map(str::to_owned)
+}
+
+fn age(now: u64, last_seen: u64) -> String {
+    let secs = now.saturating_sub(last_seen);
+    match secs {
+        0..=119 => "now".into(),
+        120..=3599 => format!("{}m ago", secs / 60),
+        3600..=86_399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// `mycelium peers --json`, bounded: a wedged daemon must not hold up the
+/// listener. The child is killed at the deadline and the reader is joined so no
+/// thread is left behind.
+fn mycelium_peers() -> Option<String> {
+    let binary = std::env::var_os("MYCELIUM_BIN")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let local = home()?.join(".mycelium/bin/mycelium");
+            local.is_file().then_some(local)
+        })
+        .unwrap_or_else(|| PathBuf::from("mycelium"));
+    let mut child = Command::new(binary)
+        .arg("peers")
+        .arg("--json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) => {
+                let _ = reader.join();
+                return None;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = reader.join();
+                return None;
+            }
+        }
+    }
+    reader.join().ok()
 }
 
 #[derive(Deserialize)]
@@ -483,6 +701,41 @@ mod tests {
     fn ssh_needs_a_host_and_mush_needs_a_root() {
         assert!(parse("[[target]]\nname = \"a\"\nkind = \"ssh\"\n").is_err());
         assert!(parse("[[target]]\nname = \"a\"\nkind = \"mush\"\n").is_err());
+    }
+
+    #[test]
+    fn fleet_peers_are_deduped_and_prefer_the_mesh_address() {
+        let json = r#"[
+          {"hello":{"hostname":"neo"},"last_seen":100,
+           "observed_endpoints":[{"address":"192.168.1.5"}]},
+          {"hello":{"hostname":"neo"},"last_seen":200,
+           "observed_endpoints":[{"address":"192.168.1.5"},{"address":"100.64.0.5"}]},
+          {"hardware":{"hostname":"batty"},"last_seen":50,
+           "observed_endpoints":[{"address":"100.64.0.6"}]},
+          {"hello":{},"last_seen":1,"observed_endpoints":[]}
+        ]"#;
+        let targets = peers_to_targets(json, 300, &BTreeSet::new());
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].label, "neo");
+        assert_eq!(targets[0].kind, Kind::Fleet);
+        assert_eq!(targets[0].command, ["ssh", "-tt", "100.64.0.5"]);
+        assert!(targets[0].detail.contains("now"), "{}", targets[0].detail);
+        assert_eq!(targets[1].label, "batty");
+        assert!(
+            targets[1].detail.contains("4m ago"),
+            "{}",
+            targets[1].detail
+        );
+    }
+
+    #[test]
+    fn a_curated_ssh_alias_wins_over_a_fleet_peer() {
+        let json = r#"[
+          {"hello":{"hostname":"neo"},"last_seen":200,
+           "observed_endpoints":[{"address":"100.64.0.5"}]}
+        ]"#;
+        let seen = BTreeSet::from(["neo".to_string()]);
+        assert!(peers_to_targets(json, 300, &seen).is_empty());
     }
 
     #[test]
