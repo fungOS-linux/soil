@@ -19,7 +19,7 @@ use fungos_records::Store;
 use serde_json::{Value, json};
 use soil_search_host::api::Host as _;
 use soil_search_host::mention_api::Host as _;
-use soil_search_host::{SearchService, api, applications};
+use soil_search_host::{LauncherConfig, SearchService, api, applications};
 use soil_vfs_host::VfsHost;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8790";
@@ -77,6 +77,7 @@ struct Args {
     applications_snapshot: Option<PathBuf>,
     no_applications: bool,
     mru: Option<PathBuf>,
+    config: Option<PathBuf>,
     marbles_snapshot: Option<PathBuf>,
     marbles_store: Option<String>,
     marbles_company: Option<String>,
@@ -118,6 +119,9 @@ fn main() -> Result<()> {
     }
     if let Some(path) = &args.mru {
         service = service.with_mru(path);
+    }
+    if let Some(path) = &args.config {
+        service = service.with_launcher_config(path);
     }
     if let Some(path) = &args.marbles_snapshot {
         service = service.with_marbles(soil_marbles::MarblesIndex::from_snapshot(
@@ -185,6 +189,9 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
         Some((path, query)) => (path, query),
         None => (target.as_str(), ""),
     };
+    if path == "/api/config" && method == "POST" {
+        return write_config(&mut stream, app, &body);
+    }
     if path == "/api/use" {
         if method != "POST" {
             return respond(
@@ -223,6 +230,42 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
             INDEX_HTML.as_bytes(),
         ),
         "/health" => respond(&mut stream, "200 OK", "text/plain; charset=utf-8", b"ok\n"),
+        "/api/tiles" => {
+            let limit = query_param(query, "limit")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(24)
+                .clamp(1, 128);
+            let (hits, config) = {
+                let service = app.service.lock().expect("search service poisoned");
+                let hits = service.tiles(limit);
+                let config = service.launcher_config().clone();
+                (hits, config)
+            };
+            respond_json(
+                &mut stream,
+                "200 OK",
+                &json!({
+                    "tiles": hits_json(app, hits, &config),
+                    "profile": config.profile,
+                    "sources": app.sources,
+                }),
+            )
+        }
+        "/api/config" => {
+            let config = {
+                let service = app.service.lock().expect("search service poisoned");
+                service.launcher_config().clone()
+            };
+            respond_json(
+                &mut stream,
+                "200 OK",
+                &json!({
+                    "profile": config.profile,
+                    "pins": config.pins,
+                    "hidden_kinds": config.hidden_kinds,
+                }),
+            )
+        }
         "/api/search" => {
             let text = query_param(query, "q").unwrap_or_default();
             let limit = query_param(query, "limit")
@@ -230,23 +273,26 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
                 .unwrap_or(MAX_PAGE)
                 .clamp(1, MAX_PAGE);
             if text.trim().is_empty() {
-                // The launcher's first frame: usage memory, no scan and no source.
-                let (hits, generation) = {
+                // At rest the launcher is a wall, not a list: pins first, then
+                // what this device opens, answered without a scan.
+                let (hits, config, generation) = {
                     let mut service = app.service.lock().expect("search service poisoned");
-                    let hits = service.recent(limit);
+                    let hits = service.tiles(limit);
+                    let config = service.launcher_config().clone();
                     let generation = service.state().map(|state| state.generation).unwrap_or(0);
-                    (hits, generation)
+                    (hits, config, generation)
                 };
                 return respond_json(
                     &mut stream,
                     "200 OK",
                     &json!({
                         "query": "",
-                        "hits": hits.into_iter().map(|hit| hit_json(app, hit)).collect::<Vec<_>>(),
+                        "hits": hits_json(app, hits, &config),
                         "next": null,
-                        "recent": true,
+                        "rest": true,
                         "generation": generation,
                         "sources": app.sources,
+                        "profile": config.profile,
                     }),
                 );
             }
@@ -257,20 +303,22 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
                 .unwrap_or(0);
             let result = {
                 let mut service = app.service.lock().expect("search service poisoned");
-                service.search(api::Query {
+                let page = service.search(api::Query {
                     text,
                     kinds,
                     mode,
                     offset,
                     limit,
-                })
+                });
+                let config = service.launcher_config().clone();
+                page.map(|page| (page, config))
             };
             match result {
-                Ok(page) => respond_json(
+                Ok((page, config)) => respond_json(
                     &mut stream,
                     "200 OK",
                     &json!({
-                        "hits": page.hits.into_iter().map(|hit| hit_json(app, hit)).collect::<Vec<_>>(),
+                        "hits": hits_json(app, page.hits, &config),
                         "next": page.next,
                         "generation": page.generation,
                         "sources": app.sources,
@@ -350,9 +398,66 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
     }
 }
 
-fn hit_json(app: &App, hit: api::Hit) -> Value {
+/// Render hits with the two things only the host knows: whether a row is pinned
+/// and, for a Spore, which surfaces it would open. Called after the service lock
+/// is released; it takes its own for the surface lookup.
+fn hits_json(app: &App, hits: Vec<api::Hit>, config: &LauncherConfig) -> Vec<Value> {
+    let surfaces: HashMap<String, Vec<String>> = {
+        let service = app.service.lock().expect("search service poisoned");
+        hits.iter()
+            .filter(|hit| hit.kind == api::Kind::Spore)
+            .filter_map(|hit| {
+                service
+                    .spore_surfaces(&hit.id)
+                    .map(|list| (hit.id.clone(), list))
+            })
+            .collect()
+    };
+    hits.into_iter()
+        .map(|hit| {
+            let pinned = config.pinned_rank(&hit.id).is_some();
+            let surfaces = surfaces.get(&hit.id).map(Vec::as_slice);
+            hit_json(app, hit, pinned, surfaces)
+        })
+        .collect()
+}
+
+fn write_config(stream: &mut TcpStream, app: &App, body: &[u8]) -> Result<()> {
+    let Ok(config) = serde_json::from_slice::<LauncherConfig>(body) else {
+        return respond_json(
+            stream,
+            "400 Bad Request",
+            &json!({"error": "config needs profile, pins and hidden_kinds"}),
+        );
+    };
+    let result = {
+        let mut service = app.service.lock().expect("search service poisoned");
+        service.set_launcher_config(config)
+    };
+    match result {
+        Ok(config) => respond_json(
+            stream,
+            "200 OK",
+            &json!({
+                "ok": true,
+                "profile": config.profile,
+                "pins": config.pins,
+                "hidden_kinds": config.hidden_kinds,
+            }),
+        ),
+        Err(error) => respond_json(
+            stream,
+            "500 Internal Server Error",
+            &json!({"error": error.to_string()}),
+        ),
+    }
+}
+
+fn hit_json(app: &App, hit: api::Hit, pinned: bool, surfaces: Option<&[String]>) -> Value {
     let art = app.art(&hit);
     json!({
+        "pinned": pinned,
+        "surfaces": surfaces,
         "kind": kind_name(hit.kind),
         "id": hit.id,
         "title": hit.title,
@@ -822,6 +927,11 @@ fn parse_args() -> Result<Option<Args>> {
                 ));
             }
             "--no-applications" => args.no_applications = true,
+            "--config" => {
+                args.config = Some(PathBuf::from(
+                    iter.next().context("--config needs a value")?,
+                ));
+            }
             "--marbles-snapshot" => {
                 args.marbles_snapshot = Some(PathBuf::from(
                     iter.next().context("--marbles-snapshot needs a value")?,
@@ -848,7 +958,8 @@ fn parse_args() -> Result<Option<Args>> {
                 println!(
                     "soil-search-web [--listen ADDR] [--vfs-root DIR] [--records-root DIR] [--book BOOK]...\n\
                      \t[--git-root DIR]... [--spore-root DIR]... [--mycelium-snapshot DIR]\n\
-                     \t[--applications-snapshot FILE] [--no-applications] [--mru FILE]\n\
+                     \t[--applications-snapshot FILE] [--no-applications]\n\
+                     \t[--mru FILE] [--config FILE]\n\
                      default: http://{DEFAULT_LISTEN}/"
                 );
                 return Ok(None);
