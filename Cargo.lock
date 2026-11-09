@@ -2395,6 +2395,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fungos-records"
+version = "0.1.0"
+source = "git+https://github.com/fungOS-linux/records.git?rev=eb25c69f906eee645b5507f09017a776b1f39377#eb25c69f906eee645b5507f09017a776b1f39377"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "clap",
+ "feed-rs",
+ "ical_vcard",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "unibus 0.1.0 (git+https://github.com/fungOS-linux/unibus.git?rev=8bf8f79)",
+ "ureq",
+ "uuid",
+]
+
+[[package]]
 name = "fungos-vfs"
 version = "0.1.0"
 source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=bcd2bc682662467d1371a2c9f8436e08934132d9#bcd2bc682662467d1371a2c9f8436e08934132d9"
@@ -6506,6 +6526,18 @@ dependencies = [
  "anyhow",
  "jni 0.21.1",
  "soil-runtime",
+]
+
+[[package]]
+name = "soil-appdata-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=eb25c69f906eee645b5507f09017a776b1f39377)",
+ "serde_json",
+ "tempfile",
+ "wasmtime",
 ]
 
 [[package]]
