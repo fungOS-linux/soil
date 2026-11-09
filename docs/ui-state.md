@@ -209,10 +209,13 @@ library under the same name.
 9. **Pointer → node.** `soil:canvas.input` is generation-bound and semantic, but
 nothing maps a pointer hit back to a node id in a scene document. Canvas has
 `interaction.rs`, gfx has `HitTarget`; the document has no field for it.
-10. **`soil-scene` text has no size.** A view sets a size per text run; the
-    document carries `{ text, ink, rgb, opacity }` and the host chooses the
-    size. A bar that mixes clock text with pill labels cannot say so, so
-    `soil-lua` drops the size at the boundary until the node grows one.
+10. **Text size is a ratio, and only the renderer knows the base.** A text node
+    carries its size as `transform.scale`; the renderer multiplies that by its
+    own body size and font. That works — it is how a 13px label stays 13px on a
+    host whose body is 16 — but it means a document is only pixel-accurate
+    against a host whose body size and face match the one it was authored
+    against. The fix is a documented body size and one bundled face, not a new
+    field: `soil-scene` already carries everything it needs.
 
 ## 8. Building, testing and opening a Spore consistently
 
