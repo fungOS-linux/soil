@@ -300,7 +300,8 @@ function render() {
     <h3>Contacts</h3><div class="grid">${(account.contacts || []).map(c => `<div class="card"><b>${esc(c.name || c.first_name)}</b><span class="muted">${esc(c.email || c.contact_token || '')}</span></div>`).join('') || '<p class="muted">None</p>'}</div>
     <h3>Projects</h3>${(account.projects || []).map(p => `<div class="row"><b>${esc(p.name)}</b> <span class="pill">${esc(p.status)}</span> <span class="pill">${esc(p.company_role || 'owner')}</span><div class="muted">${esc(p.kind || '')} · due ${esc(p.due_at || '—')}</div><div>${esc(p.summary)}</div></div>`).join('') || '<p class="muted">None</p>'}
     <h3>Opportunities</h3>${(account.opportunities || []).map(o => `<div class="row"><b>${esc(o.name)}</b> <span class="pill">${esc(o.stage)}</span><div class="muted">$${Number(o.amount || 0).toLocaleString()} · close ${esc(o.close_date || '—')}</div></div>`).join('') || '<p class="muted">None</p>'}
-    <h3>Activity</h3>${(account.activities || []).map(a => `<div class="row"><b>${esc(a.name)}</b> <span class="pill">${esc(a.kind)}</span><div class="muted">${esc(a.occurred_at)} · ${esc(a.contact_token || '')}${a.project_id ? ' · ' + esc(a.project_id) : ''}</div><div>${esc(a.description)}</div></div>`).join('') || '<p class="muted">None</p>'}`;
+    <h3>Activity</h3>${(account.activities || []).map(a => `<div class="row"><b>${esc(a.name)}</b> <span class="pill">${esc(a.kind)}</span><div class="muted">${esc(a.occurred_at)} · ${esc(a.contact_token || '')}${a.project_id ? ' · ' + esc(a.project_id) : ''}</div><div>${esc(a.description)}</div></div>`).join('') || '<p class="muted">None</p>'}
+    <h3>Timeline</h3><p class="muted">Open the CRM Spore for the unified timeline.</p>`;
 }
 function setView(view) { load(view); }
 load('team');

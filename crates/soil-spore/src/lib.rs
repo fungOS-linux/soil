@@ -76,7 +76,10 @@ pub struct Manifest {
     pub schema: u32,
     pub spore: SporeMeta,
     pub engine: Engine,
-    pub module: Module,
+    /// Absent for a Spore with no semantics of its own -- chrome, for instance:
+    /// a dock is a composition, not a program.
+    #[serde(default)]
+    pub module: Option<Module>,
     pub ui: Ui,
     pub launch: Launch,
     #[serde(default)]
@@ -90,6 +93,12 @@ pub struct Manifest {
     /// Spore id and signed digest; this flag is not a grant.
     #[serde(default)]
     pub system: Option<System>,
+    /// Chrome regions this Spore draws, when it draws any.
+    #[serde(default)]
+    pub chrome: Option<Chrome>,
+    /// Launcher identity: a mark and the colour it is drawn in.
+    #[serde(default)]
+    pub presentation: Option<Presentation>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +106,46 @@ pub struct Manifest {
 pub struct System {
     pub role: String,
 }
+
+/// A Spore that draws a slice of the shell instead of, or as well as, a window.
+///
+/// Chrome is a region, not a window: the host owns the extent, the input routing
+/// and the fallback. A chrome Spore that fails to render must never leave a hole
+/// in the desktop, so every region it claims has a built-in implementation that
+/// takes over.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Chrome {
+    /// `top-bar`, `dock`, `control-center`.
+    pub regions: Vec<String>,
+    /// Composed Lua for each region, already single-file: the host does not
+    /// compose at runtime, because composition is a build step that produces an
+    /// artifact the lock can cover.
+    pub sources: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Presentation {
+    /// One or two characters. A monogram needs no asset and cannot go missing.
+    pub badge: String,
+    /// `#rrggbb`, the app's own colour rather than a theme role.
+    pub color: String,
+}
+
+/// Regions a Spore may claim. An unlisted name is a typo or a claim the host
+/// cannot honour, and both are better refused at install than discovered later.
+pub const CHROME_REGIONS: [&str; 7] = [
+    "top-bar",
+    "dock",
+    "launcher",
+    "switcher",
+    "control-center",
+    // Transient surfaces: the shell's own voice. Kept as regions rather than
+    // windows so the host still owns where they appear and when they dismiss.
+    "notifications",
+    "attention",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -203,9 +252,21 @@ impl Manifest {
             )));
         }
 
-        safe_relative(&self.module.path)?;
-        if !self.module.path.ends_with(".wasm") {
-            return Err(Error::Invalid("module.path must end in .wasm".into()));
+        match &self.module {
+            Some(module) => {
+                safe_relative(&module.path)?;
+                if !module.path.ends_with(".wasm") {
+                    return Err(Error::Invalid("module.path must end in .wasm".into()));
+                }
+            }
+            // A Spore with no module must still do something: chrome draws a
+            // region, and nothing else is worth installing without semantics.
+            None if self.chrome.is_none() => {
+                return Err(Error::Invalid(
+                    "a Spore needs a module unless it draws chrome".into(),
+                ));
+            }
+            None => {}
         }
         safe_relative(&self.ui.entry)?;
         if !self.ui.entry.ends_with(".lua") {
@@ -243,6 +304,43 @@ impl Manifest {
                 )));
             }
         }
+        if let Some(chrome) = &self.chrome {
+            if chrome.regions.is_empty() || chrome.sources.is_empty() {
+                return Err(Error::Invalid(
+                    "chrome needs at least one region, and sources to match".into(),
+                ));
+            }
+            for region in &chrome.regions {
+                if !CHROME_REGIONS.contains(&region.as_str()) {
+                    return Err(Error::Invalid(format!(
+                        "chrome region {region:?} is not one of {CHROME_REGIONS:?}"
+                    )));
+                }
+                let Some(source) = chrome.sources.get(region) else {
+                    return Err(Error::Invalid(format!(
+                        "chrome region {region:?} has no source"
+                    )));
+                };
+                safe_relative(source)?;
+                if !source.ends_with(".lua") {
+                    return Err(Error::Invalid(format!(
+                        "chrome source {source:?} must be a .lua artifact"
+                    )));
+                }
+            }
+        }
+        if let Some(presentation) = &self.presentation {
+            let glyphs = presentation.badge.chars().count();
+            if !(1..=2).contains(&glyphs) {
+                return Err(Error::Invalid(
+                    "presentation.badge must be one or two characters".into(),
+                ));
+            }
+            let hex = presentation.color.trim_start_matches('#');
+            if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(Error::Invalid("presentation.color must be #rrggbb".into()));
+            }
+        }
         for (name, asset) in &self.assets {
             if !identifier(name) {
                 return Err(Error::Invalid(format!("asset name {name:?}")));
@@ -257,7 +355,13 @@ impl Manifest {
 
     /// Every file the manifest declares explicitly.
     pub fn declared_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.module.path.clone(), self.ui.entry.clone()];
+        let mut paths = vec![self.ui.entry.clone()];
+        if let Some(module) = &self.module {
+            paths.push(module.path.clone());
+        }
+        if let Some(chrome) = &self.chrome {
+            paths.extend(chrome.sources.values().cloned());
+        }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
         paths
             .into_iter()
@@ -740,4 +844,51 @@ pub fn hex(bytes: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use super::*;
+
+    fn manifest(extra: &str) -> String {
+        format!(
+            "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n[ui]\nentry = \"ui/main.lua\"\n[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
+        )
+    }
+
+    #[test]
+    fn a_chrome_spore_must_source_every_region_it_claims() {
+        let ok = Manifest::parse(&manifest(
+            "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"ui/dock.lua\"\n[presentation]\nbadge = \"D\"\ncolor = \"#8bd5ca\"\n",
+        ))
+        .expect("a sourced region parses");
+        assert_eq!(ok.chrome.as_ref().unwrap().regions, vec!["dock"]);
+        assert_eq!(ok.presentation.as_ref().unwrap().badge, "D");
+
+        let missing = Manifest::parse(&manifest("[chrome]\nregions = [\"dock\"]\n"));
+        assert!(
+            missing.is_err(),
+            "a region with no source is a hole in the shell"
+        );
+
+        let unknown = Manifest::parse(&manifest(
+            "[chrome]\nregions = [\"statusbar\"]\n[chrome.sources]\nstatusbar = \"ui/x.lua\"\n",
+        ));
+        assert!(unknown.is_err(), "the host only has the regions it knows");
+
+        let bad_color = Manifest::parse(&manifest(
+            "[presentation]\nbadge = \"D\"\ncolor = \"teal\"\n",
+        ));
+        assert!(bad_color.is_err(), "a colour is #rrggbb or it is nothing");
+    }
+
+    #[test]
+    fn declared_paths_cover_chrome_sources() {
+        let manifest = Manifest::parse(&manifest(
+            "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"ui/dock.lua\"\n",
+        ))
+        .expect("manifest");
+        let paths = manifest.declared_paths();
+        assert!(paths.contains(&PathBuf::from("ui/dock.lua")));
+    }
 }

@@ -5,19 +5,26 @@
 //! bounded page. It does not grant access: the host supplies the roots and
 //! approved books.
 
+pub mod applications;
 mod discovery;
 mod git;
 pub mod graph;
+mod launcher;
+mod mru;
+mod store;
 mod tgrep;
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use discovery::{PeerIndex, ServiceIndex, SporeIndex};
+use discovery::{
+    ApplicationEntry, ApplicationIndex, PeerIndex, ServiceIndex, SporeEntry, SporeIndex,
+};
 use fungos_records::{Record, Store};
 use git::GitIndex;
 use graph::GraphIndex;
+use mru::{MruCache, hit_from_usage, now_ms, usage_from_hit};
 use soil_marbles::MarblesIndex;
 use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
 use tgrep::TgrepSource;
@@ -25,10 +32,45 @@ use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit/search.wit", world: "search-host" });
 
+pub use launcher::{LauncherConfig, Profile};
+pub use mru::{Usage, recency};
 pub use soil::search::mentions as mention_api;
 use soil::search::search as search_api;
 
 pub use soil::search::search as api;
+
+/// The wire name of a kind. One table, because the HTTP surface, the usage cache
+/// and anything else that names a kind would drift apart in a second one.
+pub fn kind_name(kind: api::Kind) -> &'static str {
+    match kind {
+        api::Kind::File => "file",
+        api::Kind::RecordEntry => "record-entry",
+        api::Kind::Repository => "repository",
+        api::Kind::Spore => "spore",
+        api::Kind::Peer => "peer",
+        api::Kind::Service => "service",
+        api::Kind::Application => "application",
+        api::Kind::Action => "action",
+        api::Kind::Task => "task",
+        api::Kind::Principal => "principal",
+    }
+}
+
+pub fn kind_from_name(name: &str) -> Option<api::Kind> {
+    Some(match name.trim() {
+        "file" => api::Kind::File,
+        "record-entry" => api::Kind::RecordEntry,
+        "repository" => api::Kind::Repository,
+        "spore" => api::Kind::Spore,
+        "peer" => api::Kind::Peer,
+        "service" => api::Kind::Service,
+        "application" => api::Kind::Application,
+        "action" => api::Kind::Action,
+        "task" => api::Kind::Task,
+        "principal" => api::Kind::Principal,
+        _ => return None,
+    })
+}
 
 const MAX_PAGE: u32 = 512;
 const MAX_MENTIONS: u32 = 64;
@@ -52,8 +94,12 @@ pub struct SearchService {
     spores: Option<SporeIndex>,
     peers: Option<PeerIndex>,
     services: Option<ServiceIndex>,
+    applications: Option<ApplicationIndex>,
     marbles: Option<MarblesIndex>,
     principals: Vec<PrincipalCandidate>,
+    mru: MruCache,
+    launcher: LauncherConfig,
+    launcher_path: Option<std::path::PathBuf>,
     generation: u64,
 }
 
@@ -74,8 +120,12 @@ impl SearchService {
             spores: None,
             peers: None,
             services: None,
+            applications: None,
             marbles: None,
             principals: Vec::new(),
+            mru: MruCache::in_memory(),
+            launcher: LauncherConfig::default(),
+            launcher_path: None,
             generation: 1,
         }
     }
@@ -134,6 +184,17 @@ impl SearchService {
         self
     }
 
+    /// Use an inventory the host discovered from this machine's bundles. The
+    /// dynamically scanned counterpart of `with_applications_snapshot`.
+    pub fn with_installed_applications(
+        mut self,
+        apps: &[crate::applications::InstalledApp],
+    ) -> Self {
+        self.applications = Some(ApplicationIndex::from_installed(apps));
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
     /// Load an explicit `mycelium peers --json` snapshot. The host chooses the
     /// file; search never talks to the daemon or opens a network connection.
     pub fn with_mycelium_peers(mut self, path: impl Into<std::path::PathBuf>) -> Self {
@@ -164,6 +225,18 @@ impl SearchService {
         self
     }
 
+    /// Add the host-local installed-application inventory.
+    ///
+    /// This is the one discovery source that is never synced: the inventory is
+    /// rebuilt from the bundle index, differs per machine, and is worth nothing
+    /// to another host. A Spore cannot add a path or an application; the host
+    /// supplies the snapshot.
+    pub fn with_applications_snapshot(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.applications = Some(ApplicationIndex::load(path.into()));
+        self.generation = self.generation.saturating_add(1);
+        self
+    }
+
     /// Add a host-granted Marbles snapshot. The host decides store, company,
     /// project scope and freshness; search never runs `mb` itself.
     pub fn with_marbles(mut self, index: MarblesIndex) -> Self {
@@ -179,6 +252,165 @@ impl SearchService {
         self
     }
 
+    /// Remember usage at `path`. Without this the cache is memory-only, which is
+    /// the right default for a short-lived host and for a test.
+    pub fn with_mru(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.mru = MruCache::open(path);
+        self
+    }
+
+    /// The page a launcher shows before anyone types: the host's own usage
+    /// memory, answered from the cache without touching a source or the index.
+    pub fn recent(&self, limit: u32) -> Vec<api::Hit> {
+        let limit = limit.clamp(1, MAX_PAGE) as usize;
+        self.mru
+            .recent(limit)
+            .iter()
+            .enumerate()
+            .map(|(rank, usage)| hit_from_usage(usage, rank))
+            .collect()
+    }
+
+    /// Record that a person picked a row. The host calls this where it performs
+    /// the launch, so usage counts launches rather than renders.
+    pub fn record_use(&mut self, hit: &api::Hit) -> anyhow::Result<()> {
+        self.mru.record(usage_from_hit(hit, now_ms()))
+    }
+
+    /// Remember launcher preferences at `path`.
+    pub fn with_launcher_config(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        let path = path.into();
+        self.launcher = LauncherConfig::load(&path);
+        self.launcher_path = Some(path);
+        self
+    }
+
+    pub fn launcher_config(&self) -> &LauncherConfig {
+        &self.launcher
+    }
+
+    /// Replace the launcher's preferences, clamped to what the host honours and
+    /// persisted where they were loaded from.
+    pub fn set_launcher_config(
+        &mut self,
+        config: LauncherConfig,
+    ) -> anyhow::Result<LauncherConfig> {
+        let config = config.normalized();
+        if let Some(path) = &self.launcher_path {
+            config.save(path)?;
+        }
+        self.launcher = config.clone();
+        Ok(config)
+    }
+
+    /// The surfaces a Spore declares, so a tile can say what it would open. Views
+    /// are Spore surfaces, not a kind of their own.
+    pub fn spore_surfaces(&self, id: &str) -> Option<Vec<String>> {
+        self.spores
+            .as_ref()?
+            .get(id)
+            .map(|entry| entry.surfaces.clone())
+    }
+
+    /// The wall a launcher shows at rest: pins in the order a person arranged
+    /// them, then what this device actually opens, then — on a first run — what
+    /// the sources know. Hidden kinds never appear and no id appears twice.
+    pub fn tiles(&self, limit: u32) -> Vec<api::Hit> {
+        let limit = limit.clamp(1, MAX_PAGE) as usize;
+        let mut tiles: Vec<api::Hit> = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        for pin in &self.launcher.pins {
+            let Some(hit) = self.hit_by_id(pin) else {
+                continue;
+            };
+            if self.launcher.hides(kind_name(hit.kind)) || !seen.insert(hit.id.clone()) {
+                continue;
+            }
+            tiles.push(hit);
+        }
+        let mut learned = 0;
+        for usage in self.mru.recent(usize::MAX) {
+            if self.launcher.hides(&usage.kind) || !seen.insert(usage.id.clone()) {
+                continue;
+            }
+            tiles.push(hit_from_usage(usage, tiles.len()));
+            learned += 1;
+        }
+        // A first run has no history, and a wall holding one pinned tile is not a
+        // launcher: fill from what the sources know until something is learned.
+        if learned == 0 {
+            for hit in self.fallback_tiles() {
+                if self.launcher.hides(kind_name(hit.kind)) || !seen.insert(hit.id.clone()) {
+                    continue;
+                }
+                tiles.push(hit);
+            }
+        }
+        tiles.truncate(limit);
+        tiles
+    }
+
+    /// A pinned id resolved against the sources that keep their entries in
+    /// memory. Files and records are deliberately absent: pinning one means
+    /// pinning the row a search showed, not spending a stat to redraw a tile.
+    fn hit_by_id(&self, id: &str) -> Option<api::Hit> {
+        if let Some(applications) = &self.applications
+            && let Some(entry) = applications.get(id)
+        {
+            return Some(application_hit(entry.clone(), 0));
+        }
+        if let Some(spores) = &self.spores
+            && let Some(entry) = spores.get(id)
+        {
+            return Some(spore_hit(entry.clone(), 0));
+        }
+        None
+    }
+
+    fn fallback_tiles(&self) -> Vec<api::Hit> {
+        let mut tiles = Vec::new();
+        if let Some(applications) = &self.applications {
+            tiles.extend(
+                applications
+                    .entries()
+                    .iter()
+                    .take(12)
+                    .cloned()
+                    .map(|entry| application_hit(entry, 0)),
+            );
+        }
+        if let Some(spores) = &self.spores {
+            tiles.extend(
+                spores
+                    .entries()
+                    .iter()
+                    .take(8)
+                    .cloned()
+                    .map(|entry| spore_hit(entry, 0)),
+            );
+        }
+        tiles
+    }
+
+    /// Sources that describe an installable world are re-read when that world
+    /// moves: a Spore installed while the launcher runs has to appear without a
+    /// restart, and a new directory only moves its parent's mtime.
+    fn reload_stale(&mut self) {
+        let mut moved = false;
+        if let Some(spores) = self.spores.as_mut() {
+            moved |= spores.reload_if_stale();
+        }
+        if let Some(applications) = self.applications.as_mut() {
+            moved |= applications.reload_if_stale();
+        }
+        if moved {
+            // A page's `generation` promises what produced it; a source that
+            // re-read itself is a new generation even without an explicit refresh.
+            self.generation = self.generation.saturating_add(1);
+        }
+    }
+
     fn sources(&self) -> u32 {
         u32::from(self.vfs.is_some())
             + u32::from(self.records.is_some())
@@ -187,6 +419,7 @@ impl SearchService {
             + u32::from(self.spores.is_some())
             + u32::from(self.peers.is_some())
             + u32::from(self.services.is_some())
+            + u32::from(self.applications.is_some())
             + u32::from(self.marbles.is_some())
             + u32::from(!self.principals.is_empty())
     }
@@ -206,6 +439,7 @@ impl SearchService {
         if query.text.trim().is_empty() {
             return Err(search_api::Error::Invalid);
         }
+        self.reload_stale();
         let kinds = if query.kinds.is_empty() {
             vec![
                 search_api::Kind::File,
@@ -214,6 +448,7 @@ impl SearchService {
                 search_api::Kind::Spore,
                 search_api::Kind::Peer,
                 search_api::Kind::Service,
+                search_api::Kind::Application,
                 search_api::Kind::Task,
                 search_api::Kind::Principal,
             ]
@@ -239,6 +474,9 @@ impl SearchService {
         if kinds.contains(&search_api::Kind::Service) {
             hits.extend(self.service_hits(&query));
         }
+        if kinds.contains(&search_api::Kind::Application) {
+            hits.extend(self.application_hits(&query));
+        }
         if kinds.contains(&search_api::Kind::Action) {
             hits.extend(self.action_hits(&query));
         }
@@ -249,6 +487,13 @@ impl SearchService {
             hits.extend(self.principal_hits(&query));
         }
         self.graph.enrich(&mut hits);
+        // Usage tilts rows that are otherwise tied. The Spore still owns match
+        // policy; this only says that a row someone picks every morning should
+        // beat a stranger with the same words in it.
+        let now = now_ms();
+        for hit in &mut hits {
+            hit.score = hit.score.saturating_add(self.mru.boost(&hit.id, now));
+        }
         hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
         let start = usize::try_from(query.offset).unwrap_or(usize::MAX);
         let total = hits.len();
@@ -287,6 +532,7 @@ impl SearchService {
                     source: "tgrep".into(),
                     updated_at_ms: None,
                     references: Vec::new(),
+                    icon: None,
                 })
                 .collect());
         }
@@ -322,6 +568,7 @@ impl SearchService {
                 source: "vfs".into(),
                 updated_at_ms: None,
                 references: Vec::new(),
+                icon: None,
             })
             .collect())
     }
@@ -347,6 +594,7 @@ impl SearchService {
                 source: "git".into(),
                 updated_at_ms: None,
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -358,17 +606,7 @@ impl SearchService {
         spores
             .search(&query.text, MAX_PAGE as usize)
             .into_iter()
-            .map(|(entry, score)| search_api::Hit {
-                kind: search_api::Kind::Spore,
-                id: entry.id,
-                title: entry.name,
-                subtitle: Some(format!("{} · {}", entry.version, entry.target)),
-                snippet: (!entry.summary.is_empty()).then_some(entry.summary),
-                score,
-                source: format!("spore:{}", entry.root),
-                updated_at_ms: None,
-                references: Vec::new(),
-            })
+            .map(|(entry, score)| spore_hit(entry, score))
             .collect()
     }
 
@@ -389,6 +627,7 @@ impl SearchService {
                 source: "mycelium:peers".into(),
                 updated_at_ms: entry.updated_at_ms,
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -410,7 +649,19 @@ impl SearchService {
                 source: "mycelium:services".into(),
                 updated_at_ms: entry.updated_at_ms,
                 references: Vec::new(),
+                icon: None,
             })
+            .collect()
+    }
+
+    fn application_hits(&self, query: &search_api::Query) -> Vec<search_api::Hit> {
+        let Some(applications) = &self.applications else {
+            return Vec::new();
+        };
+        applications
+            .search(&query.text, MAX_PAGE as usize)
+            .into_iter()
+            .map(|(entry, score)| application_hit(entry, score))
             .collect()
     }
 
@@ -430,6 +681,7 @@ impl SearchService {
                 source: "git".into(),
                 updated_at_ms: None,
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -595,6 +847,7 @@ impl SearchService {
                 source: "marbles".into(),
                 updated_at_ms: Some(issue.updated_at.max(0) as u64 * 1000),
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -639,6 +892,7 @@ impl SearchService {
                 source: "principal".into(),
                 updated_at_ms: None,
                 references: Vec::new(),
+                icon: None,
             })
             .collect()
     }
@@ -812,6 +1066,39 @@ fn record_hit(record: Record, needle: &str, index: usize) -> search_api::Hit {
         source: format!("records:{}", record.book_id),
         updated_at_ms: Some(record.updated_hlc),
         references: Vec::new(),
+        icon: None,
+    }
+}
+
+/// One application row, wherever it came from: a query or a pinned id. Two
+/// mappings would drift, and a pinned tile would then look unlike a searched one.
+fn application_hit(entry: ApplicationEntry, score: u32) -> api::Hit {
+    api::Hit {
+        kind: api::Kind::Application,
+        id: entry.id,
+        title: entry.title,
+        subtitle: Some(entry.subtitle),
+        snippet: None,
+        score,
+        source: "host:applications".into(),
+        updated_at_ms: None,
+        references: Vec::new(),
+        icon: entry.icon,
+    }
+}
+
+fn spore_hit(entry: SporeEntry, score: u32) -> api::Hit {
+    api::Hit {
+        kind: api::Kind::Spore,
+        id: entry.id,
+        title: entry.name,
+        subtitle: Some(format!("{} · {}", entry.version, entry.target)),
+        snippet: (!entry.summary.is_empty()).then_some(entry.summary),
+        score,
+        source: format!("spore:{}", entry.root),
+        updated_at_ms: None,
+        references: Vec::new(),
+        icon: None,
     }
 }
 
@@ -852,6 +1139,9 @@ impl search_api::Host for SearchService {
         }
         if let Some(spores) = self.spores.as_mut() {
             spores.refresh();
+        }
+        if let Some(applications) = self.applications.as_mut() {
+            applications.refresh();
         }
         if let Some(peers) = self.peers.as_mut() {
             peers.refresh();
@@ -1083,6 +1373,146 @@ surfaces = ["canvas"]
         assert!(page.hits[0].id.starts_with("dev.fungos."));
     }
 
+    fn install_spore(root: &std::path::Path, package: &str, id: &str, name: &str) {
+        let spore = root.join(package);
+        std::fs::create_dir_all(&spore).unwrap();
+        std::fs::write(
+            spore.join("spore.toml"),
+            format!(
+                r#"schema = 1
+[spore]
+id = "{id}"
+name = "{name}"
+version = "0.1.0"
+license = "MIT"
+summary = "{name} reader with a Canvas UI"
+[engine]
+soil = ">=0.1"
+target = "wasm32-wasip2"
+[module]
+path = "module.wasm"
+[ui]
+entry = "ui/editor.lua"
+[launch]
+default = "canvas"
+surfaces = ["canvas"]
+[grants]
+"soil:canvas" = "present the editor"
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn application_row(id: &str, title: &str) -> search_api::Hit {
+        search_api::Hit {
+            kind: search_api::Kind::Application,
+            id: id.into(),
+            title: title.into(),
+            subtitle: Some("Applications".into()),
+            snippet: None,
+            score: 0,
+            source: "host:applications".into(),
+            updated_at_ms: None,
+            references: Vec::new(),
+            icon: None,
+        }
+    }
+
+    /// The launcher's first frame must not wait on a source: usage memory answers
+    /// with an empty service, and it is on disk for the next summon.
+    #[test]
+    fn recents_answer_before_any_source_is_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/mru.json");
+        let mut host = SearchService::new(None, None, vec![]).with_mru(&path);
+        assert!(host.recent(8).is_empty());
+
+        host.record_use(&application_row("com.apple.Safari", "Safari"))
+            .unwrap();
+        let recent = host.recent(8);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].title, "Safari");
+        assert_eq!(recent[0].kind, search_api::Kind::Application);
+        assert_eq!(host.state().unwrap().sources, 0);
+
+        let reopened = SearchService::new(None, None, vec![]).with_mru(&path);
+        assert_eq!(reopened.recent(8)[0].id, "com.apple.Safari");
+    }
+
+    /// Two applications match equally; the one someone has picked before wins,
+    /// because the host remembers launches and the source does not.
+    #[test]
+    fn a_remembered_row_beats_an_equally_good_stranger() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = dir.path().join("applications.json");
+        std::fs::write(
+            &snapshot,
+            serde_json::json!({"applications": [
+                {"bundle_id": "com.example.astro", "name": "Astro", "subtitle": "Utilities"},
+                {"bundle_id": "com.example.astral", "name": "Astral", "subtitle": "Utilities"},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let mut host = SearchService::new(None, None, vec![]).with_applications_snapshot(&snapshot);
+        let query = || search_api::Query {
+            text: "astr".into(),
+            kinds: vec![search_api::Kind::Application],
+            mode: None,
+            offset: 0,
+            limit: 10,
+        };
+
+        let before = host.search(query()).unwrap();
+        assert_eq!(before.hits.len(), 2);
+        assert_eq!(
+            before.hits[0].id, "com.example.astral",
+            "title breaks the tie"
+        );
+
+        let picked = before
+            .hits
+            .iter()
+            .find(|hit| hit.id == "com.example.astro")
+            .unwrap()
+            .clone();
+        host.record_use(&picked).unwrap();
+
+        let after = host.search(query()).unwrap();
+        assert_eq!(after.hits[0].id, "com.example.astro");
+        assert!(after.hits[0].score > after.hits[1].score);
+    }
+
+    /// Installing a Spore while the launcher runs has to show up without a
+    /// restart: the new directory moves the root's mtime, which is all the
+    /// service stats before paying for a walk.
+    #[test]
+    fn a_spore_installed_while_running_appears_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host =
+            SearchService::new(None, None, vec![]).with_spore_roots(vec![dir.path().to_path_buf()]);
+        let query = || search_api::Query {
+            text: "markdown".into(),
+            kinds: vec![search_api::Kind::Spore],
+            mode: None,
+            offset: 0,
+            limit: 10,
+        };
+        let before = host.search(query()).unwrap();
+        assert!(before.hits.is_empty());
+
+        install_spore(dir.path(), "markdown", "dev.fungos.markdown", "markdown");
+
+        let after = host.search(query()).unwrap();
+        assert_eq!(after.hits.len(), 1);
+        assert_eq!(after.hits[0].id, "dev.fungos.markdown");
+        assert!(
+            after.generation > before.generation,
+            "a reloaded source is a new generation"
+        );
+    }
+
     #[test]
     fn searches_mycelium_peer_and_service_snapshots() {
         let dir = tempfile::tempdir().unwrap();
@@ -1156,6 +1586,74 @@ surfaces = ["canvas"]
         assert_eq!(page.hits.len(), 1);
         assert_eq!(page.hits[0].kind, search_api::Kind::Service);
         assert_eq!(page.hits[0].id, "unibus/viewer");
+    }
+
+    #[test]
+    fn a_host_local_application_inventory_is_found_and_carries_its_icon() {
+        let dir = tempfile::tempdir().unwrap();
+        let applications = dir.path().join("applications.json");
+        std::fs::write(
+            &applications,
+            serde_json::json!({
+                "applications": [
+                    {
+                        "bundle_id": "com.apple.Safari",
+                        "name": "Safari",
+                        "subtitle": "com.apple.Safari",
+                        "icon": "asset:sha256:aa11"
+                    },
+                    { "bundle_id": "com.tinyspeck.slackmacgap", "name": "Slack" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut host =
+            SearchService::new(None, None, vec![]).with_applications_snapshot(&applications);
+
+        let page = host
+            .search(search_api::Query {
+                text: "safari".into(),
+                kinds: vec![search_api::Kind::Application],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].kind, search_api::Kind::Application);
+        // The locator is a bundle id, not a path the Spore could steer.
+        assert_eq!(page.hits[0].id, "com.apple.Safari");
+        assert_eq!(page.hits[0].source, "host:applications");
+        assert_eq!(page.hits[0].icon.as_deref(), Some("asset:sha256:aa11"));
+
+        // An application with no icon is still a row: the renderer falls back to
+        // a monogram, it does not drop the hit.
+        let page = host
+            .search(search_api::Query {
+                text: "slack".into(),
+                kinds: vec![search_api::Kind::Application],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].icon, None);
+
+        // The inventory is host-granted, not ambient: without the snapshot the
+        // kind yields nothing rather than inventing a list.
+        let mut bare = SearchService::new(None, None, vec![]);
+        let page = bare
+            .search(search_api::Query {
+                text: "safari".into(),
+                kinds: vec![search_api::Kind::Application],
+                mode: None,
+                offset: 0,
+                limit: 10,
+            })
+            .unwrap();
+        assert!(page.hits.is_empty());
     }
 
     #[test]

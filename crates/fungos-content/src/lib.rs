@@ -64,6 +64,7 @@ pub enum Locator {
     Local { key: String },
     Ipfs { cid: String },
     Iroh { hash: String },
+    S3 { bucket: String, key: String },
 }
 
 impl Locator {
@@ -72,6 +73,7 @@ impl Locator {
             Self::Local { .. } => "local",
             Self::Ipfs { .. } => "ipfs",
             Self::Iroh { .. } => "iroh",
+            Self::S3 { .. } => "s3",
         }
     }
 }
@@ -428,6 +430,7 @@ fn locator_string(locator: &Locator) -> Option<String> {
     match locator {
         Locator::Ipfs { cid } => Some(cid.clone()),
         Locator::Iroh { hash } => Some(hash.clone()),
+        Locator::S3 { bucket, key } => Some(format!("s3://{bucket}/{key}")),
         Locator::Local { .. } => None,
     }
 }

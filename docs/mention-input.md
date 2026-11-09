@@ -104,3 +104,12 @@ subtitle?
 ```
 
 That keeps it compatible with records, VFS, Marbles and principals.
+
+## Shared selector contract
+
+The same `{ kind, token, label, subtitle? }` candidate contract is used by the
+share target picker (`soil-share-dialog`) and by mention/link insertion. A Spore
+should not invent a second entity/token format for sharing.
+
+For contacts, documents, sheets and slides, the inserted token is the stable
+locator; labels are display only.

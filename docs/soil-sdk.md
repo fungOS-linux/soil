@@ -1,8 +1,8 @@
 # Soil SDK
 
-Status: **first guest features, 2026-11-04.** `soil-sdk` is the umbrella crate
-for guest-side capability helpers. Features are `audio`, `appdata`, and the
-shared `soil-sdk-codec` trait.
+Status: **first guest features, 2026-11-09.** `soil-sdk` is the umbrella crate
+for guest-side capability helpers. Features are `audio`, `appdata`, `canvas`,
+`records`, and the shared `soil-sdk-codec` trait.
 
 Naming: `soil-sdk` is the library. “Fertilizer” can be the separate scaffold /
 project generator later; it should not be the import name.
@@ -10,7 +10,7 @@ project generator later; it should not be the import name.
 ## Shape
 
 ```toml
-soil-sdk = { path = "...", features = ["audio", "appdata"] }
+soil-sdk = { path = "...", features = ["audio", "appdata", "canvas"] }
 ```
 
 ```rust
@@ -33,8 +33,10 @@ soil-sdk
   │    └─ wasi:audio/playback
   ├─ soil-sdk-codec
   │    └─ serde JSON adapter
-  └─ soil-sdk-appdata
-       └─ soil:appdata/store
+  ├─ soil-sdk-appdata
+  │    └─ soil:appdata/store
+  └─ soil-sdk-canvas
+       └─ soil:canvas/surface + soil:scene/payload
 ```
 
 That keeps the component’s imports equal to the features the Spore actually
@@ -70,13 +72,62 @@ settings.save(&value)?;
 ```
 
 - `local::Json<T>` is device-only.
-- `synced::Json<T>` is per-app, per-user, replicated and encrypted by the host.
+- `synced::Json<T>` is per-app, per-user, and replicated by the host. The
+  current records slice is not yet end-to-end encrypted.
 - `load`, `load_or_default`, `load_with_meta`, `save`, `save_if_generation`,
   `delete`, `list_keys`, `sync_state`.
 - `soil-sdk-codec` provides the `Codec` trait and `JsonCodec`.
 
 App identity comes from the signed manifest. The Spore never supplies an app id
 or a host path.
+
+## `soil-sdk-canvas`
+
+`soil:canvas` is the rendering capability. The host gives the Spore one surface
+and owns the extent, theme, input lifecycle and rasterizer. The Spore hands over
+a versioned `soil-scene` document and never gets pixels, a texture, a path or a
+window handle.
+
+```rust
+use soil_sdk::canvas::{Surface, Limits};
+use soil_scene::{Content, Node, Rect, Scene, Transform};
+
+let scene = Scene::new(vec![Node {
+    id: "panel".into(),
+    parent: None,
+    transform: Transform {
+        scale: [8.0, 4.0, 1.0],
+        ..Transform::default()
+    },
+    content: Content::Rect(Rect::default()),
+    transition_ms: None,
+}]);
+
+let state = Surface::present_scene(&scene)?;
+let budget: Limits = Surface::budget();
+```
+
+- `present(&Present)`, `present_scene(&Scene)`, `present_rgba(&RgbaFrame)` and
+  `present_lease(&GpuLease)` encode and present one document.
+- `observe()` reads the host-selected extent, focus and theme.
+- `input(generation, event)` is bound to the last observed generation.
+- `close()` releases the grant.
+- `supports(schema)` and `budget()` come from `soil:scene/payload`.
+
+The host half is `crates/soil-canvas-host`. `CanvasHost` validates documents
+against the same `soil_scene` ceilings and enforces one present and one input
+per invocation. `CanvasSocket` is the presenter that forwards the document to
+Canvas's producer socket; `CanvasRuntime` can run a component that exports
+`run() -> result<u32, string>`.
+
+```rust
+use soil_canvas_host::{CanvasHost, CanvasRuntime, CanvasSocket};
+
+let socket = CanvasSocket::connect("path/to/ui.sock", "dashboard", "Dashboard", 1200, 840)?;
+let host = CanvasHost::new(socket, 1200, 840, 2.0, theme);
+let runtime = CanvasRuntime::new()?;
+runtime.run(component_bytes, host)?;
+```
 
 ## `soil-sdk-records`
 
@@ -129,7 +180,6 @@ cargo run -p wasi-audio-wasmtime -- crates/wasi-audio-wasmtime/fixtures/tone.was
 ## Next features
 
 - `vfs` — read-only workspace path/range helpers
-- `canvas` — normalized input and host-owned surface calls
 - `ble` — typed scan/connect/read/write/notify helpers
 - `storage` — CID reads/writes
 - `time` — granted monotonic tick

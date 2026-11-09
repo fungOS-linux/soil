@@ -1,9 +1,15 @@
 # EspoCRM import
 
-Status: **one-way import + incremental sync, 2026-11-05.**
+Status: **deprecated; move Espo projection into Elmers, 2026-11-05.**
 
-`soil-crm-espo` imports EspoCRM entities into `fungos-records` as raw CRM
-records. It is deliberately a host tool: Espo credentials never enter a Spore.
+`soil-crm-espo` is deprecated. EspoCRM is an external integration edge and
+belongs in Elmers, which already owns the Espo API, credentials, imports,
+dedupe, enrichment, and CRM workflows.
+
+Soil should receive normalized `fungos.crm/*` records through the generic
+records ingest sink (`soil-records-ingest`), not through an Espo-specific crate.
+
+The existing command remains documented below only for migration/reference.
 
 ## Entities
 

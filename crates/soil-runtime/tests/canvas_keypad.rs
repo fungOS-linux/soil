@@ -1,5 +1,9 @@
 //! Existing HAL typed transport through host normalization, Wasm input import,
 //! actual Canvas owner model and render. No physical device or fake UI.
+
+mod common;
+
+use common::socket_path;
 use fungos_device_hal::{
     keypad::{KeypadResync, KeypadRing},
     keypad_transport::{decode_request, encode_response},
@@ -48,7 +52,7 @@ fn battery_guest_input_navigates_actual_simple_jarvis_owner() {
 
 #[test]
 fn hal_socket_to_guest_to_canvas_and_provider_restart() {
-    let path = std::env::temp_dir().join(format!("soil-canvas-keys-{}.sock", std::process::id()));
+    let path = socket_path(&format!("canvas-keys-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).unwrap();
     let thread = std::thread::spawn(move || {

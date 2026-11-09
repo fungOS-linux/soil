@@ -50,7 +50,7 @@ Principles:
 | [`soil:view@1.0.0`](wit/soil-view.wit) | `soil:view`, optional `soil:view.capture` | WIT + Viewer state machine |
 | [`soil:time@1.0.0`](wit/soil-time.wit) | `soil:time` | WIT |
 | [`soil:storage@1.0.0`](wit/soil-storage.wit) | `soil:storage.read`, optional `soil:storage.write` | WIT |
-| [`soil:appdata@1.0.0`](wit/soil-appdata.wit) | `soil:appdata` | WIT + guest SDK; native host next |
+| [`soil:appdata@1.0.0`](wit/soil-appdata.wit) | `soil:appdata` | WIT + guest SDK + records-backed host |
 | [`soil:records@0.1.0`](wit/soil-records.wit) | `soil:records` read/write/sync | WIT + generic/contacts host + guest SDK |
 | [`soil:http@0.1.0`](wit/soil-http.wit) | `soil:http` | WIT + bounded host + direct transport proof |
 | [`soil:index@1.1.0`](wit/soil-index.wit) | `soil:index` | derived browse/search + explicit KNN; fast direct-child traversal |
@@ -58,7 +58,8 @@ Principles:
 | [`soil:media@0.1.0`](wit/soil-media.wit) | `soil:media`, optional `soil:media-encoded` | host playback, encoded chunks, bounded image readback |
 | [`soil:surface-import@0.1.0`](wit/soil-surface-import.wit) | `soil:surface-import` | host-owned imported surfaces, damage events, normalized input |
 | [`soil:inference@0.2.0`](wit/soil-inference.wit) | `soil:inference` | WIT + models, tools, completion, SSE stream resource |
-| [`soil:search@0.5.0`](wit/soil-search.wit) | `soil:search` | WIT + files/records/graph host composition + typed `@` mention resolver |
+| [`soil:search@0.6.0`](wit/soil-search.wit) | `soil:search` | WIT + files/records/graph host composition + host-local application inventory + typed `@` mention resolver |
+| [`soil:spore@0.1.0`](wit/soil-spore.wit) | `soil:spore.catalog`, `soil:spore.launch` | installed-Spore catalog and host-owned launch; listing and running are separate intents |
 | [`soil:graph@0.1.0`](wit/soil-graph.wit) | `soil:graph` | read-only edge/reference queries over records |
 | [`soil:input@1.0.0`](wit/soil-input.wit) | — | shared normalized input types for Canvas, Terminal and imported surfaces |
 | [`soil:notify@1.1.0`](wit/soil-notify.wit) | `soil:notify`, `soil:notify/ringer` | WIT + host broker + notify Spore; ringer is an interface, not a package |
@@ -78,8 +79,8 @@ through a bounded core-Wasm ABI by the S22 runtime. See
 [`docs/abi-core-wasm.md`](docs/abi-core-wasm.md).
 
 The first host-backed capability is BLE: [`crates/soil-ble-host`](crates/soil-ble-host)
-runs the [`spores/colmi-ring`](spores/colmi-ring) protocol Spore against a real
-radio on desktop. See [`spores/colmi-ring/README.md`](spores/colmi-ring/README.md).
+runs the [COLMI ring Spore](https://github.com/ajmwagar/spores/tree/main/spores/colmi-ring)
+against a real radio on desktop.
 
 Canvas is the cross-platform owner; Spores never submit UI trees.
 [`crates/soil-runtime`](crates/soil-runtime) is the S22 reference host (wasmtime
@@ -97,6 +98,16 @@ a real component pushes bounded PCM into a cpal host. See
 [`crates/soil-sdk`](crates/soil-sdk); its first feature, `audio`, provides
 `Output`, `write_all`, `tone` and `play_tone`. See
 [`docs/soil-sdk.md`](docs/soil-sdk.md).
+The CRM is a Spore over namespaced records, not a host: [`spores/crm`](spores/crm)
+reads `crm`, `contacts`, `calls` and `messages` namespaces, while the host maps
+those names to books and enforces grants. See [`docs/crm.md`](docs/crm.md).
+Personal contact editing and explicit first-name/token sharing live in a
+separate [`spores/contacts`](spores/contacts); see [`docs/contacts.md`](docs/contacts.md).
+The reusable WASI p2 profile is [`crates/soil-wasi-host`](crates/soil-wasi-host):
+`wasi:http` incoming/outgoing, `wasi:sockets` with per-use CIDR policy, clocks,
+random, filesystem preopens and a per-request store. `soil-wasi-http` serves a
+component's `wasi:http/incoming-handler` with a deny-by-default origin/network
+policy. See [`docs/wasi.md`](docs/wasi.md).
 The portable Linux/Android/macOS input normalizer is
 [`crates/soil-canvas-input`](crates/soil-canvas-input);
 [`docs/soil-canvas.md`](docs/soil-canvas.md) records the decision and host
@@ -110,8 +121,29 @@ JNI proof.
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo check -p viewer-spore --target wasm32-wasip2
-cargo check --manifest-path spores/colmi-ring/Cargo.toml --target wasm32-wasip2
+cargo check --manifest-path ../ajmwagar/spores/spores/colmi-ring/Cargo.toml \
+  --target wasm32-wasip2
 ```
+
+### One build cache, one installed host
+
+The hosts link Wasmtime. A private `target/` per worktree therefore costs several
+gigabytes each, and a machine running several worktrees at once fills its disk
+long before it runs out of source. Build once and share:
+
+```sh
+export CARGO_TARGET_DIR="$HOME/Library/Caches/soil/cargo-target"
+export CARGO_INCREMENTAL=0
+cargo install --path crates/soil-search-host --bin soil-search-web \
+  --root "$HOME/.local"
+```
+
+Agents and Spores then run `soil-search-web` from `~/.local/bin` against whatever
+`target/` the shared cache already holds. Rebuilding is a soil decision, not a
+Spore decision: the WIT packages and the hosts that implement them move together
+(`soil:search@0.6.0`, `soil:index@1.1.0`), so a change to `wit/` or a host crate
+means a rebuild and a reinstall, while work in `spores/` or a canvas worktree does
+not.
 
 The capability contracts parse as WIT, and the Viewer state machine has no host
 authority.

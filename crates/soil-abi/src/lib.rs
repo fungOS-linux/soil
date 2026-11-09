@@ -100,9 +100,15 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("inference", &["models", "complete", "open-stream", "state"])],
     },
     Contract {
+        file: "wit/soil-spore.wit",
+        source: include_str!("../../../wit/soil-spore.wit"),
+        package: "soil:spore@0.1.0",
+        interfaces: &[("catalog", &["entries", "launch"])],
+    },
+    Contract {
         file: "wit/soil-search.wit",
         source: include_str!("../../../wit/soil-search.wit"),
-        package: "soil:search@0.5.0",
+        package: "soil:search@0.6.0",
         interfaces: &[
             ("search", &["search", "state", "refresh"]),
             ("mentions", &["suggest"]),
@@ -113,6 +119,24 @@ pub const CONTRACTS: &[Contract] = &[
         source: include_str!("../../../wit/soil-http.wit"),
         package: "soil:http@0.1.0",
         interfaces: &[("http", &["fetch"])],
+    },
+    Contract {
+        file: "wit/soil-creds.wit",
+        source: include_str!("../../../wit/soil-creds.wit"),
+        package: "soil:creds@1.0.0",
+        interfaces: &[("creds", &["resolve", "sign", "verify"])],
+    },
+    Contract {
+        file: "wit/fungos-http-context.wit",
+        source: include_str!("../../../wit/fungos-http-context.wit"),
+        package: "fungos:http-context@0.1.0",
+        interfaces: &[("context", &["current"])],
+    },
+    Contract {
+        file: "wit/soil-unibus.wit",
+        source: include_str!("../../../wit/soil-unibus.wit"),
+        package: "soil:unibus@0.1.0",
+        interfaces: &[("bus", &["poll", "publish"])],
     },
     Contract {
         file: "wit/soil-graph.wit",
@@ -160,6 +184,12 @@ pub const CONTRACTS: &[Contract] = &[
         source: include_str!("../../../wit/soil-canvas.wit"),
         package: "soil:canvas@1.0.0",
         interfaces: &[("surface", &["present", "observe", "input", "close"])],
+    },
+    Contract {
+        file: "wit/soil-scene.wit",
+        source: include_str!("../../../wit/soil-scene.wit"),
+        package: "soil:scene@1.0.0",
+        interfaces: &[("payload", &["supports", "budget"])],
     },
     Contract {
         file: "wit/wasi-audio.wit",

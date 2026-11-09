@@ -1,6 +1,10 @@
 //! All metadata and numeric values here are synthetic transport fixtures, not
 //! model math/profile data or claims about live hardware.
+
+mod common;
+
 use anyhow::Result;
+use common::socket_path;
 use fpl_gfx::SoftwareImage;
 use fungos_device_hal::estimate_transport::{EstimateFailure, TrustedEstimateReceipts};
 use s22_canvas_surface::{Availability, ModelEstimateView};
@@ -61,9 +65,8 @@ fn fixture(
     max_age: Duration,
 ) -> (GuestScene, std::thread::JoinHandle<()>) {
     static SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "soil-estimate-{}-{}",
-        std::process::id(),
+    let path = socket_path(&format!(
+        "estimate-{}",
         SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let listener = UnixListener::bind(&path).unwrap();
@@ -148,7 +151,7 @@ fn actual_wasm_typed_results_no_fallback_recovery() {
 }
 #[test]
 fn permission_and_import_separation_no_contact() {
-    let path = std::env::temp_dir().join(format!("soil-estimate-denied-{}", std::process::id()));
+    let path = socket_path("estimate-denied");
     let listener = UnixListener::bind(&path).unwrap();
     listener.set_nonblocking(true).unwrap();
     let views = Arc::new(Mutex::new(vec![]));

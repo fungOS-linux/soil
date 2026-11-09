@@ -34,7 +34,7 @@ private contact
 private assignment
   account link, role
 team projection
-  first name + opaque contact token
+  first/last name + opaque contact token
 ```
 
 A team sees an account assignment through the projection. It does not
@@ -158,6 +158,90 @@ source
 source_id
 ```
 
+## CRM Spore and namespaces
+
+The CRM domain is a Spore, not a host. It reads only namespaced records:
+
+```text
+crm        shared CRM: accounts, companies, projects, activities, opportunities
+contacts   personal contacts
+calls      personal call/activity records
+messages   personal conversation threads/messages
+```
+
+```text
+spores/crm
+  accounts
+  account <account-id>
+  timeline <account-id> [limit]
+  pipeline [company-id]
+  pipeline move <opportunity-id> <stage>
+  audit [target-id] [limit]
+  activity add <id> <account-id> <kind> <title> <occurred-at> [summary]
+  opportunity stage <opportunity-id> <stage>
+  contacts shared
+  call add <id> <account-id> <title> <occurred-at> [summary]
+  email add <id> <thread-id> <account-id> <subject> <sender> <body> <occurred-at-ms>
+```
+
+The host maps namespace names to books and enforces read/write per namespace.
+The Spore never sees a book path. Contacts, calls and mail stay in personal
+books; the shared CRM holds the relationship and references them by stable id
+or contact token.
+
+Multiple CRMs are separate namespaces:
+
+```text
+crm                 default/personal CRM
+crm:fpl             FPL shared CRM
+crm:puget-audio     Puget Audio shared CRM
+crm:new-ancients    New Ancients shared CRM
+```
+
+Invoke the Spore with:
+
+```text
+--crm crm:fpl pipeline
+--crm crm:puget-audio account a-acme
+```
+
+Each shared CRM can have its own book and grants. Elmers projects the same
+Espo accounts into each brand book with a `brand` filter.
+
+There is no contact merge and no bulk sharing. Account↔contact links, contact
+editing and explicit share/unshare belong to the Contacts Spore/UI
+(`spores/contacts`). The link is written to the personal contacts book. The CRM
+reads that private link only when the contacts namespace is granted, and reads
+explicit projections for the team view. Calls and
+emails written by the CRM Spore land in the personal namespaces as private
+records.
+
+CRM mutations write `fungos.audit/event@1` records into the selected CRM
+namespace. The audit payload carries action/target metadata and stage or link
+deltas, never personal call/email bodies.
+
+Roles are a host policy layer: the host links only the namespace grants the
+current principal's Mycelium roles allow. Unibus/records sync remains
+host-mediated transport, not a Spore import.
+
+## Timeline
+
+The CRM Spore owns the unified timeline:
+
+```text
+timeline <account-id> [limit]
+account <account-id>   includes the first 25 events
+contact <contact-id>   includes the contact timeline
+project <project-id>   includes the project timeline
+```
+
+It joins CRM activities with linked conversation messages. Messages are matched
+through `fungos.graph/link` mention records, so the CRM does not copy message
+bodies. The timeline is a derived view, not a new authority.
+
+`soil-crm-host` no longer serves timeline data or fetches cross-book messages.
+See [Unified timeline](timeline.md) for the Git and audit-log design.
+
 ## Mock CRM
 
 Start with deterministic mock data before importing real Espo records:
@@ -265,7 +349,7 @@ See [EspoCRM import](crm-espo.md).
 
 ```text
 CRM Spore over collection `crm`; no soil:crm WIT
-brand -> account -> project -> timeline
+brand -> account -> project -> detail
 graph panel from soil:graph
 team book mapping + first-name projections
 task and artifact records

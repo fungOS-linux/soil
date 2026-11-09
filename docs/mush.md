@@ -3,6 +3,11 @@
 Mush is the sandboxed shell over one VFS workspace. The command engine is a
 Wasm Spore; the native `mush` process is only the host.
 
+A Mush session is intended to run inside a **Desktop**, the durable top-level
+namespace for a body of work. `--root` is currently a standalone VFS root; the
+Desktop binding adds project mounts, a records scope, and a stable identity. See
+[Desktops](desktop.md).
+
 ```sh
 mush --root ~/fungos-node
 ```
@@ -434,6 +439,62 @@ rm     -> namespace unlink; blob and history retained
 ```
 
 `rm` is not blob destruction. Explicit VFS GC is the collector.
+
+## Worktrees and trees
+
+The first worktree slice lives in the Mush CLI, not a separate `soil`
+subcommand. It keeps the VFS as the file store and records the collaborative
+objects above it in `soil:records`:
+
+```sh
+mush tree snapshot projects/demo          # tree id + file count
+mush tree show <tree-id>                  # manifest as JSON
+mush tree diff <tree-a> <tree-b>          # + / - / ~
+mush tree checkout <tree-id> checkouts/demo
+
+mush worktree create projects/demo --thread thread-1
+mush worktree list [--thread thread-1]
+mush worktree show wt_...
+mush worktree snapshot wt_... [path]
+mush worktree checkout wt_... checkouts/demo
+mush worktree diff wt_a wt_b
+mush worktree schema
+```
+
+A **tree** is a content-addressed manifest of a VFS subtree. Each entry carries
+the relative path, `ContentId`, size, and media type; the tree id is the BLAKE3
+of the canonical entry list. A **worktree** names a VFS path, a thread, a base
+tree, and a head tree. A **ref** maps `ref/<worktree>/head` to the current tree.
+A **checkout** records where a tree was materialized on a device.
+
+Records use these schemas in the `worktree` collection:
+
+```text
+thread     fungos.thread/v1
+worktree   fungos.worktree/v1
+tree       fungos.tree/v1
+ref        fungos.ref/v1
+checkout   fungos.checkout/v1
+turn       fungos.turn/v1       (reserved)
+comment    fungos.comment/v1    (reserved)
+```
+
+The records store defaults to `<vfs-root>/.fungos/records`, book `mush`,
+collection `worktree`. Override it with `--state-root`, `--worktree-book`, and
+`--worktree-collection` (or `MUSH_STATE_ROOT`, `MUSH_WORKTREE_BOOK`,
+`MUSH_WORKTREE_COLLECTION`). This is a local records book for the first slice;
+point it at a synced book when worktree sync lands.
+
+Limits of this slice:
+
+- Snapshot and checkout are local; there is no mount process or peer sync yet.
+- `checkout` writes the tree's files and does not delete extra files that were
+  already under the target path.
+- Empty directories are not represented; trees are file manifests.
+- Tree manifests are flat records, not yet a chunked Merkle DAG. The tree id is
+  still content-addressed and stable.
+- The mutating subcommands are host-side Mush operations; they do not run inside
+  the Spore and do not require the shell component.
 
 ## Host boundary
 

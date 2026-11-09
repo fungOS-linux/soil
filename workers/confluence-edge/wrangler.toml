@@ -1,0 +1,14 @@
+name = "confluence-edge"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-09-17"
+
+[build]
+command = "worker-build --release"
+
+[vars]
+# Local wrangler dev: the relay can be a localhost process during development.
+# Deployed Workers must point at a public relay URL.
+CONFLUENCE_RELAY_URL = "http://127.0.0.1:8898"
+
+[dev]
+port = 8790

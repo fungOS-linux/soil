@@ -59,6 +59,7 @@ impl SporeEntry {
 pub struct SporeIndex {
     roots: Vec<PathBuf>,
     entries: Vec<SporeEntry>,
+    fingerprint: u64,
 }
 
 impl SporeIndex {
@@ -66,12 +67,16 @@ impl SporeIndex {
         let mut index = Self {
             roots,
             entries: Vec::new(),
+            fingerprint: 0,
         };
         index.refresh();
         index
     }
 
+    /// Re-walk the roots, and remember what the roots looked like when it
+    /// finished so the next check can be a stat rather than a walk.
     pub fn refresh(&mut self) {
+        self.fingerprint = Self::fingerprint(&self.roots);
         self.entries.clear();
         let mut seen = BTreeSet::new();
         for root in &self.roots {
@@ -85,6 +90,39 @@ impl SporeIndex {
         }
         self.entries.sort_by(|a, b| a.id.cmp(&b.id));
         self.entries.truncate(MAX_SPORES);
+    }
+
+    /// A newly installed Spore is a new directory under a root, which moves the
+    /// root's own mtime. Check that before paying for a walk: installing a Spore
+    /// while the launcher runs must not need a restart, and a search must not
+    /// re-walk a directory tree to prove nothing changed.
+    pub fn reload_if_stale(&mut self) -> bool {
+        if Self::fingerprint(&self.roots) == self.fingerprint {
+            return false;
+        }
+        self.refresh();
+        true
+    }
+
+    fn fingerprint(roots: &[PathBuf]) -> u64 {
+        let mut hash = 0u64;
+        for root in roots {
+            let stamp = fs::metadata(root)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |elapsed| elapsed.as_nanos() as u64);
+            hash = hash.wrapping_mul(31).wrapping_add(stamp);
+        }
+        hash
+    }
+
+    pub fn entries(&self) -> &[SporeEntry] {
+        &self.entries
+    }
+
+    pub fn get(&self, id: &str) -> Option<&SporeEntry> {
+        self.entries.iter().find(|entry| entry.id == id)
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<(SporeEntry, u32)> {
@@ -415,6 +453,126 @@ impl Searchable for ServiceEntry {
     }
     fn searchable(&self) -> String {
         ServiceEntry::searchable(self)
+    }
+}
+
+/// An application installed on this host.
+///
+/// The inventory is host-local and disposable: it is rebuilt from the bundle
+/// index, it differs per machine, and nothing about it is worth syncing. Peers
+/// and services arrive as Mycelium snapshots; this one never leaves the host.
+#[derive(Clone)]
+pub struct ApplicationEntry {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    /// Host-resolved asset reference, or none when the bundle carries no icon.
+    pub icon: Option<String>,
+}
+
+impl Searchable for ApplicationEntry {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn searchable(&self) -> String {
+        format!("{} {}", self.id, self.title).to_lowercase()
+    }
+}
+
+/// A host-supplied inventory of installed applications.
+///
+/// Shape: `{ "applications": [ { "bundle_id", "name", "subtitle", "icon" } ] }`.
+/// A malformed or missing snapshot yields an empty index rather than an error:
+/// an inventory that cannot be read is not a search that cannot run.
+#[derive(Default)]
+pub struct ApplicationIndex {
+    path: Option<PathBuf>,
+    entries: Vec<ApplicationEntry>,
+    fingerprint: Option<std::time::SystemTime>,
+}
+
+impl ApplicationIndex {
+    pub fn load(path: PathBuf) -> Self {
+        let mut index = Self {
+            path: Some(path),
+            entries: Vec::new(),
+            fingerprint: None,
+        };
+        index.refresh();
+        index
+    }
+
+    /// An inventory discovered from this machine's bundles. The same index as the
+    /// snapshot path, so a hit looks the same whichever way the host learned it.
+    pub fn from_installed(apps: &[crate::applications::InstalledApp]) -> Self {
+        Self {
+            path: None,
+            entries: apps
+                .iter()
+                .map(|app| ApplicationEntry {
+                    id: app.bundle_id.clone(),
+                    title: app.name.clone(),
+                    subtitle: app.folder.clone(),
+                    icon: None,
+                })
+                .collect(),
+            fingerprint: None,
+        }
+    }
+
+    pub fn refresh(&mut self) {
+        self.entries.clear();
+        let Some(path) = &self.path else {
+            return;
+        };
+        self.fingerprint = fs::metadata(path).and_then(|meta| meta.modified()).ok();
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            return;
+        };
+        for application in array_field(&value, "applications") {
+            let Some(id) = string_field(application, "bundle_id") else {
+                continue;
+            };
+            self.entries.push(ApplicationEntry {
+                title: string_field(application, "name").unwrap_or_else(|| id.clone()),
+                subtitle: string_field(application, "subtitle").unwrap_or_else(|| id.clone()),
+                icon: string_field(application, "icon"),
+                id,
+            });
+        }
+        self.entries.sort_by(|a, b| a.id.cmp(&b.id));
+        self.entries.truncate(MAX_SPORES);
+    }
+
+    pub fn entries(&self) -> &[ApplicationEntry] {
+        &self.entries
+    }
+
+    pub fn get(&self, id: &str) -> Option<&ApplicationEntry> {
+        self.entries.iter().find(|entry| entry.id == id)
+    }
+
+    pub fn search(&self, query: &str, limit: usize) -> Vec<(ApplicationEntry, u32)> {
+        search_entries(&self.entries, query, limit, 960_000)
+    }
+
+    /// The host that wrote the snapshot may rewrite it (an install, an uninstall,
+    /// a new bundle), so follow the file rather than the process start.
+    pub fn reload_if_stale(&mut self) -> bool {
+        let Some(path) = &self.path else {
+            return false;
+        };
+        if fs::metadata(path).and_then(|meta| meta.modified()).ok() == self.fingerprint {
+            return false;
+        }
+        self.refresh();
+        true
     }
 }
 

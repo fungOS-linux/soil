@@ -15,6 +15,7 @@ mod outcome;
 mod overlay;
 mod project;
 mod service;
+mod worktree;
 
 use std::{
     io::{self, BufRead, IsTerminal, Write},
@@ -455,6 +456,30 @@ fn run() -> Result<()> {
     {
         args.drain(0..2);
         return run_operator(&root, args);
+    }
+
+    // Worktree and tree records are their own subcommand; they never start the
+    // command engine.
+    let state_root = take_option(&mut args, "--state-root")
+        .or_else(|| std::env::var("MUSH_STATE_ROOT").ok())
+        .map(|value| config::expand_home(&value))
+        .unwrap_or_else(|| root.join(".fungos/records"));
+    let worktree_book = take_option(&mut args, "--worktree-book")
+        .or_else(|| std::env::var("MUSH_WORKTREE_BOOK").ok())
+        .unwrap_or_else(|| "mush".into());
+    let worktree_collection = take_option(&mut args, "--worktree-collection")
+        .or_else(|| std::env::var("MUSH_WORKTREE_COLLECTION").ok())
+        .unwrap_or_else(|| "worktree".into());
+    if matches!(args.first().map(String::as_str), Some("worktree" | "tree")) {
+        let command = args.remove(0);
+        return worktree::run(
+            &root,
+            &command,
+            args,
+            state_root,
+            worktree_book,
+            worktree_collection,
+        );
     }
     let wasm = take_option(&mut args, "--wasm")
         .or_else(|| std::env::var("MUSH_WASM").ok())

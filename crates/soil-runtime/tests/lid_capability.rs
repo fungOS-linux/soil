@@ -1,3 +1,7 @@
+mod common;
+
+use common::socket_path;
+
 use fungos_device_hal::{
     lid::{LidFailure, LidPosition, LidSample},
     lid_transport::{REQUEST, encode_response},
@@ -41,7 +45,7 @@ fn read(guest: &mut GuestScene) -> Vec<soil_runtime::lid::Observation> {
     guest.take_lid_logs()
 }
 fn socket(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("soil-lid-{}-{name}.sock", std::process::id()))
+    socket_path(&format!("lid-{name}.sock"))
 }
 fn guest(path: &Path) -> GuestScene {
     GuestScene::with_lid(

@@ -1,9 +1,0 @@
-package fungos:media-probe@0.1.0;
-
-world media-probe {
-  import soil:media/playback@0.1.0;
-  import soil:media/encoded@0.1.0;
-  import soil:media/image@0.1.0;
-
-  export run: func(args: list<string>) -> result<_, string>;
-}

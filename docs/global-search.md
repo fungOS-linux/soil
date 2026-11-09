@@ -1,6 +1,6 @@
 # Global search
 
-`soil:search@0.5.0` is a host-composed discovery surface over the sources a
+`soil:search@0.6.0` is a host-composed discovery surface over the sources a
 host has already granted:
 
 ```text
@@ -12,8 +12,16 @@ repositories -> explicit local Git roots
 spores       -> explicit local Spore manifest roots
 peers        -> explicit `mycelium peers --json` snapshot
 services     -> explicit Mycelium/Unibus service catalog snapshot
+applications -> host-local installed-application inventory
 actions      -> reserved for a host action registry
 ```
+
+Applications are the one source that is **host-local by construction**. The
+inventory is whatever is installed on this machine, it differs per host, and it
+is cheap to rebuild from the bundle index — so it is never synced, never enters
+records, and never gossips. A hit carries the bundle identifier as `id`, the
+display name as `title`, and an icon as an asset reference the renderer resolves;
+the Spore still cannot see a path.
 
 It is not authority. A hit is a locator plus display metadata. The caller still
 fetches the file through `soil:vfs` or the entry through `soil:records`.

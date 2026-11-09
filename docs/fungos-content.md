@@ -12,7 +12,7 @@ The rule:
 
 - `ContentId` — canonical whole-content BLAKE3 digest, displayed as `blake3:<hex>`.
 - `BlobRef` — content id, size, media type, and one or more provider locators.
-- `Locator` — `local`, `ipfs`, `iroh` (iroh locator reserved).
+- `Locator` — `local`, `ipfs`, `iroh`, `s3` (iroh/S3 locators are provider refs, not authority).
 - `LocalFsProvider` — content-addressed local filesystem store.
 - `IpfsStub` — creates real raw-block CIDv1 locators from SHA-256 and keeps bytes in memory until a Kubo HTTP adapter lands.
 - `ContentIndex` — JSON-backed index stub keyed by `ContentId`, with lookup by entity, content id, IPFS CID/Iroh hash, and a lexical search stub.
@@ -23,6 +23,7 @@ The IPFS stub emits a **raw-block CIDv1**, not a Kubo UnixFS file CID. That dist
 
 1. Mycelium/Iroh transport adapter using the existing authenticated peer identity.
 2. Kubo HTTP RPC adapter.
-3. SQLite/FTS5 index and translated metadata fields.
-4. `fungos:content` host capability for Soil components.
-5. Range reads, pin/unpin, provider health, and LOD policy.
+3. S3 provider adapter and object lifecycle policy.
+4. SQLite/FTS5 index and translated metadata fields.
+5. `fungos:content` host capability for Soil components.
+6. Range reads, pin/unpin, provider health, and LOD policy.

@@ -1,4 +1,7 @@
+mod common;
+
 use anyhow::Result;
+use common::socket_path;
 use fpl_gfx::SoftwareImage;
 use fungos_device_hal::{
     battery_transport::{BatteryFailure, encode_response},
@@ -65,9 +68,8 @@ fn fixture_guest(
     std::thread::JoinHandle<()>,
 ) {
     static SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "soil-battery-{}-{}",
-        std::process::id(),
+    let path = socket_path(&format!(
+        "battery-{}",
         SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let listener = UnixListener::bind(&path).unwrap();
@@ -197,7 +199,7 @@ fn stale_and_retention_revalidation() {
 }
 #[test]
 fn denied_no_socket_and_default_backcompat() {
-    let path = std::env::temp_dir().join(format!("soil-battery-denied-{}", std::process::id()));
+    let path = socket_path("battery-denied");
     let listener = UnixListener::bind(&path).unwrap();
     listener.set_nonblocking(true).unwrap();
     let views = Arc::new(Mutex::new(vec![]));
