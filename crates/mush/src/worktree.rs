@@ -24,6 +24,10 @@ const WORKTREE_SCHEMA: &str = "fungos.worktree/v1";
 const TREE_SCHEMA: &str = "fungos.tree/v1";
 const REF_SCHEMA: &str = "fungos.ref/v1";
 const CHECKOUT_SCHEMA: &str = "fungos.checkout/v1";
+const WORKTREE_STATE_SCHEMA: &str = "fungos.worktree-state/v1";
+
+/// The only collection in the device-local book.
+const LOCAL_COLLECTION: &str = "local";
 const COMMENT_SCHEMA: &str = "fungos.comment/v1";
 
 const SCHEMAS: &[(&str, &str)] = &[
@@ -33,6 +37,7 @@ const SCHEMAS: &[(&str, &str)] = &[
     ("tree", TREE_SCHEMA),
     ("ref", REF_SCHEMA),
     ("checkout", CHECKOUT_SCHEMA),
+    ("worktree-state", WORKTREE_STATE_SCHEMA),
     ("comment", COMMENT_SCHEMA),
 ];
 
@@ -55,16 +60,45 @@ struct Turn {
     created_at_ms: u64,
 }
 
+/// A worktree as every device agrees it is.
+///
+/// Deliberately no path, no base/head tree and no timestamp of the last local
+/// look: those describe one machine's view, and putting them in a synced book
+/// means two devices trade lies about each other's filesystem.
 #[derive(Debug, Serialize, Deserialize)]
 struct Worktree {
     id: String,
     name: String,
     thread: String,
+    created_at_ms: u64,
+}
+
+/// What *this* device currently has for a worktree.
+///
+/// Lives in the device-local collection. A synced book must never carry it —
+/// the path, and which tree this machine last materialised, are the difference
+/// between two checkouts of one worktree.
+#[derive(Debug, Serialize, Deserialize)]
+struct WorktreeState {
+    worktree: String,
     path: String,
     base_tree: String,
     head_tree: String,
-    created_at_ms: u64,
     updated_at_ms: u64,
+}
+
+/// The worktree record as written before the split, when device state shared
+/// the synced collection. Read only by the migration.
+#[derive(Debug, Deserialize)]
+struct LegacyWorktree {
+    id: String,
+    name: String,
+    thread: String,
+    path: Option<String>,
+    base_tree: Option<String>,
+    head_tree: Option<String>,
+    created_at_ms: u64,
+    updated_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,8 +147,13 @@ struct Comment {
 
 struct State {
     vfs: Vfs,
+    /// The synced book: thread, worktree identity, tree, ref, comment.
     records: RecordsBookHost,
     collection: String,
+    /// The device-local book: checkout, mount owner, this machine's path and
+    /// base/head for a worktree.
+    local: RecordsBookHost,
+    local_collection: String,
 }
 
 impl State {
@@ -122,11 +161,81 @@ impl State {
         let vfs = Vfs::open(root).with_context(|| format!("open VFS {}", root.display()))?;
         let records = RecordsBookHost::open(state_root, book, collection)
             .with_context(|| format!("open records {book}/{collection}"))?;
-        Ok(Self {
+        // A separate book, not merely a separate collection: the book host
+        // hands back whatever it holds stamped with the collection it was asked
+        // for, so a second collection inside the same book is not a boundary —
+        // it reads the synced records and a sync of the main book would carry
+        // the device ones. Device state gets its own book, which is a real
+        // boundary: nothing that publishes `book` can see it.
+        let local_book = format!("{book}.local");
+        let local_collection = LOCAL_COLLECTION.to_string();
+        let local = RecordsBookHost::open(state_root, &local_book, &local_collection)
+            .with_context(|| format!("open records {local_book}/{local_collection}"))?;
+        let mut state = Self {
             vfs,
             records,
             collection: collection.to_string(),
-        })
+            local,
+            local_collection,
+        };
+        state.migrate_device_state()?;
+        Ok(state)
+    }
+
+    /// Move device state out of the synced collection for stores written before
+    /// the split.
+    ///
+    /// Idempotent: after a record has been rewritten it carries no path, so a
+    /// second open is a no-op. Nothing is deleted from the synced collection
+    /// until its local half has been written.
+    fn migrate_device_state(&mut self) -> Result<()> {
+        let entries = self.records.scan_all(10_000)?;
+        let mut pending = Vec::new();
+        for entry in entries {
+            if entry.deleted || !entry.key.id.starts_with("worktree/") {
+                continue;
+            }
+            let Ok(legacy) = serde_json::from_slice::<LegacyWorktree>(&entry.body) else {
+                continue;
+            };
+            // Only records written before the split carry a path.
+            if legacy.path.is_none() {
+                continue;
+            }
+            pending.push(legacy);
+        }
+
+        for legacy in pending {
+            let head = legacy
+                .head_tree
+                .clone()
+                .or_else(|| legacy.base_tree.clone())
+                .unwrap_or_default();
+            let path = legacy.path.clone().unwrap_or_default();
+            let state = WorktreeState {
+                worktree: legacy.id.clone(),
+                path,
+                base_tree: legacy.base_tree.clone().unwrap_or_else(|| head.clone()),
+                head_tree: head,
+                updated_at_ms: legacy.updated_at_ms.unwrap_or(legacy.created_at_ms),
+            };
+            self.put_local(
+                worktree_state_record(&legacy.id),
+                WORKTREE_STATE_SCHEMA,
+                &state,
+            )?;
+            self.put(
+                worktree_record(&legacy.id),
+                WORKTREE_SCHEMA,
+                &Worktree {
+                    id: legacy.id.clone(),
+                    name: legacy.name,
+                    thread: legacy.thread,
+                    created_at_ms: legacy.created_at_ms,
+                },
+            )?;
+        }
+        Ok(())
     }
 
     fn put<T: Serialize>(&mut self, id: String, schema: &str, value: &T) -> Result<()> {
@@ -148,6 +257,38 @@ impl State {
         Ok(())
     }
 
+    /// Write a device-local record. Never the synced book.
+    fn put_local<T: Serialize>(&mut self, id: String, schema: &str, value: &T) -> Result<()> {
+        let body = serde_json::to_vec(value)?;
+        let entry = records::Entry {
+            key: records::Key {
+                collection: self.local_collection.clone(),
+                id: id.clone(),
+            },
+            schema: schema.to_string(),
+            revision: 0,
+            updated_at_ms: 0,
+            origin: String::new(),
+            deleted: false,
+            body,
+        };
+        <RecordsBookHost as records::Host>::upsert(&mut self.local, entry)
+            .map_err(|error| anyhow!("write local record {id}: {error:?}"))?;
+        Ok(())
+    }
+
+    fn get_local<T: DeserializeOwned>(&mut self, id: &str) -> Result<Option<T>> {
+        let Some(entry) = self.local.get_entry(id)? else {
+            return Ok(None);
+        };
+        if entry.deleted {
+            return Ok(None);
+        }
+        serde_json::from_slice(&entry.body)
+            .with_context(|| format!("decode local record {id}"))
+            .map(Some)
+    }
+
     fn get<T: DeserializeOwned>(&mut self, id: &str) -> Result<Option<T>> {
         let Some(entry) = self.records.get_entry(id)? else {
             return Ok(None);
@@ -164,12 +305,36 @@ impl State {
         let entries = self.records.scan_all(10_000)?;
         let mut values = Vec::new();
         for entry in entries {
-            if entry.deleted || !entry.key.id.starts_with(prefix) {
+            // `scan_all` walks the whole book, so the collection has to be
+            // checked here or the local and synced books read each other and
+            // the split is cosmetic.
+            if entry.deleted
+                || entry.key.collection != self.collection
+                || !entry.key.id.starts_with(prefix)
+            {
                 continue;
             }
             values.push(
                 serde_json::from_slice(&entry.body)
                     .with_context(|| format!("decode record {}", entry.key.id))?,
+            );
+        }
+        Ok(values)
+    }
+
+    fn scan_local<T: DeserializeOwned>(&mut self, prefix: &str) -> Result<Vec<T>> {
+        let entries = self.local.scan_all(10_000)?;
+        let mut values = Vec::new();
+        for entry in entries {
+            if entry.deleted
+                || entry.key.collection != self.local_collection
+                || !entry.key.id.starts_with(prefix)
+            {
+                continue;
+            }
+            values.push(
+                serde_json::from_slice(&entry.body)
+                    .with_context(|| format!("decode local record {}", entry.key.id))?,
             );
         }
         Ok(values)
@@ -225,30 +390,43 @@ impl State {
             id: id.clone(),
             name,
             thread: thread.to_string(),
-            path,
-            base_tree: tree.id.clone(),
-            head_tree: tree.id.clone(),
             created_at_ms: now,
-            updated_at_ms: now,
         };
         self.put(tree_record(&tree.id), TREE_SCHEMA, &tree)?;
         self.put(worktree_record(&id), WORKTREE_SCHEMA, &worktree)?;
+        self.put_local(
+            worktree_state_record(&id),
+            WORKTREE_STATE_SCHEMA,
+            &WorktreeState {
+                worktree: id.clone(),
+                path,
+                base_tree: tree.id.clone(),
+                head_tree: tree.id.clone(),
+                updated_at_ms: now,
+            },
+        )?;
         self.set_ref(&id, "head", &tree.id)?;
         Ok(worktree)
     }
 
     fn snapshot_worktree(&mut self, id: &str, path: Option<&str>) -> Result<Worktree> {
-        let mut worktree = self.load_worktree(id)?;
+        let worktree = self.load_worktree(id)?;
+        let mut state = self.load_worktree_state(&worktree.id)?;
         let path = match path {
             Some(path) => normalize_path(path)?,
-            None => worktree.path.clone(),
+            None => state.path.clone(),
         };
         let tree = snapshot_tree(&self.vfs, &path)?;
         self.put(tree_record(&tree.id), TREE_SCHEMA, &tree)?;
-        worktree.head_tree = tree.id.clone();
-        worktree.updated_at_ms = now_ms();
-        self.put(worktree_record(&worktree.id), WORKTREE_SCHEMA, &worktree)?;
-        self.set_ref(&worktree.id, "head", &worktree.head_tree)?;
+        state.path = path;
+        state.head_tree = tree.id.clone();
+        state.updated_at_ms = now_ms();
+        self.put_local(
+            worktree_state_record(&worktree.id),
+            WORKTREE_STATE_SCHEMA,
+            &state,
+        )?;
+        self.set_ref(&worktree.id, "head", &state.head_tree)?;
         Ok(worktree)
     }
 
@@ -256,6 +434,15 @@ impl State {
         let id = id.strip_prefix("worktree/").unwrap_or(id);
         self.get(&worktree_record(id))?
             .with_context(|| format!("worktree {id} not found"))
+    }
+
+    fn load_worktree_state(&mut self, id: &str) -> Result<WorktreeState> {
+        self.get_local(&worktree_state_record(id))?
+            .with_context(|| {
+                format!(
+                    "worktree {id} has no state on this device — mount or snapshot it here first"
+                )
+            })
     }
 
     fn load_tree(&mut self, id: &str) -> Result<Tree> {
@@ -306,7 +493,7 @@ impl State {
                 tree: tree.id.clone(),
                 created_at_ms: now_ms(),
             };
-            self.put(checkout_record(&checkout.id), CHECKOUT_SCHEMA, &checkout)?;
+            self.put_local(checkout_record(&checkout.id), CHECKOUT_SCHEMA, &checkout)?;
         }
         Ok(count)
     }
@@ -368,9 +555,10 @@ fn run_worktree(state: &mut State, args: &mut Vec<String>) -> Result<()> {
                 .ok_or_else(|| anyhow!("usage: mush worktree create <path> --thread <thread>"))?;
             ensure_arity(args, 1)?;
             let worktree = state.create_worktree(&path, &thread, id.as_deref(), name.as_deref())?;
+            let local = state.load_worktree_state(&worktree.id)?;
             println!(
                 "{}\tthread={}\thead={}",
-                worktree.id, worktree.thread, worktree.head_tree
+                worktree.id, worktree.thread, local.head_tree
             );
             Ok(())
         }
@@ -387,9 +575,16 @@ fn run_worktree(state: &mut State, args: &mut Vec<String>) -> Result<()> {
                 {
                     continue;
                 }
+                // A worktree known to the book but never mounted here shows as
+                // such rather than borrowing another device's path.
+                let (path, head) =
+                    match state.get_local::<WorktreeState>(&worktree_state_record(&worktree.id))? {
+                        Some(local) => (local.path, local.head_tree),
+                        None => ("-".to_string(), "-".to_string()),
+                    };
                 println!(
                     "{}\t{}\t{}\t{}\t{}",
-                    worktree.id, worktree.thread, worktree.path, worktree.head_tree, worktree.name
+                    worktree.id, worktree.thread, path, head, worktree.name
                 );
             }
             Ok(())
@@ -407,14 +602,16 @@ fn run_worktree(state: &mut State, args: &mut Vec<String>) -> Result<()> {
                 bail!("usage: mush worktree snapshot <id> [path]");
             }
             let worktree = state.snapshot_worktree(&args[0], args.get(1).map(String::as_str))?;
-            println!("{}\thead={}", worktree.id, worktree.head_tree);
+            let local = state.load_worktree_state(&worktree.id)?;
+            println!("{}\thead={}", worktree.id, local.head_tree);
             Ok(())
         }
         "checkout" => {
             ensure_no_options(args)?;
             ensure_arity(args, 2)?;
             let worktree = state.load_worktree(&args[0])?;
-            let tree = state.load_tree(&worktree.head_tree)?;
+            let local = state.load_worktree_state(&worktree.id)?;
+            let tree = state.load_tree(&local.head_tree)?;
             let count = state.checkout(&tree, &args[1], Some(&worktree))?;
             println!(
                 "checked out {count} files from {} into {}",
@@ -427,8 +624,10 @@ fn run_worktree(state: &mut State, args: &mut Vec<String>) -> Result<()> {
             ensure_arity(args, 2)?;
             let left = state.load_worktree(&args[0])?;
             let right = state.load_worktree(&args[1])?;
-            let left_tree = state.load_tree(&left.head_tree)?;
-            let right_tree = state.load_tree(&right.head_tree)?;
+            let left_head = state.load_worktree_state(&left.id)?.head_tree;
+            let right_head = state.load_worktree_state(&right.id)?.head_tree;
+            let left_tree = state.load_tree(&left_head)?;
+            let right_tree = state.load_tree(&right_head)?;
             print_diff(&left_tree, &right_tree);
             Ok(())
         }
@@ -622,6 +821,11 @@ fn worktree_record(id: &str) -> String {
     format!("worktree/{id}")
 }
 
+/// Device-local companion to `worktree_record`, in the local collection.
+fn worktree_state_record(id: &str) -> String {
+    format!("worktree-state/{id}")
+}
+
 fn tree_record(id: &str) -> String {
     format!("tree/{id}")
 }
@@ -730,6 +934,55 @@ mod tests {
         (dir, state)
     }
 
+    /// A store written before the split keeps its worktree, and the device
+    /// state it used to carry moves to the local book instead of being dropped.
+    #[test]
+    fn the_migration_splits_a_pre_split_worktree_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vfs_root, records_root) = (dir.path().join("vfs"), dir.path().join("records"));
+        {
+            let mut state = State::open(&vfs_root, &records_root, "mush-test", "worktree").unwrap();
+            // The shape written before the split: portable identity and device
+            // state in one record.
+            let legacy = serde_json::json!({
+                "id": "wt_old",
+                "name": "old",
+                "thread": "thread-1",
+                "path": "projects/old",
+                "base_tree": "tree-base",
+                "head_tree": "tree-head",
+                "created_at_ms": 5,
+                "updated_at_ms": 9,
+            });
+            state
+                .put(worktree_record("wt_old"), WORKTREE_SCHEMA, &legacy)
+                .unwrap();
+        }
+
+        // Reopening migrates.
+        let mut state = State::open(&vfs_root, &records_root, "mush-test", "worktree").unwrap();
+        let local = state.load_worktree_state("wt_old").unwrap();
+        assert_eq!(local.path, "projects/old");
+        assert_eq!(local.head_tree, "tree-head");
+        assert_eq!(local.base_tree, "tree-base");
+
+        let portable = state.load_worktree("wt_old").unwrap();
+        assert_eq!(portable.id, "wt_old");
+        assert_eq!(portable.thread, "thread-1");
+        let body = serde_json::to_string(&portable).unwrap();
+        assert!(!body.contains("projects/old"), "{body}");
+
+        // Idempotent: a second open does not duplicate or lose anything.
+        let mut again = State::open(&vfs_root, &records_root, "mush-test", "worktree").unwrap();
+        assert_eq!(
+            again
+                .scan_local::<WorktreeState>("worktree-state/")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn snapshots_are_content_addressed_and_round_trip() {
         let (_dir, mut state) = state();
@@ -783,7 +1036,8 @@ mod tests {
             .unwrap();
         assert_eq!(worktree.thread, "thread-1");
         assert!(state.get::<Thread>("thread/thread-1").unwrap().is_some());
-        let base = state.load_tree(&worktree.head_tree).unwrap();
+        let base_head = state.load_worktree_state("wt_test").unwrap().head_tree;
+        let base = state.load_tree(&base_head).unwrap();
 
         state
             .vfs
@@ -804,7 +1058,9 @@ mod tests {
             )
             .unwrap();
         let updated = state.snapshot_worktree("wt_test", None).unwrap();
-        let head = state.load_tree(&updated.head_tree).unwrap();
+        assert_eq!(updated.id, "wt_test");
+        let head_tree = state.load_worktree_state("wt_test").unwrap().head_tree;
+        let head = state.load_tree(&head_tree).unwrap();
         let diff = diff_lines(&base, &head);
         assert!(diff.contains(&"~ src/main.rs".to_string()), "{diff:?}");
         assert!(diff.contains(&"+ src/lib.rs".to_string()), "{diff:?}");
@@ -818,6 +1074,26 @@ mod tests {
             state.vfs.get("checkouts/demo/src/main.rs").unwrap(),
             b"fn main() {}"
         );
-        assert!(state.scan::<Checkout>("checkout/").unwrap().len() == 1);
+        assert_eq!(state.scan_local::<Checkout>("checkout/").unwrap().len(), 1);
+        // The split: the synced book carries identity, this device carries the
+        // path and the trees it materialised.
+        assert!(state.scan::<Checkout>("checkout/").unwrap().is_empty());
+        assert_eq!(
+            state
+                .scan::<WorktreeState>("worktree-state/")
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            state
+                .scan_local::<WorktreeState>("worktree-state/")
+                .unwrap()
+                .len(),
+            1
+        );
+        let portable = serde_json::to_string(&state.load_worktree("wt_test").unwrap()).unwrap();
+        assert!(!portable.contains("path"), "{portable}");
+        assert!(!portable.contains("head_tree"), "{portable}");
     }
 }
