@@ -6713,6 +6713,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-home"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "soil-http-host"
 version = "0.1.0"
 dependencies = [
