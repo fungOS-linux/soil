@@ -401,14 +401,14 @@ fn run() -> Result<()> {
     // `mush sh` (and a bare `mush -c CMD`) is the POSIX-ish entry point: one
     // command line, VFS commands through the Spore, allowlisted host programs
     // through the overlay bridge, and session state that outlives the process
-    // because a terminal spawns a fresh shell for every tool call.
-    let shell = if args.first().map(String::as_str) == Some("sh") {
+    // because a terminal spawns a fresh shell for every tool call. The flags are
+    // parsed later, once every other option has been consumed: `--wasm X sh -c`
+    // must not be mistaken for a shell flag.
+    let shell_requested = if args.first().map(String::as_str) == Some("sh") {
         args.remove(0);
-        Some(parse_shell_args(&mut args)?)
-    } else if args.first().map(String::as_str) == Some("-c") || has_shell_command_flag(&args) {
-        Some(parse_shell_args(&mut args)?)
+        true
     } else {
-        None
+        args.first().map(String::as_str) == Some("-c") || has_shell_command_flag(&args)
     };
 
     // A pure `-l` / `-i` flag carries no command, so what follows it may still be
@@ -462,7 +462,16 @@ fn run() -> Result<()> {
     let wasm = take_option(&mut args, "--wasm")
         .or_else(|| std::env::var("MUSH_WASM").ok())
         .unwrap_or_else(|| "spores/mush/module.wasm".into());
-    let wasm = expand_home(&wasm);
+    let mut wasm = expand_home(&wasm);
+    // An installed binary is not next to the component. Prefer the repo-relative
+    // path when it exists (so a checkout works unchanged), then the installed
+    // copy that scripts/install-mush.sh places beside the binary.
+    if !wasm.exists() {
+        let installed = expand_home("~/.local/share/mush/module.wasm");
+        if installed.exists() {
+            wasm = installed;
+        }
+    }
     let term = take_option(&mut args, "--term")
         .or_else(|| std::env::var("TERM").ok())
         .unwrap_or_else(|| "xterm-256color".into());
@@ -496,7 +505,8 @@ fn run() -> Result<()> {
             "records binding needs --records-root, --records-book and --records-collection"
         ),
     };
-    if let Some(shell) = shell {
+    if shell_requested {
+        let shell = parse_shell_args(&mut args)?;
         return run_shell(&root, &bytes, &term, command_root, records, shell);
     }
     let mut runtime = Runtime::open(&root, &bytes, &term, command_root, records)?;
