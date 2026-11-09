@@ -154,8 +154,21 @@ export KEY=VALUE
 unset KEY...
 env
 set [KEY=VALUE]
+man NAME
 exit
 ```
+
+## Spore identity reads
+
+`man NAME` prints the generated manual of an installed Spore, and `NAME
+--version` prints its identity line. Both are host builtins: the Spore owns
+shell semantics, but package metadata lives behind the host, so the host answers
+and the guest's authority is unchanged.
+
+Spore packages are read from `~/.local/share/fungos/spores` (a sibling of the
+command root), or `MUSH_SPORE_ROOT` when set. `man` works with no display and no
+network: the page is generated from the installed manifest and the body ships
+inside the package.
 
 ## Editing and inspection
 

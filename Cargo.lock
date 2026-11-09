@@ -4094,6 +4094,7 @@ dependencies = [
  "soil-inference",
  "soil-records-host",
  "soil-scrub",
+ "soil-spore",
  "soil-vfs-host",
  "tempfile",
  "tiny_http",
