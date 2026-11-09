@@ -100,15 +100,45 @@ fn run_in_spore(runtime: &mut Runtime, command: &str) -> Result<i32> {
 fn run_host(root: &Path, program: &str, args: &[String]) -> Result<i32> {
     let overlay = Overlay::materialize(root)
         .with_context(|| format!("materialize a workspace for {program}"))?;
-    let status = Command::new(program)
-        .args(args)
-        .current_dir(overlay.path())
-        .status()
-        .with_context(|| format!("run {program}"))?;
+    let mut command = Command::new(program);
+    command.args(args).current_dir(overlay.path());
+    // Whoever is running also knows who it is running as. Passing that to the
+    // child is what lets a tool record *which* agent claimed a piece of work
+    // instead of leaving the link to be reconstructed later.
+    for (key, value) in identity(root) {
+        command.env(key, value);
+    }
+    let status = command.status().with_context(|| format!("run {program}"))?;
     overlay
         .apply(root)
         .with_context(|| format!("apply what {program} changed"))?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// The identity of the caller, as environment for a host program.
+///
+/// Empty where the thing is unknown: a half-known identity is worse than an
+/// absent one, because a consumer cannot tell which half is a guess.
+fn identity(root: &Path) -> Vec<(String, String)> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| root.to_path_buf());
+    let origin = crate::origin::resolve(&cwd);
+    let mut out = Vec::new();
+    if let Some(thread) = origin.thread {
+        out.push(("MUSH_THREAD_ID".to_string(), thread));
+    }
+    if let Some(worktree) = origin.worktree {
+        out.push(("MUSH_WORKTREE".to_string(), worktree));
+    }
+    if let Some(project) = origin.marble_project {
+        out.push(("MUSH_MARBLE_PROJECT".to_string(), project));
+    }
+    if let Some(desktop) = origin.desktop {
+        out.push(("MUSH_DESKTOP".to_string(), desktop));
+    }
+    if let Some(repo) = origin.repo {
+        out.push(("MUSH_PROJECT".to_string(), repo));
+    }
+    out
 }
 
 /// A bare program name only. `./cargo` would run code from the overlay itself,

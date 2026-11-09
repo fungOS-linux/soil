@@ -189,7 +189,8 @@ fn repo_name(cwd: &Path) -> Option<String> {
 
 /// `<mount>/worktrees/<label>/<project>` -> (label, project).
 fn worktree_segment(cwd: &Path, mount: &Path) -> Option<(String, String)> {
-    let mut parts = cwd.strip_prefix(mount).ok()?.components();
+    let (cwd, mount) = (canonical(cwd), canonical(mount));
+    let mut parts = cwd.strip_prefix(&mount).ok()?.components();
     if parts.next()?.as_os_str() != "worktrees" {
         return None;
     }
@@ -224,13 +225,22 @@ fn marble_project_from(cwd: &Path) -> Option<String> {
     None
 }
 
+/// Compare real paths: `/var` is a symlink to `/private/var` on macOS, and a
+/// configured mount is written the short way while `current_dir` reports the
+/// resolved way. Comparing the strings alone silently unregisters every
+/// Desktop under a symlinked path.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn path_is_under(path: &Path, base: &Path) -> bool {
-    path.starts_with(base)
+    canonical(path).starts_with(canonical(base))
 }
 
 /// The project name in `<mount>/projects/<name>/...`.
 fn project_segment(cwd: &Path, mount: &Path) -> Option<String> {
-    let mut parts = cwd.strip_prefix(mount).ok()?.components();
+    let (cwd, mount) = (canonical(cwd), canonical(mount));
+    let mut parts = cwd.strip_prefix(&mount).ok()?.components();
     if parts.next()?.as_os_str() != "projects" {
         return None;
     }

@@ -726,3 +726,24 @@ is the identity of a working agent: who, on what, in which tree.
 
 The thread <-> marble link is not resolved here yet; it needs the claim record,
 not the filesystem.
+
+### Who a host command is running as
+
+Every host program started by `mush sh` receives the caller's identity in its
+environment, so a tool can record *which* agent did something instead of leaving
+the link to be reconstructed later:
+
+| variable | meaning |
+|---|---|
+| `MUSH_THREAD_ID` | the Delta thread that owns this session |
+| `MUSH_WORKTREE` | the worktree label (`agent-1`) |
+| `MUSH_PROJECT` | the project the tree is of |
+| `MUSH_MARBLE_PROJECT` | marbles project slug from `.marbles/project.toml` |
+| `MUSH_DESKTOP` | the Desktop that owns the tree |
+
+Unset variables are omitted rather than empty: a consumer cannot tell which
+half of a half-known identity is a guess.
+
+This is the contract behind "jump to the agent working this marble" --
+`mb claim` can record the thread id it was handed, and `mb show` can then print
+a `delta://thread/...` link. The marbles side is not wired yet.
