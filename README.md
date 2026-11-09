@@ -108,6 +108,11 @@ The reusable WASI p2 profile is [`crates/soil-wasi-host`](crates/soil-wasi-host)
 random, filesystem preopens and a per-request store. `soil-wasi-http` serves a
 component's `wasi:http/incoming-handler` with a deny-by-default origin/network
 policy. See [`docs/wasi.md`](docs/wasi.md).
+Secrets are host-mediated: a Spore names a credential and gets an opaque handle,
+never the bytes. The backend is Geode; see [`docs/soil-creds.md`](docs/soil-creds.md).
+A Spore can opt into a name that any node running it answers on, by declaring an
+`[anycast]` claim in its manifest and publishing a short-lived lease; see
+[`docs/soil-anycast.md`](docs/soil-anycast.md).
 The portable Linux/Android/macOS input normalizer is
 [`crates/soil-canvas-input`](crates/soil-canvas-input);
 [`docs/soil-canvas.md`](docs/soil-canvas.md) records the decision and host
