@@ -1,0 +1,5 @@
+package soil:audio-host@0.1.0;
+
+world host {
+  import soil:audio/audio@0.1.0;
+}

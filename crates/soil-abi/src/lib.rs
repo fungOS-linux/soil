@@ -198,6 +198,12 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("playback", &["open"])],
     },
     Contract {
+        file: "wit/soil-audio.wit",
+        source: include_str!("../../../wit/soil-audio.wit"),
+        package: "soil:audio@0.1.0",
+        interfaces: &[("audio", &["open", "rooms", "current-room"])],
+    },
+    Contract {
         file: "wit/soil-ble.wit",
         source: include_str!("../../../wit/soil-ble.wit"),
         package: "soil:ble@1.0.0",

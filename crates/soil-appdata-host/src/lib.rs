@@ -31,7 +31,7 @@ wasmtime::component::bindgen!({
     },
 });
 
-use soil::appdata::appdata;
+pub use soil::appdata::appdata;
 
 const MAX_KEY_BYTES: usize = 256;
 const MAX_LIST_KEYS: u32 = 512;
@@ -485,7 +485,7 @@ fn validate_key(key: &str) -> anyhow::Result<()> {
         || key.contains("//")
         || key
             .chars()
-            .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | ':')))
+            .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | ':' | '@')))
         || key
             .split('/')
             .any(|segment| segment == "." || segment == "..")
@@ -506,7 +506,7 @@ fn valid_prefix(prefix: &str) -> bool {
                 .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
             && prefix
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | ':')))
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | ':' | '@')))
 }
 
 pub fn add_to_linker<T>(linker: &mut Linker<T>) -> anyhow::Result<()>
@@ -564,6 +564,19 @@ mod tests {
         assert_eq!(
             host.delete(r(&handle), "settings".into()),
             Err(appdata::Error::NotFound)
+        );
+    }
+
+    #[test]
+    fn schema_versioned_keys_are_canonical() {
+        // `sfx.mapping@1` is a schema key, not a path. The appdata grammar has
+        // to allow `@` or every versioned schema is unreadable.
+        let (mut host, handle) = open_local("dev.test.app");
+        host.set(r(&handle), "sfx.mapping@1".into(), b"{}".to_vec())
+            .unwrap();
+        assert_eq!(
+            host.get(r(&handle), "sfx.mapping@1".into()).unwrap(),
+            Some(b"{}".to_vec())
         );
     }
 

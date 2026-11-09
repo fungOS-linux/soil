@@ -27,6 +27,7 @@ credential resolution stay in host adapters.
 | `fungos:http-context@0.1.0` | wired | host-attested invocation context for `wasi:http` handlers |
 | `soil:unibus@0.1.0` | wired | bounded poll/publish over Unibus; `soil-wasi-host` adapter |
 | `soil:appdata@1.0.0` | contract | guest SDK exists; native host next |
+| `soil:audio@0.1.0` | contract | room-aware PCM sink over `wasi:audio`; host resolver in `crates/soil-audio-host` |
 | `soil:storage@1.0.0` | contract | content-addressed asset cache |
 | `soil:media@0.1.0` | wired | playback, encoded chunks, image |
 | `soil:surface-import@0.1.0` | wired | host-owned imported surfaces |

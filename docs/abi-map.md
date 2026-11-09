@@ -37,6 +37,7 @@ review map for what else exists and what is missing.
 | `soil:surface@1` | window / compositor / seat | `soil:surface` | **deferred** | Spore submits a bounded retained scene; only if a Spore or non-Canvas host ever needs its own UI. Not on the v1 path. |
 | `wasi:webgpu@0.3.0-rc.2` | wgpu-core device | link `wasi:webgpu` | yes | Upstream WIT, no native handles. Host: [`crates/soil-webgpu`](../crates/soil-webgpu). Presentation stays Canvas-owned. |
 | `wasi:audio@0.1.0` | audio sink | link `wasi:audio` | draft | Soil-maintained PCM sink; cpal host; no callbacks or device handles. [`docs/wasi-audio.md`](wasi-audio.md). |
+| `soil:audio@0.1.0` | room-aware audio sink | `soil:audio` | draft | A room name resolved by the host (local device or Isochrone destination), over the same PCM sink. [`docs/soil-audio.md`](soil-audio.md). |
 | `soil:mic@1` | audio capture | `soil:mic.capture` | yes | Bounded PCM chunks. Visible capture indicator; no background capture. Separate from playback so muting output never implies mic permission. |
 | `soil:camera@1` | camera capture | `soil:camera.capture` | yes | Still/low-rate frames only. Full-rate video belongs on `soil:stream`/producer path. No device paths or raw controls. |
 | `soil:input@1` | shared normalized input types | — | yes | Key, modifiers, pointer, scroll, text and focus types shared by Canvas, Terminal and imported surfaces. Types only; each surface keeps its own presentation grant. Canonical WIT: [`wit/soil-input.wit`](../wit/soil-input.wit). |

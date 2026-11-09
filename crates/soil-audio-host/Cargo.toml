@@ -1,0 +1,18 @@
+[package]
+name = "soil-audio-host"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/fungOS-linux/soil"
+publish = false
+
+[dependencies]
+anyhow = "1"
+wasmtime = { version = "50", default-features = false, features = [
+    "anyhow",
+    "component-model",
+    "cranelift",
+    "runtime",
+    "std",
+] }
+wasi-audio-wasmtime = { path = "../wasi-audio-wasmtime" }

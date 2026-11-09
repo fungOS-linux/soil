@@ -10,7 +10,10 @@ publish = false
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+soil-appdata-host = { path = "../soil-appdata-host" }
+soil-audio-host = { path = "../soil-audio-host" }
 soil-records-host = { path = "../soil-records-host" }
+soil-vfs-host = { path = "../soil-vfs-host" }
 toml = "0.8"
 wasmtime = { version = "50", features = ["anyhow"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }

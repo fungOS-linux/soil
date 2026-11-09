@@ -1,0 +1,103 @@
+// Route-aware audio playback.
+//
+// `wasi:audio` is the portable PCM sink: the guest writes interleaved f32 and
+// the host owns the device. This package adds the one thing a desktop needs on
+// top of that: a *room*, so a sound can go where the principal actually is
+// instead of wherever this machine's default device happens to be.
+//
+// A room is a host-resolved name. It is never an address, port, SSRC, device
+// path, or socket. The host owns discovery, the principal's current room, and
+// the policy that decides whether a Spore may send to one.
+//
+// `wasi:audio` stays the portable contract; Soil links this package in front of
+// it when a Spore needs routing. A guest that only needs a local sink keeps
+// importing `wasi:audio`.
+package soil:audio@0.1.0;
+
+interface audio {
+  record format {
+    sample-rate: u32,
+    channels: u8,
+  }
+
+  enum room-kind {
+    /// A device attached to this host.
+    local,
+    /// A receiver elsewhere on the principal's network.
+    remote,
+  }
+
+  record room {
+    /// Stable id used by `open`, e.g. `home-pi`.
+    name: string,
+    /// What a person sees, e.g. `Home Pi` or `Lab stereo`.
+    label: string,
+    kind: room-kind,
+    /// True when a receiver is attached and the room can be heard now. A room
+    /// that exists but is not live fails `open` with `no-listener`; playing
+    /// into a room nobody is in is the tree falling in the forest.
+    live: bool,
+    /// The principal the host believes is in the room, when it knows.
+    principal: option<string>,
+  }
+
+  enum error {
+    /// The Spore has no `soil:audio` grant, or may not send to this room.
+    denied,
+    /// No room with that name exists for this principal.
+    unknown-room,
+    /// The room exists, but nothing is listening there right now.
+    no-listener,
+    /// The host has no current room, or the sink is not ready.
+    not-ready,
+    /// The requested format is not supported by this room's transport.
+    unsupported,
+    /// A per-call or queue budget was exceeded.
+    over-budget,
+    /// Malformed format or room name.
+    invalid,
+    /// The device or network sink failed.
+    backend,
+    /// The output resource was already closed.
+    closed,
+  }
+
+  record status {
+    format: format,
+    /// The room that was actually opened, after `current` was resolved.
+    room: string,
+    queued-frames: u32,
+    underruns: u64,
+    latency-ms: u32,
+  }
+
+  resource output {
+    format: func() -> result<format, error>;
+    /// Push interleaved f32 frames. Returns the number of complete frames
+    /// accepted; zero means backpressure, not failure.
+    write: func(frames: list<f32>) -> result<u32, error>;
+    /// Wait until the host queue is empty or the bounded timeout expires.
+    drain: func(timeout-ms: u32) -> result<_, error>;
+    status: func() -> result<status, error>;
+    close: func() -> result<_, error>;
+  }
+
+  /// `room` is `none` for the host default, `current` for the room the
+  /// principal is listening in, or a named room. The host resolves all three.
+  open: func(format: format, room: option<string>) -> result<output, error>;
+
+  /// Rooms this principal may send to, whether or not they are live.
+  rooms: func() -> result<list<room>, error>;
+
+  /// The room the principal is in, when the host knows. `none` is not an
+  /// error: a desktop can be open with nobody attached to a room.
+  current-room: func() -> result<option<room>, error>;
+}
+
+world guest {
+  import audio;
+}
+
+world host {
+  import audio;
+}

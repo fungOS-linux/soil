@@ -36,7 +36,7 @@ wasmtime::component::bindgen!({
 use wasi::audio::playback;
 
 /// Host-selected Isochrone destination. The guest never sees this.
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 pub struct IsochroneConfig {
     pub bind: SocketAddr,
     pub destination: SocketAddr,
@@ -53,7 +53,7 @@ impl WasiAudioHost {
     pub fn new() -> Self {
         Self {
             table: ResourceTable::new(),
-            wasi: WasiCtxBuilder::new().build(),
+            wasi: WasiCtxBuilder::new().inherit_stdio().build(),
             isochrone: None,
         }
     }
@@ -63,7 +63,7 @@ impl WasiAudioHost {
     pub fn with_isochrone(config: IsochroneConfig) -> Self {
         Self {
             table: ResourceTable::new(),
-            wasi: WasiCtxBuilder::new().build(),
+            wasi: WasiCtxBuilder::new().inherit_stdio().build(),
             isochrone: Some(config),
         }
     }
@@ -191,6 +191,147 @@ impl Output {
             (self.capacity_samples - producer.slots()) / usize::from(self.format.channels)
         })
     }
+
+    /// Open a sink without naming the generated `wasi:audio` types. This is the
+    /// surface `soil:audio` uses; the WIT wrapper above stays a thin adapter.
+    pub fn open_sink(
+        format: SinkFormat,
+        isochrone: Option<&IsochroneConfig>,
+    ) -> Result<Self, SinkError> {
+        Self::open(
+            playback::Format {
+                sample_rate: format.sample_rate,
+                channels: format.channels,
+            },
+            isochrone,
+        )
+        .map_err(sink_error)
+    }
+
+    pub fn sink_format(&self) -> SinkFormat {
+        SinkFormat {
+            sample_rate: self.format.sample_rate,
+            channels: self.format.channels,
+        }
+    }
+
+    pub fn write_sink(&mut self, frames: &[f32]) -> Result<u32, SinkError> {
+        if self.closed {
+            return Err(SinkError::Closed);
+        }
+        let channels = usize::from(self.format.channels);
+        if channels == 0 || !frames.len().is_multiple_of(channels) {
+            return Err(SinkError::Invalid);
+        }
+        if let Some(sink) = self.isochrone.as_mut() {
+            sink.pending.extend_from_slice(frames);
+            let packet_samples = sink.frames_per_packet * sink.channels;
+            while sink.pending.len() >= packet_samples {
+                let packet: Vec<f32> = sink.pending.drain(..packet_samples).collect();
+                sink.sender.send(&packet).map_err(|_| SinkError::Backend)?;
+            }
+            return Ok((frames.len() / channels) as u32);
+        }
+        let producer = self.producer.as_mut().ok_or(SinkError::Closed)?;
+        let mut accepted = 0;
+        for frame in frames.chunks_exact(channels) {
+            if producer.slots() < channels {
+                break;
+            }
+            for sample in frame {
+                producer.push(*sample).map_err(|_| SinkError::OverBudget)?;
+            }
+            accepted += 1;
+        }
+        Ok(accepted)
+    }
+
+    pub fn drain_sink(&mut self, timeout_ms: u32) -> Result<(), SinkError> {
+        if self.closed {
+            return Err(SinkError::Closed);
+        }
+        if self.isochrone.is_some() {
+            return Ok(());
+        }
+        let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms.min(2_000)));
+        while self.queued_frames() > 0 {
+            if Instant::now() >= deadline {
+                return Err(SinkError::NotReady);
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+
+    pub fn status_sink(&self) -> SinkStatus {
+        let queued = self.queued_frames();
+        let frames_per_second = u64::from(self.format.sample_rate);
+        SinkStatus {
+            format: self.sink_format(),
+            queued_frames: queued.min(u32::MAX as usize) as u32,
+            underruns: self.underruns.load(Ordering::Relaxed),
+            latency_ms: (queued as u64 * 1_000)
+                .checked_div(frames_per_second)
+                .unwrap_or(0) as u32,
+        }
+    }
+
+    pub fn close_sink(&mut self) {
+        self.stop();
+    }
+}
+
+/// Format for the public sink surface, independent of the generated WIT types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SinkFormat {
+    pub sample_rate: u32,
+    pub channels: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SinkError {
+    Denied,
+    NotReady,
+    OverBudget,
+    Invalid,
+    Underrun,
+    Closed,
+    Unsupported,
+    Backend,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SinkStatus {
+    pub format: SinkFormat,
+    pub queued_frames: u32,
+    pub underruns: u64,
+    pub latency_ms: u32,
+}
+
+fn sink_error(error: playback::Error) -> SinkError {
+    match error {
+        playback::Error::Denied => SinkError::Denied,
+        playback::Error::NotReady => SinkError::NotReady,
+        playback::Error::OverBudget => SinkError::OverBudget,
+        playback::Error::Invalid => SinkError::Invalid,
+        playback::Error::Underrun => SinkError::Underrun,
+        playback::Error::Closed => SinkError::Closed,
+        playback::Error::Unsupported => SinkError::Unsupported,
+        playback::Error::Backend => SinkError::Backend,
+    }
+}
+
+fn playback_error(error: SinkError) -> playback::Error {
+    match error {
+        SinkError::Denied => playback::Error::Denied,
+        SinkError::NotReady => playback::Error::NotReady,
+        SinkError::OverBudget => playback::Error::OverBudget,
+        SinkError::Invalid => playback::Error::Invalid,
+        SinkError::Underrun => playback::Error::Underrun,
+        SinkError::Closed => playback::Error::Closed,
+        SinkError::Unsupported => playback::Error::Unsupported,
+        SinkError::Backend => playback::Error::Backend,
+    }
 }
 
 impl Drop for Output {
@@ -286,38 +427,7 @@ impl playback::HostOutput for WasiAudioHost {
             .table
             .get_mut(&output)
             .map_err(|_| playback::Error::Closed)?;
-        if output.closed {
-            return Err(playback::Error::Closed);
-        }
-        let channels = usize::from(output.format.channels);
-        if !frames.len().is_multiple_of(channels) {
-            return Err(playback::Error::Invalid);
-        }
-        if let Some(sink) = output.isochrone.as_mut() {
-            sink.pending.extend_from_slice(&frames);
-            let packet_samples = sink.frames_per_packet * sink.channels;
-            while sink.pending.len() >= packet_samples {
-                let packet: Vec<f32> = sink.pending.drain(..packet_samples).collect();
-                sink.sender
-                    .send(&packet)
-                    .map_err(|_| playback::Error::Backend)?;
-            }
-            return Ok((frames.len() / channels) as u32);
-        }
-        let producer = output.producer.as_mut().ok_or(playback::Error::Closed)?;
-        let mut accepted = 0;
-        for frame in frames.chunks_exact(channels) {
-            if producer.slots() < channels {
-                break;
-            }
-            for sample in frame {
-                producer
-                    .push(*sample)
-                    .map_err(|_| playback::Error::OverBudget)?;
-            }
-            accepted += 1;
-        }
-        Ok(accepted)
+        output.write_sink(&frames).map_err(playback_error)
     }
 
     fn drain(&mut self, output: Resource<Output>, timeout_ms: u32) -> Result<(), playback::Error> {
@@ -325,20 +435,7 @@ impl playback::HostOutput for WasiAudioHost {
             .table
             .get_mut(&output)
             .map_err(|_| playback::Error::Closed)?;
-        if output.closed {
-            return Err(playback::Error::Closed);
-        }
-        if output.isochrone.is_some() {
-            return Ok(());
-        }
-        let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms.min(2_000)));
-        while output.queued_frames() > 0 {
-            if Instant::now() >= deadline {
-                return Err(playback::Error::NotReady);
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-        Ok(())
+        output.drain_sink(timeout_ms).map_err(playback_error)
     }
 
     fn status(&mut self, output: Resource<Output>) -> Result<playback::Status, playback::Error> {
@@ -346,15 +443,15 @@ impl playback::HostOutput for WasiAudioHost {
             .table
             .get(&output)
             .map_err(|_| playback::Error::Closed)?;
-        let queued = output.queued_frames();
-        let frames_per_second = u64::from(output.format.sample_rate);
+        let status = output.status_sink();
         Ok(playback::Status {
-            format: output.format,
-            queued_frames: queued.min(u32::MAX as usize) as u32,
-            underruns: output.underruns.load(Ordering::Relaxed),
-            latency_ms: (queued as u64 * 1_000)
-                .checked_div(frames_per_second)
-                .unwrap_or(0) as u32,
+            format: playback::Format {
+                sample_rate: status.format.sample_rate,
+                channels: status.format.channels,
+            },
+            queued_frames: status.queued_frames,
+            underruns: status.underruns,
+            latency_ms: status.latency_ms,
         })
     }
 
@@ -363,13 +460,13 @@ impl playback::HostOutput for WasiAudioHost {
             .table
             .get_mut(&output)
             .map_err(|_| playback::Error::Closed)?;
-        output.stop();
+        output.close_sink();
         Ok(())
     }
 
     fn drop(&mut self, output: Resource<Output>) -> Result<(), wasmtime::Error> {
         if let Ok(mut output) = self.table.delete(output) {
-            output.stop();
+            output.close_sink();
         }
         Ok(())
     }

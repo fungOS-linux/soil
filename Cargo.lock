@@ -4090,6 +4090,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
+ "soil-audio-host",
  "soil-command",
  "soil-inference",
  "soil-records-host",
@@ -6557,6 +6558,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-audio-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "wasi-audio-wasmtime",
+ "wasmtime",
+]
+
+[[package]]
 name = "soil-ble-host"
 version = "0.1.0"
 dependencies = [
@@ -6604,7 +6614,10 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "soil-appdata-host",
+ "soil-audio-host",
  "soil-records-host",
+ "soil-vfs-host",
  "tempfile",
  "toml 0.8.23",
  "wasmtime",

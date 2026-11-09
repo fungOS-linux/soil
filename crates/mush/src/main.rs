@@ -14,13 +14,15 @@ use std::{
     io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
 use rustyline::{DefaultEditor, error::ReadlineError};
 use serde::{Deserialize, Serialize};
 use soil::command::command as command_abi;
-use soil_command::{CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
+use soil_audio_host::{RoomDirectory, StaticRooms};
+use soil_command::{Capabilities, CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
 use soil_inference::{GeodeResolver, SoilConfig};
 use soil_vfs_host::{VfsHost, index, vfs, vfs_mut};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -42,10 +44,14 @@ struct CommandHost {
 }
 
 impl CommandHost {
-    fn new(root: PathBuf, records: Option<RecordsBinding>) -> Result<Self> {
+    fn new(
+        root: PathBuf,
+        records: Option<RecordsBinding>,
+        capabilities: Capabilities,
+    ) -> Result<Self> {
         Ok(Self {
             root,
-            runner: CommandRunner::new(records)?,
+            runner: CommandRunner::with_capabilities(records, capabilities)?,
         })
     }
 
@@ -117,11 +123,21 @@ impl Host {
         command_root: PathBuf,
         records: Option<RecordsBinding>,
     ) -> Result<Self> {
+        // Commands are trusted, signed packages. The runner only links a
+        // capability when the command imports it; these are the host-side
+        // values used to build those grants.
+        let capabilities = Capabilities {
+            vfs_root: Some(root.to_path_buf()),
+            appdata_root: Some(expand_home("~/.local/share/fungos/appdata")),
+            app_id: None,
+            user_id: std::env::var("FUNGOS_USER_ID").ok(),
+            rooms: Some(Arc::new(StaticRooms::from_env()) as Arc<dyn RoomDirectory>),
+        };
         Ok(Self {
             vfs: VfsHost::open(root)?,
             wasi: WasiCtxBuilder::new().inherit_stdio().build(),
             table: ResourceTable::new(),
-            commands: CommandHost::new(command_root, records)?,
+            commands: CommandHost::new(command_root, records, capabilities)?,
         })
     }
 }
