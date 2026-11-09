@@ -37,8 +37,7 @@ The catalog is `~/.config/fungos/terminal/targets.toml` (override with
 
 ```toml
 [mush]
-binary = "target/debug/mush"                    # relative to the server's cwd
-wasm = "~/.local/share/fungos/mush/module.wasm"
+binary = "mush"                                 # or an absolute path
 
 [[target]]
 name = "studio"
@@ -57,19 +56,21 @@ args = ["-p", "2222"]                           # optional extra ssh args
 name = "acme"
 label = "acme"
 kind = "mush"
-root = "~/.local/share/fungos/desktops/acme"    # the desktop's VFS root
+desktop = "acme"                                # or root = "/path/to/vfs"
 ```
 
 `kind = "ssh"` runs `ssh -tt [args...] host`, so host-key and password prompts
 appear in the browser like any other output. `kind = "mush"` runs
-`<binary> --wasm <wasm> --root <root>`: one Mush session per desktop root, which
-is how a virtual or shared desktop gets its own shell.
+`mush --desktop <id>` (or `--root <dir>`): one Mush session per desktop, which
+is how a virtual or shared desktop gets its own shell. The Mush Spore is
+embedded in the host binary; `wasm = "..."` is a development override, and a
+stale module fails its type check.
 
 Without a config file the catalog is discovered: the login shells that exist
 (`$SHELL`, zsh, bash, sh), the non-pattern `Host` aliases in `~/.ssh/config`,
-and `~/.config/fungos/desktops/*.toml` when `SOIL_MUSH_BIN`/`target/debug/mush`
-and `SOIL_MUSH_WASM`/`~/.local/share/fungos/mush/module.wasm` resolve. `acme`,
-`desk`, and `personal` above are the desktops already on this machine.
+and `~/.config/fungos/desktops/*.toml` when a `mush` binary resolves
+(`SOIL_MUSH_BIN`, `target/debug/mush`, or `mush` on `PATH`). `acme`, `desk`, and
+`personal` above are the desktops already on this machine.
 
 ## Endpoints
 

@@ -4,7 +4,7 @@
 //! from `~/.config/fungos/terminal/targets.toml` when that file exists;
 //! otherwise it is discovered from the machine: the login shells that exist,
 //! the `Host` aliases in `~/.ssh/config`, and the desktops in
-//! `~/.config/fungos/desktops/` (when a Mush binary and module are available).
+//! `~/.config/fungos/desktops/` (when a Mush binary is available).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -125,9 +125,12 @@ struct Entry {
     host: Option<String>,
     #[serde(default)]
     args: Vec<String>,
-    /// `mush`: the VFS root for this desktop.
+    /// `mush`: a Desktop registry id, or a bare VFS root.
+    #[serde(default)]
+    desktop: Option<String>,
     #[serde(default)]
     root: Option<String>,
+    /// Development override for the embedded Spore.
     #[serde(default)]
     wasm: Option<String>,
 }
@@ -172,27 +175,34 @@ impl Entry {
                 (command, detail)
             }
             Kind::Mush => {
-                let root = self
-                    .root
-                    .with_context(|| format!("target {:?}: kind mush needs root", self.name))?;
-                let wasm = self.wasm.or_else(|| mush.wasm.clone()).with_context(|| {
-                    format!(
-                        "target {:?}: kind mush needs wasm (set it here or under [mush])",
-                        self.name
-                    )
-                })?;
-                let root = expand_home(&root);
-                let wasm = expand_home(&wasm);
-                let command = vec![
-                    mush.binary.clone(),
-                    "--wasm".into(),
-                    wasm.display().to_string(),
-                    "--root".into(),
-                    root.display().to_string(),
-                ];
-                let detail = self
-                    .detail
-                    .unwrap_or_else(|| format!("mush · {}", root.display()));
+                let desktop = self.desktop;
+                let root = self.root.map(|root| expand_home(&root));
+                if desktop.is_none() && root.is_none() {
+                    anyhow::bail!("target {:?}: kind mush needs desktop or root", self.name);
+                }
+                let mut command = vec![mush.binary.clone()];
+                if let Some(desktop) = &desktop {
+                    command.push("--desktop".into());
+                    command.push(desktop.clone());
+                }
+                if let Some(root) = &root {
+                    command.push("--root".into());
+                    command.push(root.display().to_string());
+                }
+                // The Spore is embedded in the host; --wasm is a development
+                // override, and a stale module fails its type check.
+                if let Some(wasm) = self.wasm.or_else(|| mush.wasm.clone()) {
+                    command.push("--wasm".into());
+                    command.push(expand_home(&wasm).display().to_string());
+                }
+                let what = desktop
+                    .map(|desktop| format!("desktop {desktop}"))
+                    .unwrap_or_else(|| {
+                        root.as_ref()
+                            .map(|root| root.display().to_string())
+                            .unwrap_or_default()
+                    });
+                let detail = self.detail.unwrap_or_else(|| format!("mush · {what}"));
                 (command, detail)
             }
         };
@@ -299,9 +309,6 @@ fn desktop_targets(home: &Path) -> Vec<Target> {
     let Some(binary) = mush_binary() else {
         return Vec::new();
     };
-    let Some(wasm) = mush_wasm(home) else {
-        return Vec::new();
-    };
     let dir = home.join(".config/fungos/desktops");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
@@ -324,17 +331,11 @@ fn desktop_targets(home: &Path) -> Vec<Target> {
         }
         let label = desktop.name.unwrap_or_else(|| desktop.id.clone());
         targets.push(Target {
-            name: desktop.id,
+            name: desktop.id.clone(),
             label: format!("{label} desktop"),
             kind: Kind::Mush,
-            detail: format!("mush · {}", root.display()),
-            command: vec![
-                binary.clone(),
-                "--wasm".into(),
-                wasm.display().to_string(),
-                "--root".into(),
-                root.display().to_string(),
-            ],
+            detail: format!("mush · desktop {}", desktop.id),
+            command: vec![binary.clone(), "--desktop".into(), desktop.id],
         });
     }
     targets.sort_by(|a, b| a.label.cmp(&b.label));
@@ -350,13 +351,6 @@ fn mush_binary() -> Option<String> {
         return Some(local.display().to_string());
     }
     on_path("mush").then(|| "mush".to_owned())
-}
-
-fn mush_wasm(home: &Path) -> Option<PathBuf> {
-    let path = std::env::var_os("SOIL_MUSH_WASM")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/share/fungos/mush/module.wasm"));
-    path.is_file().then_some(path)
 }
 
 /// Whether a target's program can be spawned. Checked before the pty so a
@@ -417,7 +411,7 @@ mod tests {
             name = "acme"
             label = "Acme desktop"
             kind = "mush"
-            root = "/desktops/acme"
+            desktop = "acme"
             "#,
         )
         .unwrap();
@@ -431,15 +425,36 @@ mod tests {
         assert_eq!(targets[1].label, "neo");
         assert_eq!(
             targets[2].command,
-            [
-                "/opt/mush",
-                "--wasm",
-                "/opt/mush.wasm",
-                "--root",
-                "/desktops/acme"
-            ]
+            ["/opt/mush", "--desktop", "acme", "--wasm", "/opt/mush.wasm"]
         );
         assert_eq!(targets[2].label, "Acme desktop");
+    }
+
+    #[test]
+    fn a_mush_root_and_wasm_override_are_passed_through() {
+        let targets = parse(
+            r#"
+            [mush]
+            binary = "/opt/mush"
+            wasm = "/opt/mush.wasm"
+
+            [[target]]
+            name = "bare"
+            kind = "mush"
+            root = "/desktops/bare"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            targets[0].command,
+            [
+                "/opt/mush",
+                "--root",
+                "/desktops/bare",
+                "--wasm",
+                "/opt/mush.wasm"
+            ]
+        );
     }
 
     #[test]
