@@ -97,7 +97,10 @@ a real component pushes bounded PCM into a cpal host. See
 [`docs/wasi-audio.md`](docs/wasi-audio.md). Guest code uses the umbrella
 [`crates/soil-sdk`](crates/soil-sdk); its first feature, `audio`, provides
 `Output`, `write_all`, `tone` and `play_tone`. See
-[`docs/soil-sdk.md`](docs/soil-sdk.md).
+[`docs/soil-sdk.md`](docs/soil-sdk.md). Lua guests can use the generated
+[`crates/soil-sdk-lua`](crates/soil-sdk-lua) bindings: `soil-sdk-lua` reads the
+canonical WIT and emits `soil.lua` plus a host signature manifest. The host
+installs one `__soil_call` dispatcher; the SDK never reimplements a capability.
 The CRM is a Spore over namespaced records, not a host: [`spores/crm`](spores/crm)
 reads `crm`, `contacts`, `calls` and `messages` namespaces, while the host maps
 those names to books and enforces grants. See [`docs/crm.md`](docs/crm.md).

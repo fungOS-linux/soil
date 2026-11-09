@@ -22,6 +22,14 @@ Records and Geode do not get separate Iroh transports. They share the session,
 endpoint discovery, identity checks, expiry, grants, and revocation. They differ
 only by message kinds.
 
+## One records crate
+
+`fungos-records` is declared once, in `[workspace.dependencies]`, because the
+SQLite schema and the durable peer outbox are one contract shared by the records
+host, the sync host and every book consumer. Pinning it per crate is how the
+workspace ended up with two revisions: two incompatible `Store` types, and two
+copies of `unibus` through their transitive dependency. A bump is now one edit.
+
 ## Spore opt-in
 
 A Spore does not import `soil:unibus`, `soil:iroh`, or `unibus/peer/1`.

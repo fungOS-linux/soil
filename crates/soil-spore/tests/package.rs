@@ -43,7 +43,9 @@ fn fixture() -> PathBuf {
     fs::create_dir_all(root.join("ui")).unwrap();
     fs::create_dir_all(root.join("assets")).unwrap();
     fs::write(root.join("spore.toml"), MANIFEST).unwrap();
-    fs::write(root.join("module.wasm"), b"\0asm\x01\0\0\0").unwrap();
+    // An empty component preamble (`0x0d 0x00`), not a core module: `check`
+    // reads the component type, and a core module is not a Spore module.
+    fs::write(root.join("module.wasm"), b"\0asm\x0d\x00\x01\x00").unwrap();
     fs::write(root.join("ui/editor.lua"), b"return {}\n").unwrap();
     fs::write(root.join("assets/site-map.png"), b"\x89PNG\r\n").unwrap();
     root
@@ -225,4 +227,16 @@ fn safe_paths_are_the_ones_we_accept() {
         assert!(soil_spore::safe_relative(bad).is_err(), "{bad}");
     }
     let _ = Path::new("x");
+}
+
+#[test]
+fn a_module_that_is_not_a_component_is_rejected_with_a_reason() {
+    // `check` reads the component type to hold [grants] to the real imports, so
+    // a plain core module has to fail loudly rather than silently skip the rule.
+    let error = soil_spore::imported_packages(b"\0asm\x01\0\0\0").unwrap_err();
+    assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+    assert!(
+        error.to_string().contains("component"),
+        "the message should say why: {error}"
+    );
 }
