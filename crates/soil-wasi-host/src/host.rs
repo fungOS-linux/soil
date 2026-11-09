@@ -114,6 +114,8 @@ impl WasiHostBuilder {
     pub fn bus(mut self, bus: Arc<dyn Bus>) -> Self {
         self.bus = Some(bus);
         self
+    }
+
     /// Link `soil:records` for this host. A component that imports the
     /// interface without a book configured fails at instantiation, naming the
     /// import, rather than answering `unsupported` on the first call.
@@ -196,6 +198,8 @@ impl WasiHost {
 
     pub(crate) fn bus(&self) -> Option<Arc<dyn Bus>> {
         self.bus.clone()
+    }
+
     /// Run one `soil:records` call under the shared book lock.
     ///
     /// The guard never crosses an await: every trait method is synchronous, so a

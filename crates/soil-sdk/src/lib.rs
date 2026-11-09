@@ -15,3 +15,6 @@ pub use soil_sdk_appdata::Result as AppDataResult;
 
 #[cfg(feature = "records")]
 pub use soil_sdk_records as records;
+
+#[cfg(feature = "unibus")]
+pub use soil_sdk_unibus as unibus;
