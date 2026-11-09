@@ -1,0 +1,12 @@
+// Guest-side view of the Soil Canvas capability.
+//
+// A Spore gets one host-selected surface. `present` carries a versioned
+// `soil-scene` document; the host validates it and either rasterizes it or
+// forwards it to the owner compositor. The Spore never receives a window,
+// texture, path, or device handle.
+package soil:canvas-guest@0.1.0;
+
+world guest {
+  import soil:canvas/surface@1.0.0;
+  import soil:scene/payload@1.0.0;
+}
