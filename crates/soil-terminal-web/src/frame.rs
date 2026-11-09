@@ -1,0 +1,177 @@
+//! Snapshot → browser frames.
+//!
+//! A frame is a diff against the previous snapshot: only rows that changed are
+//! sent, and each row is a list of style runs rather than one object per cell.
+//! The first frame (or a resize) is full, so a reconnecting browser can rebuild
+//! the screen from one message.
+
+use serde_json::{Value, json};
+use soil_vt::{Cell, Snapshot};
+
+const BOLD: u8 = 1;
+const ITALIC: u8 = 2;
+const UNDERLINE: u8 = 4;
+const FAINT: u8 = 8;
+const INVERSE: u8 = 16;
+
+pub fn frame(snapshot: &Snapshot, previous: Option<&Snapshot>) -> Value {
+    let full = previous.is_none_or(|last| last.cols != snapshot.cols || last.rows != snapshot.rows);
+    let mut rows = Vec::new();
+    for y in 0..snapshot.rows {
+        let runs = row_runs(snapshot, y);
+        let changed = full || previous.is_some_and(|last| row_runs(last, y) != runs);
+        if changed {
+            rows.push(json!({ "y": y, "runs": runs }));
+        }
+    }
+    json!({
+        "type": "frame",
+        "full": full,
+        "cols": snapshot.cols,
+        "rows": snapshot.rows,
+        "cursor": snapshot.cursor,
+        "title": snapshot.title,
+        "scroll": snapshot.scroll.map(|scroll| json!({
+            "offset": scroll.offset,
+            "total": scroll.total,
+            "len": scroll.len,
+        })),
+        "rows": rows,
+    })
+}
+
+/// One row as `[text, fg, bg, flags]` runs. A wide glyph's spacer is skipped:
+/// the leading cell carries the cluster and a monospace font gives it two cells.
+fn row_runs(snapshot: &Snapshot, y: u16) -> Vec<Value> {
+    let mut runs: Vec<Run> = Vec::new();
+    for x in 0..snapshot.cols {
+        let Some(cell) = snapshot.cell(x, y) else {
+            break;
+        };
+        if cell.wide_tail {
+            continue;
+        }
+        let text = if cell.text.is_empty() {
+            " ".to_string()
+        } else {
+            cell.text.clone()
+        };
+        let fg = cell.fg.map(hex);
+        let bg = cell.bg.map(hex);
+        let flags = flags(cell);
+        match runs.last_mut() {
+            Some(last) if last.fg == fg && last.bg == bg && last.flags == flags => {
+                last.text.push_str(&text);
+            }
+            _ => runs.push(Run {
+                text,
+                fg,
+                bg,
+                flags,
+            }),
+        }
+    }
+    runs.into_iter()
+        .map(|run| json!([run.text, run.fg, run.bg, run.flags]))
+        .collect()
+}
+
+struct Run {
+    text: String,
+    fg: Option<String>,
+    bg: Option<String>,
+    flags: u8,
+}
+
+fn hex(color: soil_vt::Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
+fn flags(cell: &Cell) -> u8 {
+    let mut flags = 0;
+    if cell.bold {
+        flags |= BOLD;
+    }
+    if cell.italic {
+        flags |= ITALIC;
+    }
+    if cell.underline {
+        flags |= UNDERLINE;
+    }
+    if cell.faint {
+        flags |= FAINT;
+    }
+    if cell.inverse {
+        flags |= INVERSE;
+    }
+    flags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(rows: &[&str], cols: u16) -> Snapshot {
+        let mut session = soil_vt::Session::new(cols, rows.len() as u16, 10).unwrap();
+        session.write(rows.join("\r\n").as_bytes());
+        session.snapshot().unwrap()
+    }
+
+    #[test]
+    fn a_full_frame_carries_every_row() {
+        let snapshot = snapshot(&["hello", "world"], 10);
+        let frame = frame(&snapshot, None);
+        assert_eq!(frame["full"], true);
+        assert_eq!(frame["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(frame["rows"][0]["runs"][0][0], "hello     ");
+    }
+
+    #[test]
+    fn a_diff_only_carries_the_changed_row() {
+        let first = snapshot(&["hello", "world"], 10);
+        let mut session = soil_vt::Session::new(10, 2, 10).unwrap();
+        session.write(b"hello\r\nworld");
+        let _ = session.snapshot().unwrap();
+        session.write(b"\x1b[2;1Hagain");
+        let second = session.snapshot().unwrap();
+        let frame = frame(&second, Some(&first));
+        assert_eq!(frame["full"], false);
+        let rows = frame["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["y"], 1);
+        assert_eq!(rows[0]["runs"][0][0], "again     ");
+    }
+
+    #[test]
+    fn a_resize_forces_a_full_frame() {
+        let first = snapshot(&["hello"], 10);
+        let mut session = soil_vt::Session::new(4, 1, 10).unwrap();
+        session.write(b"hi");
+        let second = session.snapshot().unwrap();
+        assert_eq!(frame(&second, Some(&first))["full"], true);
+    }
+
+    #[test]
+    fn a_frame_reports_the_scrollbar() {
+        let mut session = soil_vt::Session::new(20, 3, 100).unwrap();
+        session.write(b"a\r\nb\r\nc\r\nd\r\ne");
+        session.scroll(-1);
+        let frame = frame(&session.snapshot().unwrap(), None);
+        let scroll = &frame["scroll"];
+        assert!(scroll["total"].as_u64().unwrap() >= 5);
+        assert!(scroll["offset"].as_u64().unwrap() < scroll["total"].as_u64().unwrap());
+        assert!(frame["cursor"].is_null());
+    }
+
+    #[test]
+    fn style_runs_merge_and_flags_are_reported() {
+        let mut session = soil_vt::Session::new(20, 1, 10).unwrap();
+        session.write(b"\x1b[1;31mred\x1b[0m plain");
+        let frame = frame(&session.snapshot().unwrap(), None);
+        let runs = frame["rows"][0]["runs"].as_array().unwrap();
+        assert_eq!(runs[0][0], "red");
+        assert_eq!(runs[0][3], 1);
+        assert!(runs[1][0].as_str().unwrap().starts_with(" plain"));
+        assert_eq!(runs[1][3], 0);
+    }
+}

@@ -123,6 +123,30 @@ obligations, [`docs/soil-canvas-s22.md`](docs/soil-canvas-s22.md) records the S2
 proving run, and [`docs/android.md`](docs/android.md) records the first Android
 JNI proof.
 
+## Terminal in the browser
+
+[`crates/soil-terminal-web`](crates/soil-terminal-web) runs a real pty, feeds
+its bytes to `soil-vt`, and streams styled rows to a browser over SSE;
+keystrokes return as POSTs. It is the same emulator as the native terminal
+window, with the browser as a second presenter.
+
+```sh
+# local shell
+cargo run -p soil-terminal-web --bin soil-terminal-web
+
+# a remote shell over ssh (the browser shows the normal host-key prompt)
+cargo run -p soil-terminal-web --bin soil-terminal-web -- --ssh aj@home-pi
+
+# mush inside soil-vt
+cargo run -p soil-terminal-web --bin soil-terminal-web -- \
+  --command target/debug/mush --wasm spores/mush/module.wasm \
+  --root ~/.local/share/fungos/vfs
+```
+
+The listener defaults to loopback; a non-loopback address requires `--token`.
+Prefer an SSH tunnel (`ssh -L 8790:127.0.0.1:8790 host`) over exposing the port.
+See [`crates/soil-terminal-web/README.md`](crates/soil-terminal-web/README.md).
+
 ## Development
 
 ```sh
