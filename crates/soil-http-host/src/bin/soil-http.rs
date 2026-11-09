@@ -31,8 +31,8 @@ fn run() -> Result<(), String> {
             "--bearer-env" => {
                 args.next();
                 let name = args.next().ok_or("--bearer-env requires a VARIABLE")?;
-                let token = env::var(&name)
-                    .map_err(|_| format!("--bearer-env: {name} is not set"))?;
+                let token =
+                    env::var(&name).map_err(|_| format!("--bearer-env: {name} is not set"))?;
                 bearer = Some(BearerCredential::new(token));
             }
             _ => break,

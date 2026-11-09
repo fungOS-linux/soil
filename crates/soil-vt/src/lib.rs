@@ -217,8 +217,7 @@ impl Session {
 
     /// Move the viewport through history. Negative is up, towards older rows.
     pub fn scroll(&mut self, delta: isize) {
-        self.terminal
-            .scroll_viewport(ScrollViewport::Delta(delta));
+        self.terminal.scroll_viewport(ScrollViewport::Delta(delta));
     }
 
     /// Return the viewport to the active screen.
@@ -270,14 +269,13 @@ impl Session {
         // A cursor in history would point at a row that is not the program's
         // cursor, so it is only meaningful while the viewport is active.
         let viewport_active = self.terminal.is_viewport_active().unwrap_or(true);
-        let cursor = (viewport_active && self.terminal.is_cursor_visible().unwrap_or(false)).then(
-            || {
+        let cursor =
+            (viewport_active && self.terminal.is_cursor_visible().unwrap_or(false)).then(|| {
                 (
                     self.terminal.cursor_x().unwrap_or(0),
                     self.terminal.cursor_y().unwrap_or(0),
                 )
-            },
-        );
+            });
         let scroll = self.terminal.scrollbar().ok().map(|bar| Scroll {
             offset: bar.offset,
             total: bar.total,
@@ -341,9 +339,7 @@ fn read_cell(cell: &ghostty_vt::render::CellIteration<'_>) -> Result<Cell, Error
 /// grapheme, which keeps the bound proportional to the requested line count
 /// without claiming to be exact.
 fn scrollback_bytes(lines: usize, cols: u16) -> usize {
-    lines
-        .saturating_mul(usize::from(cols))
-        .saturating_mul(16)
+    lines.saturating_mul(usize::from(cols)).saturating_mul(16)
 }
 
 #[cfg(test)]
@@ -477,10 +473,26 @@ mod tests {
         let snapshot = session.snapshot().unwrap();
         assert_eq!(snapshot.cols, 60);
         assert_eq!(snapshot.rows, 16);
-        assert!(snapshot.row_text(0).starts_with("┌ soil tui ─"), "{}", snapshot.row_text(0));
-        assert!(snapshot.row_text(1).contains("Overview"), "{}", snapshot.row_text(1));
-        assert!(snapshot.row_text(4).contains("> Ingest"), "{}", snapshot.row_text(4));
-        assert!(snapshot.row_text(14).contains("tab switch"), "{}", snapshot.row_text(14));
+        assert!(
+            snapshot.row_text(0).starts_with("┌ soil tui ─"),
+            "{}",
+            snapshot.row_text(0)
+        );
+        assert!(
+            snapshot.row_text(1).contains("Overview"),
+            "{}",
+            snapshot.row_text(1)
+        );
+        assert!(
+            snapshot.row_text(4).contains("> Ingest"),
+            "{}",
+            snapshot.row_text(4)
+        );
+        assert!(
+            snapshot.row_text(14).contains("tab switch"),
+            "{}",
+            snapshot.row_text(14)
+        );
         // The frame hides the cursor at the end, so the snapshot carries none.
         assert_eq!(snapshot.cursor, None);
     }
