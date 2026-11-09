@@ -10,6 +10,10 @@ interface http {
   enum method {
     get,
     head,
+    post,
+    put,
+    patch,
+    delete,
   }
 
   record header {
@@ -22,6 +26,9 @@ interface http {
     method: method,
     /// Allowlisted request headers only; the host rejects unknown names.
     headers: list<header>,
+    /// Body for `post`, `put`, `patch` and `delete`. A body on `get` or `head`
+    /// is rejected, and the host caps it with the same budget as a response.
+    body: option<list<u8>>,
     /// Opaque host credential handle (for example a Geode entry). Never a
     /// token, username, password, or private key.
     credential: option<string>,

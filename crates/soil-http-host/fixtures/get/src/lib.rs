@@ -17,6 +17,7 @@ impl Guest for Component {
                 name: "accept".into(),
                 value: "application/rss+xml, application/atom+xml, application/xml, text/xml, */*".into(),
             }],
+            body: None,
             credential,
             max_bytes: 1024 * 1024,
             timeout_ms: 10_000,
