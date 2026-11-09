@@ -71,22 +71,32 @@ fn receive(
     };
 
     let headers = request.headers();
-    let Some(webhook_id) = header(&headers, "webhook-id") else {
-        return reply(response_out, 401, json_error(401), "");
+    // Two signature schemes, two shapes. GitHub signs only the body with
+    // `X-Hub-Signature-256`; Standard Webhooks signs `id.timestamp.body` and
+    // needs the timestamp to bound replay. The header decides which, so a hook
+    // never has to declare its provider twice.
+    let github_signature = header(&headers, "x-hub-signature-256");
+    let standard = if github_signature.is_some() {
+        None
+    } else {
+        let Some(webhook_id) = header(&headers, "webhook-id") else {
+            return reply(response_out, 401, json_error(401), "");
+        };
+        let Some(timestamp) = header(&headers, "webhook-timestamp") else {
+            return reply(response_out, 401, json_error(401), "");
+        };
+        let Some(signature) = header(&headers, "webhook-signature") else {
+            return reply(response_out, 401, json_error(401), "");
+        };
+        let Ok(timestamp_seconds) = timestamp.parse::<i64>() else {
+            return reply(response_out, 401, json_error(401), "");
+        };
+        let now_seconds = (context.received_at_ms / 1000) as i64;
+        if (now_seconds - timestamp_seconds).abs() > MAX_SKEW_SECONDS {
+            return reply(response_out, 401, json_error(401), "");
+        }
+        Some((webhook_id, timestamp, signature))
     };
-    let Some(timestamp) = header(&headers, "webhook-timestamp") else {
-        return reply(response_out, 401, json_error(401), "");
-    };
-    let Some(signature_header) = header(&headers, "webhook-signature") else {
-        return reply(response_out, 401, json_error(401), "");
-    };
-    let Ok(timestamp_seconds) = timestamp.parse::<i64>() else {
-        return reply(response_out, 401, json_error(401), "");
-    };
-    let now_seconds = (context.received_at_ms / 1000) as i64;
-    if (now_seconds - timestamp_seconds).abs() > MAX_SKEW_SECONDS {
-        return reply(response_out, 401, json_error(401), "");
-    }
 
     let body = match read_body(request) {
         Ok(body) => body,
@@ -98,25 +108,45 @@ fn receive(
         return reply(response_out, 415, json_error(415), "");
     };
 
-    let signable = [
-        webhook_id.as_bytes(),
-        b".",
-        timestamp.as_bytes(),
-        b".",
-        body.as_slice(),
-    ]
-    .concat();
+    let delivery_id = match &standard {
+        Some((webhook_id, _, _)) => webhook_id.clone(),
+        // GitHub's delivery id is the only replay handle it gives us: the
+        // body signature has no timestamp, so redelivery is rejected by id,
+        // not by age.
+        None => match header(&headers, "x-github-delivery") {
+            Some(delivery) => delivery,
+            None => return reply(response_out, 401, json_error(401), ""),
+        },
+    };
     let Some(handle) = resolve_credential(slug) else {
         return reply(response_out, 503, json_error(503), "");
     };
-    if !verify(&handle, &signable, &signature_header) {
+    let verified = match (&standard, github_signature) {
+        (Some((webhook_id, timestamp, signature)), None) => {
+            let signable = [
+                webhook_id.as_bytes(),
+                b".",
+                timestamp.as_bytes(),
+                b".",
+                body.as_slice(),
+            ]
+            .concat();
+            verify(&handle, &signable, &signature)
+        }
+        (None, Some(signature)) => verify_github(&handle, &body, &signature),
+        _ => false,
+    };
+    if !verified {
         return reply(response_out, 401, json_error(401), "");
     }
 
-    let event_type = header(&headers, "x-event-type").unwrap_or_else(|| "webhook".to_string());
+    let event_type = match header(&headers, "x-event-type") {
+        Some(event_type) => event_type,
+        None => header(&headers, "x-github-event").unwrap_or_else(|| "webhook".to_string()),
+    };
     let event = serde_json::json!({
         "provider": provider,
-        "delivery_id": webhook_id,
+        "delivery_id": delivery_id,
         "event_type": event_type,
         "received_at_ms": context.received_at_ms,
         "headers": safe_headers(&headers),
@@ -187,6 +217,39 @@ fn split_hook_path(rest: &str) -> Option<(&str, &str)> {
 
 fn resolve_credential(name: &str) -> Option<creds::Handle> {
     creds::resolve(name).ok()
+}
+
+/// GitHub's scheme: `sha256=<hex>` over the raw body, no timestamp.
+fn verify_github(handle: &creds::Handle, body: &[u8], header: &str) -> bool {
+    let Some(hex) = header.strip_prefix("sha256=") else {
+        return false;
+    };
+    if hex.len() != 64 {
+        return false;
+    }
+    let mut signature = [0u8; 32];
+    for (index, byte) in signature.iter_mut().enumerate() {
+        let Some(high) = hex_digit(hex.as_bytes()[index * 2]) else {
+            return false;
+        };
+        let Some(low) = hex_digit(hex.as_bytes()[index * 2 + 1]) else {
+            return false;
+        };
+        *byte = high << 4 | low;
+    }
+    matches!(
+        creds::verify(handle, creds::Algorithm::HmacSha256, body, &signature),
+        Ok(true)
+    )
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn verify(handle: &creds::Handle, message: &[u8], header: &str) -> bool {
