@@ -259,11 +259,21 @@ renderer and it uses its stdout as the prompt:
 prompt_command = "starship prompt --status $MUSH_STATUS --cmd-duration $MUSH_DURATION_MS"
 ```
 
-`MUSH_STATUS`, `MUSH_DURATION_MS`, and `MUSH_CWD` are exported for the command,
-along with `STARSHIP_SHELL=mush`. [Starship](https://starship.rs) needs no
-adapter beyond that line; any script that prints a prompt works the same way.
-If the command fails or prints nothing, Mush falls back to the Spore's own
-prompt rather than leaving the session without one.
+`MUSH_STATUS`, `MUSH_DURATION_MS`, `MUSH_CWD`, and `MUSH_HOST_CWD` are exported
+for the command, along with `STARSHIP_SHELL=mush`. [Starship](https://starship.rs)
+needs no adapter beyond that line; any script that prints a prompt works the
+same way. If the command fails or prints nothing, Mush falls back to the Spore's
+own prompt rather than leaving the session without one.
+
+When the Desktop is projected on this device, the command also runs **inside
+that projection**, so a renderer that inspects a directory reads real files
+rather than the VFS path it cannot open. That is what lets a Git segment report a
+branch when the projected project is a Git checkout, and leaves it empty when it
+is not. `MUSH_CWD` stays the VFS path; `MUSH_HOST_CWD` is where it maps to here.
+
+Note that Spaceship is a Zsh theme -- it is shell code, so it cannot be a Mush
+prompt renderer. Starship's presets cover the same look without depending on a
+shell Mush does not have.
 
 The renderer runs in the host, not the Spore, because the Spore has no process
 and no network. A themed prompt therefore describes the VFS (directory, status,

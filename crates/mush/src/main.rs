@@ -655,6 +655,7 @@ fn run() -> Result<()> {
             &root,
             &interactive_command_root,
             config.prompt_command.as_deref(),
+            desktop.as_ref().map(|desktop| desktop.mount.as_path()),
         )?
     } else {
         run_lines(&mut runtime)?
@@ -1106,6 +1107,7 @@ fn run_interactive(
     root: &Path,
     command_root: &Path,
     prompt_command: Option<&str>,
+    mount: Option<&Path>,
 ) -> Result<i32> {
     // Mush runs every command in-process, so there is no child to suspend or
     // resume. Letting Ctrl-Z land would stop the shell while the terminal is
@@ -1125,7 +1127,7 @@ fn run_interactive(
     refresh_cwd(runtime, &cwd);
     loop {
         let prompt = match prompt_command {
-            Some(command) => match prompt_via_command(command, status, elapsed, &cwd) {
+            Some(command) => match prompt_via_command(command, status, elapsed, &cwd, mount) {
                 Some(text) => text,
                 // A broken prompt command must not cost the session its prompt.
                 None => runtime.prompt()?,
@@ -1200,18 +1202,26 @@ fn prompt_via_command(
     status: i32,
     elapsed: std::time::Duration,
     cwd: &std::sync::Arc<std::sync::Mutex<String>>,
+    mount: Option<&Path>,
 ) -> Option<String> {
     let current = cwd.lock().map(|cwd| cwd.clone()).unwrap_or_default();
-    let output = std::process::Command::new("sh")
+    // A prompt renderer that inspects a directory -- for a Git branch, say --
+    // needs the projected host path, not the VFS path it cannot open.
+    let host_cwd = mount.and_then(|mount| host_cwd_for(mount, &current));
+    let mut process = std::process::Command::new("sh");
+    process
         .arg("-c")
         .arg(command)
         .env("MUSH_STATUS", status.to_string())
         .env("MUSH_DURATION_MS", elapsed.as_millis().to_string())
         .env("MUSH_CWD", &current)
         .env("STARSHIP_SHELL", "mush")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stdin(std::process::Stdio::null());
+    if let Some(host_cwd) = &host_cwd {
+        process.current_dir(host_cwd);
+        process.env("MUSH_HOST_CWD", host_cwd);
+    }
+    let output = process.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1219,6 +1229,17 @@ fn prompt_via_command(
         .trim_end_matches('\n')
         .to_string();
     if text.is_empty() { None } else { Some(text) }
+}
+
+/// Where a VFS path lands on this device, when the Desktop is projected here.
+fn host_cwd_for(mount: &Path, vfs_cwd: &str) -> Option<std::path::PathBuf> {
+    let relative = vfs_cwd.trim_start_matches('/');
+    let path = if relative.is_empty() {
+        mount.to_path_buf()
+    } else {
+        mount.join(relative)
+    };
+    path.is_dir().then_some(path)
 }
 
 fn run_lines(runtime: &mut Runtime) -> Result<i32> {
