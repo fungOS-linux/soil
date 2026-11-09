@@ -75,27 +75,30 @@ pub fn resolve(cwd: &Path) -> Origin {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let delta_worktree = delta_worktree_id(cwd);
-    // A Delta worktree is named after its repository, so the directory name is
-    // the repository name when there is no Git metadata to read.
-    let repo = repo_name(cwd).or_else(|| {
-        delta_worktree.as_ref().and_then(|_| {
-            cwd.file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
+    let desktops = desktop::list().unwrap_or_default();
+    let mount_match = desktops
+        .iter()
+        .find(|desktop| path_is_under(cwd, &desktop.mount));
+    // Three ways to learn the repository name, strongest first: Git metadata,
+    // the Delta worktree directory, then the caller's place inside a Desktop's
+    // `projects/` tree.
+    let repo = repo_name(cwd)
+        .or_else(|| {
+            delta_worktree.as_ref().and_then(|_| {
+                cwd.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+        })
+        .or_else(|| mount_match.and_then(|desktop| project_segment(cwd, &desktop.mount)));
+
+    let matched = mount_match.or_else(|| {
+        repo.as_deref().and_then(|repo| {
+            desktops
+                .iter()
+                .find(|desktop| desktop.projects.iter().any(|project| project == repo))
         })
     });
-    let desktops = desktop::list().unwrap_or_default();
-
-    let matched = desktops
-        .iter()
-        .find(|desktop| path_is_under(cwd, &desktop.mount))
-        .or_else(|| {
-            repo.as_deref().and_then(|repo| {
-                desktops
-                    .iter()
-                    .find(|desktop| desktop.projects.iter().any(|project| project == repo))
-            })
-        });
 
     let Some(desktop) = matched else {
         return Origin {
@@ -166,6 +169,15 @@ fn repo_name(cwd: &Path) -> Option<String> {
 
 fn path_is_under(path: &Path, base: &Path) -> bool {
     path.starts_with(base)
+}
+
+/// The project name in `<mount>/projects/<name>/...`.
+fn project_segment(cwd: &Path, mount: &Path) -> Option<String> {
+    let mut parts = cwd.strip_prefix(mount).ok()?.components();
+    if parts.next()?.as_os_str() != "projects" {
+        return None;
+    }
+    parts.next()?.as_os_str().to_str().map(str::to_string)
 }
 
 /// Whether something is mounted at `path`.
@@ -240,6 +252,21 @@ mod tests {
         let cwd = Path::new("/src/soil/.delta/worktrees/njtb5mrzj3h2/soil");
         assert_eq!(delta_worktree_id(cwd).as_deref(), Some("njtb5mrzj3h2"));
         assert_eq!(delta_worktree_id(Path::new("/src/soil")), None);
+    }
+
+    #[test]
+    fn reads_the_project_name_from_a_path_inside_the_mount() {
+        let mount = Path::new("/home/me/mnt/personal");
+        assert_eq!(
+            project_segment(Path::new("/home/me/mnt/personal/projects/soil/src"), mount).as_deref(),
+            Some("soil")
+        );
+        // A path elsewhere in the mount is not a project.
+        assert_eq!(
+            project_segment(Path::new("/home/me/mnt/personal/notes"), mount),
+            None
+        );
+        assert_eq!(project_segment(Path::new("/tmp/elsewhere"), mount), None);
     }
 
     #[test]
