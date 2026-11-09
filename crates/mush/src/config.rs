@@ -17,6 +17,8 @@ pub struct Config {
     pub principal: Option<String>,
     pub socket: Option<PathBuf>,
     pub desktop: Option<String>,
+    /// Host command whose stdout becomes the prompt, for themed prompts.
+    pub prompt_command: Option<String>,
 }
 
 pub fn default_path() -> PathBuf {
@@ -54,6 +56,7 @@ fn parse(text: &str) -> Result<Config> {
             "principal" => config.principal = Some(value),
             "socket" => config.socket = Some(expand_home(&value)),
             "desktop" => config.desktop = Some(value),
+            "prompt_command" => config.prompt_command = Some(value),
             other => anyhow::bail!(
                 "mush config line {}: unknown key {other:?}",
                 line_number + 1

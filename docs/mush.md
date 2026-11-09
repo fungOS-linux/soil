@@ -237,10 +237,38 @@ When stdin is a terminal, Mush uses `rustyline`:
 ↑ / ↓        previous / next command
 Ctrl-R       reverse history search
 Ctrl-S       forward history search
+Tab          complete command names and VFS paths
 Ctrl-A / E   line start / end
 Ctrl-W       delete previous word
 Alt-B / F    move by word
 ```
+
+Tab completes the first word against builtins plus installed command packages,
+and completes VFS paths everywhere else, relative to the shell's current
+directory. Completion runs in the host because only the host can see the
+command packages; the shell's `cd` stays in the Spore, so the host refreshes its
+idea of the directory at start-up and after every `cd`.
+
+### Themed prompts
+
+`PS1` is enough for a static prompt. For anything richer, point Mush at a prompt
+renderer and it uses its stdout as the prompt:
+
+```toml
+# ~/.config/fungos/mush/config.toml
+prompt_command = "starship prompt --status $MUSH_STATUS --cmd-duration $MUSH_DURATION_MS"
+```
+
+`MUSH_STATUS`, `MUSH_DURATION_MS`, and `MUSH_CWD` are exported for the command,
+along with `STARSHIP_SHELL=mush`. [Starship](https://starship.rs) needs no
+adapter beyond that line; any script that prints a prompt works the same way.
+If the command fails or prints nothing, Mush falls back to the Spore's own
+prompt rather than leaving the session without one.
+
+The renderer runs in the host, not the Spore, because the Spore has no process
+and no network. A themed prompt therefore describes the VFS (directory, status,
+duration, time) rather than a Git branch -- the VFS has no repository state to
+read.
 
 History is stored at `~/.local/state/fungos/mush/history`, a stable per-user
 path. History that lived inside the VFS root would be empty every time the root

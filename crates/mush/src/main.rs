@@ -4,6 +4,7 @@
 //! VFS root, the `soil:vfs` / `soil:index` / `soil:vfs-mut` grants, and the
 //! line-oriented terminal.
 
+mod complete;
 mod config;
 mod deadline;
 mod desktop;
@@ -26,7 +27,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use rand::Rng;
-use rustyline::{DefaultEditor, error::ReadlineError};
+use rustyline::{Editor, error::ReadlineError, history::FileHistory};
 use soil::command::command as command_abi;
 use soil_command::{CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
 use soil_inference::{GeodeResolver, SoilConfig};
@@ -596,6 +597,7 @@ fn run() -> Result<()> {
             .with_context(|| format!("read Mush component {}", wasm.display()))?,
         None => EMBEDDED_MUSH.to_vec(),
     };
+    let interactive_command_root = command_root.clone();
     let mut runtime = Runtime::open(
         &root,
         &bytes,
@@ -647,7 +649,13 @@ fn run() -> Result<()> {
     }
 
     let status = if io::stdin().is_terminal() {
-        run_interactive(&mut runtime, &history)?
+        run_interactive(
+            &mut runtime,
+            &history,
+            &root,
+            &interactive_command_root,
+            config.prompt_command.as_deref(),
+        )?
     } else {
         run_lines(&mut runtime)?
     };
@@ -1092,17 +1100,39 @@ fn doctor_report(
     }
 }
 
-fn run_interactive(runtime: &mut Runtime, history: &Path) -> Result<i32> {
+fn run_interactive(
+    runtime: &mut Runtime,
+    history: &Path,
+    root: &Path,
+    command_root: &Path,
+    prompt_command: Option<&str>,
+) -> Result<i32> {
     // Mush runs every command in-process, so there is no child to suspend or
     // resume. Letting Ctrl-Z land would stop the shell while the terminal is
     // still in raw mode, which corrupts the session on `fg` and has nothing to
     // resume anyway. Report the boundary instead of breaking the terminal.
-    unsafe { libc::signal(libc::SIGTSTP, on_suspend as libc::sighandler_t) };
-    let mut editor = DefaultEditor::new()?;
+    unsafe { libc::signal(libc::SIGTSTP, on_suspend as *const () as libc::sighandler_t) };
+    let editor_config = rustyline::Config::builder()
+        .completion_type(rustyline::CompletionType::List)
+        .build();
+    let mut editor = Editor::<complete::MushHelper, FileHistory>::with_config(editor_config)?;
+    let helper = complete::MushHelper::new(root.to_path_buf(), command_root);
+    let cwd = helper.cwd_handle();
+    editor.set_helper(Some(helper));
     let _ = editor.load_history(history);
     let mut status = 0;
+    let mut elapsed = std::time::Duration::ZERO;
+    refresh_cwd(runtime, &cwd);
     loop {
-        let prompt = runtime.prompt()?;
+        let prompt = match prompt_command {
+            Some(command) => match prompt_via_command(command, status, elapsed, &cwd) {
+                Some(text) => text,
+                // A broken prompt command must not cost the session its prompt.
+                None => runtime.prompt()?,
+            },
+            None => runtime.prompt()?,
+        };
+        let started = std::time::Instant::now();
         match editor.readline(&prompt) {
             Ok(line) => {
                 let line = line.trim_end_matches(['\r', '\n']);
@@ -1114,6 +1144,10 @@ fn run_interactive(runtime: &mut Runtime, history: &Path) -> Result<i32> {
                 eprint!("{}", response.stderr);
                 io::stdout().flush()?;
                 status = response.status;
+                elapsed = started.elapsed();
+                if changes_directory(line) {
+                    refresh_cwd(runtime, &cwd);
+                }
                 if response.exit {
                     break;
                 }
@@ -1130,6 +1164,61 @@ fn run_interactive(runtime: &mut Runtime, history: &Path) -> Result<i32> {
     }
     let _ = editor.save_history(history);
     Ok(status)
+}
+
+/// Keep the completer's idea of the shell's cwd in step with the Spore's.
+///
+/// `pwd` is the only way the host can ask, and running it resets `$?`, so this
+/// happens at start-up and after `cd` rather than before every prompt.
+fn refresh_cwd(runtime: &mut Runtime, cwd: &std::sync::Arc<std::sync::Mutex<String>>) {
+    let Ok(executed) = runtime.execute("pwd") else {
+        return;
+    };
+    let value = executed.output.trim();
+    if value.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = cwd.lock() {
+        *guard = value.to_string();
+    }
+}
+
+fn changes_directory(line: &str) -> bool {
+    line.split_whitespace().next() == Some("cd")
+}
+
+/// Run the configured prompt command and use its stdout as the prompt.
+///
+/// This is how a theme reaches the shell: the host owns process spawning, so a
+/// prompt renderer never has to enter the Spore. Starship needs no adapter:
+///
+/// ```text
+/// prompt_command = "starship prompt --status $MUSH_STATUS --cmd-duration $MUSH_DURATION_MS"
+/// ```
+fn prompt_via_command(
+    command: &str,
+    status: i32,
+    elapsed: std::time::Duration,
+    cwd: &std::sync::Arc<std::sync::Mutex<String>>,
+) -> Option<String> {
+    let current = cwd.lock().map(|cwd| cwd.clone()).unwrap_or_default();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("MUSH_STATUS", status.to_string())
+        .env("MUSH_DURATION_MS", elapsed.as_millis().to_string())
+        .env("MUSH_CWD", &current)
+        .env("STARSHIP_SHELL", "mush")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches('\n')
+        .to_string();
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn run_lines(runtime: &mut Runtime) -> Result<i32> {

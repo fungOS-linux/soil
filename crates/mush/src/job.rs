@@ -218,21 +218,20 @@ impl Jobs {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
     }
+}
 
+impl Shared {
     fn finish(&self, id: &str, command: String, executed: Executed) {
         {
-            let mut inner = self
-                .shared
-                .inner
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
+            let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            let elapsed = started_ago(&inner, id);
             let word = command
                 .split_whitespace()
                 .next()
                 .unwrap_or_default()
                 .to_string();
             let samples = inner.durations.entry(word).or_default();
-            samples.push(started_ago(&inner, id));
+            samples.push(elapsed);
             if samples.len() > MAX_SAMPLES {
                 samples.remove(0);
             }
@@ -240,7 +239,7 @@ impl Jobs {
                 job.finished = Some(executed);
             }
         }
-        self.shared.changed.notify_all();
+        self.changed.notify_all();
     }
 }
 
