@@ -558,32 +558,32 @@ fn run() -> Result<()> {
     }
 
     if let Some(command) = command {
+        let mut status = 0;
         for line in command.lines() {
             let response = runtime.execute(line)?;
             print!("{}", response.output);
             eprint!("{}", response.stderr);
+            status = response.status;
             if response.exit {
-                return finish(response.status);
+                return finish(status);
             }
         }
-        return Ok(());
+        return finish(status);
     }
 
     if let Some(script) = script {
         let response = runtime.execute(&format!("source {script}"))?;
         print!("{}", response.output);
         eprint!("{}", response.stderr);
-        if response.exit {
-            return finish(response.status);
-        }
-        return Ok(());
+        return finish(response.status);
     }
 
-    if io::stdin().is_terminal() {
-        run_interactive(&mut runtime, &history)
+    let status = if io::stdin().is_terminal() {
+        run_interactive(&mut runtime, &history)?
     } else {
-        run_lines(&mut runtime)
-    }
+        run_lines(&mut runtime)?
+    };
+    finish(status)
 }
 
 fn new_mcp_token() -> String {
@@ -875,9 +875,10 @@ fn doctor_report(
     }
 }
 
-fn run_interactive(runtime: &mut Runtime, history: &Path) -> Result<()> {
+fn run_interactive(runtime: &mut Runtime, history: &Path) -> Result<i32> {
     let mut editor = DefaultEditor::new()?;
     let _ = editor.load_history(history);
+    let mut status = 0;
     loop {
         let prompt = runtime.prompt()?;
         match editor.readline(&prompt) {
@@ -890,6 +891,7 @@ fn run_interactive(runtime: &mut Runtime, history: &Path) -> Result<()> {
                 print!("{}", response.output);
                 eprint!("{}", response.stderr);
                 io::stdout().flush()?;
+                status = response.status;
                 if response.exit {
                     break;
                 }
@@ -905,11 +907,12 @@ fn run_interactive(runtime: &mut Runtime, history: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let _ = editor.save_history(history);
-    Ok(())
+    Ok(status)
 }
 
-fn run_lines(runtime: &mut Runtime) -> Result<()> {
+fn run_lines(runtime: &mut Runtime) -> Result<i32> {
     let stdin = io::stdin();
+    let mut status = 0;
     loop {
         print!("{}", runtime.prompt()?);
         io::stdout().flush()?;
@@ -921,11 +924,12 @@ fn run_lines(runtime: &mut Runtime) -> Result<()> {
         print!("{}", response.output);
         eprint!("{}", response.stderr);
         io::stdout().flush()?;
+        status = response.status;
         if response.exit {
             break;
         }
     }
-    Ok(())
+    Ok(status)
 }
 
 fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {

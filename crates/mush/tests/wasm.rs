@@ -473,3 +473,31 @@ fn server_refuses_to_start_without_a_terminal_or_foreground() {
     assert!(stderr.contains("is a server"), "{stderr}");
     assert!(stderr.contains("--foreground"), "{stderr}");
 }
+
+#[test]
+fn exit_status_reports_what_the_command_did() {
+    let dir = tempfile::tempdir().unwrap();
+    let status = |command: &str| {
+        Command::new(env!("CARGO_BIN_EXE_mush"))
+            .arg("--root")
+            .arg(dir.path())
+            .arg("--wasm")
+            .arg(module())
+            .arg("--command")
+            .arg(command)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .code()
+            .unwrap()
+    };
+    assert_eq!(status("echo hi"), 0);
+    assert_eq!(status("true"), 0);
+    // A harness that only reads the exit code must not see success.
+    assert_eq!(status("false"), 1);
+    assert_eq!(status("no-such-command"), 1);
+    assert_eq!(status("cat missing.txt"), 1);
+    assert_eq!(status("true; false"), 1);
+    assert_eq!(status("false; true"), 0);
+}
