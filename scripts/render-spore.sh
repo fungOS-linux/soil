@@ -20,4 +20,4 @@ scene=$(mktemp -t spore-scene.XXXXXX.json)
 trap 'rm -f "$scene"' EXIT
 
 cargo run -q -p soil-lua -- "$@" --out "$scene"
-cargo run -q -p soil-scene-gpu -- --scene "$scene" --size "${width}x${height}" --rgba "$out"
+cargo run -q -p soil-scene-gpu --bin soil-scene-gpu -- --scene "$scene" --size "${width}x${height}" --rgba "$out"
