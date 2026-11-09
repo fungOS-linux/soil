@@ -80,8 +80,23 @@ pub struct Manifest {
     /// a dock is a composition, not a program.
     #[serde(default)]
     pub module: Option<Module>,
-    pub ui: Ui,
+    /// The Lua entrypoint.
+    ///
+    /// Optional, and a first-class entrypoint in its own right: the host JITs
+    /// this file, so a Spore does not need a wasm build to exist. A package
+    /// with neither a module nor a UI nor a chrome region does nothing, and
+    /// validation refuses it.
+    #[serde(default)]
+    pub ui: Option<Ui>,
     pub launch: Launch,
+    /// Build-time dependencies and the exact version each was built against.
+    ///
+    /// A composed artifact pins its imports by construction, so a range would be
+    /// a promise the bytes cannot keep. Recording the exact version is what lets
+    /// a reviewer see which SDK produced the artifact, and lets a builder refuse
+    /// to compose against a different one.
+    #[serde(default)]
+    pub deps: BTreeMap<String, String>,
     #[serde(default)]
     pub grants: BTreeMap<String, String>,
     #[serde(default)]
@@ -133,10 +148,52 @@ pub struct System {
 pub struct Chrome {
     /// `top-bar`, `dock`, `control-center`.
     pub regions: Vec<String>,
-    /// Composed Lua for each region, already single-file: the host does not
-    /// compose at runtime, because composition is a build step that produces an
-    /// artifact the lock can cover.
+    /// Composed Lua for a region, when the region's artifact is not the Spore's
+    /// own `[ui] entry`.
+    ///
+    /// The common case is one region and one UI file, so this is usually empty:
+    /// repeating `[ui] entry` under `[chrome.sources]` only creates two places
+    /// that can disagree. It stays for the package that ships a distinct
+    /// composed artifact per region. The host still does not compose at runtime;
+    /// whichever path wins is what the lock covers.
+    #[serde(default)]
     pub sources: BTreeMap<String, String>,
+    /// Logical height this package authors the region at.
+    ///
+    /// Absent means the host's default. The number is declared rather than
+    /// inferred because the host has to reserve the region *before* the package
+    /// runs: it draws the built-in fallback at this height, then hands over. A
+    /// package that disagrees with the fallback is a package that shifts the
+    /// desktop when it loads, which is why the shell reads this instead of
+    /// carrying a constant of its own.
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+impl Chrome {
+    /// The height the host reserves for this package's region.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height.unwrap_or(chrome::DEFAULT_HEIGHT)
+    }
+}
+
+/// Shell metrics that belong to the region contract rather than to a renderer.
+///
+/// These lived in a graphics crate, which made the shell depend on a drawing
+/// library to know how tall its own bar is. A chrome package may narrow them in
+/// its manifest; the host uses the same numbers for the fallback it draws before
+/// any package loads.
+pub mod chrome {
+    /// Logical height of the bar region.
+    pub const DEFAULT_HEIGHT: u32 = 44;
+    /// Outer padding inside the bar.
+    pub const DEFAULT_PADDING: u32 = 8;
+    /// Label size in the bar, in logical pixels.
+    pub const DEFAULT_TEXT_SIZE: u32 = 14;
+    /// Height of an interactive control in the bar; the whole row, so the target
+    /// is the row rather than the glyph.
+    pub const DEFAULT_CONTROL_HEIGHT: u32 = DEFAULT_HEIGHT;
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -334,18 +391,22 @@ impl Manifest {
                     return Err(Error::Invalid("module.path must end in .wasm".into()));
                 }
             }
-            // A Spore with no module must still do something: chrome draws a
-            // region, and nothing else is worth installing without semantics.
-            None if self.chrome.is_none() => {
+            // A Spore without a module still has to do something. Any entrypoint
+            // counts, and Lua is one of them: the host JITs `[ui] entry`, so a
+            // Lua-only Spore is a program, not a second-class attachment to a
+            // wasm build. `chrome` counts because a host draws the region.
+            None if self.ui.is_none() && self.chrome.is_none() => {
                 return Err(Error::Invalid(
-                    "a Spore needs a module unless it draws chrome".into(),
+                    "a Spore needs an entrypoint: a module, a Lua UI, or a chrome region".into(),
                 ));
             }
             None => {}
         }
-        safe_relative(&self.ui.entry)?;
-        if !self.ui.entry.ends_with(".lua") {
-            return Err(Error::Invalid("ui.entry must end in .lua".into()));
+        if let Some(ui) = &self.ui {
+            safe_relative(&ui.entry)?;
+            if !ui.entry.ends_with(".lua") {
+                return Err(Error::Invalid("ui.entry must end in .lua".into()));
+            }
         }
 
         if self.launch.surfaces.is_empty() {
@@ -372,6 +433,19 @@ impl Manifest {
             )));
         }
 
+        for (name, version) in &self.deps {
+            if !identifier(name) {
+                return Err(Error::Invalid(format!(
+                    "dependency {name:?} must be a lowercase identifier such as `fungos.ui`"
+                )));
+            }
+            if !version_is_exact(version) {
+                return Err(Error::Invalid(format!(
+                    "dependency {name:?} = {version:?} must be one exact version, not a range: a composed artifact cannot float"
+                )));
+            }
+        }
+
         for capability in self.grants.keys() {
             if !grants(capability) {
                 return Err(Error::Invalid(format!(
@@ -380,10 +454,8 @@ impl Manifest {
             }
         }
         if let Some(chrome) = &self.chrome {
-            if chrome.regions.is_empty() || chrome.sources.is_empty() {
-                return Err(Error::Invalid(
-                    "chrome needs at least one region, and sources to match".into(),
-                ));
+            if chrome.regions.is_empty() {
+                return Err(Error::Invalid("chrome needs at least one region".into()));
             }
             for region in &chrome.regions {
                 if !CHROME_REGIONS.contains(&region.as_str()) {
@@ -391,9 +463,9 @@ impl Manifest {
                         "chrome region {region:?} is not one of {CHROME_REGIONS:?}"
                     )));
                 }
-                let Some(source) = chrome.sources.get(region) else {
+                let Some(source) = self.region_source(region) else {
                     return Err(Error::Invalid(format!(
-                        "chrome region {region:?} has no source"
+                        "chrome region {region:?} has no source: give the Spore a [ui] entry or name one in [chrome.sources]"
                     )));
                 };
                 safe_relative(source)?;
@@ -430,19 +502,47 @@ impl Manifest {
 
     /// Every file the manifest declares explicitly.
     pub fn declared_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.ui.entry.clone()];
+        let mut paths = Vec::new();
+        if let Some(ui) = &self.ui {
+            paths.push(ui.entry.clone());
+        }
         if let Some(module) = &self.module {
             paths.push(module.path.clone());
         }
         if let Some(chrome) = &self.chrome {
-            paths.extend(chrome.sources.values().cloned());
+            for region in &chrome.regions {
+                if let Some(source) = chrome.sources.get(region) {
+                    paths.push(source.clone());
+                }
+            }
         }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
         paths.extend(self.skills.iter().map(|skill| skill.path.clone()));
+        let mut seen = std::collections::BTreeSet::new();
         paths
             .into_iter()
-            .filter_map(|path| safe_relative(&path).ok())
+            .filter(|path| safe_relative(path).is_ok())
+            .map(PathBuf::from)
+            .filter(|path| seen.insert(path.clone()))
             .collect()
+    }
+
+    /// The Lua a host loads for a chrome `region`.
+    ///
+    /// An explicit per-region artifact wins; otherwise the Spore's single `[ui]
+    /// entry` is the region's Lua. One region plus one UI file is the common
+    /// shape, and naming the same path twice only creates two places to disagree.
+    #[must_use]
+    pub fn region_source(&self, region: &str) -> Option<&str> {
+        let chrome = self.chrome.as_ref()?;
+        if !chrome.regions.iter().any(|claimed| claimed == region) {
+            return None;
+        }
+        chrome
+            .sources
+            .get(region)
+            .map(String::as_str)
+            .or_else(|| self.ui.as_ref().map(|ui| ui.entry.as_str()))
     }
 }
 
@@ -479,6 +579,11 @@ fn identifier(value: &str) -> bool {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// One exact version: no `^`, `~`, `>=`, `*` or range separators.
+fn version_is_exact(value: &str) -> bool {
+    version(value) && !value.contains(['^', '~', '*', '>', '<', ' ', ','])
 }
 
 fn version(value: &str) -> bool {
@@ -861,6 +966,65 @@ pub fn pack(root: &Path) -> Result<Vec<u8>> {
 
 /// Verify a packed tar: entry safety, embedded lock, and every digest.
 pub fn verify(bytes: &[u8]) -> Result<(Manifest, Lock)> {
+    let (manifest, lock, _) = read_package(bytes)?;
+    Ok((manifest, lock))
+}
+
+/// Unpack a verified package into `dest`.
+///
+/// The archive is the distribution unit: a machine installs from a `.spore`
+/// file and never needs the Spore's source, its composer, or the SDK it was
+/// built against. Everything is verified before a single byte is written, so a
+/// tampered or partial package cannot leave half a Spore on disk.
+///
+/// # Errors
+/// Fails when the package is unsafe, tampered, or the destination cannot be
+/// written.
+pub fn unpack(bytes: &[u8], dest: &Path) -> Result<Lock> {
+    let (_, lock, files) = read_package(bytes)?;
+    for (path, body) in files {
+        let target = dest.join(&path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        fs::write(&target, body).map_err(io_error)?;
+    }
+    Ok(lock)
+}
+
+/// The CIDv1 of a package's bytes: raw codec over sha2-256.
+///
+/// A `.spore` tar is deterministic, so the same tree yields the same bytes and
+/// therefore the same CID. That is the identity a registry versions on top of;
+/// `spore.lock` stays the human-readable digest.
+#[must_use]
+pub fn cid_v1_raw(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut block = vec![0x01, 0x55, 0x12, 0x20];
+    block.extend_from_slice(&digest);
+    format!("b{}", base32_lower(&block))
+}
+
+fn base32_lower(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    let mut buffer: u32 = 0;
+    let mut bits = 0;
+    for byte in bytes {
+        buffer = (buffer << 8) | u32::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buffer >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buffer << (5 - bits)) & 0x1f) as usize] as char);
+    }
+    out
+}
+
+fn read_package(bytes: &[u8]) -> Result<(Manifest, Lock, BTreeMap<String, Vec<u8>>)> {
     if bytes.len() as u64 > MAX_PACKAGE_BYTES {
         return Err(Error::Invalid("package is too large".into()));
     }
@@ -930,7 +1094,7 @@ pub fn verify(bytes: &[u8]) -> Result<(Manifest, Lock)> {
             "manifest identity does not match the lock".into(),
         ));
     }
-    Ok((manifest, lock))
+    Ok((manifest, lock, files))
 }
 
 // ---- signatures -----------------------------------------------------------
@@ -1027,24 +1191,41 @@ mod chrome_tests {
     use super::*;
 
     fn manifest(extra: &str) -> String {
+        with_ui("[ui]\nentry = \"ui/main.lua\"\n", extra)
+    }
+
+    /// Same manifest with the `[ui]` block chosen by the caller, so a test can
+    /// ask what a package looks like with no Lua entrypoint at all.
+    fn with_ui(ui: &str, extra: &str) -> String {
         format!(
-            "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n[ui]\nentry = \"ui/main.lua\"\n[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
+            "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n{ui}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
         )
     }
 
     #[test]
     fn a_chrome_spore_must_source_every_region_it_claims() {
-        let ok = Manifest::parse(&manifest(
-            "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"ui/dock.lua\"\n[presentation]\nbadge = \"D\"\ncolor = \"#8bd5ca\"\n",
-        ))
-        .expect("a sourced region parses");
-        assert_eq!(ok.chrome.as_ref().unwrap().regions, vec!["dock"]);
-        assert_eq!(ok.presentation.as_ref().unwrap().badge, "D");
+        // One region, one UI file: the entry already is the region's Lua, so no
+        // `[chrome.sources]` is needed and none can go stale.
+        let implicit = Manifest::parse(&manifest("[chrome]\nregions = [\"dock\"]\n"))
+            .expect("a single-region Spore defaults to its UI entry");
+        assert_eq!(implicit.region_source("dock"), Some("ui/main.lua"));
+        assert_eq!(
+            implicit.region_source("top-bar"),
+            None,
+            "an unclaimed region has no source"
+        );
 
-        let missing = Manifest::parse(&manifest("[chrome]\nregions = [\"dock\"]\n"));
+        let explicit = Manifest::parse(&manifest(
+            "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"dist/dock.lua\"\n[presentation]\nbadge = \"D\"\ncolor = \"#8bd5ca\"\n",
+        ))
+        .expect("an explicit region artifact wins over the UI entry");
+        assert_eq!(explicit.region_source("dock"), Some("dist/dock.lua"));
+        assert_eq!(explicit.presentation.as_ref().unwrap().badge, "D");
+
+        let missing = Manifest::parse(&with_ui("", "[chrome]\nregions = [\"dock\"]\n"));
         assert!(
             missing.is_err(),
-            "a region with no source is a hole in the shell"
+            "a region with no source and no UI entry is a hole in the shell"
         );
 
         let unknown = Manifest::parse(&manifest(
@@ -1060,11 +1241,76 @@ mod chrome_tests {
 
     #[test]
     fn declared_paths_cover_chrome_sources() {
-        let manifest = Manifest::parse(&manifest(
-            "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"ui/dock.lua\"\n",
+        let explicit = Manifest::parse(&manifest(
+            "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"dist/dock.lua\"\n",
         ))
         .expect("manifest");
-        let paths = manifest.declared_paths();
-        assert!(paths.contains(&PathBuf::from("ui/dock.lua")));
+        let paths = explicit.declared_paths();
+        assert!(paths.contains(&PathBuf::from("dist/dock.lua")));
+
+        let implicit =
+            Manifest::parse(&manifest("[chrome]\nregions = [\"dock\"]\n")).expect("manifest");
+        assert_eq!(
+            implicit.declared_paths(),
+            vec![PathBuf::from("ui/main.lua"), PathBuf::from("module.wasm")],
+            "the UI entry is declared once even when a region also resolves to it"
+        );
+    }
+
+    #[test]
+    fn a_dependency_is_one_exact_version() {
+        let ok = Manifest::parse(&manifest("[deps]\n\"fungos.ui\" = \"0.1.0\"\n"));
+        let ok = ok.expect("an exact version parses");
+        assert_eq!(ok.deps.get("fungos.ui").map(String::as_str), Some("0.1.0"));
+
+        for range in ["^0.1.0", "~0.1.0", ">=0.1.0", "0.1.*", "<0.2.0"] {
+            let bad = Manifest::parse(&manifest(&format!("[deps]\n\"fungos.ui\" = \"{range}\"\n")));
+            assert!(
+                bad.is_err(),
+                "{range} is a range, and a composed artifact cannot float"
+            );
+        }
+
+        let bad_name = Manifest::parse(&manifest("[deps]\n\"Fungos.UI\" = \"0.1.0\"\n"));
+        assert!(
+            bad_name.is_err(),
+            "a dependency name is a lowercase identifier"
+        );
+    }
+
+    #[test]
+    fn lua_is_an_entrypoint_of_its_own() {
+        let lua_only = with_ui("[ui]\nentry = \"ui/app.lua\"\n", "")
+            .replace("[module]\npath = \"module.wasm\"\n", "");
+        let parsed = Manifest::parse(&lua_only).expect("a Lua-only Spore is a Spore");
+        assert!(parsed.module.is_none());
+        assert_eq!(
+            parsed.declared_paths(),
+            vec![PathBuf::from("ui/app.lua")],
+            "no wasm means nothing claims a module file"
+        );
+
+        // Chrome with no UI entry still installs, because the host draws it and
+        // the region names its own artifact.
+        let chrome_only = Manifest::parse(
+            &with_ui("", "[chrome]\nregions = [\"dock\"]\n")
+                .replace("[module]\npath = \"module.wasm\"\n", "")
+                .replace(
+                    "[chrome]\nregions = [\"dock\"]\n",
+                    "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"ui/dock.lua\"\n",
+                ),
+        )
+        .expect("a chrome Spore needs no UI entry when it names its artifact");
+        assert_eq!(chrome_only.region_source("dock"), Some("ui/dock.lua"));
+    }
+
+    #[test]
+    fn a_spore_with_no_entrypoint_is_refused() {
+        let empty = with_ui("", "").replace("[module]\npath = \"module.wasm\"\n", "");
+        let error = Manifest::parse(&empty).expect_err("nothing to run, nothing to draw");
+        assert!(
+            error.to_string().contains("entrypoint"),
+            "the error says what is missing: {error}"
+        );
     }
 }

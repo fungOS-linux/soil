@@ -1,3 +1,8 @@
+// A few 3D helpers here belong to the views the `term` feature owns (point
+// clouds, projections). In a core-only build they are unreachable, not dead, so
+// the warning is silenced for that shape of build alone.
+#![cfg_attr(not(feature = "term"), allow(dead_code))]
+
 //! GPU-resident dense and 3D paths.
 //!
 //! These are deliberately outside the serialized scene document. `soil_scene`
