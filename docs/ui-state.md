@@ -67,10 +67,22 @@ contract: both render what the host already retained.
 The Lua column is worth being precise about. `soil-sdk-lua` **generates** a Lua
 file from the WIT (`30 packages, 44 interfaces, 146 functions`), but it is names
 and arity only: every function is one call to
-`__soil.invoke(grant, interface, function, arguments)`. There is **no Lua engine
-in the soil workspace at all** — no `mlua`, `luau` or `piccolo` in `Cargo.lock`.
-The only Lua VM in the ecosystem is Canvas's (`mlua`, in `crates/canvas`). So
-"WASM + Lua, running in soil" is currently "WASM in soil, Lua in Canvas".
+`__soil.invoke(grant, interface, function, arguments)`. Until [`crates/soil-lua`](../crates/soil-lua)
+landed there was **no Lua engine in the soil workspace at all** — no `mlua`,
+`luau` or `piccolo` in `Cargo.lock`. That crate is now the engine: it reads a
+package whose `[engine].target = "soil"`, runs its Lua in the same sandbox
+Canvas uses (same libraries, memory ceiling, interrupt budget, same removed
+globals), and returns a `soil_scene` document. It is verified against
+`spores/divebar`'s composed `dist/top-bar.lua`: 17 nodes at 1200x44, matching the
+count the browser composer reports for the same view.
+
+What it is not yet: a *presenter*. Canvas is still the only host that turns a
+live Lua view into pixels on a composited surface, because `soil:canvas.present`
+has no host-side implementation that embeds this crate. And the crate is not yet
+a workspace member — that line currently lists four crates whose source is
+untracked (`soil-appdata-host`, `soil-confluence`, `soil-edge`, `soil-sdk-lua`),
+and a member list that names a missing package breaks the whole workspace for
+everyone else.
 
 ## 4. What has been ported, and how far
 
@@ -151,9 +163,11 @@ retained modules do per-keystroke.
 
 ## 7. What to fix, in order
 
-1. **A Lua host in soil.** Until `crates/soil-lua` exists, a Lua Spore runs on
-exactly one host (Canvas, on macOS/Linux desktop) and the thesis is untrue
-everywhere else — including the native `soil-vt-window` path and Android.
+1. **Land the Lua host and present from it.** `crates/soil-lua` runs the view;
+   nothing calls it yet. Add its `members` entry together with the four crates
+   that are already on that line but untracked, then have the host's shell call
+   `Spore::load_region` → `render` → `present` behind the existing fallback
+   (last-good document, built-in bar if the candidate fails).
 2. **One ingress path.** `soil-scene-gpu` and `soil-ui-demo` default to
    `…/Dock/canvas/ui.sock`. Canvas binds
    `…/Dock/canvas/external-surfaces.sock` (a Unix **datagram** socket,
@@ -186,6 +200,10 @@ library under the same name.
 9. **Pointer → node.** `soil:canvas.input` is generation-bound and semantic, but
 nothing maps a pointer hit back to a node id in a scene document. Canvas has
 `interaction.rs`, gfx has `HitTarget`; the document has no field for it.
+10. **`soil-scene` text has no size.** A view sets a size per text run; the
+    document carries `{ text, ink, rgb, opacity }` and the host chooses the
+    size. A bar that mixes clock text with pill labels cannot say so, so
+    `soil-lua` drops the size at the boundary until the node grows one.
 
 ## 8. Building, testing and opening a Spore consistently
 
@@ -201,7 +219,15 @@ lua tools/tend.lua --scene /tmp/bar.json <view> <snapshot> --width 1200 --height
 ```
 
 `--scene` is the portable checkpoint: it writes a `soil_scene` document that
-`soil-scene-gpu` can rasterize with no Canvas present.
+`soil-scene-gpu` can rasterize with no Canvas present. `soil-lua` is the same
+checkpoint taken from the package rather than from a checkout, which is what a
+host has:
+
+```sh
+cargo run -p soil-lua -- check spores/divebar
+cargo run -p soil-lua -- run spores/divebar --region top-bar \
+  --width 1200 --height 44 --snapshot snapshot.json --out bar.json
+```
 
 Package gates (in this order; each refuses what the previous one could have
 caught):
