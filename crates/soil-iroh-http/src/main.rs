@@ -67,12 +67,18 @@ struct ProxyArgs {
     /// Loopback address clients connect to. Point the `.myc` name at this.
     #[arg(long, default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
-    /// Endpoint id to dial.
+    /// Endpoint id to dial. Ignored when `--lease` names one instead.
     #[arg(long)]
-    endpoint: String,
+    endpoint: Option<String>,
     /// Direct address to try for that endpoint. Repeatable.
     #[arg(long)]
     addr: Vec<SocketAddr>,
+    /// A lease record, as the fleet publishes them: `endpoint.endpoint_id`,
+    /// `endpoint.alpns`, `endpoint.direct_addresses`, `expires_at`. This is the
+    /// fleet's own artifact, so the proxy stops carrying an id an operator
+    /// pasted into a unit file.
+    #[arg(long)]
+    lease: Option<PathBuf>,
     #[arg(long, default_value = "soil/http/1")]
     alpn: String,
 }
@@ -161,8 +167,18 @@ async fn handle_incoming(
 }
 
 async fn proxy(args: ProxyArgs) -> Result<()> {
-    let target: EndpointId = args.endpoint.parse().context("parse --endpoint")?;
-    ensure!(!args.addr.is_empty(), "at least one --addr is required");
+    let (target, addrs, alpn) = match &args.lease {
+        Some(path) => resolve_lease(path, now_seconds())?,
+        None => {
+            let endpoint = args
+                .endpoint
+                .as_deref()
+                .context("--endpoint or --lease is required")?;
+            let target: EndpointId = endpoint.parse().context("parse --endpoint")?;
+            ensure!(!args.addr.is_empty(), "at least one --addr is required");
+            (target, args.addr.clone(), args.alpn.clone())
+        }
+    };
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
         .bind()
@@ -181,8 +197,8 @@ async fn proxy(args: ProxyArgs) -> Result<()> {
     loop {
         let (client, peer) = listener.accept().await.context("accept local client")?;
         let endpoint = endpoint.clone();
-        let addr = args.addr.clone();
-        let alpn = args.alpn.clone().into_bytes();
+        let addr = addrs.clone();
+        let alpn = alpn.clone().into_bytes();
         tokio::spawn(async move {
             match proxy_one(client, &endpoint, target, &addr, &alpn).await {
                 Ok(()) => tracing::info!(%peer, "proxied over iroh"),
@@ -228,6 +244,74 @@ async fn proxy_one(
     let (mut read, mut write) = client.into_split();
     pump(recv, send, &mut read, &mut write).await;
     Ok(())
+}
+
+/// One published lease record.
+#[derive(serde::Deserialize)]
+struct LeaseRecord {
+    endpoint: LeaseEndpoint,
+}
+
+#[derive(serde::Deserialize)]
+struct LeaseEndpoint {
+    endpoint_id: String,
+    #[serde(default)]
+    alpns: Vec<String>,
+    #[serde(default)]
+    direct_addresses: Vec<String>,
+    /// The record's own expiry. It lives beside the addresses it vouches for,
+    /// because an address outliving the lease that named it is how a rotation
+    /// turns into an outage.
+    #[serde(default)]
+    expires_at: Option<i64>,
+}
+
+/// Read a lease: who to dial, where, and whether it still speaks for itself.
+///
+/// An expired lease is refused rather than tried: a stale endpoint id is how a
+/// rotation quietly becomes an outage.
+fn resolve_lease(path: &Path, now: i64) -> Result<(EndpointId, Vec<SocketAddr>, String)> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read lease {}", path.display()))?;
+    let lease: LeaseRecord =
+        serde_json::from_str(&text).with_context(|| format!("parse lease {}", path.display()))?;
+    if let Some(expires_at) = lease.endpoint.expires_at {
+        ensure!(
+            expires_at > now,
+            "lease {} expired at {expires_at} (now {now})",
+            path.display()
+        );
+    }
+    let target: EndpointId = lease
+        .endpoint
+        .endpoint_id
+        .parse()
+        .context("parse lease endpoint_id")?;
+    let addrs = lease
+        .endpoint
+        .direct_addresses
+        .iter()
+        .filter_map(|addr| addr.parse::<SocketAddr>().ok())
+        .collect::<Vec<_>>();
+    ensure!(
+        !addrs.is_empty(),
+        "lease {} lists no usable direct address",
+        path.display()
+    );
+    let alpn = lease
+        .endpoint
+        .alpns
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "soil/http/1".to_owned());
+    Ok((target, addrs, alpn))
+}
+
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 /// One HTTP exchange, byte for byte, until either side closes.
