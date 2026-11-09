@@ -661,7 +661,11 @@ fn undeclared_packages(
 /// `soil:records` while the manifest lists only WASI fails here instead of at
 /// review time.
 fn check_declared_grants(root: &Path, manifest: &Manifest) -> Result<()> {
-    let path = root.join(&manifest.module.path);
+    // A chrome-only Spore has no module, so there is nothing to import.
+    let Some(module) = &manifest.module else {
+        return Ok(());
+    };
+    let path = root.join(&module.path);
     let bytes =
         fs::read(&path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
     let imported = imported_packages(&bytes)?;
@@ -669,7 +673,7 @@ fn check_declared_grants(root: &Path, manifest: &Manifest) -> Result<()> {
     if !undeclared.is_empty() {
         return Err(Error::Invalid(format!(
             "{} imports {} but [grants] does not declare {}",
-            manifest.module.path,
+            module.path,
             undeclared.join(", "),
             if undeclared.len() == 1 { "it" } else { "them" },
         )));

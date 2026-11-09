@@ -11,7 +11,9 @@ use std::{env, fs, path::PathBuf, process::ExitCode, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use soil_records_host::RecordsBookHost;
-use soil_wasi_host::{HttpPolicy, HttpService, NetworkPolicy, WasiHostBuilder, WasiHostPolicy};
+use soil_wasi_host::{
+    HttpPolicy, HttpService, NetworkPolicy, UnibusBus, WasiHostBuilder, WasiHostPolicy,
+};
 use tokio::net::TcpListener;
 use wasmtime_wasi::FsPerms;
 
@@ -49,6 +51,11 @@ async fn run() -> Result<()> {
             .with_context(|| format!("open records book in {}", root.display()))?;
         builder = builder.records_book(records);
     }
+    if let Some(path) = &options.unibus {
+        let bus = UnibusBus::from_config_file(path)
+            .with_context(|| format!("connect the Unibus hub for {}", path.display()))?;
+        builder = builder.bus(Arc::new(bus));
+    }
     let service = Arc::new(HttpService::from_bytes(&bytes, builder)?);
     let listener = TcpListener::bind(&options.listen)
         .await
@@ -70,6 +77,7 @@ struct Options {
     inherit_stdio: bool,
     preopens: Vec<(PathBuf, String, FsPerms)>,
     records: Option<(PathBuf, String, String)>,
+    unibus: Option<PathBuf>,
 }
 
 impl Options {
@@ -145,6 +153,10 @@ impl Options {
                 "--records" => {
                     let value = next(&mut args, "--records")?;
                     options.records = Some(parse_records(&value)?);
+                }
+                "--unibus" => {
+                    let value = next(&mut args, "--unibus")?;
+                    options.unibus = Some(PathBuf::from(value));
                 }
                 "--help" | "-h" => {
                     println!("{USAGE}");
@@ -232,4 +244,8 @@ usage: soil-wasi-http [OPTIONS] COMPONENT.wasm
                               link soil:records to one book and collection, so a
                               Spore that imports it can store run state. Without
                               this flag the interface is unlinked and such a
-                              component fails to instantiate.";
+                              component fails to instantiate.
+  --unibus CONFIG.json       connect the Unibus hub named by an unibus-sdk
+                              `ClientConfig` and link soil:unibus, so a Spore
+                              that imports it can poll and publish frames. The
+                              credential stays in the host.";
