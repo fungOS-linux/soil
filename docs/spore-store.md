@@ -370,6 +370,83 @@ signed separately so a client can tell a complete prefix from a truncated one
 and can detect a fork. Package signatures stay the publisher's and are
 independent of the store's.
 
+### The index on disk
+
+`soil-store` reads this shape, and a publisher writes it:
+
+```json
+{
+  "schema": 1,
+  "source": "fungos",
+  "checkpoint": { "seq": 17, "root": "…", "signature": "…" },
+  "entries": [
+    {
+      "seq": 16, "kind": "update",
+      "spore_id": "dev.fungos.markdown", "version": "0.2.0",
+      "digest": "<spore.lock digest>",
+      "package": "ipfs://bafy…", "listing": "ipfs://bafy…",
+      "module": "<sha256 of module.wasm, or null>",
+      "ui": "<digest over ui/**/*.lua>",
+      "grants": ["soil:canvas", "soil:storage"],
+      "system": null, "publisher": "mycelium:fungos/release",
+      "signature": "…"
+    }
+  ]
+}
+```
+
+`module` and `ui` are not decoration: they are what makes the update class
+computable without fetching two tars. The publisher computes them with the same
+functions the client uses (`soil_store::plan::module_digest` and `view_digest`),
+so "only the view changed" means the same thing on both ends.
+
+## Propagation
+
+The index and the packages are signed and content-addressed, which is what lets
+Mycelium carry them. A node that has an index advertises the checkpoint the way
+it advertises a service lease; a peer fetches `after=<seq>` and the tars it does
+not have. The bytes can come from any peer, because nothing is trusted on the
+strength of who handed it over: entries carry the source signature, packages
+carry the publisher signature, and both are verified against the digest the
+client already had.
+
+That makes a fleet store a *policy*, not a different transport: point the fleet
+at its own index, and the mesh that already moves releases moves the catalog and
+the packages too. The official store stays the fallback for a machine that is
+alone.
+
+## The planner
+
+`soil-store` is the crate that answers the two questions a storefront has to get
+right, and it runs on a reviewer's laptop with no network:
+
+```sh
+soil-store index    --spores-root spores/ -o index.json [--source fungos]
+soil-store plan     --index index.json --spores-root ~/.local/share/fungos/spores [--json]
+soil-store snapshot --index index.json --spores-root ~/.local/share/fungos/spores -o store.snapshot.lua
+soil-store serve    --index index.json --spores-root ~/.local/share/fungos/spores [--addr 127.0.0.1:8800]
+```
+
+`index` seals a fresh log from a package tree: it numbers the entries, folds them
+into the checkpoint root, and addresses each tar by the CID of the bytes it would
+hand back. The checkpoint it writes is unsigned — signing `(seq, root, source)`
+with the store principal is the publisher's step and is not wired up yet, which
+is why the storefront says "no signed index" rather than implying otherwise.
+
+`serve` is the loopback presenter: it reads the index and the install root once,
+answers `/`, `/updates`, `/spore/<id>`, `/api/plan` and `/api/index`, and never
+writes to either. It rescans on start, so publishing a new index means restarting
+the service (`launchctl kickstart -k gui/$UID/dev.fungos.soil-store`).
+
+`plan` classifies every installed Spore against the catalog (`live`, `restart`,
+`consent`, `system`, `hold`) and reports current and yanked packages. `snapshot`
+emits the table `spores/store/ui/store.lua` renders, so the view never learns how
+to read an index and the storefront is testable without a Canvas.
+
+The precedence is `hold` > `system` > `consent` > `live`/`restart`: the most
+disruptive truth wins, so an update that both rebuilds the module and grows the
+grant set is never advertised as a restart.
+
 ## `store.myc`
 
 `store.myc` is a name for a local service, exactly like `ai.myc` and `mcp.myc`:
@@ -382,11 +459,24 @@ store --updates              -> the same list in the terminal
 ```
 
 Mycelium's loopback gateway owns the name, the certificate and the loopback
-binding. The storefront is a Canvas web surface served by the local store
-service; if no store service is running the name does not resolve to anything
-else — the gateway returns an error rather than forwarding somewhere. The store
-never proxies a third party, and no request leaves the machine to render a
-listing.
+binding. Behind it is `soil-store serve` on `127.0.0.1:8800`, installed as
+`dev.fungos.soil-store` and routed by `~/.mycelium/gateway/routes.json`:
+
+```json
+{ "name": "store", "hosts": ["store.myc"],
+  "upstream": "http://127.0.0.1:8800", "service_kind": "store", "priority": 10 }
+```
+
+The generated gateway certificate lists `store.myc` in its SANs. If no store
+service is running the gateway returns an error rather than forwarding somewhere
+else. The store never proxies a third party, and no request leaves the machine to
+render a listing.
+
+Two things are deliberately thin today: the catalog carries identity
+(`spore_id`, `version`, digest, `grants`, `system`), not prose, so a card for a
+package this host has not installed shows its id and category until listings are
+fetched by CID; and the update classes are computed but nothing applies them yet,
+so the page is a report, not an installer.
 
 Fetched artifacts (icons, screenshots, the rich record) are content-addressed,
 so a browser cache and an IPFS gateway agree about what a listing showed.
