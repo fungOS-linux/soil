@@ -18,12 +18,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::outcome::{Executed, State};
+use crate::job::{Jobs, Outcome};
 
-pub fn serve<F>(socket: &Path, mut execute: F) -> Result<()>
-where
-    F: FnMut(&str) -> Result<Executed>,
-{
+pub fn serve(socket: &Path, jobs: &Jobs) -> Result<()> {
     prepare_socket(socket)?;
     let listener = UnixListener::bind(socket)
         .with_context(|| format!("bind Mush service socket {}", socket.display()))?;
@@ -38,7 +35,7 @@ where
                 continue;
             }
         };
-        if let Err(error) = handle(stream, &mut execute) {
+        if let Err(error) = handle(stream, jobs) {
             eprintln!("mush: request: {error:#}");
         }
     }
@@ -63,10 +60,7 @@ fn prepare_socket(socket: &Path) -> Result<()> {
     Ok(())
 }
 
-fn handle<F>(stream: UnixStream, execute: &mut F) -> Result<()>
-where
-    F: FnMut(&str) -> Result<Executed>,
-{
+fn handle(stream: UnixStream, jobs: &Jobs) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     if !same_uid(&stream)? {
         let mut stream = stream;
@@ -79,41 +73,66 @@ where
         bail!("empty request");
     }
     let request: Value = serde_json::from_str(&line).context("parse request JSON")?;
-    let Some(command) = request.get("command").and_then(Value::as_str) else {
-        let response = json!({"ok": false, "error": "request needs a string `command`"});
-        write_response(stream, &response)?;
-        return Ok(());
+    let kind = request
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("exec");
+    let response = match kind {
+        "jobs" => {
+            let mut listing = jobs.list();
+            listing["ok"] = json!(true);
+            listing
+        }
+        "job" => {
+            let id = request
+                .get("job")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match jobs.snapshot(id) {
+                Some(mut snapshot) => {
+                    snapshot["ok"] = json!(true);
+                    snapshot
+                }
+                None => json!({"ok": false, "error": format!("no job {id:?}")}),
+            }
+        }
+        _ => {
+            let Some(command) = request.get("command").and_then(Value::as_str) else {
+                write_response(
+                    stream,
+                    &json!({"ok": false, "error": "request needs a string `command`"}),
+                )?;
+                return Ok(());
+            };
+            let threshold = request
+                .get("background_after_secs")
+                .and_then(Value::as_u64)
+                .map(Duration::from_secs);
+            match jobs.submit(command, threshold)? {
+                Outcome::Completed(executed) => json!({
+                    "ok": true,
+                    "output": executed.output,
+                    "stderr": executed.stderr,
+                    "exit": executed.exit,
+                    "status": executed.status,
+                    "state": executed.state.as_str(),
+                    "blocking": executed.state.blocking(),
+                }),
+                Outcome::Background { job, after } => json!({
+                    "ok": true,
+                    "state": "background",
+                    "blocking": false,
+                    "job": job,
+                    "after_secs": after.as_secs(),
+                    "hint": format!(
+                        "command still running after {}s; check it with `mush job {job}` or list with `mush jobs`",
+                        after.as_secs()
+                    ),
+                }),
+            }
+        }
     };
-    let mut output = String::new();
-    let mut stderr = String::new();
-    let mut exit = false;
-    let mut status = 0;
-    let mut state = State::Done;
-    for line in command.lines() {
-        let executed = execute(line)?;
-        output.push_str(&executed.output);
-        stderr.push_str(&executed.stderr);
-        exit |= executed.exit;
-        status = executed.status;
-        if executed.state != State::Done {
-            state = executed.state;
-        }
-        if exit {
-            break;
-        }
-    }
-    write_response(
-        stream,
-        &json!({
-            "ok": true,
-            "output": output,
-            "stderr": stderr,
-            "exit": exit,
-            "status": status,
-            "state": state.as_str(),
-            "blocking": state.blocking(),
-        }),
-    )?;
+    write_response(stream, &response)?;
     Ok(())
 }
 

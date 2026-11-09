@@ -242,7 +242,9 @@ Ctrl-W       delete previous word
 Alt-B / F    move by word
 ```
 
-History is stored at `<vfs-root>/.fungos/mush-history` by default:
+History is stored at `~/.local/state/fungos/mush/history`, a stable per-user
+path. History that lived inside the VFS root would be empty every time the root
+changed, which leaves Ctrl-R with nothing to search.
 
 ```sh
 mush --root ~/fungos-node --history ~/.local/state/mush/history
@@ -250,6 +252,25 @@ mush --root ~/fungos-node --history ~/.local/state/mush/history
 
 `MUSH_HISTORY` overrides the path. Non-interactive input still uses a plain
 line loop.
+
+### No job control
+
+Ctrl-Z, `fg`, `bg` and `&` do not exist here, and cannot: they are operations on
+child processes, and Mush runs every command in-process inside the Spore. Ctrl-Z
+prints a one-line explanation instead of suspending, because stopping the shell
+mid-read would leave the terminal in raw mode with nothing to resume.
+
+Backgrounding exists at a different layer. A daemon call that outlives its
+threshold keeps running and hands the caller a job id:
+
+```sh
+mush request --background-after 600 'mb ready --json'
+# command still running after 600s; check it with `mush job j1`
+mush jobs
+mush job j1
+```
+
+That is the receipt an agent needs; it is not shell job control.
 
 ## Agent overlay
 

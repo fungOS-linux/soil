@@ -8,6 +8,7 @@ mod config;
 mod deadline;
 mod desktop;
 mod gateway;
+mod job;
 mod mcp_gateway;
 mod mcp_server;
 mod origin;
@@ -407,6 +408,14 @@ fn run() -> Result<()> {
         args.remove(0);
         return run_request(&config, args);
     }
+    if args.first().map(String::as_str) == Some("job") {
+        args.remove(0);
+        return run_job(&config, args);
+    }
+    if args.first().map(String::as_str) == Some("jobs") {
+        args.remove(0);
+        return run_jobs(&config, args);
+    }
     if args.first().map(String::as_str) == Some("origin") {
         args.remove(0);
         return origin::run(args);
@@ -501,7 +510,10 @@ fn run() -> Result<()> {
     let history = take_option(&mut args, "--history")
         .or_else(|| std::env::var("MUSH_HISTORY").ok())
         .map(|value| config::expand_home(&value))
-        .unwrap_or_else(|| root.join(".fungos/mush-history"));
+        // A stable per-user path, not `<root>/.fungos`: history that moves with
+        // the VFS root is empty every time the root changes, which makes Ctrl-R
+        // search nothing.
+        .unwrap_or_else(|| config::expand_home("~/.local/state/fungos/mush/history"));
     let command_root = take_option(&mut args, "--command-root")
         .or_else(|| std::env::var("FUNGOS_COMMAND_ROOT").ok())
         .or_else(|| {
@@ -553,6 +565,14 @@ fn run() -> Result<()> {
     let listen = take_option(&mut args, "--listen")
         .or_else(|| std::env::var("MUSH_MCP_LISTEN").ok())
         .unwrap_or_else(|| "127.0.0.1:0".into());
+    // How long a daemon call waits before handing the caller a job id. The
+    // adaptive default only applies when this is absent.
+    let background_after = match take_option(&mut args, "--background-after")
+        .or_else(|| std::env::var("MUSH_BACKGROUND_AFTER").ok())
+    {
+        Some(value) => deadline::parse_budget(&value)?,
+        None => None,
+    };
     let configured_token =
         take_option(&mut args, "--mcp-token").or_else(|| std::env::var("MUSH_MCP_TOKEN").ok());
     let mcp_token = configured_token.clone().unwrap_or_else(new_mcp_token);
@@ -591,7 +611,8 @@ fn run() -> Result<()> {
         let socket = socket
             .as_deref()
             .context("mush --serve needs --socket PATH or a config socket")?;
-        return service::serve(socket, |line| runtime.execute(line));
+        let jobs = job::Jobs::start(runtime, background_after);
+        return service::serve(socket, &jobs);
     }
 
     if mcp {
@@ -600,7 +621,8 @@ fn run() -> Result<()> {
         if configured_token.is_none() {
             eprintln!("mush: mcp bearer token {mcp_token}");
         }
-        return mcp_server::serve(server, &mcp_token, |line| runtime.execute(line));
+        let jobs = job::Jobs::start(runtime, background_after);
+        return mcp_server::serve(server, &mcp_token, &jobs);
     }
 
     if let Some(command) = command {
@@ -630,6 +652,19 @@ fn run() -> Result<()> {
         run_lines(&mut runtime)?
     };
     finish(status)
+}
+
+/// Ctrl-Z has nothing to suspend in Mush; explain that and carry on.
+extern "C" fn on_suspend(_signal: libc::c_int) {
+    let message = b"\nmush: Ctrl-Z does nothing here; commands run in-process, not as child jobs\n";
+    // Async-signal-safe: write(2) on a static buffer, nothing else.
+    unsafe {
+        libc::write(
+            libc::STDERR_FILENO,
+            message.as_ptr() as *const libc::c_void,
+            message.len(),
+        );
+    }
 }
 
 fn new_mcp_token() -> String {
@@ -662,7 +697,9 @@ fn usage() -> String {
          \x20 mush run op [OPTIONS]\n\
          \x20 mush --serve --socket PATH --root DIR [--foreground] [OPTIONS]\n\
          \x20 mush mcp [--listen ADDR] [--foreground] [OPTIONS]\n\
-         \x20 mush origin [--cwd PATH] [--json]\n\n\
+         \x20 mush origin [--cwd PATH] [--json]\n\
+         \x20 mush jobs [--json]\n\
+         \x20 mush job ID [--json]\n\n\
          The Mush Spore is embedded; --wasm overrides it for development.\n\n\
          Options:\n\
          \x20 --root DIR                 VFS root (mutually exclusive with --desktop)\n\
@@ -679,8 +716,10 @@ fn usage() -> String {
          \x20 --command LINE             execute one or more command lines\n\
          \x20 --script PATH              source a VFS script\n\
          \x20 --timeout SECONDS          interrupt a command after this long (0 disables)\n\
+         \x20 --background-after SECONDS hand the caller a job id after this long (0 disables)\n\
          \x20 --foreground               allow a server subcommand to take the terminal\n\n\
          A non-interactive command runs with a {}s deadline unless --timeout says otherwise.\n\
+         A daemon call that outlives its background threshold keeps running and returns a job id.\n\
          Servers refuse to start without --foreground when stdin is not a terminal.\n",
         env!("CARGO_PKG_VERSION"),
         deadline::DEFAULT_TIMEOUT.as_secs()
@@ -761,16 +800,7 @@ fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
 
-    let socket = take_option(&mut args, "--socket")
-        .or_else(|| std::env::var("MUSH_SOCKET").ok())
-        .or_else(|| {
-            config
-                .socket
-                .as_ref()
-                .map(|path| path.display().to_string())
-        })
-        .map(|value| config::expand_home(&value))
-        .context("mush request needs --socket PATH or a config socket")?;
+    let socket = service_socket(config, &mut args)?;
     let json = args.iter().any(|arg| arg == "--json");
     args.retain(|arg| arg != "--json");
     // The client needs its own bound: a wedged daemon must not hang the
@@ -786,14 +816,23 @@ fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
         );
     }
     let command = args.join(" ");
+    let background_after = take_option(&mut args, "--background-after")
+        .or_else(|| std::env::var("MUSH_BACKGROUND_AFTER").ok());
+    let background_after_secs = match background_after {
+        Some(value) => deadline::parse_budget(&value)?.map(|budget| budget.as_secs()),
+        None => None,
+    };
+    let mut request = serde_json::json!({"command": command});
+    if let Some(seconds) = background_after_secs {
+        request["background_after_secs"] = serde_json::json!(seconds);
+    }
     let mut stream = UnixStream::connect(&socket)
         .with_context(|| format!("connect Mush service {}", socket.display()))?;
     if let Some(budget) = budget {
         stream.set_read_timeout(Some(budget))?;
         stream.set_write_timeout(Some(budget))?;
     }
-    stream
-        .write_all(serde_json::to_string(&serde_json::json!({"command": command}))?.as_bytes())?;
+    stream.write_all(serde_json::to_string(&request)?.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
     let mut line = String::new();
@@ -809,11 +848,21 @@ fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
         return Err(error.into());
     }
     let response: serde_json::Value = serde_json::from_str(&line).context("parse Mush response")?;
+    let background =
+        response.get("state").and_then(serde_json::Value::as_str) == Some("background");
     if json {
         print!("{line}");
         if !line.ends_with('\n') {
             println!();
         }
+    } else if background {
+        // The work is still alive; this is the receipt, on stdout where a
+        // caller that only reads output will see it.
+        let hint = response
+            .get("hint")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("command still running");
+        println!("{hint}");
     } else if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
         if let Some(output) = response.get("output").and_then(serde_json::Value::as_str) {
             print!("{output}");
@@ -829,12 +878,128 @@ fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
         anyhow::bail!("{error}");
     }
     io::stdout().flush()?;
+    if background {
+        return Ok(());
+    }
     let status = response
         .get("status")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(0) as i32;
     if status != 0 {
         std::process::exit(status);
+    }
+    Ok(())
+}
+
+/// Resolve the daemon socket from flags, environment, or config.
+fn service_socket(config: &config::Config, args: &mut Vec<String>) -> Result<PathBuf> {
+    take_option(args, "--socket")
+        .or_else(|| std::env::var("MUSH_SOCKET").ok())
+        .or_else(|| {
+            config
+                .socket
+                .as_ref()
+                .map(|path| path.display().to_string())
+        })
+        .map(|value| config::expand_home(&value))
+        .context("needs --socket PATH or a config socket")
+}
+
+/// One request, one response line, bounded so a wedged daemon cannot park us.
+fn service_query(socket: &Path, request: &serde_json::Value) -> Result<serde_json::Value> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)
+        .with_context(|| format!("connect Mush service {}", socket.display()))?;
+    stream.set_read_timeout(Some(deadline::DEFAULT_TIMEOUT))?;
+    stream.write_all(serde_json::to_string(request)?.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    serde_json::from_str(&line).context("parse Mush response")
+}
+
+fn run_jobs(config: &config::Config, mut args: Vec<String>) -> Result<()> {
+    let socket = service_socket(config, &mut args)?;
+    let reply = service_query(&socket, &serde_json::json!({"kind": "jobs"}))?;
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", serde_json::to_string_pretty(&reply)?);
+        return Ok(());
+    }
+    let empty = Vec::new();
+    let jobs = reply
+        .get("jobs")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or(&empty);
+    if jobs.is_empty() {
+        println!("no jobs");
+        return Ok(());
+    }
+    for job in jobs {
+        println!(
+            "{}\t{}\t{}",
+            job.get("job")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+            job.get("state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+            job.get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-"),
+        );
+    }
+    Ok(())
+}
+
+fn run_job(config: &config::Config, mut args: Vec<String>) -> Result<()> {
+    let socket = service_socket(config, &mut args)?;
+    let json = args.iter().any(|arg| arg == "--json");
+    args.retain(|arg| arg != "--json");
+    let id = args
+        .first()
+        .cloned()
+        .context("usage: mush job ID [--json]")?;
+    let reply = service_query(&socket, &serde_json::json!({"kind": "job", "job": id}))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&reply)?);
+        return Ok(());
+    }
+    if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        anyhow::bail!(
+            "{}",
+            reply
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown job")
+        );
+    }
+    let state = reply
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    if let Some(stdout) = reply.get("stdout").and_then(serde_json::Value::as_str) {
+        print!("{stdout}");
+    }
+    if let Some(stderr) = reply.get("stderr").and_then(serde_json::Value::as_str) {
+        eprint!("{stderr}");
+    }
+    io::stdout().flush()?;
+    if state == "running" {
+        println!("state: running");
+        if let Some(hint) = reply.get("hint").and_then(serde_json::Value::as_str) {
+            println!("{hint}");
+        }
+        return Ok(());
+    }
+    let status = reply
+        .get("status")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32;
+    if status != 0 {
+        return finish(status);
     }
     Ok(())
 }
@@ -928,6 +1093,11 @@ fn doctor_report(
 }
 
 fn run_interactive(runtime: &mut Runtime, history: &Path) -> Result<i32> {
+    // Mush runs every command in-process, so there is no child to suspend or
+    // resume. Letting Ctrl-Z land would stop the shell while the terminal is
+    // still in raw mode, which corrupts the session on `fg` and has nothing to
+    // resume anyway. Report the boundary instead of breaking the terminal.
+    unsafe { libc::signal(libc::SIGTSTP, on_suspend as libc::sighandler_t) };
     let mut editor = DefaultEditor::new()?;
     let _ = editor.load_history(history);
     let mut status = 0;

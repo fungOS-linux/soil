@@ -10,28 +10,22 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use tiny_http::{Header, Response, Server, StatusCode};
 
-use crate::outcome::{Executed, State};
+use crate::job::{Jobs, Outcome};
 
 const MAX_REQUEST: u64 = 2 * 1024 * 1024;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 
-pub fn serve<F>(server: Server, token: &str, mut execute: F) -> Result<()>
-where
-    F: FnMut(&str) -> Result<Executed>,
-{
+pub fn serve(server: Server, token: &str, jobs: &Jobs) -> Result<()> {
     eprintln!("mush: mcp server http://{}/mcp", server.server_addr());
     for request in server.incoming_requests() {
-        if let Err(error) = handle(request, token, &mut execute) {
+        if let Err(error) = handle(request, token, jobs) {
             eprintln!("mush: mcp: {error:#}");
         }
     }
     Ok(())
 }
 
-fn handle<F>(mut request: tiny_http::Request, token: &str, execute: &mut F) -> Result<()>
-where
-    F: FnMut(&str) -> Result<Executed>,
-{
+fn handle(mut request: tiny_http::Request, token: &str, jobs: &Jobs) -> Result<()> {
     if request.method().as_str() != "POST" || request.url() != "/mcp" {
         return respond(request, 404, &[], b"not found\n");
     }
@@ -73,13 +67,22 @@ where
                 "result": {
                     "tools": [{
                         "name": "mush_exec",
-                        "description": "Execute a Mush command in the daemon's fixed VFS workspace. Use for VFS, records and installed wasm commands; no host process is involved. A command that outlives the daemon deadline is interrupted and returns state=timeout rather than hanging.",
+                        "description": "Execute a Mush command in the daemon's fixed VFS workspace. Use for VFS, records and installed wasm commands; no host process is involved. A command that outlives the daemon deadline is interrupted and returns state=timeout. A command that outlives its background threshold keeps running and returns state=background with a job id.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "command": {"type": "string", "description": "Shell command line(s)"}
                             },
                             "required": ["command"]
+                        }
+                    }, {
+                        "name": "mush_job",
+                        "description": "Check a backgrounded Mush command, or list every job when no id is given. Use this after mush_exec returns state=background instead of re-running the command.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "job": {"type": "string", "description": "Job id from mush_exec; omit to list"}
+                            }
                         }
                     }]
                 }
@@ -91,6 +94,32 @@ where
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            if name == "mush_job" {
+                let job = params
+                    .get("arguments")
+                    .and_then(|value| value.get("job"))
+                    .and_then(Value::as_str);
+                let body = match job {
+                    Some(id) => jobs
+                        .snapshot(id)
+                        .unwrap_or_else(|| json!({"error": format!("no job {id}")})),
+                    None => jobs.list(),
+                };
+                let text = serde_json::to_string_pretty(&body)?;
+                return respond_json(
+                    request,
+                    200,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "content": [{"type": "text", "text": text}],
+                            "structuredContent": body,
+                            "isError": false
+                        }
+                    }),
+                );
+            }
             if name != "mush_exec" {
                 return respond_json(
                     request,
@@ -110,29 +139,47 @@ where
                     &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"command is required"}}),
                 );
             }
-            let (mut stdout, mut stderr, mut exit, mut status) =
-                (String::new(), String::new(), false, 0);
-            let mut state = State::Done;
-            for line in command.lines() {
-                let executed = execute(line)?;
-                stdout.push_str(&executed.output);
-                stderr.push_str(&executed.stderr);
-                exit |= executed.exit;
-                status = executed.status;
-                if executed.state != State::Done {
-                    state = executed.state;
+            let outcome = jobs.submit(command, None)?;
+            let (text, structured, is_error) = match outcome {
+                Outcome::Completed(executed) => {
+                    let mut stdout = executed.output;
+                    if stdout.len() > MAX_OUTPUT {
+                        stdout.truncate(MAX_OUTPUT);
+                        stdout.push_str("\n[mush: output truncated]\n");
+                    }
+                    let text = format!("{}{}", stdout, executed.stderr);
+                    let failed = executed.status != 0 || executed.exit;
+                    (
+                        text,
+                        json!({
+                            "stdout": stdout,
+                            "stderr": executed.stderr,
+                            "status": executed.status,
+                            "exit": executed.exit,
+                            "state": executed.state.as_str(),
+                            "blocking": executed.state.blocking()
+                        }),
+                        failed,
+                    )
                 }
-                if stdout.len() > MAX_OUTPUT {
-                    stdout.truncate(MAX_OUTPUT);
-                    stdout.push_str("\n[mush: output truncated]\n");
-                    status = 1;
-                    break;
+                Outcome::Background { job, after } => {
+                    let hint = format!(
+                        "command still running after {}s; check it with mush_job {{\"job\":\"{job}\"}} instead of re-running it",
+                        after.as_secs()
+                    );
+                    (
+                        hint.clone(),
+                        json!({
+                            "state": "background",
+                            "job": job,
+                            "after_secs": after.as_secs(),
+                            "blocking": false,
+                            "hint": hint,
+                        }),
+                        false,
+                    )
                 }
-                if exit {
-                    break;
-                }
-            }
-            let text = format!("{stdout}{stderr}");
+            };
             respond_json(
                 request,
                 200,
@@ -141,15 +188,8 @@ where
                     "id": id,
                     "result": {
                         "content": [{"type": "text", "text": text}],
-                        "structuredContent": {
-                            "stdout": stdout,
-                            "stderr": stderr,
-                            "status": status,
-                            "exit": exit,
-                            "state": state.as_str(),
-                            "blocking": state.blocking()
-                        },
-                        "isError": status != 0 || exit || state != State::Done
+                        "structuredContent": structured,
+                        "isError": is_error
                     }
                 }),
             )
