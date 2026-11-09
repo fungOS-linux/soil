@@ -348,6 +348,22 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
         ("DELETE", path) if path.starts_with("/sessions/") => {
             close_session(&mut stream, app, path)?
         }
+        // One full screen as Lua, for a scene renderer that paints the Spore's
+        // own view instead of this server's HTML. The grid is the Spore's; this
+        // endpoint is the transport, not a second renderer.
+        ("GET", "/snapshot.lua") => {
+            let Some(session) = app.pick(wanted) else {
+                return not_found(&mut stream);
+            };
+            session.touch();
+            let snapshot = session.host.snapshot();
+            respond(
+                &mut stream,
+                "200 OK",
+                "text/x-lua; charset=utf-8",
+                frame::lua(&snapshot).as_bytes(),
+            )?;
+        }
         ("GET", "/events") => {
             let Some(session) = app.pick(wanted) else {
                 return not_found(&mut stream);
