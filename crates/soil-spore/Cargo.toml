@@ -18,6 +18,12 @@ toml = "0.8"
 # the module instead of the other way round.
 wit-component = "0.247"
 wit-parser = "0.247"
+# Drain on SIGTERM. An ephemeral node being replaced must leave the pool when
+# its supervisor stops it, not one lease TTL later. `signal-hook` is the safe
+# way to do that in a blocking loop: this crate forbids unsafe, and there is no
+# async runtime here to borrow a signal from.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
 
 [[bin]]
 name = "soil-spore"
