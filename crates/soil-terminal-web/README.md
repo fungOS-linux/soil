@@ -77,6 +77,28 @@ and `~/.config/fungos/desktops/*.toml` when a `mush` binary resolves
 (`SOIL_MUSH_BIN`, `target/debug/mush`, or `mush` on `PATH`). `acme`, `desk`, and
 `personal` above are the desktops already on this machine.
 
+## Mush
+
+A Mush target runs the host's embedded Spore. Two things are per desktop:
+
+**`.mushrc`** is a script at the VFS root, run before the first prompt. It is a
+normal Mush script, so it can set `PS1` (the prompt understands `\u`, `\h`,
+`\w`, `\W`, `\d`, `\$`), export variables, or print a MOTD:
+
+```sh
+echo "export PS1='acme:\w$ '" > /.mushrc
+echo 'echo mush · acme desktop' >> /.mushrc
+echo 'echo help for builtins · exit to leave' >> /.mushrc
+```
+
+`\d` is the desktop id when the host selected one; without a `.mushrc` the
+default prompt includes it.
+
+**`clear`** is a builtin (ED2 + cursor home), so it works on every surface.
+Ctrl-L clears in the line editor, Ctrl-U kills the line, Ctrl-C interrupts.
+Host programs run on the pty with inherited stdio, so a program that turns echo
+off — a password prompt — reads the terminal the way it would in any shell.
+
 ## Endpoints
 
 | Method | Path | Meaning |
