@@ -99,6 +99,21 @@ pub struct Manifest {
     /// Launcher identity: a mark and the colour it is drawn in.
     #[serde(default)]
     pub presentation: Option<Presentation>,
+    /// Agent skills this Spore ships. Each one is declared by path, so the lock
+    /// and the tar cover it like any other asset: what teaches an agent to use
+    /// the Spore is prose, and the prose has to travel with the package.
+    #[serde(default)]
+    pub skills: Vec<Skill>,
+}
+
+/// One agent skill: a `SKILL.md` whose frontmatter names it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Skill {
+    /// Registry identity; must match the frontmatter and the directory name.
+    pub name: String,
+    /// Path to the `SKILL.md`, relative to the package root.
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -219,7 +234,48 @@ impl Manifest {
         let path = root.join("spore.toml");
         let source = fs::read_to_string(&path)
             .map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
-        Self::parse(&source)
+        let manifest = Self::parse(&source)?;
+        manifest.check_skills(root)?;
+        Ok(manifest)
+    }
+
+    /// Skills are files, so only `load` can check them: `parse` has no root.
+    /// A declared skill that is missing, unnamed, or misnamed is a packaging
+    /// error, not a runtime surprise.
+    fn check_skills(&self, root: &Path) -> Result<()> {
+        for skill in &self.skills {
+            let file = root.join(&skill.path);
+            let source = fs::read_to_string(&file)
+                .map_err(|error| Error::Io(format!("{}: {error}", file.display())))?;
+            let (name, description) = skill_frontmatter(&source).ok_or_else(|| {
+                Error::Invalid(format!(
+                    "{} needs `---` frontmatter with name and description",
+                    file.display()
+                ))
+            })?;
+            if name != skill.name {
+                return Err(Error::Invalid(format!(
+                    "skill {:?} declares name {name:?} in its frontmatter",
+                    skill.name
+                )));
+            }
+            if description.trim().is_empty() {
+                return Err(Error::Invalid(format!(
+                    "skill {name:?} needs a description"
+                )));
+            }
+            let dirname = file
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if dirname != name {
+                return Err(Error::Invalid(format!(
+                    "skill {name:?} must live in a directory of the same name, not {dirname:?}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -250,6 +306,25 @@ impl Manifest {
                 "version {:?} is not semver-ish",
                 self.spore.version
             )));
+        }
+        for skill in &self.skills {
+            if !identifier(&skill.name) {
+                return Err(Error::Invalid(format!(
+                    "skill name {:?} must be lowercase letters, digits, - or _",
+                    skill.name
+                )));
+            }
+            let path = safe_relative(&skill.path)?;
+            if path
+                .file_name()
+                .map(|name| name.to_string_lossy() != "SKILL.md")
+                != Some(true)
+            {
+                return Err(Error::Invalid(format!(
+                    "skill {:?} must point at a SKILL.md, not {:?}",
+                    skill.name, skill.path
+                )));
+            }
         }
 
         match &self.module {
@@ -363,11 +438,35 @@ impl Manifest {
             paths.extend(chrome.sources.values().cloned());
         }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
+        paths.extend(self.skills.iter().map(|skill| skill.path.clone()));
         paths
             .into_iter()
             .filter_map(|path| safe_relative(&path).ok())
             .collect()
     }
+}
+
+/// The two frontmatter fields a skill registry needs. Everything else in a
+/// SKILL.md is prose, so it is not parsed here.
+fn skill_frontmatter(source: &str) -> Option<(String, String)> {
+    let mut lines = source.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let mut name = None;
+    let mut description = None;
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("name:") {
+            name = Some(value.trim().to_string());
+        }
+        if let Some(value) = line.strip_prefix("description:") {
+            description = Some(value.trim().to_string());
+        }
+    }
+    Some((name?, description?))
 }
 
 fn identifier(value: &str) -> bool {
