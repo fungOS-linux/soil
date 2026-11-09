@@ -6598,6 +6598,13 @@ name = "soil-canvas-input"
 version = "0.1.0"
 
 [[package]]
+name = "soil-capture"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+]
+
+[[package]]
 name = "soil-command"
 version = "0.1.0"
 dependencies = [

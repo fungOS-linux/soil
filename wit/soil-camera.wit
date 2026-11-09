@@ -1,0 +1,59 @@
+// Bounded camera capture.
+//
+// Still and low-rate frames only. Full-rate video belongs on a host-owned
+// producer/surface path; it must not copy every frame through wasm. One camera
+// per Spore; at most one frame in flight; at most 8 MiB per frame. No device
+// enumeration, device paths or raw controls.
+//
+// The host owns the camera, permission prompt and visible capture indicator.
+// The returned frame is a bounded copy; it is not a native handle.
+package soil:camera@1.0.0;
+
+interface capture {
+  enum pixel-format {
+    rgba8,
+    mjpeg,
+  }
+
+  record format {
+    width: u32,
+    height: u32,
+    pixel-format: pixel-format,
+  }
+
+  record frame {
+    /// Monotonic sequence within this capture session.
+    sequence: u64,
+    /// Host monotonic time at capture, milliseconds.
+    soil-time-ms: u64,
+    format: format,
+    data: list<u8>,
+  }
+
+  enum error {
+    denied,
+    not-found,
+    not-ready,
+    over-budget,
+    invalid,
+    closed,
+    backend,
+  }
+
+  resource camera {
+    next-frame: func(timeout-ms: u32) -> result<option<frame>, error>;
+    close: func() -> result<_, error>;
+  }
+
+  /// Host chooses the camera and shows the capture indicator. `purpose` is
+  /// user-facing text for the consent surface.
+  open: func(purpose: string) -> result<camera, error>;
+}
+
+world capture-host {
+  import capture;
+}
+
+world guest {
+  import capture;
+}

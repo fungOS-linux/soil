@@ -37,8 +37,9 @@ review map for what else exists and what is missing.
 | `soil:surface@1` | window / compositor / seat | `soil:surface` | **deferred** | Spore submits a bounded retained scene; only if a Spore or non-Canvas host ever needs its own UI. Not on the v1 path. |
 | `wasi:webgpu@0.3.0-rc.2` | wgpu-core device | link `wasi:webgpu` | yes | Upstream WIT, no native handles. Host: [`crates/soil-webgpu`](../crates/soil-webgpu). Presentation stays Canvas-owned. |
 | `wasi:audio@0.1.0` | audio sink | link `wasi:audio` | draft | Soil-maintained PCM sink; cpal host; no callbacks or device handles. [`docs/wasi-audio.md`](wasi-audio.md). |
-| `soil:mic@1` | audio capture | `soil:mic.capture` | yes | Bounded PCM chunks. Visible capture indicator; no background capture. Separate from playback so muting output never implies mic permission. |
-| `soil:camera@1` | camera capture | `soil:camera.capture` | yes | Still/low-rate frames only. Full-rate video belongs on `soil:stream`/producer path. No device paths or raw controls. |
+| `soil:mic@1` | audio capture | `soil:mic.capture` | yes | Bounded PCM chunks. Visible capture indicator; no background capture. Separate from playback so muting output never implies mic permission. Canonical WIT: [`wit/soil-mic.wit`](../wit/soil-mic.wit); host backend: [`crates/soil-capture`](../crates/soil-capture). |
+| `soil:camera@1` | camera capture | `soil:camera.capture` | yes | Still/low-rate frames only. Full-rate video belongs on `soil:stream`/producer path. No device paths or raw controls. Canonical WIT: [`wit/soil-camera.wit`](../wit/soil-camera.wit); host backend: [`crates/soil-capture`](../crates/soil-capture). |
+| `soil:screencast@0.1` | screen/window capture | `soil:screencast.capture` | yes | Host-owned picker and capture session; a Spore gets an opaque session and surface alias, never pixels or handles. Canonical WIT: [`wit/soil-screencast.wit`](../wit/soil-screencast.wit); host adapter pending. |
 | `soil:input@1` | shared normalized input types | — | yes | Key, modifiers, pointer, scroll, text and focus types shared by Canvas, Terminal and imported surfaces. Types only; each surface keeps its own presentation grant. Canonical WIT: [`wit/soil-input.wit`](../wit/soil-input.wit). |
 | `soil:ble@1` | BLE radio | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | yes | Eight verbs, Soil-issued handles, typed errors, local lease (signed lease pending). Canonical WIT: [`wit/soil-ble.wit`](../wit/soil-ble.wit); host: [`crates/soil-ble-host`](../crates/soil-ble-host). |
 | `soil:stream@1` | Unibus stream | `soil:stream` plus kind/schema grants | yes | Bounded subscription resource; read/write/credit; no endpoints, producer ids, or tokens. |
@@ -80,80 +81,29 @@ until a Spore must draw its own interface or a host runs without Canvas. See
 
 ## Contract sketches
 
-### `soil:camera@1`
+### Capture: `soil:mic`, `soil:camera`, `soil:screencast`
 
-```wit
-// Limits: one camera per Spore; still/low-rate only; max 1 frame in flight;
-// max 8 MiB per encoded frame; no device enumeration or controls.
-package soil:camera@1.0.0;
+Canonical contracts:
 
-interface camera {
-  record format {
-    width: u32,
-    height: u32,
-    pixel-format: string,
-  }
+- [`wit/soil-mic.wit`](../wit/soil-mic.wit): polled PCM chunks from a
+  host-selected microphone.
+- [`wit/soil-camera.wit`](../wit/soil-camera.wit): still or low-rate camera
+  frames, never a full-rate per-frame wasm copy.
+- [`wit/soil-screencast.wit`](../wit/soil-screencast.wit): a host-owned capture
+  session with a host picker and a surface alias, never pixels or display
+  handles.
 
-  record frame {
-    sequence: u64,
-    soil-time-ms: u64,
-    format: format,
-    data: list<u8>,
-  }
+The split is deliberate. Microphone capture is bounded PCM for agents,
+recorders and voice apps. Camera capture is a small frame path for previews and
+stills; full-rate video goes through a host-owned producer/surface path.
+Screencast is a host-owned surface producer: the Spore can start/stop it and
+name its alias, but cannot inspect a display, choose a native window id or read
+the frame buffer.
 
-  enum error {
-    denied,
-    not-found,
-    not-ready,
-    over-budget,
-    invalid,
-    closed,
-  }
-
-  open: func(purpose: string) -> result<camera, error>;
-  // resource or polled handle; one frame at a time, caller copies.
-  next-frame: func(timeout-ms: u32) -> result<option<frame>, error>;
-  close: func() -> result<_, error>;
-}
-```
-
-A full-rate camera should not copy every frame through wasm. Use a producer
-path on `soil:stream` or `soil:surface` and let Soil own the buffer.
-
-The browser/finder design built on `soil:vfs` and `soil:index` is in
-[`docs/file-browser.md`](file-browser.md).
-
-### `soil:mic@1`
-
-```wit
-// Limits: one capture stream per Spore; 16 kHz..48 kHz; mono/stereo;
-// max 8192 frames per call; host-selected device.
-package soil:mic@1.0.0;
-
-interface mic {
-  record pcm {
-    sample-rate: u32,
-    channels: u8,
-    frames: u32,
-    samples: list<f32>,
-  }
-
-  enum error {
-    denied,
-    not-ready,
-    over-budget,
-    invalid,
-    closed,
-  }
-
-  open: func() -> result<mic, error>;
-  read: func(max-frames: u32, timeout-ms: u32) -> result<option<pcm>, error>;
-  close: func() -> result<_, error>;
-}
-```
-
-Capture is separate from `soil:audio` playback so grants and user indicators
-are independent.
+All three are polled, one session per Spore, with a visible capture indicator
+and no background capture. The host owns the device, permission prompt, format
+conversion and encoding. Native backends are still pending; the contracts are
+reviewed and `soil-abi` pins their package names and free functions.
 
 ### `soil:input@1`
 
@@ -270,7 +220,8 @@ Any unsupported row is a named denial, not an empty success.
    `soil:canvas-input` into the S22/Fire TV hosts,
    finish the BLE gaps (signed lease, DIS `ring-id`, Unibus publish, Android
    JNI), then the host adapters and denial fixtures for `time` and `storage`,
-   then `api`, `mic`, `camera`. `audio` waits for a concrete Spore that plays
+   then `api` and the `mic`, `camera` and `screencast` host adapters (their
+   contracts are canonical). `audio` waits for a concrete Spore that plays
    something.
 4. **After that:** `notify`.
 5. **Only with a concrete workload:** `surface` (if a Spore/non-Canvas host
@@ -302,3 +253,8 @@ Any unsupported row is a named denial, not an empty success.
 Resolved: `soil:time` is a grant, not an always-available primitive. Both
 `monotonic-ms` and `tick` return `denied` without `soil:time`; hosts must not
 silently provide an ambient clock.
+
+Resolved: `soil:screencast` returns an opaque session plus a surface alias, not
+pixels or encoded frames. Encoded capture is deferred until a recorder needs a
+separate bounded interface. `soil:mic` stays separate from `soil:audio` playback
+so output mute never implies microphone permission.

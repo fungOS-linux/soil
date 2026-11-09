@@ -1,0 +1,57 @@
+// Host-owned screen and window capture.
+//
+// The host shows its own picker, owns the capture and encoding, and keeps the
+// frame buffer. A Spore gets an opaque session plus a surface alias; it never
+// receives display ids, native window handles, pixels or encoded frames through
+// this interface. One cast per Spore; visible indicator; no background capture.
+//
+// The alias can be placed through `soil:surface-import` by a Spore that has both
+// grants. A room adapter uses the same session host-side and publishes the
+// encoded stream without handing capture authority to the Rooms Spore.
+package soil:screencast@0.1.0;
+
+interface capture {
+  enum source-kind {
+    screen,
+    window,
+    region,
+    surface,
+  }
+
+  record info {
+    /// Opaque alias resolvable by the host's surface importer.
+    alias: string,
+    kind: source-kind,
+    width: u32,
+    height: u32,
+    fps: u32,
+  }
+
+  enum error {
+    denied,
+    cancelled,
+    not-ready,
+    unsupported,
+    over-budget,
+    invalid,
+    closed,
+    backend,
+  }
+
+  resource session {
+    info: func() -> result<info, error>;
+    stop: func() -> result<_, error>;
+  }
+
+  /// Host shows the picker and starts capture. `purpose` is user-facing text
+  /// for the consent surface. Cancelling the picker returns `cancelled`.
+  open: func(purpose: string) -> result<session, error>;
+}
+
+world capture-host {
+  import capture;
+}
+
+world guest {
+  import capture;
+}

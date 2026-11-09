@@ -1,0 +1,46 @@
+// Bounded microphone capture.
+//
+// The host owns the device, permission prompt, visible capture indicator and
+// format conversion. A Spore gets polled PCM chunks, never a device handle or a
+// callback. One stream per Spore; 16 kHz..48 kHz; mono or stereo; at most 8192
+// frames per read. Capture stops when the resource is closed or dropped.
+//
+// Capture is separate from playback so muting output never implies microphone
+// permission. A room adapter that publishes speech captures host-side and does
+// not expose this grant to the Rooms Spore.
+package soil:mic@1.0.0;
+
+interface capture {
+  enum error {
+    denied,
+    not-ready,
+    over-budget,
+    invalid,
+    closed,
+  }
+
+  record pcm {
+    sample-rate: u32,
+    channels: u8,
+    frames: u32,
+    /// Normalized f32 samples, interleaved by channel.
+    samples: list<f32>,
+  }
+
+  resource mic {
+    read: func(max-frames: u32, timeout-ms: u32) -> result<option<pcm>, error>;
+    close: func() -> result<_, error>;
+  }
+
+  /// Host chooses the device and shows the capture indicator. `purpose` is
+  /// user-facing text for the consent surface.
+  open: func(purpose: string) -> result<mic, error>;
+}
+
+world capture-host {
+  import capture;
+}
+
+world guest {
+  import capture;
+}

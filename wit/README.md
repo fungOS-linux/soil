@@ -30,6 +30,9 @@ credential resolution stay in host adapters.
 | `soil:storage@1.0.0` | contract | content-addressed asset cache |
 | `soil:media@0.1.0` | wired | playback, encoded chunks, image |
 | `soil:surface-import@0.1.0` | wired | host-owned imported surfaces |
+| `soil:mic@1.0.0` | contract | bounded PCM capture; no host adapter |
+| `soil:camera@1.0.0` | contract | still/low-rate camera frames; no host adapter |
+| `soil:screencast@0.1.0` | contract | host-owned capture session + surface alias; no host adapter |
 | `soil:inference@0.2.0` | wired | models, tools, completion stream |
 | `soil:notify@1.1.0` | wired | inbox/focus/history/cleanup and ringer |
 | `fungos:actions@1.0.0` | wired | action bus plus presentation catalog |

@@ -32,6 +32,12 @@ that session. The Iroh listener/router lives in `crates/soil-sync-host`; a real
 encrypted loopback test syncs records through it. See
 [Shared peer sync](docs/peer-sync.md).
 
+A room follows the same rule. Membership, presence, audio buses, text and
+signaling belong to a host-owned room service; audio and screen share belong to
+host media adapters; the Spore renders a snapshot and names opaque surface
+aliases. Rooms is the Canvas presenter and Holodeck the VR presenter of the same
+`space`. See [Rooms](docs/rooms.md). `spores/rooms` is the flat half.
+
 Principles:
 
 - **No ambient authority.** A Spore runs against exactly the imports its signed

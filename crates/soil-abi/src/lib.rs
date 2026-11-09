@@ -84,6 +84,24 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("surface", &["open"])],
     },
     Contract {
+        file: "wit/soil-mic.wit",
+        source: include_str!("../../../wit/soil-mic.wit"),
+        package: "soil:mic@1.0.0",
+        interfaces: &[("capture", &["open"])],
+    },
+    Contract {
+        file: "wit/soil-camera.wit",
+        source: include_str!("../../../wit/soil-camera.wit"),
+        package: "soil:camera@1.0.0",
+        interfaces: &[("capture", &["open"])],
+    },
+    Contract {
+        file: "wit/soil-screencast.wit",
+        source: include_str!("../../../wit/soil-screencast.wit"),
+        package: "soil:screencast@0.1.0",
+        interfaces: &[("capture", &["open"])],
+    },
+    Contract {
         file: "wit/soil-media.wit",
         source: include_str!("../../../wit/soil-media.wit"),
         package: "soil:media@0.1.0",
