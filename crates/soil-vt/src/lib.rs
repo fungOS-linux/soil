@@ -3,7 +3,7 @@
 //! Emulation is the part of a terminal that is actually hard — escape
 //! sequences, wide characters, reflow on resize, scrollback, the alternate
 //! screen. None of it is Soil's to invent, so this crate wraps
-//! [`libghostty_vt`], the emulator extracted from Ghostty, and exposes the only
+//! [`ghostty_vt`], the emulator extracted from Ghostty, and exposes the only
 //! thing a renderer needs: a snapshot of the grid.
 //!
 //! ```text
@@ -13,13 +13,29 @@
 //! Deliberately no rendering, no fonts, no colour policy. Soil owns the
 //! process and its output; Canvas owns pixels. A `Snapshot` is plain data so it
 //! can cross a WIT boundary unchanged.
+//!
+//! # Building
+//!
+//! `ghostty-vt-sys` compiles libghostty-vt with Zig, and Ghostty requires an
+//! exact Zig minor version. The toolchain is pinned in `.cargo/config.toml`
+//! (`ZIG`) and fetched by `scripts/bootstrap-toolchain.sh`, so `cargo build`
+//! does not depend on whatever `zig` happens to be on `PATH`.
+//!
+//! ```sh
+//! scripts/bootstrap-toolchain.sh
+//! cargo test -p soil-vt
+//! ```
+//!
+//! If the build fails inside Ghostty's `libsystem_override.sh` with
+//! `ar: temporary file: No such file or directory`, the process `TMPDIR` points
+//! at a directory that no longer exists. Re-run with `TMPDIR=/tmp`.
 
 pub mod host;
 
 pub use host::Host;
 
-use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
-use libghostty_vt::terminal::{Options, Terminal};
+use ghostty_vt::render::{CellIterator, RenderState, RowIterator};
+use ghostty_vt::terminal::{Event, Options, Terminal};
 
 /// A colour as it arrives from the terminal, before any theme is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +45,8 @@ pub struct Rgb {
     pub b: u8,
 }
 
-impl From<libghostty_vt::style::RgbColor> for Rgb {
-    fn from(value: libghostty_vt::style::RgbColor) -> Self {
+impl From<ghostty_vt::style::RgbColor> for Rgb {
+    fn from(value: ghostty_vt::style::RgbColor) -> Self {
         Self {
             r: value.r,
             g: value.g,
@@ -118,24 +134,24 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<libghostty_vt::error::Error> for Error {
-    fn from(value: libghostty_vt::error::Error) -> Self {
+impl From<ghostty_vt::error::Error> for Error {
+    fn from(value: ghostty_vt::error::Error) -> Self {
         Self(value.to_string())
     }
 }
 
 /// A live terminal: the state a running program writes into.
 pub struct Session {
-    terminal: Terminal<'static, 'static>,
-    /// Shared with the emulator's callbacks: libghostty-vt reports events as it
-    /// parses, so the counters must outlive the borrow that `write` holds.
-    bells: std::rc::Rc<std::cell::Cell<u64>>,
+    terminal: Terminal,
+    /// Bells rung so far. The emulator reports each bell as an event while it
+    /// parses; a counter survives a dropped frame where a flag would not.
+    bells: u64,
     /// Bytes the emulator wants written back to the pty (device status reports,
     /// and the kitty keyboard negotiation that a full-screen program expects).
-    responses: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
-    render: RenderState<'static>,
-    rows: RowIterator<'static>,
-    cells: CellIterator<'static>,
+    responses: Vec<u8>,
+    render: RenderState,
+    rows: RowIterator,
+    cells: CellIterator,
 }
 
 impl std::fmt::Debug for Session {
@@ -154,30 +170,21 @@ impl Session {
         if cols == 0 || rows == 0 {
             return Err(Error("a terminal needs at least one cell".into()));
         }
-        let bells = std::rc::Rc::new(std::cell::Cell::new(0u64));
-        let responses = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut terminal = Terminal::new(Options {
-            cols,
-            rows,
-            max_scrollback: scrollback,
-        })?;
-        {
-            let counter = std::rc::Rc::clone(&bells);
-            let _ = terminal.on_bell(move |_| counter.set(counter.get() + 1));
-        }
-        {
-            let outbox = std::rc::Rc::clone(&responses);
-            let _ =
-                terminal.on_pty_write(move |_, data| outbox.borrow_mut().extend_from_slice(data));
-        }
-        Ok(Self {
-            terminal,
-            bells,
-            responses,
+        let mut session = Self {
+            terminal: Terminal::new(Options {
+                cols,
+                rows,
+                max_scrollback: scrollback_bytes(scrollback, cols),
+            })?,
+            bells: 0,
+            responses: Vec::new(),
             render: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
-        })
+        };
+        // Creating a terminal already queues its device-attribute answer.
+        session.pump_events();
+        Ok(session)
     }
 
     pub fn cols(&self) -> u16 {
@@ -190,18 +197,19 @@ impl Session {
 
     /// Bells rung since the session started.
     pub fn bells(&self) -> u64 {
-        self.bells.get()
+        self.bells
     }
 
     /// Take the bytes the emulator wants sent back to the program, if any.
-    pub fn drain_responses(&self) -> Vec<u8> {
-        std::mem::take(&mut *self.responses.borrow_mut())
+    pub fn drain_responses(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.responses)
     }
 
     /// Feed a program's output. Partial sequences are held by the emulator, so
     /// a caller may hand over any chunk size, including single bytes.
     pub fn write(&mut self, bytes: &[u8]) {
         self.terminal.vt_write(bytes);
+        self.pump_events();
     }
 
     /// Resize the grid. Content reflows; scrollback is preserved.
@@ -210,7 +218,22 @@ impl Session {
             return Err(Error("a terminal needs at least one cell".into()));
         }
         self.terminal.resize(cols, rows, 1, 1)?;
+        // A resize can emit a size report for a program that asked for one.
+        self.pump_events();
         Ok(())
+    }
+
+    /// Collect what the emulator queued while parsing: bells, and bytes a
+    /// program is waiting on. Events are drained after every write so the
+    /// outbox never grows with output nobody asked for.
+    fn pump_events(&mut self) {
+        for event in self.terminal.events() {
+            match event {
+                Event::Bell => self.bells = self.bells.saturating_add(1),
+                Event::PtyWrite(bytes) => self.responses.extend_from_slice(&bytes),
+                _ => {}
+            }
+        }
     }
 
     /// Read the grid as it should be drawn now.
@@ -250,12 +273,12 @@ impl Session {
             cells,
             cursor,
             title,
-            bells: self.bells(),
+            bells: self.bells,
         })
     }
 }
 
-fn read_cell(cell: &libghostty_vt::render::CellIteration<'_, '_>) -> Result<Cell, Error> {
+fn read_cell(cell: &ghostty_vt::render::CellIteration<'_>) -> Result<Cell, Error> {
     let mut text = String::new();
     cell.graphemes_utf8(&mut text)?;
     let style = cell.style()?;
@@ -265,12 +288,25 @@ fn read_cell(cell: &libghostty_vt::render::CellIteration<'_, '_>) -> Result<Cell
         bg: cell.bg_color()?.map(Rgb::from),
         bold: style.bold,
         italic: style.italic,
-        underline: style.underline != libghostty_vt::style::Underline::None,
+        underline: style.underline != ghostty_vt::style::Underline::None,
         faint: style.faint,
         inverse: style.inverse,
-        wide_tail: cell.raw_cell()?.wide()? != libghostty_vt::screen::CellWide::Narrow,
+        // Only the *tail* of a wide cluster is a tail. The leading cell owns
+        // the glyph and advances the renderer by two; marking it here too
+        // would make a renderer skip the glyph it is supposed to draw.
+        wide_tail: cell.raw_cell()?.wide()? == ghostty_vt::screen::CellWide::SpacerTail,
         selected: cell.is_selected()?,
     })
+}
+
+/// Ghostty bounds scrollback in bytes, pruned at page granularity; callers of
+/// this crate think in lines. Sixteen bytes per cell approximates one styled
+/// grapheme, which keeps the bound proportional to the requested line count
+/// without claiming to be exact.
+fn scrollback_bytes(lines: usize, cols: u16) -> usize {
+    lines
+        .saturating_mul(usize::from(cols))
+        .saturating_mul(16)
 }
 
 #[cfg(test)]
@@ -375,6 +411,23 @@ mod tests {
         // Nothing is selected until a gesture says so; a renderer must be able
         // to rely on the flag being meaningful rather than always true.
         assert!(!snapshot.cell(0, 0).unwrap().selected);
+    }
+
+    #[test]
+    fn only_the_trailing_cell_of_a_wide_cluster_is_a_tail() {
+        let mut session = Session::new(4, 1, 10).expect("terminal");
+        session.write("界".as_bytes());
+        let snapshot = session.snapshot().unwrap();
+        let head = snapshot.cell(0, 0).unwrap();
+        assert_eq!(head.text, "界");
+        assert!(
+            !head.wide_tail,
+            "the leading cell owns the glyph and must be drawn"
+        );
+        assert!(
+            snapshot.cell(1, 0).unwrap().wide_tail,
+            "the spacer to the right is the tail"
+        );
     }
 
     #[test]
