@@ -1,7 +1,7 @@
-//! A shell in the browser, rendered by `soil-vt`.
+//! A browser terminal with a target picker, rendered by `soil-vt`.
 //!
 //! ```text
-//! browser ── SSE grid ── soil-terminal-web ── pty ── ssh | mush | $SHELL
+//! browser ── SSE grid ── soil-terminal-web ── pty ── zsh | ssh | mush
 //!                 └──── POST input ────┘
 //! ```
 //!
@@ -9,12 +9,17 @@
 //! browser is a second presenter, not a second terminal: it receives styled
 //! rows and sends keystrokes.
 //!
+//! One server hosts many sessions. A session is a target (a local shell, an
+//! ssh host, or a Mush desktop) on its own pty and its own emulator; the page
+//! opens, switches, and closes them like a multiplexer.
+//!
 //! ```sh
-//! # local shell
+//! # pick from ~/.config/fungos/terminal/targets.toml, or from what is on the
+//! # machine: the login shells, the Host aliases in ~/.ssh/config, and the
+//! # desktops under ~/.config/fungos/desktops/
 //! soil-terminal-web
-//! # a remote shell over ssh
+//! # one target, no picker
 //! soil-terminal-web --ssh aj@home-pi
-//! # mush inside soil-vt
 //! soil-terminal-web --command target/debug/mush \
 //!   --wasm spores/mush/module.wasm --root ~/.local/share/fungos/vfs
 //! ```
@@ -28,11 +33,14 @@ mod http;
 mod page;
 mod paste;
 mod pty;
+mod targets;
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -43,6 +51,7 @@ use soil_vt::{Host, Snapshot};
 use http::{query_param, read_request, respond, respond_json};
 use paste::Paste;
 use pty::Pty;
+use targets::{Kind, Target};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8790";
 const DEFAULT_COLS: u16 = 80;
@@ -59,9 +68,10 @@ soil-terminal-web [OPTIONS]
 
   --listen ADDR        bind address (default 127.0.0.1:8790)
   --token VALUE        require ?token=VALUE (mandatory beyond loopback)
-  --ssh TARGET         run `ssh -tt TARGET` on the pty
+  --targets FILE       target catalog (default ~/.config/fungos/terminal/targets.toml)
+  --ssh TARGET         run `ssh -tt TARGET` as the only target
   --ssh-arg VALUE      extra ssh argument, repeatable (e.g. -p 2222)
-  --command CMD [ARGS] run CMD instead of $SHELL; consumes the rest
+  --command CMD [ARGS] run CMD as the only target; consumes the rest
   --paste-root DIR     where pasted bytes are stored (default ~/.local/share/fungos/paste)
   --cols N             initial columns (default 80)
   --rows N             initial rows (default 24)
@@ -78,25 +88,27 @@ struct Args {
     rows: u16,
     scrollback: usize,
     paste_root: PathBuf,
+    targets: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
     let Some(args) = parse_args()? else {
         return Ok(());
     };
-    let host = Host::spawn(args.cols, args.rows, args.scrollback)
-        .map_err(|error| anyhow::anyhow!("terminal: {error}"))?;
-    let pty = Pty::spawn(&args.command, args.cols, args.rows, host.clone())?;
-    let paste = Paste::open(args.paste_root.clone())?;
+    let targets = resolve_targets(&args)?;
     let app = Arc::new(App {
-        host,
-        pty,
         token: args.token,
-        paste,
+        paste: Paste::open(args.paste_root.clone())?,
+        targets,
+        sessions: Mutex::new(BTreeMap::new()),
+        next_id: AtomicU64::new(1),
+        cols: args.cols,
+        rows: args.rows,
+        scrollback: args.scrollback,
     });
 
-    let listener = TcpListener::bind(&args.listen)
-        .with_context(|| format!("bind {}", args.listen))?;
+    let listener =
+        TcpListener::bind(&args.listen).with_context(|| format!("bind {}", args.listen))?;
     match &app.token {
         Some(token) => println!("soil terminal: http://{}/?token={token}", args.listen),
         None => println!("soil terminal: http://{}/", args.listen),
@@ -118,10 +130,67 @@ fn main() -> Result<()> {
 }
 
 struct App {
-    host: Host,
-    pty: Pty,
     token: Option<String>,
     paste: Paste,
+    targets: Vec<Target>,
+    sessions: Mutex<BTreeMap<u64, Arc<Session>>>,
+    next_id: AtomicU64,
+    cols: u16,
+    rows: u16,
+    scrollback: usize,
+}
+
+struct Session {
+    id: u64,
+    target: String,
+    label: String,
+    host: Host,
+    pty: Pty,
+}
+
+impl App {
+    fn open(&self, target: &Target) -> Result<Arc<Session>> {
+        if let Some(program) = target.command.first()
+            && !targets::program_exists(program)
+        {
+            anyhow::bail!("{program} is not installed (target {:?})", target.name);
+        }
+        let host = Host::spawn(self.cols, self.rows, self.scrollback)
+            .map_err(|error| anyhow::anyhow!("terminal: {error}"))?;
+        let pty = Pty::spawn(&target.command, self.cols, self.rows, host.clone())?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let session = Arc::new(Session {
+            id,
+            target: target.name.clone(),
+            label: target.label.clone(),
+            host,
+            pty,
+        });
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.insert(id, Arc::clone(&session));
+        }
+        Ok(session)
+    }
+
+    fn session(&self, id: u64) -> Option<Arc<Session>> {
+        self.sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| sessions.get(&id).cloned())
+    }
+
+    /// The session an endpoint means: the one named in `?session=`, or the
+    /// first one for a caller that predates the picker.
+    fn pick(&self, id: Option<u64>) -> Option<Arc<Session>> {
+        match id {
+            Some(id) => self.session(id),
+            None => self
+                .sessions
+                .lock()
+                .ok()
+                .and_then(|sessions| sessions.values().next().cloned()),
+        }
+    }
 }
 
 fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
@@ -153,6 +222,8 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
         .target
         .split_once('?')
         .map_or(request.target.as_str(), |(path, _)| path);
+    let wanted =
+        query_param(&request.target, "session").and_then(|value| value.parse::<u64>().ok());
     match (request.method.as_str(), path) {
         ("GET", "/") | ("GET", "/index.html") => respond(
             &mut stream,
@@ -160,20 +231,33 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
             "text/html; charset=utf-8",
             page::INDEX_HTML.as_bytes(),
         )?,
-        ("GET", "/health") => {
-            respond(&mut stream, "200 OK", "text/plain; charset=utf-8", b"ok\n")?
+        ("GET", "/health") => respond(&mut stream, "200 OK", "text/plain; charset=utf-8", b"ok\n")?,
+        ("GET", "/favicon.ico") => respond(&mut stream, "204 No Content", "text/plain", b"")?,
+        ("GET", "/targets") => respond_json(&mut stream, "200 OK", &targets_json(app))?,
+        ("GET", "/sessions") => respond_json(&mut stream, "200 OK", &sessions_json(app))?,
+        ("POST", "/sessions") => open_session(&mut stream, app, &request.body)?,
+        ("DELETE", path) if path.starts_with("/sessions/") => {
+            close_session(&mut stream, app, path)?
         }
-        ("GET", "/favicon.ico") => {
-            respond(&mut stream, "204 No Content", "text/plain", b"")?
+        ("GET", "/events") => {
+            let Some(session) = app.pick(wanted) else {
+                return not_found(&mut stream);
+            };
+            return sse(stream, session);
         }
-        ("GET", "/events") => return sse(stream, app),
         ("POST", "/input") => {
+            let Some(session) = app.pick(wanted) else {
+                return not_found(&mut stream);
+            };
             // Typing while reading history means "back to the prompt".
-            app.host.scroll_to_bottom();
-            app.pty.write(&request.body);
+            session.host.scroll_to_bottom();
+            session.pty.write(&request.body);
             respond(&mut stream, "204 No Content", "text/plain", b"")?;
         }
         ("POST", "/scroll") => {
+            let Some(session) = app.pick(wanted) else {
+                return not_found(&mut stream);
+            };
             let Some(delta) = parse_scroll(&request.body) else {
                 respond(
                     &mut stream,
@@ -183,7 +267,7 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
                 )?;
                 return Ok(());
             };
-            app.host.scroll(delta);
+            session.host.scroll(delta);
             respond(&mut stream, "204 No Content", "text/plain", b"")?;
         }
         ("POST", "/paste") => {
@@ -209,6 +293,9 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
             }
         }
         ("POST", "/resize") => {
+            let Some(session) = app.pick(wanted) else {
+                return not_found(&mut stream);
+            };
             let Some((cols, rows)) = parse_size(&request.body) else {
                 respond(
                     &mut stream,
@@ -218,22 +305,129 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
                 )?;
                 return Ok(());
             };
-            app.host.resize(cols, rows);
-            app.pty.resize(cols, rows);
+            session.host.resize(cols, rows);
+            session.pty.resize(cols, rows);
             respond(&mut stream, "204 No Content", "text/plain", b"")?;
         }
-        ("GET" | "POST", _) => respond(
-            &mut stream,
-            "404 Not Found",
-            "text/plain; charset=utf-8",
-            b"not found\n",
-        )?,
+        ("GET" | "POST" | "DELETE", _) => return not_found(&mut stream),
         _ => respond(
             &mut stream,
             "405 Method Not Allowed",
             "text/plain; charset=utf-8",
             b"method not allowed\n",
         )?,
+    }
+    Ok(())
+}
+
+fn not_found(stream: &mut TcpStream) -> Result<()> {
+    respond(
+        stream,
+        "404 Not Found",
+        "text/plain; charset=utf-8",
+        b"no such session or path\n",
+    )?;
+    Ok(())
+}
+
+fn targets_json(app: &App) -> Value {
+    json!({
+        "targets": app
+            .targets
+            .iter()
+            .map(|target| json!({
+                "name": target.name,
+                "label": target.label,
+                "kind": target.kind.as_str(),
+                "detail": target.detail,
+            }))
+            .collect::<Vec<_>>()
+    })
+}
+
+fn sessions_json(app: &App) -> Value {
+    let sessions = app
+        .sessions
+        .lock()
+        .map(|sessions| {
+            sessions
+                .values()
+                .map(|session| {
+                    json!({
+                        "id": session.id,
+                        "target": session.target,
+                        "label": session.label,
+                        "exited": session.pty.exited(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({ "sessions": sessions })
+}
+
+fn open_session(stream: &mut TcpStream, app: &App, body: &[u8]) -> Result<()> {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        respond(
+            stream,
+            "400 Bad Request",
+            "text/plain; charset=utf-8",
+            b"expected {\"target\":\"name\"}\n",
+        )?;
+        return Ok(());
+    };
+    let Some(name) = value.get("target").and_then(Value::as_str) else {
+        respond(
+            stream,
+            "400 Bad Request",
+            "text/plain; charset=utf-8",
+            b"expected {\"target\":\"name\"}\n",
+        )?;
+        return Ok(());
+    };
+    let Some(target) = app.targets.iter().find(|target| target.name == name) else {
+        respond(
+            stream,
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            format!("no target {name:?}\n").as_bytes(),
+        )?;
+        return Ok(());
+    };
+    match app.open(target) {
+        Ok(session) => respond_json(
+            stream,
+            "200 OK",
+            &json!({ "id": session.id, "target": session.target, "label": session.label }),
+        )?,
+        Err(error) => {
+            eprintln!("soil terminal: could not start {}: {error:#}", target.name);
+            respond(
+                stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                format!("could not start {}: {error:#}\n", target.name).as_bytes(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn close_session(stream: &mut TcpStream, app: &App, path: &str) -> Result<()> {
+    let Ok(id) = path.trim_start_matches("/sessions/").parse::<u64>() else {
+        return not_found(stream);
+    };
+    let removed = app
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|mut sessions| sessions.remove(&id));
+    match removed {
+        Some(session) => {
+            session.pty.kill();
+            respond(stream, "204 No Content", "text/plain", b"")?;
+        }
+        None => not_found(stream)?,
     }
     Ok(())
 }
@@ -254,7 +448,7 @@ fn parse_size(body: &[u8]) -> Option<(u16, u16)> {
     ))
 }
 
-fn sse(mut stream: TcpStream, app: &App) -> Result<()> {
+fn sse(mut stream: TcpStream, session: Arc<Session>) -> Result<()> {
     stream.write_all(
         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\n\r\n",
     )?;
@@ -265,15 +459,15 @@ fn sse(mut stream: TcpStream, app: &App) -> Result<()> {
     let mut exit_sent = false;
     let mut keepalive = Instant::now();
     loop {
-        let generation = app.host.generation();
+        let generation = session.host.generation();
         if last.is_none() || generation != last_generation {
-            let snapshot = app.host.snapshot();
+            let snapshot = session.host.snapshot();
             let frame = frame::frame(&snapshot, last.as_deref());
             write_event(&mut stream, &frame)?;
             last = Some(snapshot);
             last_generation = generation;
         }
-        if app.pty.exited() && !exit_sent {
+        if session.pty.exited() && !exit_sent {
             write_event(&mut stream, &json!({ "type": "exit" }))?;
             exit_sent = true;
         }
@@ -304,6 +498,7 @@ fn parse_args() -> Result<Option<Args>> {
         rows: DEFAULT_ROWS,
         scrollback: DEFAULT_SCROLLBACK,
         paste_root: expand_home("~/.local/share/fungos/paste"),
+        targets: None,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -311,7 +506,12 @@ fn parse_args() -> Result<Option<Args>> {
             "--listen" => args.listen = iter.next().context("--listen needs ADDR")?,
             "--token" => args.token = Some(iter.next().context("--token needs a value")?),
             "--ssh" => args.ssh = Some(iter.next().context("--ssh needs TARGET")?),
-            "--ssh-arg" => args.ssh_args.push(iter.next().context("--ssh-arg needs a value")?),
+            "--ssh-arg" => args
+                .ssh_args
+                .push(iter.next().context("--ssh-arg needs a value")?),
+            "--targets" => {
+                args.targets = Some(expand_home(&iter.next().context("--targets needs FILE")?))
+            }
             "--cols" => {
                 args.cols = iter
                     .next()
@@ -346,6 +546,8 @@ fn parse_args() -> Result<Option<Args>> {
                     args.ssh_args.push(value.to_owned());
                 } else if let Some(value) = other.strip_prefix("--paste-root=") {
                     args.paste_root = expand_home(value);
+                } else if let Some(value) = other.strip_prefix("--targets=") {
+                    args.targets = Some(expand_home(value));
                 } else {
                     anyhow::bail!("unknown argument {other}; try --help");
                 }
@@ -353,10 +555,6 @@ fn parse_args() -> Result<Option<Args>> {
         }
     }
 
-    args.command = resolve_command(args.command, args.ssh.as_deref(), &args.ssh_args)?;
-    if args.command.first().is_none_or(String::is_empty) {
-        anyhow::bail!("the command is empty");
-    }
     if args.cols == 0 || args.cols > MAX_DIMENSION || args.rows == 0 || args.rows > MAX_DIMENSION {
         anyhow::bail!("cols and rows must be 1-{MAX_DIMENSION}");
     }
@@ -372,18 +570,39 @@ fn parse_args() -> Result<Option<Args>> {
     Ok(Some(args))
 }
 
+fn resolve_targets(args: &Args) -> Result<Vec<Target>> {
+    if args.command.is_empty() && args.ssh.is_none() {
+        let targets = targets::load(args.targets.as_deref())?;
+        if targets.is_empty() {
+            anyhow::bail!(
+                "no targets: add [[target]] entries to ~/.config/fungos/terminal/targets.toml, or pass --ssh/--command"
+            );
+        }
+        return Ok(targets);
+    }
+    if args.targets.is_some() {
+        anyhow::bail!("--targets cannot be combined with --ssh/--command");
+    }
+    let command = resolve_command(args.command.clone(), args.ssh.as_deref(), &args.ssh_args)?;
+    let label = command
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "shell".to_owned());
+    Ok(vec![Target {
+        name: "default".into(),
+        label,
+        kind: if args.ssh.is_some() {
+            Kind::Ssh
+        } else {
+            Kind::Shell
+        },
+        detail: command.join(" "),
+        command,
+    }])
+}
+
 fn expand_home(value: &str) -> PathBuf {
-    if value == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(value));
-    }
-    if let Some(rest) = value.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    PathBuf::from(value)
+    targets::expand_home(value)
 }
 
 fn resolve_command(
@@ -409,9 +628,7 @@ fn resolve_command(
 }
 
 fn is_loopback(listen: &str) -> bool {
-    let host = listen
-        .rsplit_once(':')
-        .map_or(listen, |(host, _)| host);
+    let host = listen.rsplit_once(':').map_or(listen, |(host, _)| host);
     host == "localhost" || host == "::1" || host == "[::1]" || host.starts_with("127.")
 }
 

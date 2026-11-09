@@ -1,44 +1,96 @@
 # soil-terminal-web
 
-A shell in the browser, rendered by **`soil-vt`**. The browser is a presenter,
-not a second terminal: the server runs a real pty, feeds its bytes to the same
-emulator the native terminal window uses, and streams styled rows over
-Server-Sent Events. Keystrokes come back as POSTs.
+A browser terminal with a **target picker**, rendered by **`soil-vt`**. The
+browser is a presenter, not a second terminal: the server runs a real pty per
+session, feeds its bytes to the same emulator the native terminal window uses,
+and streams styled rows over Server-Sent Events. Keystrokes come back as POSTs.
 
 ```text
-browser ── EventSource ── soil-terminal-web ── pty ── ssh | mush | $SHELL
+browser ── EventSource ── soil-terminal-web ── pty ── zsh | ssh | mush
         └── POST /input ──┘
 ```
 
+One server hosts many sessions. A session is a **target** — a local shell, an
+ssh host, or a Mush desktop — on its own pty and its own emulator. The page
+opens, switches, and closes them like a multiplexer; the server owns the session
+table, so a reload reattaches to the session named in the URL.
+
 ```sh
-# local shell
+# pick from ~/.config/fungos/terminal/targets.toml, or from what is on the
+# machine: the login shells, the Host aliases in ~/.ssh/config, and the
+# desktops under ~/.config/fungos/desktops/
 soil-terminal-web
 
-# a remote shell over ssh
+# one target, no picker
 soil-terminal-web --ssh aj@home-pi
-
-# mush inside soil-vt (build the host first: cargo build -p mush)
 soil-terminal-web --command target/debug/mush \
   --wasm spores/mush/module.wasm --root ~/.local/share/fungos/vfs
 ```
 
-Open the printed URL. `--listen` and `--token` must come **before**
-`--command`, because `--command` consumes the rest of the line.
+Open the printed URL. `--listen`, `--token`, and `--targets` must come
+**before** `--command`, because `--command` consumes the rest of the line.
+
+## Targets
+
+The catalog is `~/.config/fungos/terminal/targets.toml` (override with
+`--targets FILE`). Every `[[target]]` becomes a button, grouped by `kind`:
+
+```toml
+[mush]
+binary = "target/debug/mush"                    # relative to the server's cwd
+wasm = "~/.local/share/fungos/mush/module.wasm"
+
+[[target]]
+name = "studio"
+label = "studio"
+kind = "shell"
+command = ["zsh", "-l"]                         # default: $SHELL
+
+[[target]]
+name = "neo"
+label = "neo"
+kind = "ssh"
+host = "averys-macbook-neo"                     # an ~/.ssh/config alias
+args = ["-p", "2222"]                           # optional extra ssh args
+
+[[target]]
+name = "acme"
+label = "acme"
+kind = "mush"
+root = "~/.local/share/fungos/desktops/acme"    # the desktop's VFS root
+```
+
+`kind = "ssh"` runs `ssh -tt [args...] host`, so host-key and password prompts
+appear in the browser like any other output. `kind = "mush"` runs
+`<binary> --wasm <wasm> --root <root>`: one Mush session per desktop root, which
+is how a virtual or shared desktop gets its own shell.
+
+Without a config file the catalog is discovered: the login shells that exist
+(`$SHELL`, zsh, bash, sh), the non-pattern `Host` aliases in `~/.ssh/config`,
+and `~/.config/fungos/desktops/*.toml` when `SOIL_MUSH_BIN`/`target/debug/mush`
+and `SOIL_MUSH_WASM`/`~/.local/share/fungos/mush/module.wasm` resolve. `acme`,
+`desk`, and `personal` above are the desktops already on this machine.
 
 ## Endpoints
 
 | Method | Path | Meaning |
 |---|---|---|
 | `GET` | `/` | the page |
-| `GET` | `/events` | SSE: one `frame` per change, `exit` at the end |
-| `POST` | `/input` | raw bytes for the pty (keystrokes) |
-| `POST` | `/scroll` | `{"delta":N}`; negative is up into history |
+| `GET` | `/targets` | the catalog |
+| `GET` | `/sessions` | open sessions and whether their pty has exited |
+| `POST` | `/sessions` | `{"target":"name"}`; opens a session and returns `{id,label,target}` |
+| `DELETE` | `/sessions/<id>` | kill the pty and forget the session |
+| `GET` | `/events?session=N` | SSE: one `frame` per change, `exit` at the end |
+| `POST` | `/input?session=N` | raw bytes for that pty (keystrokes) |
+| `POST` | `/scroll?session=N` | `{"delta":N}`; negative is up into history |
 | `POST` | `/paste` | raw bytes; `x-filename` + `content-type`; returns the CID and path |
-| `POST` | `/resize` | `{"cols":N,"rows":N}` |
+| `POST` | `/resize?session=N` | `{"cols":N,"rows":N}` |
 | `GET` | `/health` | `ok` |
 
-A frame is a diff: `{"full":false,"rows":[{"y":3,"runs":[["text",fg,bg,flags]]}]}`.
-The first frame after a connect, and any resize, is `full`. Flags are
+Omitting `?session=` uses the first open session, which keeps the old
+single-shell callers working. A frame is a diff:
+`{"full":false,"rows":[{"y":3,"runs":[["text",fg,bg,flags]]}]}`. The first frame
+after a connect, and any resize, is `full`. Flags are
 `bold=1, italic=2, underline=4, faint=8, inverse=16`. Each frame also carries
 `scroll: {"offset":N,"total":N,"len":N}` (or `null`), which drives the
 scrollbar and tells the page whether the viewport is in history.
@@ -66,6 +118,20 @@ The inserted path is a **host** path, which is what a normal shell or agent TUI
 can read. Running mush (a VFS shell) needs a VFS-relative paste path; that is a
 follow-up.
 
+## term.myc
+
+The Mycelium gateway serves this server at **`https://term.myc/`** through one
+`routes.json` entry:
+
+```json
+{ "name": "term", "hosts": ["term.myc"], "upstream": "http://127.0.0.1:8792", "priority": 10 }
+```
+
+The gateway reloads routes every second; the upstream must be the same
+`--listen` address the server prints. The gateway cert's SAN is `*.myc` plus
+one name per route, so a browser may warn for a name that is not listed
+explicitly; `http://127.0.0.1:8792/` is the no-warning URL.
+
 ## Tests
 
 ```sh
@@ -73,13 +139,15 @@ cargo test -p soil-terminal-web
 ```
 
 The suite covers frame diffing, style runs, request parsing, resize and scroll
-clamping, loopback detection, ssh argv construction, the content-addressed
-store, and a real pty feeding the emulator.
+clamping, loopback detection, ssh argv construction, target config parsing and
+ssh-config discovery, the content-addressed store, and a real pty feeding the
+emulator.
 
 ## Security
 
 This is a remote shell. The listener defaults to `127.0.0.1`; a non-loopback
-address **requires** `--token`, and every endpoint checks it.
+address **requires** `--token`, and every endpoint checks it. A session is a
+pty for the server's user; the picker is not an authorization boundary.
 
 ```sh
 soil-terminal-web --listen 0.0.0.0:8790 --token "$(openssl rand -hex 16)" --ssh aj@home-pi

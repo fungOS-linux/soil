@@ -125,23 +125,32 @@ JNI proof.
 
 ## Terminal in the browser
 
-[`crates/soil-terminal-web`](crates/soil-terminal-web) runs a real pty, feeds
-its bytes to `soil-vt`, and streams styled rows to a browser over SSE;
-keystrokes return as POSTs. It is the same emulator as the native terminal
+[`crates/soil-terminal-web`](crates/soil-terminal-web) runs a real pty per
+session, feeds its bytes to `soil-vt`, and streams styled rows to a browser over
+SSE; keystrokes return as POSTs. It is the same emulator as the native terminal
 window, with the browser as a second presenter.
 
+One server hosts many sessions, so the page is a small multiplexer: a picker of
+targets — local shells, ssh hosts, and Mush desktops — plus tabs for the ones
+that are open. The catalog is `~/.config/fungos/terminal/targets.toml`;
+without it, the login shells, the `Host` aliases in `~/.ssh/config`, and the
+desktops under `~/.config/fungos/desktops/` are discovered.
+
 ```sh
-# local shell
+# pick a shell, a host, or a desktop
 cargo run -p soil-terminal-web --bin soil-terminal-web
 
-# a remote shell over ssh (the browser shows the normal host-key prompt)
+# one target, no picker: a remote shell over ssh (normal host-key prompt)
 cargo run -p soil-terminal-web --bin soil-terminal-web -- --ssh aj@home-pi
 
-# mush inside soil-vt
+# one target, no picker: mush inside soil-vt
 cargo run -p soil-terminal-web --bin soil-terminal-web -- \
   --command target/debug/mush --wasm spores/mush/module.wasm \
   --root ~/.local/share/fungos/vfs
 ```
+
+The Mycelium gateway serves it at `https://term.myc/` through one
+`routes.json` entry pointing at the server's loopback port.
 
 The listener defaults to loopback; a non-loopback address requires `--token`.
 Prefer an SSH tunnel (`ssh -L 8790:127.0.0.1:8790 host`) over exposing the port.

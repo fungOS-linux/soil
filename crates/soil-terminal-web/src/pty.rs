@@ -112,6 +112,14 @@ impl Pty {
     pub fn exited(&self) -> bool {
         self.exited.load(Ordering::Acquire)
     }
+
+    /// End the program. Dropping the pty also does this, but a session kept
+    /// alive by an event stream would otherwise outlive its tab.
+    pub fn kill(&self) {
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+    }
 }
 
 impl Drop for Pty {

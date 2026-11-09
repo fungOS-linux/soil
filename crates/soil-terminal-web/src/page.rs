@@ -1,8 +1,9 @@
 //! The one page this host serves.
 //!
-//! It is deliberately dependency-free: an `EventSource` for frames, `fetch` for
+//! It is deliberately dependency-free: an `EventSource` per session, `fetch` for
 //! keystrokes and resizes, and DOM spans for cells. The server owns the VT; the
-//! page is only a presenter.
+//! page is only a presenter. The picker and the tabs are a view of the server's
+//! session table, not a second source of truth.
 
 pub const INDEX_HTML: &str = r##"<!doctype html>
 <html lang="en">
@@ -11,7 +12,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>soil terminal</title>
 <style>
-:root { --bg:#0b0e11; --fg:#dce5ea; --muted:#8395a2; --accent:#7dd3a8; --line:#1c252d; }
+:root { --bg:#0b0e11; --fg:#dce5ea; --muted:#8395a2; --accent:#7dd3a8; --line:#1c252d; --sel:#141b21; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
@@ -25,6 +26,40 @@ header {
 header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 #title { color: var(--fg); font-weight: 600; }
 #status { margin-left: auto; }
+#tabs {
+  display: none; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--line);
+  overflow-x: auto; font-size: 12px;
+}
+.tab {
+  display: flex; align-items: center; border-radius: 6px; background: transparent;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.tab.active { background: var(--sel); border-color: var(--line); }
+.tab > button {
+  background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer;
+  padding: 4px 8px; border-radius: 6px;
+}
+.tab.active > button { color: var(--fg); }
+.tab > button.close { padding: 4px 6px; color: var(--muted); }
+.tab > button.close:hover { color: #ff9a9a; }
+#body { flex: 1; display: flex; min-height: 0; }
+#targets {
+  width: 210px; flex: 0 0 auto; border-right: 1px solid var(--line);
+  overflow-y: auto; padding: 4px 8px 12px;
+}
+#targets h2 {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); margin: 12px 6px 4px; font-weight: 600;
+}
+.target {
+  display: block; width: 100%; text-align: left; background: none; border: 0;
+  color: var(--fg); font: inherit; padding: 6px 8px; border-radius: 6px; cursor: pointer;
+}
+.target:hover { background: var(--sel); }
+.target .detail {
+  display: block; color: var(--muted); font-size: 10px; margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #screen {
   flex: 1; position: relative; overflow: hidden; padding: 10px 12px;
   font-size: 14px; line-height: 1.35; outline: none; cursor: text;
@@ -54,14 +89,18 @@ footer { padding: 6px 12px; border-top: 1px solid var(--line); font-size: 11px; 
   <span id="title">soil terminal</span>
   <span id="status">connecting…</span>
 </header>
-<main id="screen" tabindex="0">
-  <div id="grid"><div id="cursor"></div><span id="measure">0000000000</span></div>
-  <div id="scrollbar"><div id="thumb"></div></div>
-</main>
-<footer>click to focus · ctrl-c sends SIGINT · paste or drop files to upload · resize to reflow</footer>
+<nav id="tabs"></nav>
+<div id="body">
+  <aside id="targets"><div id="target-list"></div></aside>
+  <main id="screen" tabindex="0">
+    <div id="grid"><div id="cursor"></div><span id="measure">0000000000</span></div>
+    <div id="scrollbar"><div id="thumb"></div></div>
+  </main>
+</div>
+<footer>click a target to open a session · wheel scrolls · paste or drop files to upload · ctrl-c sends SIGINT</footer>
 <script>
-const token = new URLSearchParams(location.search).get('token') || '';
-const suffix = token ? '?token=' + encodeURIComponent(token) : '';
+const params = new URLSearchParams(location.search);
+const token = params.get('token') || '';
 const screen = document.getElementById('screen');
 const grid = document.getElementById('grid');
 const cursor = document.getElementById('cursor');
@@ -70,9 +109,22 @@ const statusEl = document.getElementById('status');
 const titleEl = document.getElementById('title');
 const scrollbar = document.getElementById('scrollbar');
 const thumb = document.getElementById('thumb');
+const tabsEl = document.getElementById('tabs');
+const targetsEl = document.getElementById('target-list');
 
 let cols = 0, rows = 0, cellW = 8, lineH = 18;
+let targets = [];
+const sessions = new Map();
+let current = null;
 const rowEls = [];
+
+function api(path, sessionId) {
+  const query = new URLSearchParams();
+  if (token) query.set('token', token);
+  if (sessionId !== undefined && sessionId !== null) query.set('session', String(sessionId));
+  const text = query.toString();
+  return path + (text ? '?' + text : '');
+}
 
 function ensureRow(y) {
   while (rowEls.length <= y) {
@@ -140,9 +192,145 @@ function applyFrame(frame) {
   }
 }
 
+function renderTargets() {
+  targetsEl.replaceChildren();
+  const groups = [['shell', 'shells'], ['ssh', 'hosts'], ['mush', 'desktops']];
+  for (const [kind, heading] of groups) {
+    const items = targets.filter((target) => target.kind === kind);
+    if (!items.length) continue;
+    const title = document.createElement('h2');
+    title.textContent = heading;
+    targetsEl.append(title);
+    for (const target of items) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'target';
+      const label = document.createElement('span');
+      label.textContent = target.label;
+      const detail = document.createElement('span');
+      detail.className = 'detail';
+      detail.textContent = target.detail;
+      button.append(label, detail);
+      button.addEventListener('click', () => openTarget(target.name));
+      targetsEl.append(button);
+    }
+  }
+}
+
+function renderTabs() {
+  tabsEl.replaceChildren();
+  for (const session of sessions.values()) {
+    const tab = document.createElement('div');
+    tab.className = 'tab' + (current === session ? ' active' : '');
+    const label = document.createElement('button');
+    label.type = 'button';
+    label.textContent = session.label;
+    label.addEventListener('click', () => switchTo(session.id));
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'close';
+    close.textContent = '×';
+    close.title = 'close session';
+    close.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeSession(session.id);
+    });
+    tab.append(label, close);
+    tabsEl.append(tab);
+  }
+  tabsEl.style.display = sessions.size ? 'flex' : 'none';
+}
+
+async function openTarget(name) {
+  statusEl.textContent = 'opening ' + name + '…';
+  try {
+    const response = await fetch(api('/sessions'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ target: name }),
+    });
+    if (!response.ok) {
+      statusEl.textContent = (await response.text()).trim() || 'could not open ' + name;
+      return;
+    }
+    const info = await response.json();
+    sessions.set(info.id, info);
+    switchTo(info.id);
+  } catch (error) {
+    statusEl.textContent = 'could not open ' + name;
+  }
+}
+
+function switchTo(id) {
+  const session = sessions.get(id);
+  if (!session) return;
+  if (current && current.source) current.source.close();
+  current = session;
+  clearGrid();
+  cols = 0;
+  rows = 0;
+  cursor.style.display = 'none';
+  scrollbar.style.display = 'none';
+  titleEl.textContent = session.label;
+  statusEl.textContent = 'connecting…';
+  renderTabs();
+  const query = new URLSearchParams();
+  if (token) query.set('token', token);
+  query.set('session', String(id));
+  history.replaceState(null, '', location.pathname + '?' + query.toString());
+  session.source = new EventSource(api('/events', id));
+  session.source.onopen = () => {
+    statusEl.textContent = 'connected';
+    fit(true);
+  };
+  session.source.onerror = () => {
+    if (current === session) statusEl.textContent = 'reconnecting…';
+  };
+  session.source.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === 'exit') {
+      if (current === session) statusEl.textContent = 'session ended';
+      return;
+    }
+    if (message.type === 'frame' && current === session) {
+      applyFrame(message);
+      if (!cols || !rows) fit();
+    }
+  };
+}
+
+async function closeSession(id) {
+  const session = sessions.get(id);
+  if (!session) return;
+  if (session.source) session.source.close();
+  sessions.delete(id);
+  fetch(api('/sessions/' + id), { method: 'DELETE' }).catch(() => {});
+  if (current === session) {
+    current = null;
+    const next = sessions.keys().next();
+    if (!next.done) {
+      switchTo(next.value);
+      return;
+    }
+    clearGrid();
+    cols = 0;
+    rows = 0;
+    cursor.style.display = 'none';
+    scrollbar.style.display = 'none';
+    titleEl.textContent = 'soil terminal';
+    document.title = 'soil terminal';
+    statusEl.textContent = 'pick a target';
+    const query = new URLSearchParams();
+    if (token) query.set('token', token);
+    const text = query.toString();
+    history.replaceState(null, '', location.pathname + (text ? '?' + text : ''));
+  }
+  renderTabs();
+}
+
 function sendInput(text) {
-  if (!text) return;
-  fetch('/input' + suffix, { method: 'POST', body: text, keepalive: true }).catch(() => {});
+  if (!text || !current) return;
+  fetch(api('/input', current.id), { method: 'POST', body: text, keepalive: true }).catch(() => {});
 }
 
 function shellQuote(path) {
@@ -152,7 +340,7 @@ function shellQuote(path) {
 
 async function upload(blob, name) {
   try {
-    const response = await fetch('/paste' + suffix, {
+    const response = await fetch(api('/paste'), {
       method: 'POST',
       headers: {
         'content-type': blob.type || 'application/octet-stream',
@@ -201,9 +389,10 @@ document.addEventListener('paste', async (event) => {
 
 screen.addEventListener('wheel', (event) => {
   event.preventDefault();
+  if (!current) return;
   const lines = Math.max(1, Math.round(Math.abs(event.deltaY) / 40));
   const delta = event.deltaY < 0 ? -lines : lines;
-  fetch('/scroll' + suffix, {
+  fetch(api('/scroll', current.id), {
     method: 'POST',
     body: JSON.stringify({ delta }),
     keepalive: true,
@@ -252,7 +441,8 @@ document.addEventListener('keydown', (event) => {
   sendInput(data);
 });
 
-function fit() {
+function fit(force) {
+  if (!current) return;
   const rect = screen.getBoundingClientRect();
   const style = getComputedStyle(screen);
   const width = rect.width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
@@ -261,10 +451,10 @@ function fit() {
   lineH = rowEls[0] ? rowEls[0].getBoundingClientRect().height : (parseFloat(style.lineHeight) || 18);
   const nextCols = Math.max(20, Math.floor(width / cellW));
   const nextRows = Math.max(5, Math.floor(height / lineH));
-  if (nextCols === cols && nextRows === rows) return;
+  if (!force && nextCols === cols && nextRows === rows) return;
   cols = nextCols;
   rows = nextRows;
-  fetch('/resize' + suffix, {
+  fetch(api('/resize', current.id), {
     method: 'POST',
     body: JSON.stringify({ cols, rows }),
     keepalive: true,
@@ -280,25 +470,37 @@ window.addEventListener('resize', () => {
 screen.addEventListener('click', () => screen.focus());
 screen.focus();
 
-const source = new EventSource('/events' + suffix);
-source.onopen = () => {
-  statusEl.textContent = 'connected';
-  fit();
-};
-source.onerror = () => {
-  statusEl.textContent = 'reconnecting…';
-};
-source.onmessage = (event) => {
-  const message = JSON.parse(event.data);
-  if (message.type === 'exit') {
-    statusEl.textContent = 'session ended';
-    return;
+async function boot() {
+  try {
+    const response = await fetch(api('/targets'));
+    targets = (await response.json()).targets || [];
+  } catch (error) {
+    targets = [];
   }
-  if (message.type === 'frame') {
-    applyFrame(message);
-    if (!cols || !rows) fit();
+  renderTargets();
+  renderTabs();
+  const wanted = params.get('session');
+  if (wanted) {
+    try {
+      const live = await (await fetch(api('/sessions'))).json();
+      const found = (live.sessions || []).find((session) => String(session.id) === wanted);
+      if (found) {
+        sessions.set(found.id, found);
+        switchTo(found.id);
+        return;
+      }
+    } catch (error) {
+      // fall through to the first target
+    }
   }
-};
+  if (targets.length) {
+    openTarget(targets[0].name);
+  } else {
+    statusEl.textContent = 'no targets configured';
+  }
+}
+
+boot();
 </script>
 </body>
 </html>
