@@ -175,6 +175,7 @@ struct Entry {
     wasm: Option<String>,
 }
 
+#[cfg(test)]
 pub fn parse(text: &str) -> Result<Vec<Target>> {
     Ok(parse_config(text)?.0)
 }
