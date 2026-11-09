@@ -2881,6 +2881,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "hexf-parse"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6576,6 +6582,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-canvas-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "soil-scene",
+ "tempfile",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "soil-canvas-input"
 version = "0.1.0"
 
@@ -6598,7 +6616,9 @@ name = "soil-confluence"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
+ "getrandom 0.2.17",
  "http",
  "serde",
  "serde_json",
@@ -6744,6 +6764,21 @@ dependencies = [
  "serde",
  "serde_json",
  "winit",
+]
+
+[[package]]
+name = "soil-iroh-http"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "iroh",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6906,6 +6941,7 @@ version = "0.1.0"
 dependencies = [
  "soil-sdk-appdata",
  "soil-sdk-audio",
+ "soil-sdk-canvas",
  "soil-sdk-records",
  "soil-sdk-unibus",
 ]
@@ -6924,6 +6960,15 @@ dependencies = [
 name = "soil-sdk-audio"
 version = "0.1.0"
 dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "soil-sdk-canvas"
+version = "0.1.0"
+dependencies = [
+ "soil-scene",
+ "thiserror 2.0.21",
  "wit-bindgen",
 ]
 

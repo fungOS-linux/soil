@@ -10,11 +10,13 @@ publish = false
 default = []
 audio = ["dep:soil-sdk-audio"]
 appdata = ["dep:soil-sdk-appdata"]
+canvas = ["dep:soil-sdk-canvas"]
 records = ["dep:soil-sdk-records"]
 unibus = ["dep:soil-sdk-unibus"]
 
 [dependencies]
 soil-sdk-audio = { path = "../soil-sdk-audio", optional = true }
 soil-sdk-appdata = { path = "../soil-sdk-appdata", optional = true }
+soil-sdk-canvas = { path = "../soil-sdk-canvas", optional = true }
 soil-sdk-records = { path = "../soil-sdk-records", optional = true }
 soil-sdk-unibus = { path = "../soil-sdk-unibus", optional = true }

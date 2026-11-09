@@ -1,0 +1,12 @@
+// Host-side view of the Canvas capability.
+//
+// A Spore imported into this world gets one host-selected Canvas surface. The
+// host owns validation, extent, theme, generation, and the actual presenter.
+package soil:canvas-host@0.1.0;
+
+world canvas-guest {
+  import soil:canvas/surface@1.0.0;
+  import soil:scene/payload@1.0.0;
+
+  export run: func() -> result<u32, string>;
+}

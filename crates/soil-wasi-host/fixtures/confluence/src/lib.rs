@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 
-use base64::Engine as _;
 use wasip2::http::types::{
     Headers, IncomingBody, IncomingRequest, Method, OutgoingBody, OutgoingResponse,
     ResponseOutparam,
@@ -59,30 +58,49 @@ fn receive(
 
     let path = request.path_with_query().unwrap_or_default();
     let path = path.split('?').next().unwrap_or_default();
-    let Some(provider) = path
+    // `/webhooks/<provider>` uses the deployment's single secret;
+    // `/webhooks/<provider>/<slug>` names one registered hook, and the slug is
+    // the credential name the host resolves. The path is the only thing that
+    // selects a secret, so adding a hook needs no restart and no new route.
+    let Some((provider, slug)) = path
         .strip_prefix("/webhooks/")
-        .filter(|provider| !provider.is_empty() && !provider.contains('/'))
+        .and_then(split_hook_path)
     else {
         return reply(response_out, 404, json_error(404), "");
     };
 
     let headers = request.headers();
-    let Some(webhook_id) = header(&headers, "webhook-id") else {
+    // A verifier is a *shape*, not an implementation: which header carries the
+    // signature, how it is encoded, and what the signature covers. GitHub and
+    // Gitea are the same algorithm over the same bytes and differ only in a
+    // header name and a `sha256=` prefix, so adding a provider means adding a
+    // row here.
+    let Some(scheme) = SCHEMES
+        .iter()
+        .find(|scheme| header(&headers, scheme.signature_header).is_some())
+    else {
         return reply(response_out, 401, json_error(401), "");
     };
-    let Some(timestamp) = header(&headers, "webhook-timestamp") else {
+
+    let Some(delivery_id) = header(&headers, scheme.delivery_header) else {
+        // Without a delivery id there is nothing to dedupe a redelivery on, and
+        // every scheme here relies on its own id for that.
         return reply(response_out, 401, json_error(401), "");
     };
-    let Some(signature_header) = header(&headers, "webhook-signature") else {
-        return reply(response_out, 401, json_error(401), "");
+
+    let timestamp = match scheme.timestamp_header {
+        Some(name) => match header(&headers, name).and_then(|value| value.parse::<i64>().ok()) {
+            Some(timestamp) => {
+                let now_seconds = (context.received_at_ms / 1000) as i64;
+                if (now_seconds - timestamp).abs() > MAX_SKEW_SECONDS {
+                    return reply(response_out, 401, json_error(401), "");
+                }
+                Some(timestamp.to_string())
+            }
+            None => return reply(response_out, 401, json_error(401), ""),
+        },
+        None => None,
     };
-    let Ok(timestamp_seconds) = timestamp.parse::<i64>() else {
-        return reply(response_out, 401, json_error(401), "");
-    };
-    let now_seconds = (context.received_at_ms / 1000) as i64;
-    if (now_seconds - timestamp_seconds).abs() > MAX_SKEW_SECONDS {
-        return reply(response_out, 401, json_error(401), "");
-    }
 
     let body = match read_body(request) {
         Ok(body) => body,
@@ -94,25 +112,33 @@ fn receive(
         return reply(response_out, 415, json_error(415), "");
     };
 
-    let signable = [
-        webhook_id.as_bytes(),
-        b".",
-        timestamp.as_bytes(),
-        b".",
-        body.as_slice(),
-    ]
-    .concat();
-    let Some(handle) = resolve_credential() else {
+    let Some(handle) = resolve_credential(slug) else {
         return reply(response_out, 503, json_error(503), "");
     };
-    if !verify(&handle, &signable, &signature_header) {
+    let Some(signature) = header(&headers, scheme.signature_header) else {
+        return reply(response_out, 401, json_error(401), "");
+    };
+    let signable = match (&scheme.signed, &timestamp) {
+        (Signed::Body, _) => body.clone(),
+        (Signed::IdTimestampBody, Some(timestamp)) => [
+            delivery_id.as_bytes(),
+            b".",
+            timestamp.as_bytes(),
+            b".",
+            body.as_slice(),
+        ]
+        .concat(),
+        (Signed::IdTimestampBody, None) => return reply(response_out, 401, json_error(401), ""),
+    };
+    if !verify(&handle, &signable, &signature, scheme) {
         return reply(response_out, 401, json_error(401), "");
     }
 
-    let event_type = header(&headers, "x-event-type").unwrap_or_else(|| "webhook".to_string());
+    let event_type = header(&headers, scheme.event_header).unwrap_or_else(|| "webhook".to_string());
     let event = serde_json::json!({
         "provider": provider,
-        "delivery_id": webhook_id,
+        "scheme": scheme.name,
+        "delivery_id": delivery_id,
         "event_type": event_type,
         "received_at_ms": context.received_at_ms,
         "headers": safe_headers(&headers),
@@ -169,16 +195,87 @@ fn read_body(request: &IncomingRequest) -> Result<Vec<u8>, u16> {
     Ok(data)
 }
 
-fn resolve_credential() -> Option<creds::Handle> {
-    creds::resolve(CREDENTIAL).ok()
+/// `provider` or `provider/slug`, with no further segments.
+fn split_hook_path(rest: &str) -> Option<(&str, &str)> {
+    let mut segments = rest.split('/');
+    let provider = segments.next().filter(|part| !part.is_empty())?;
+    let slug = match segments.next() {
+        Some(slug) if !slug.is_empty() => slug,
+        Some(_) => return None,
+        None => CREDENTIAL,
+    };
+    segments.next().is_none().then_some((provider, slug))
 }
 
-fn verify(handle: &creds::Handle, message: &[u8], header: &str) -> bool {
+fn resolve_credential(name: &str) -> Option<creds::Handle> {
+    creds::resolve(name).ok()
+}
+
+/// One signature scheme: where the signature is, and what it covers.
+struct Scheme {
+    name: &'static str,
+    signature_header: &'static str,
+    /// Stripped from the header value before decoding, e.g. `sha256=` or `v1,`.
+    prefix: &'static str,
+    encoding: Encoding,
+    signed: Signed,
+    delivery_header: &'static str,
+    event_header: &'static str,
+    /// When present, the signature covers this and skew is enforced.
+    timestamp_header: Option<&'static str>,
+}
+
+enum Encoding {
+    Hex,
+    Base64,
+}
+
+enum Signed {
+    /// The raw body, as GitHub and Gitea sign it.
+    Body,
+    /// `id.timestamp.body`, as Standard Webhooks signs it.
+    IdTimestampBody,
+}
+
+const SCHEMES: &[Scheme] = &[
+    Scheme {
+        name: "github",
+        signature_header: "x-hub-signature-256",
+        prefix: "sha256=",
+        encoding: Encoding::Hex,
+        signed: Signed::Body,
+        delivery_header: "x-github-delivery",
+        event_header: "x-github-event",
+        timestamp_header: None,
+    },
+    Scheme {
+        name: "gitea",
+        signature_header: "x-gitea-signature",
+        prefix: "",
+        encoding: Encoding::Hex,
+        signed: Signed::Body,
+        delivery_header: "x-gitea-delivery",
+        event_header: "x-gitea-event",
+        timestamp_header: None,
+    },
+    Scheme {
+        name: "standard-webhooks",
+        signature_header: "webhook-signature",
+        prefix: "v1,",
+        encoding: Encoding::Base64,
+        signed: Signed::IdTimestampBody,
+        delivery_header: "webhook-id",
+        event_header: "x-event-type",
+        timestamp_header: Some("webhook-timestamp"),
+    },
+];
+
+fn verify(handle: &creds::Handle, message: &[u8], header: &str, scheme: &Scheme) -> bool {
     for candidate in header.split_ascii_whitespace() {
-        let Some(signature) = candidate.strip_prefix("v1,") else {
+        let Some(encoded) = candidate.strip_prefix(scheme.prefix) else {
             continue;
         };
-        let Ok(signature) = base64::engine::general_purpose::STANDARD.decode(signature) else {
+        let Some(signature) = decode(encoded, &scheme.encoding) else {
             continue;
         };
         if matches!(
@@ -189,6 +286,35 @@ fn verify(handle: &creds::Handle, message: &[u8], header: &str) -> bool {
         }
     }
     false
+}
+
+fn decode(value: &str, encoding: &Encoding) -> Option<Vec<u8>> {
+    match encoding {
+        Encoding::Base64 => {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.decode(value).ok()
+        }
+        Encoding::Hex => {
+            if value.len() % 2 != 0 {
+                return None;
+            }
+            let bytes = value.as_bytes();
+            let mut out = Vec::with_capacity(bytes.len() / 2);
+            for pair in bytes.chunks_exact(2) {
+                out.push(hex_digit(pair[0])? << 4 | hex_digit(pair[1])?);
+            }
+            Some(out)
+        }
+    }
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn header(headers: &Headers, name: &str) -> Option<String> {

@@ -34,7 +34,7 @@ credential resolution stay in host adapters.
 | `soil:notify@1.1.0` | wired | inbox/focus/history/cleanup and ringer |
 | `fungos:actions@1.0.0` | wired | action bus plus presentation catalog |
 | `soil:ble@1.0.0` | wired | BLE host and COLMI ring Spore |
-| `soil:canvas@1.0.0` | wired | owner surface and normalized input |
+| `soil:canvas@1.0.0` | wired | owner surface, `soil-scene` document, guest SDK and component host |
 | `soil:terminal@0.1.0` | contract | host-rendered terminal surface |
 | `soil:view@1.0.0` | contract | host-reviewed web/Spore/retained view |
 | `soil:mycelium@0.1.0` | deferred | directory/session; no host yet |

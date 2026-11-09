@@ -10,6 +10,9 @@ pub use soil_sdk_audio as audio;
 #[cfg(feature = "appdata")]
 pub use soil_sdk_appdata as appdata;
 
+#[cfg(feature = "canvas")]
+pub use soil_sdk_canvas as canvas;
+
 #[cfg(feature = "appdata")]
 pub use soil_sdk_appdata::Result as AppDataResult;
 

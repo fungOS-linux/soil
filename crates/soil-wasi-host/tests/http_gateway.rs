@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use http::Method;
 use soil_wasi_host::{
-    GatewayRoute, HttpGatewayBuilder, HttpService, WasiHostBuilder, WasiHostPolicy,
+    GatewayRoute, HttpGatewayBuilder, HttpService, OriginAuth, WasiHostBuilder, WasiHostPolicy,
 };
 use tokio::net::TcpListener;
 
@@ -21,6 +21,85 @@ fn service(name: &str, component: &[u8]) -> Arc<HttpService> {
         )
         .unwrap(),
     )
+}
+
+/// A gateway whose only vhost answers with host-attested context fields.
+async fn context_ingress(
+    origin_auth: OriginAuth,
+) -> (
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let gateway = HttpGatewayBuilder::new()
+        .origin_auth(origin_auth)
+        .vhost(
+            "confluence.test",
+            "context-fixture",
+            service("context-fixture", CONTEXT),
+            [GatewayRoute::new([Method::POST], "/webhooks/").unwrap()],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(Arc::new(gateway).serve(listener));
+    (address, task)
+}
+
+#[tokio::test]
+async fn refuses_a_direct_hit_on_a_terminated_listener() {
+    // The listener is bound on loopback, so a request sent here *is* a direct
+    // hit; naming only 127.0.0.2 as the terminator makes that visible.
+    let (address, task) = context_ingress(OriginAuth::trusted_terminator([
+        std::net::IpAddr::from([127, 0, 0, 2]),
+    ]))
+    .await;
+
+    let response = send(
+        address,
+        &post(
+            "confluence.test",
+            "/webhooks/github",
+            "{}",
+            &[("x-palisade-origin", "cf-aop")],
+        ),
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert_eq!(response_body(&response), "untrusted origin");
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn passes_the_terminator_certificate_to_the_guest() {
+    let (address, task) = context_ingress(OriginAuth::trusted_terminator([
+        std::net::IpAddr::from([127, 0, 0, 1]),
+    ]))
+    .await;
+
+    let response = send(
+        address,
+        &post(
+            "confluence.test",
+            "/webhooks/github",
+            "{}",
+            &[
+                ("x-palisade-origin", "cf-aop"),
+                ("x-palisade-auth", "sha256:5f1e"),
+            ],
+        ),
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let body = response_body(&response);
+    let fields: Vec<&str> = body.split('|').collect();
+    assert_eq!(fields.len(), 6, "{body:?}");
+    assert_eq!(fields[4], "sha256:5f1e", "tls_peer: {body:?}");
+
+    task.abort();
 }
 
 #[tokio::test]
