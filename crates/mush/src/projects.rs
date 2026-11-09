@@ -396,3 +396,114 @@ pub fn run(config: &crate::config::Config, mut args: Vec<String>) -> Result<()> 
     render(&projects, json_output);
     Ok(())
 }
+
+/// Clone a repository into a Desktop, shallow, then optionally give it a
+/// copy-on-write worktree.
+///
+/// The clone is `--depth 1` on purpose: this is a starting point for work, not
+/// an archive. A worktree is a CoW copy of that shallow clone, which is why it
+/// costs almost nothing on a filesystem that supports reflinks and falls back
+/// to a plain copy when it does not -- an honest copy is better than a clone
+/// that silently takes minutes.
+pub fn add(config: &crate::config::Config, mut args: Vec<String>) -> Result<()> {
+    let worktree = crate::take_option(&mut args, "--worktree");
+    args.retain(|arg| arg != "--json");
+    let desktop_id = crate::take_option(&mut args, "--desktop")
+        .or_else(|| std::env::var("MUSH_DESKTOP").ok())
+        .or_else(|| config.desktop.clone())
+        .or_else(|| {
+            let cwd = std::env::current_dir().ok()?;
+            crate::origin::resolve(&cwd).desktop
+        })
+        .ok_or_else(|| anyhow::anyhow!("no Desktop selected; pass --desktop ID"))?;
+    let desktop = desktop::load(&desktop_id)?;
+    let Some(name) = args.first().cloned() else {
+        anyhow::bail!("usage: mush project add NAME [--desktop ID] [--worktree LABEL]");
+    };
+
+    let projects = desktop.mount.join("projects");
+    std::fs::create_dir_all(&projects)
+        .map_err(|error| anyhow::anyhow!("create {}: {error}", projects.display()))?;
+    let target = projects.join(&name);
+
+    desktop::add_project(&desktop_id, &name)?;
+    println!("claimed {name} in {desktop_id}");
+
+    if target.join(".git").exists() {
+        println!("already cloned: {}", target.display());
+    } else {
+        let status = Command::new("gh")
+            .arg("repo")
+            .arg("clone")
+            .arg(&name)
+            .arg(&target)
+            .arg("--")
+            .arg("--depth")
+            .arg("1")
+            .status()
+            .map_err(|error| anyhow::anyhow!("run gh repo clone: {error}"))?;
+        if !status.success() {
+            anyhow::bail!("gh repo clone {name} failed with {status}");
+        }
+        println!("cloned (depth 1): {}", target.display());
+    }
+
+    if let Some(label) = worktree {
+        let base = desktop.mount.join("worktrees").join(&label);
+        std::fs::create_dir_all(&base)
+            .map_err(|error| anyhow::anyhow!("create {}: {error}", base.display()))?;
+        let destination = base.join(&name);
+        if destination.exists() {
+            println!("worktree already present: {}", destination.display());
+            return Ok(());
+        }
+        cow_copy(&target, &destination)?;
+        println!(
+            "worktree ({}) {} -> {}",
+            cow_kind(),
+            target.display(),
+            destination.display()
+        );
+    }
+    Ok(())
+}
+
+/// `cp -c` is a clonefile on macOS; `--reflink=auto` is the same idea on Linux.
+/// Both fall back to a normal copy rather than failing.
+fn cow_copy(source: &Path, destination: &Path) -> Result<()> {
+    let status = Command::new("cp")
+        .arg(cow_flag())
+        .arg("-R")
+        .arg(source)
+        .arg(destination)
+        .status()
+        .map_err(|error| anyhow::anyhow!("run cp: {error}"))?;
+    if !status.success() {
+        anyhow::bail!(
+            "copy {} -> {} failed",
+            source.display(),
+            destination.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn cow_flag() -> &'static str {
+    "-c"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cow_flag() -> &'static str {
+    "--reflink=auto"
+}
+
+#[cfg(target_os = "macos")]
+fn cow_kind() -> &'static str {
+    "clonefile"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cow_kind() -> &'static str {
+    "reflink"
+}

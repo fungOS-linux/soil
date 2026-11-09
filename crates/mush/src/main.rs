@@ -438,6 +438,17 @@ fn run() -> Result<()> {
         args.remove(0);
         return projects::run(&config, args);
     }
+    if args.first().map(String::as_str) == Some("project") {
+        args.remove(0);
+        let Some(subcommand) = args.first().cloned() else {
+            anyhow::bail!("usage: mush project add NAME [--desktop ID] [--worktree LABEL]");
+        };
+        args.remove(0);
+        return match subcommand.as_str() {
+            "add" => projects::add(&config, args),
+            other => anyhow::bail!("unknown project subcommand {other:?}; try `add`"),
+        };
+    }
     let explicit_root = args.iter().any(|arg| arg == "--root");
     let mut desktop_id = take_option(&mut args, "--desktop")
         .or_else(|| std::env::var("MUSH_DESKTOP").ok())

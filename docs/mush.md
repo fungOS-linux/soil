@@ -677,3 +677,26 @@ configuration state, not an error.
 `--claim` writes names into the Desktop's `projects` list. It declares, it does
 not clone: a claimed repository that is not on the projection reports `missing`
 until something materializes it, which keeps the declaration honest.
+
+### Materializing a project
+
+```sh
+mush project add NAME --desktop acme                 # claim + shallow clone
+mush project add NAME --desktop acme --worktree w1   # plus a CoW worktree
+```
+
+The clone is `--depth 1` on purpose: a starting point for work, not an archive.
+The worktree is a copy-on-write copy of that clone:
+
+| platform | primitive | cost |
+|---|---|---|
+| macOS / APFS | `cp -c` (clonefile) | near zero |
+| Linux / btrfs, xfs | `cp --reflink=auto` | near zero |
+| other, and NFS | plain copy | full size |
+
+That last row matters: a Desktop projected over NFS gets a real copy, not a
+reflink, so the worktree costs what the tree costs. The command says which
+primitive it used rather than implying CoW everywhere.
+
+Verified on APFS: shallow clone, `clonefile` worktree, and the base clone of a
+small repository at 144K.
