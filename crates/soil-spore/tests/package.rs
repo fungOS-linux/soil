@@ -1,4 +1,6 @@
-use soil_spore::{Error, Manifest, check, compute_lock, pack, verify, write_lock};
+use soil_spore::{
+    Error, Manifest, check, compute_lock, pack, publish_blockers, verify, write_lock,
+};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -225,4 +227,123 @@ fn safe_paths_are_the_ones_we_accept() {
         assert!(soil_spore::safe_relative(bad).is_err(), "{bad}");
     }
     let _ = Path::new("x");
+}
+
+const CID: &str = "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+
+#[test]
+fn a_package_ships_only_what_it_declares() {
+    let root = fixture();
+    // Build inputs and repo documentation are not payload.
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("ui/lib")).unwrap();
+    fs::write(root.join("src/lib.rs"), b"pub fn main() {}\n").unwrap();
+    fs::write(root.join("README.md"), b"# demo\n").unwrap();
+    fs::write(root.join("screenshot.png"), b"\x89PNG\r\n").unwrap();
+    fs::write(root.join("ui/lib/ui.lua"), b"return {}\n").unwrap();
+
+    let lock = write_lock(&root).unwrap();
+    assert_eq!(
+        lock.files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "assets/site-map.png",
+            "module.wasm",
+            "spore.toml",
+            "ui/editor.lua",
+            "ui/lib/ui.lua",
+        ],
+        "a package carries runtime files and every .lua the UI is made of"
+    );
+}
+
+#[test]
+fn store_artwork_is_a_cid_and_never_a_path() {
+    let with = |extra: &str| MANIFEST.replace("[engine]", &format!("{extra}\n[engine]"));
+    let icon = |value: &str| {
+        with(&format!(
+            "[presentation]\nbadge = \"D\"\ncolor = \"#8bd5ca\"\nicon = \"{value}\""
+        ))
+    };
+
+    assert!(
+        Manifest::parse(&icon(CID)).is_ok(),
+        "a content-addressed mark is a reference"
+    );
+    assert!(
+        Manifest::parse(&icon("assets/icon.png")).is_err(),
+        "a path here puts the bytes back in the bundle"
+    );
+    assert!(
+        Manifest::parse(&icon("ipfs://not-a-cid")).is_err(),
+        "ipfs:// is not enough; the CID must parse"
+    );
+
+    let screenshot = |value: &str| {
+        with(&format!(
+            "[catalog]\ncategories = [\"utilities\"]\nscreenshots = [ {{ cid = \"{value}\", caption = \"A screen\" }} ]"
+        ))
+    };
+    assert!(Manifest::parse(&screenshot(CID)).is_ok());
+    assert!(Manifest::parse(&screenshot("screens/one.png")).is_err());
+}
+
+#[test]
+fn a_listing_needs_a_shape_before_it_is_reviewed() {
+    let plain = Manifest::parse(MANIFEST).unwrap();
+    let blockers = publish_blockers(&plain);
+    assert!(
+        blockers
+            .iter()
+            .any(|blocker| blocker.contains("description")),
+        "a listing without a paragraph is not a listing: {blockers:?}"
+    );
+    assert!(
+        blockers.iter().any(|blocker| blocker.contains("catalog")),
+        "a package with no listing is not publishable: {blockers:?}"
+    );
+
+    let listing = MANIFEST
+        .replace(
+            "summary = \"demo spore\"",
+            "summary = \"demo spore\"\ndescription = \"A demo Spore for the tests.\"\nhomepage = \"https://example.test\"",
+        )
+        .replace(
+            "[engine]",
+            &format!(
+                "[docs]\nusage = [\"demo\"]\nman = \"docs/man.md\"\n\n[presentation]\nbadge = \"D\"\ncolor = \"#8bd5ca\"\nicon = \"{CID}\"\n\n[engine]"
+            ),
+        );
+    let listing = format!(
+        "{listing}\n[catalog]\ncategories = [\"utilities\"]\nkeywords = [\"demo\"]\nscreenshots = [{{ cid = \"{CID}\", caption = \"One\" }}, {{ cid = \"{CID}\", caption = \"Two\" }}]\n"
+    );
+    let listing = Manifest::parse(&listing).expect("a complete listing parses");
+    assert_eq!(
+        publish_blockers(&listing),
+        Vec::<String>::new(),
+        "everything mechanical is present"
+    );
+}
+
+#[test]
+fn a_declared_manual_must_exist_and_is_part_of_the_package() {
+    let root = fixture();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/man.md"), b"# Demo\n").unwrap();
+    let manifest = MANIFEST.replace(
+        "[engine]",
+        "[docs]\nusage = [\"demo\"]\nman = \"docs/man.md\"\n\n[engine]",
+    );
+    fs::write(root.join("spore.toml"), manifest).unwrap();
+
+    let lock = check(&root).unwrap();
+    assert!(lock.file("docs/man.md").is_some(), "the manual ships");
+
+    fs::remove_file(root.join("docs/man.md")).unwrap();
+    assert!(
+        check(&root).is_err(),
+        "a manifest that names a manual it does not carry is refused"
+    );
 }

@@ -20,6 +20,7 @@ use rustyline::{DefaultEditor, error::ReadlineError};
 use soil::command::command as command_abi;
 use soil_command::{CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
 use soil_inference::{GeodeResolver, SoilConfig};
+use soil_spore::manual::{Manual, read_prose};
 use soil_vfs_host::{VfsHost, index, vfs, vfs_mut};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -32,6 +33,66 @@ struct Host {
     wasi: WasiCtx,
     table: ResourceTable,
     commands: CommandHost,
+    spores: SporeCatalog,
+}
+
+/// Installed Spore packages, as much of them as a manual needs.
+///
+/// `man` is a shell builtin, but the guest has no way to read a package: the
+/// manifest and the authored body live behind this process. Reading them here
+/// keeps the guest's authority unchanged -- no new grant, no filesystem access,
+/// just the metadata the host already owns.
+struct SporeCatalog {
+    root: PathBuf,
+}
+
+impl SporeCatalog {
+    fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn find(&self, name: &str) -> Result<Option<(PathBuf, soil_spore::Manifest)>> {
+        let direct = self.root.join(name);
+        if direct.join("spore.toml").is_file() {
+            let manifest = soil_spore::Manifest::load(&direct)
+                .with_context(|| format!("read Spore package {}", direct.display()))?;
+            return Ok(Some((direct, manifest)));
+        }
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Ok(None);
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.join("spore.toml").is_file() {
+                continue;
+            }
+            let Ok(manifest) = soil_spore::Manifest::load(&dir) else {
+                continue;
+            };
+            if manifest.spore.name == name || manifest.spore.id == name {
+                return Ok(Some((dir, manifest)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn manual(&self, name: &str) -> Result<Option<String>> {
+        let Some((dir, manifest)) = self.find(name)? else {
+            return Ok(None);
+        };
+        let prose = read_prose(&dir, &manifest)?;
+        Ok(Some(Manual::from_manifest(&manifest, prose).render(80)))
+    }
+
+    fn identity(&self, name: &str) -> Result<Option<String>> {
+        let Some((_, manifest)) = self.find(name)? else {
+            return Ok(None);
+        };
+        Ok(Some(format!(
+            "{} {} ({}, {})\n",
+            manifest.spore.name, manifest.spore.version, manifest.spore.id, manifest.spore.license
+        )))
+    }
 }
 
 struct CommandHost {
@@ -115,12 +176,61 @@ impl Host {
         command_root: PathBuf,
         records: Option<RecordsBinding>,
     ) -> Result<Self> {
+        // Commands and Spores are siblings under the fungOS data directory;
+        // `--command-root` and `FUNGOS_COMMAND_ROOT` therefore move both.
+        let spore_root = std::env::var_os("MUSH_SPORE_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| command_root.parent().map(|parent| parent.join("spores")))
+            .unwrap_or_else(|| PathBuf::from("spores"));
         Ok(Self {
             vfs: VfsHost::open(root)?,
             wasi: WasiCtxBuilder::new().inherit_stdio().build(),
             table: ResourceTable::new(),
             commands: CommandHost::new(command_root, records)?,
+            spores: SporeCatalog::new(spore_root),
         })
+    }
+
+    /// Answer for a Spore without running anything.
+    ///
+    /// `man NAME` prints the generated page and `NAME --version` prints the
+    /// identity line, exactly as they would for an installed command. Both are
+    /// reads of installed metadata, so they work in a session with no display.
+    fn builtin(&self, name: &str, args: &[String]) -> Result<Option<command_abi::Output>> {
+        let stdout = |text: String| command_abi::Output {
+            code: 0,
+            stdout: text.into_bytes(),
+            stderr: Vec::new(),
+        };
+        if name == "man" {
+            let Some(target) = args.first() else {
+                return Ok(Some(command_abi::Output {
+                    code: 2,
+                    stdout: Vec::new(),
+                    stderr: b"usage: man NAME\n".to_vec(),
+                }));
+            };
+            return Ok(Some(match self.spores.manual(target)? {
+                Some(page) => stdout(page),
+                None => command_abi::Output {
+                    code: 1,
+                    stdout: Vec::new(),
+                    stderr: format!("man: no entry for {target}\n").into_bytes(),
+                },
+            }));
+        }
+        let single = |flag: &str| args.len() == 1 && args[0] == flag;
+        if single("--version") || single("-V") {
+            if let Some(line) = self.spores.identity(name)? {
+                return Ok(Some(stdout(line)));
+            }
+        }
+        if single("--help") || single("-h") {
+            if let Some(page) = self.spores.manual(name)? {
+                return Ok(Some(stdout(page)));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -191,6 +301,12 @@ impl command_abi::Host for Host {
         stdin: Vec<u8>,
         cwd: Option<String>,
     ) -> Result<command_abi::Output, String> {
+        if let Some(output) = self
+            .builtin(&name, &args)
+            .map_err(|error| format!("{error:#}"))?
+        {
+            return Ok(output);
+        }
         self.commands
             .run(&name, args, stdin, cwd)
             .map_err(|error| format!("{error:#}"))

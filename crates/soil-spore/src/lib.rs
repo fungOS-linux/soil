@@ -26,6 +26,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
+pub mod manual;
 pub mod publisher;
 
 pub const SCHEMA: u32 = 1;
@@ -38,6 +39,17 @@ pub const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Largest single file inside a package.
 pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Longest listing paragraph a manifest may carry.
+pub const MAX_DESCRIPTION_CHARS: usize = 1000;
+/// Most synopsis lines a manual may declare.
+pub const MAX_USAGE_LINES: usize = 8;
+/// Most keywords a listing may carry.
+pub const MAX_KEYWORDS: usize = 12;
+/// Most screenshots a listing may carry.
+pub const MAX_SCREENSHOTS: usize = 10;
+/// Longest screenshot caption (alt text).
+pub const MAX_CAPTION_CHARS: usize = 200;
 
 #[derive(Debug)]
 pub enum Error {
@@ -99,12 +111,64 @@ pub struct Manifest {
     /// Launcher identity: a mark and the colour it is drawn in.
     #[serde(default)]
     pub presentation: Option<Presentation>,
+    /// What `man` prints: synopsis lines and an authored body.
+    #[serde(default)]
+    pub docs: Option<Docs>,
+    /// What a public listing may show. Every rich artifact is a CID: a package
+    /// carries the reference, never the bytes.
+    #[serde(default)]
+    pub catalog: Option<Catalog>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct System {
     pub role: String,
+}
+
+/// Man-page material that is not already implied by the manifest.
+///
+/// The page itself is generated: name, version, licence, grants and launch
+/// surfaces are structured data, so they are never retyped here. What cannot
+/// be derived is the synopsis and the prose, and those live in the package
+/// because `man` must work offline.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Docs {
+    /// Lines a shell would accept, including the Spore name and without a
+    /// prompt.
+    #[serde(default)]
+    pub usage: Vec<String>,
+    /// Markdown body shipped in the package. Small prose, not an asset.
+    #[serde(default)]
+    pub man: Option<String>,
+}
+
+/// The public listing a Spore is allowed to claim.
+///
+/// A store renders this; a package never carries the bytes it points at. The
+/// thumbnail rule is deliberate: a listing without screenshots is a listing
+/// nobody can judge, so the packager refuses to call it publishable.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Catalog {
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub screenshots: Vec<Screenshot>,
+    /// CID of the rich listing record: long prose, changelog, provenance.
+    #[serde(default)]
+    pub record: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Screenshot {
+    /// `ipfs://<cid>`. A path here would put the bytes back in the package.
+    pub cid: String,
+    /// Alt text. A screenshot nobody can describe is not accessible.
+    pub caption: String,
 }
 
 /// A Spore that draws a slice of the shell instead of, or as well as, a window.
@@ -131,7 +195,29 @@ pub struct Presentation {
     pub badge: String,
     /// `#rrggbb`, the app's own colour rather than a theme role.
     pub color: String,
+    /// CID of a richer mark drawn by a store or a launcher that has fetched it.
+    /// Never a path: the fallback badge is what works with no network.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
+
+/// Categories a listing may claim. A fixed vocabulary is what makes browsing
+/// and ranking comparable across publishers; an unlisted name is a typo or a
+/// new category, and both should arrive as a change to this list.
+pub const CATEGORIES: [&str; 12] = [
+    "communication",
+    "developer-tools",
+    "education",
+    "games",
+    "graphics",
+    "media",
+    "network",
+    "productivity",
+    "science",
+    "security",
+    "system",
+    "utilities",
+];
 
 /// Regions a Spore may claim. An unlisted name is a typo or a claim the host
 /// cannot honour, and both are better refused at install than discovered later.
@@ -155,6 +241,10 @@ pub struct SporeMeta {
     pub version: String,
     pub license: String,
     pub summary: String,
+    /// One paragraph for a listing or `spore info`. `summary` is the row;
+    /// this is the paragraph under it.
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub homepage: Option<String>,
 }
@@ -340,6 +430,91 @@ impl Manifest {
             if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err(Error::Invalid("presentation.color must be #rrggbb".into()));
             }
+            if let Some(icon) = &presentation.icon {
+                reference(icon)?;
+            }
+        }
+        if let Some(description) = &self.spore.description {
+            if description.trim().is_empty() {
+                return Err(Error::Invalid(
+                    "spore.description must not be empty when present".into(),
+                ));
+            }
+            if description.chars().count() > MAX_DESCRIPTION_CHARS {
+                return Err(Error::Invalid(format!(
+                    "spore.description is longer than {MAX_DESCRIPTION_CHARS} characters"
+                )));
+            }
+        }
+        if let Some(docs) = &self.docs {
+            if docs.usage.len() > MAX_USAGE_LINES {
+                return Err(Error::Invalid(format!(
+                    "docs.usage has more than {MAX_USAGE_LINES} lines"
+                )));
+            }
+            for line in &docs.usage {
+                if line.trim().is_empty() || line.chars().any(char::is_control) {
+                    return Err(Error::Invalid(
+                        "docs.usage entries must be plain lines".into(),
+                    ));
+                }
+            }
+            if let Some(man) = &docs.man {
+                safe_relative(man)?;
+                if !man.ends_with(".md") {
+                    return Err(Error::Invalid("docs.man must name a Markdown file".into()));
+                }
+            }
+        }
+        if let Some(catalog) = &self.catalog {
+            if catalog.categories.is_empty() {
+                return Err(Error::Invalid(
+                    "catalog.categories must not be empty".into(),
+                ));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for category in &catalog.categories {
+                if !CATEGORIES.contains(&category.as_str()) {
+                    return Err(Error::Invalid(format!(
+                        "catalog category {category:?} is not one of {CATEGORIES:?}"
+                    )));
+                }
+                if !seen.insert(category) {
+                    return Err(Error::Invalid(format!(
+                        "catalog category {category:?} is repeated"
+                    )));
+                }
+            }
+            if catalog.keywords.len() > MAX_KEYWORDS {
+                return Err(Error::Invalid(format!(
+                    "catalog.keywords has more than {MAX_KEYWORDS} entries"
+                )));
+            }
+            for word in &catalog.keywords {
+                if !keyword(word) {
+                    return Err(Error::Invalid(format!(
+                        "catalog keyword {word:?} must be lowercase letters, digits or dashes"
+                    )));
+                }
+            }
+            if catalog.screenshots.len() > MAX_SCREENSHOTS {
+                return Err(Error::Invalid(format!(
+                    "catalog.screenshots has more than {MAX_SCREENSHOTS} entries"
+                )));
+            }
+            for screenshot in &catalog.screenshots {
+                reference(&screenshot.cid)?;
+                if screenshot.caption.trim().is_empty()
+                    || screenshot.caption.chars().count() > MAX_CAPTION_CHARS
+                {
+                    return Err(Error::Invalid(format!(
+                        "catalog screenshot captions must be 1..={MAX_CAPTION_CHARS} characters"
+                    )));
+                }
+            }
+            if let Some(record) = &catalog.record {
+                reference(record)?;
+            }
         }
         for (name, asset) in &self.assets {
             if !identifier(name) {
@@ -363,10 +538,28 @@ impl Manifest {
             paths.extend(chrome.sources.values().cloned());
         }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
+        if let Some(man) = self.docs.as_ref().and_then(|docs| docs.man.clone()) {
+            paths.push(man);
+        }
         paths
             .into_iter()
             .filter_map(|path| safe_relative(&path).ok())
             .collect()
+    }
+
+    /// Every file the package ships, relative to the package root.
+    ///
+    /// A package is what the Spore needs to run: its manifest, its Lua UI, its
+    /// module, its declared assets and its manual. Build inputs (`src/`, `wit/`,
+    /// `Cargo.*`), tests, and repo documentation are not part of it -- shipping
+    /// them would put source and screenshots in every download for no runtime
+    /// benefit. `spore.lock` is added when packing.
+    pub fn package_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.declared_paths();
+        paths.push(PathBuf::from("spore.toml"));
+        paths.sort();
+        paths.dedup();
+        paths
     }
 }
 
@@ -400,6 +593,36 @@ fn grants(value: &str) -> bool {
         && interface.chars().all(|c| {
             c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_' | '/')
         })
+}
+
+fn keyword(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A listing artifact is content-addressed or it is not a listing artifact.
+///
+/// Accepting a path here is how screenshots and logos end up inside the bundle
+/// that moves around, so the only accepted form is `ipfs://<CIDv1 base32>`.
+/// The bytes live wherever the CID resolves; the package carries the claim.
+pub fn reference(value: &str) -> Result<()> {
+    let Some(cid) = value.strip_prefix("ipfs://") else {
+        return Err(Error::Invalid(format!(
+            "{value:?} is not an ipfs:// reference; a store artifact is a CID, never a path"
+        )));
+    };
+    let valid = (20..=128).contains(&cid.len())
+        && cid.starts_with('b')
+        && cid.chars().all(|c| matches!(c, 'a'..='z' | '2'..='7'));
+    if !valid {
+        return Err(Error::Invalid(format!(
+            "{value:?} is not an ipfs:// CIDv1 (base32) reference"
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve a manifest path without letting it leave the package.
@@ -536,10 +759,87 @@ fn body(id: &str, version: &str, files: &[FileEntry]) -> String {
 // ---- package reading ------------------------------------------------------
 
 /// Every package file except `signatures/` and `spore.lock`, sorted by path.
+///
+/// This is the whole tree, build inputs included. `collect_package` is what
+/// ships; this stays for callers that need to inspect a directory as it is.
 pub fn collect(root: &Path) -> Result<Vec<(String, Vec<u8>)>> {
     let mut files = BTreeMap::new();
     walk(root, root, &mut files)?;
     Ok(files.into_iter().collect())
+}
+
+/// The files a package actually ships, sorted by path.
+///
+/// Declared files must exist: a package that names an asset it does not carry
+/// is refused here rather than at launch. The Lua UI is a directory artifact --
+/// every `.lua` under `ui/` is part of it, because how an author splits a view
+/// is not something the manifest should have to enumerate.
+pub fn collect_package(root: &Path, manifest: &Manifest) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut files = BTreeMap::new();
+    for path in manifest.package_paths() {
+        let full = root.join(&path);
+        let metadata = fs::symlink_metadata(&full)
+            .map_err(|error| Error::Io(format!("{}: {error}", full.display())))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(Error::Invalid(format!(
+                "{} is declared but is not a regular file",
+                path.display()
+            )));
+        }
+        if metadata.len() > MAX_FILE_BYTES {
+            return Err(Error::Invalid(format!(
+                "{} exceeds {MAX_FILE_BYTES} bytes",
+                path.display()
+            )));
+        }
+        let name = path
+            .to_str()
+            .ok_or_else(|| Error::UnsafePath(path.display().to_string()))?
+            .replace('\\', "/");
+        let bytes =
+            fs::read(&full).map_err(|error| Error::Io(format!("{}: {error}", full.display())))?;
+        files.insert(name, bytes);
+    }
+    let ui = root.join("ui");
+    if ui.is_dir() {
+        walk_lua(root, &ui, &mut files)?;
+    }
+    Ok(files.into_iter().collect())
+}
+
+fn walk_lua(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
+    for entry in
+        fs::read_dir(dir).map_err(|error| Error::Io(format!("{}: {error}", dir.display())))?
+    {
+        let entry = entry.map_err(|error| Error::Io(error.to_string()))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::UnsafePath(format!(
+                "{} is a symlink; packages contain regular files",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            walk_lua(root, &path, out)?;
+            continue;
+        }
+        if !metadata.is_file() || path.extension().is_none_or(|extension| extension != "lua") {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| Error::UnsafePath(path.display().to_string()))?;
+        let name = relative
+            .to_str()
+            .ok_or_else(|| Error::UnsafePath(relative.display().to_string()))?
+            .replace('\\', "/");
+        let bytes =
+            fs::read(&path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
+        out.insert(name, bytes);
+    }
+    Ok(())
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
@@ -588,7 +888,7 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<
 
 /// Compute the lock for a directory's current contents.
 pub fn compute_lock(root: &Path, manifest: &Manifest) -> Result<Lock> {
-    let files = collect(root)?;
+    let files = collect_package(root, manifest)?;
     Ok(lock_of(&manifest.spore.id, &manifest.spore.version, &files))
 }
 
@@ -631,6 +931,81 @@ pub fn check(root: &Path) -> Result<Lock> {
     Ok(lock)
 }
 
+/// Mechanical admission rules for a public listing.
+///
+/// These are the ones a program can check. They exist so the review queue
+/// starts from a package that already has the shape of a listing: a paragraph,
+/// a readable manual, a declared category set, and screenshots someone can look
+/// at. Everything else -- authorship, intent, whether the grants are honest --
+/// stays a human review. Empty means the package is ready to be reviewed, not
+/// that it is approved.
+pub fn publish_blockers(manifest: &Manifest) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if manifest
+        .spore
+        .description
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        blockers.push("spore.description is missing".into());
+    }
+    if manifest
+        .spore
+        .homepage
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        blockers.push("spore.homepage is missing; a listing must say where it comes from".into());
+    }
+    let usage = manifest
+        .docs
+        .as_ref()
+        .map(|docs| docs.usage.len())
+        .unwrap_or(0);
+    if usage == 0 {
+        blockers.push("docs.usage is missing; nobody can try it without a synopsis".into());
+    }
+    if manifest
+        .docs
+        .as_ref()
+        .and_then(|docs| docs.man.as_ref())
+        .is_none()
+    {
+        blockers.push("docs.man is missing; a listing needs a manual".into());
+    }
+    if manifest
+        .presentation
+        .as_ref()
+        .is_none_or(|presentation| presentation.icon.is_none())
+    {
+        blockers.push("presentation.icon is missing; a listing needs a mark".into());
+    }
+    match manifest.catalog.as_ref() {
+        None => blockers.push("catalog is missing; there is nothing to list".into()),
+        Some(catalog) => {
+            if catalog.screenshots.len() < 2 {
+                blockers.push(
+                    "catalog.screenshots needs at least two images; one screen is not a listing"
+                        .into(),
+                );
+            }
+            if catalog.keywords.is_empty() {
+                blockers.push("catalog.keywords is empty".into());
+            }
+        }
+    }
+    for (capability, reason) in &manifest.grants {
+        if reason.trim().is_empty() {
+            blockers.push(format!("grant {capability:?} has no written reason"));
+        }
+    }
+    blockers
+}
+
 /// Write a fresh lock.
 pub fn write_lock(root: &Path) -> Result<Lock> {
     let manifest = Manifest::load(root)?;
@@ -655,7 +1030,7 @@ pub fn pack(root: &Path) -> Result<Vec<u8>> {
         return Err(Error::Lock("lock does not match the manifest".into()));
     }
 
-    let mut files = collect(root)?;
+    let mut files = collect_package(root, &manifest)?;
     files.push((LOCK_NAME.to_owned(), lock.render().into_bytes()));
 
     let total: u64 = files.iter().map(|(_, bytes)| bytes.len() as u64).sum();
@@ -685,6 +1060,15 @@ pub fn pack(root: &Path) -> Result<Vec<u8>> {
 
 /// Verify a packed tar: entry safety, embedded lock, and every digest.
 pub fn verify(bytes: &[u8]) -> Result<(Manifest, Lock)> {
+    let (manifest, lock, _) = read_package(bytes)?;
+    Ok((manifest, lock))
+}
+
+/// Verify a packed tar and hand back its files.
+///
+/// Installation needs the bytes it just verified; a caller that only wants the
+/// identity calls `verify`.
+pub fn read_package(bytes: &[u8]) -> Result<(Manifest, Lock, BTreeMap<String, Vec<u8>>)> {
     if bytes.len() as u64 > MAX_PACKAGE_BYTES {
         return Err(Error::Invalid("package is too large".into()));
     }
@@ -754,7 +1138,7 @@ pub fn verify(bytes: &[u8]) -> Result<(Manifest, Lock)> {
             "manifest identity does not match the lock".into(),
         ));
     }
-    Ok((manifest, lock))
+    Ok((manifest, lock, files))
 }
 
 // ---- signatures -----------------------------------------------------------
