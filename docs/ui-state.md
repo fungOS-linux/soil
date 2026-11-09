@@ -27,6 +27,15 @@ producer can ask `supports(schema)` and `budget()` before it builds a document �
 the document's shape is deliberately not a WIT type, so a new node kind never
 rebuilds the Spores that draw.
 
+A document is in the **same normalized space as the ABI**, and this is the one
+rule a producer has to get right: eight units span the extent in *both* axes, a
+rect's `translation` is its top-left corner in a y-up space, and `scale` is its
+size in those units. Pixels never appear in a document — that is precisely what
+lets one view render at 1200x44 and at 3840x2160 without reflowing. Getting it
+wrong is quiet rather than loud: a document emitted in pixels renders one
+quadrant of its surface, because the renderer clips an 1200-unit-wide rect to the
+surface it was asked for.
+
 `soil:surface@1` (a Spore submitting a UI tree of its own) is **deferred, not on
 the v1 path**. `soil:view@1` (host-owned web/Spore/retained content inside
 Canvas) **is** v1. That distinction is the load-bearing one in the whole design:
@@ -249,6 +258,7 @@ Present, by target:
 |---|---|
 | Composited, retained module | run `canvas`, then `tend … --surface S` |
 | Composited, GPU scene | `soil-scene-gpu --scene X --canvas-socket <external-surfaces.sock> --source-id S --size WxH --hold` |
+| A frame with no compositor | `soil-scene-gpu --scene X --size WxH --rgba out.rgba` |
 | Browser | `cargo run -p canvas-web --bin canvas-web-host --features native-host` → `http://127.0.0.1:8088/?surface=S` |
 | Native window, no compositor | `soil-vt-window --shell`, or `soil-terminal` |
 | Android | `soil-runtime` + `s22-canvas-surface` (egui 0.33.3, software backend) |
