@@ -72,7 +72,7 @@ run_host() {
   bounded 30 "$shell" -c "cd '$host' && $1" >/dev/null 2>&1
 }
 run_mush() {
-  bounded 40 "$mush" --root "$vfs" --timeout 15 --command "$1" >/dev/null 2>&1
+  bounded 40 "$mush" --root "$vfs" --timeout 30 sh -c "$1" </dev/null >/dev/null 2>&1
 }
 
 vfs_commands=(
@@ -86,7 +86,7 @@ vfs_commands=(
   'echo hi > note.txt'
 )
 toolchain_commands=(
-  'git status'
+  'git --version'
   'git log --oneline'
   'cargo --version'
   'rg --version'

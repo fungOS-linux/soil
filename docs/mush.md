@@ -556,7 +556,6 @@ Limits of this slice:
   the Spore and do not require the shell component.
 
 ## Host boundary
-
 `mush` opens the VFS root, links the grants, and calls the Spore one line at a
 time. The Spore returns output, prompt, and exit state. The current host is
 line-oriented; `soil:terminal` cell-grid rendering remains the next frontend.
@@ -577,3 +576,35 @@ The probe runs the same command lines through the host shell and through Mush
 over equivalent content, and reports completions per class. It is only
 meaningful alongside honest exit statuses -- a shell that reports success for a
 command it could not run appears to pass every toolchain step.
+
+## The host bridge
+
+The Spore has no host process. That is the boundary that makes it safe, and it
+is also what stops it from being an agent's shell: `git` and `cargo` live on the
+other side of it.
+
+`mush sh` crosses that boundary for a short list of programs. The VFS is
+materialized into an overlay, the program runs there, and its changes are
+applied back:
+
+```sh
+mush sh -c 'git status && cargo test'
+mush sh -c 'rg TODO src'
+```
+
+The allowlist is compilers, version control, and text tools:
+
+```text
+cargo rustc cc clang clang++ c++ git make cmake ninja pkg-config
+rg sed awk diff jq true false test
+```
+
+These run with the user's full privileges and only the overlay as their working
+directory -- they can still read `$HOME`. Anything that carries credentials or
+reaches the network (`gh`, `ssh`, `curl`, `python3`) is therefore **not** in the
+list: adding one is a boundary decision, not a convenience. A bare program name
+only is accepted, so `./cargo` cannot smuggle in code from the overlay itself.
+
+Pipelines and redirection are handed to the Spore, which owns that parsing; a
+simple command whose program is allowlisted goes to the host. Screenshots of the
+gap: `scripts/mush-agent-parity.sh`.

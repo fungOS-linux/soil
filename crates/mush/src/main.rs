@@ -17,6 +17,7 @@ mod outcome;
 mod overlay;
 mod project;
 mod service;
+mod shell;
 mod worktree;
 
 use std::{
@@ -397,6 +398,17 @@ fn run() -> Result<()> {
             std::process::exit(2);
         }
     }
+    // `mush sh` and the `-c` / `-lc` forms a terminal uses for a login shell.
+    let mut shell_mode = false;
+    if args.first().map(String::as_str) == Some("sh") {
+        args.remove(0);
+        shell_mode = true;
+    }
+    let mut shell_command = take_option(&mut args, "-c").or_else(|| take_option(&mut args, "-lc"));
+    if shell_command.is_some() {
+        shell_mode = true;
+    }
+    args.retain(|arg| arg != "-l" && arg != "-i");
     let config_path = take_option(&mut args, "--config")
         .map(|value| config::expand_home(&value))
         .unwrap_or_else(config::default_path);
@@ -627,6 +639,25 @@ fn run() -> Result<()> {
         return mcp_server::serve(server, &mcp_token, &jobs);
     }
 
+    if shell_mode {
+        let status = match shell_command {
+            Some(line) => shell::run_line(&mut runtime, &root, &line)?,
+            None => {
+                let stdin = io::stdin();
+                let mut status = 0;
+                for line in stdin.lock().lines() {
+                    let line = line?;
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    status = shell::run_line(&mut runtime, &root, &line)?;
+                }
+                status
+            }
+        };
+        return finish(status);
+    }
+
     if let Some(command) = command {
         let mut status = 0;
         for line in command.lines() {
@@ -646,6 +677,12 @@ fn run() -> Result<()> {
         print!("{}", response.output);
         eprint!("{}", response.stderr);
         return finish(response.status);
+    }
+
+    // Nothing positional is valid here. Silently falling through to reading
+    // stdin would turn a typo into a shell that waits forever.
+    if !args.is_empty() {
+        anyhow::bail!("unexpected arguments: {}", args.join(" "));
     }
 
     let status = if io::stdin().is_terminal() {
