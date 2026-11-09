@@ -30,8 +30,9 @@ socket, DNS, TLS, redirect policy, proxy policy, credentials and response cap.
 ```wit
 record request {
   url: string,
-  method: method,          // get, head
+  method: method,          // get, head, post, put, patch, delete
   headers: list<header>,   // host-allowlisted names only
+  body: option<list<u8>>,  // writes only; a body on get/head is rejected
   credential: option<string>, // opaque Geode handle, never a token
   max-bytes: u32,
   timeout-ms: u32,
@@ -53,9 +54,10 @@ Errors are typed: `denied`, `invalid`, `over-budget`, `timeout`, `unavailable`,
 `crates/soil-http-host` currently provides:
 
 - origin allowlist (`scheme://host:port`)
-- GET/HEAD only
-- request headers limited to `accept`, `accept-language`, `user-agent`,
-  `if-none-match`, `if-modified-since`, `range`
+- `get`, `head`, `post`, `put`, `patch` and `delete`; a body on a read is
+  rejected, and a request body shares the same byte budget as a response
+- request headers limited to `accept`, `accept-language`, `content-type`,
+  `user-agent`, `if-none-match`, `if-modified-since`, `range`
 - no redirects
 - per-call body and deadline caps, plus host maximums
 - credential handles resolved by `CredentialProvider`; no secret bytes enter
@@ -104,6 +106,25 @@ target/debug/soil-http --allow http://127.0.0.1:8891 \
 
 The host prints the status and bounded body. The guest sees one
 `soil:http.fetch` call and no socket, DNS, TLS, proxy, or credential material.
+
+## CLI
+
+`soil-http` runs one component and prints what it returns:
+
+```sh
+soil-http --allow http://192.168.1.10:80 \
+  spores/hue/module.wasm --bridge http://192.168.1.10 --key "$HUE_KEY" on
+```
+
+For an origin that needs a bearer token, `--bearer-env` reads it from the host
+environment and answers the guest's `default` credential handle. The token never
+enters argv or the guest:
+
+```sh
+soil-http --allow https://api.spotify.com:443 \
+  --bearer-env SPOTIFY_TOKEN \
+  spores/spotify/module.wasm --device raspotify play
+```
 
 ## Next
 
