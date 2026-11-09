@@ -283,6 +283,15 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
             ),
             None => ("404 Not Found", "no index\n".into(), TEXT),
         },
+        ("GET", "/api/apps") => {
+            let value = &store.snapshot.value;
+            let body = serde_json::json!({
+                "apps": value["apps"],
+                "pending": value["pending"],
+                "source": value["source"],
+            });
+            ("200 OK", body.to_string(), JSON)
+        }
         ("GET", "/api/plan") => (
             "200 OK",
             serde_json::json!({
