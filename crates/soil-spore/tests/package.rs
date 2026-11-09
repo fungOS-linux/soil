@@ -49,6 +49,45 @@ fn fixture() -> PathBuf {
     root
 }
 
+/// A package whose only entrypoint is its Lua: no module, no wasm to build.
+const LUA_ONLY: &str = r#"schema = 1
+
+[spore]
+id = "dev.fungos.divebar"
+name = "divebar"
+version = "0.1.0"
+license = "MIT"
+summary = "a bar"
+
+[engine]
+soil = ">=0.1"
+target = "soil"
+
+[ui]
+entry = "ui/divebar.lua"
+
+[chrome]
+regions = ["top-bar"]
+
+[launch]
+default = "canvas"
+surfaces = ["canvas"]
+"#;
+
+fn lua_only_fixture() -> PathBuf {
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("soil-spore-lua-{}-{id}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("ui")).unwrap();
+    fs::write(root.join("spore.toml"), LUA_ONLY).unwrap();
+    fs::write(
+        root.join("ui/divebar.lua"),
+        b"return { render = function() end }\n",
+    )
+    .unwrap();
+    root
+}
+
 fn build_tar(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for (path, bytes) in files {
@@ -66,6 +105,59 @@ fn build_tar(files: &[(String, Vec<u8>)]) -> Vec<u8> {
             .unwrap();
     }
     builder.into_inner().unwrap()
+}
+
+#[test]
+fn a_lua_only_spore_checks_packs_and_verifies() {
+    let root = lua_only_fixture();
+    let manifest = Manifest::load(&root).unwrap();
+    assert!(manifest.module.is_none(), "no wasm in a Lua-only Spore");
+    assert_eq!(
+        manifest.region_source("top-bar"),
+        Some("ui/divebar.lua"),
+        "the region resolves to the UI entry without repeating the path"
+    );
+
+    let lock = check(&root).unwrap();
+    assert_eq!(
+        lock.files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["spore.toml", "ui/divebar.lua"],
+        "nothing claims a module file it does not ship"
+    );
+
+    let bytes = pack(&root).unwrap();
+    let (_, verified) = verify(&bytes).unwrap();
+    assert_eq!(verified.digest, lock.digest);
+
+    // The lock still guards the Lua: a Lua-only Spore is not an unlocked one.
+    fs::write(root.join("ui/divebar.lua"), b"return {}\n").unwrap();
+    assert!(matches!(check(&root), Err(Error::Lock(_))));
+}
+
+#[test]
+fn a_region_naming_its_own_artifact_need_not_borrow_the_ui_entry() {
+    let root = lua_only_fixture();
+    fs::write(
+        root.join("spore.toml"),
+        LUA_ONLY.replace(
+            "top-bar\"]\n",
+            "top-bar\"]\n\n[chrome.sources]\ntop-bar = \"dist/bar.lua\"\n",
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("dist")).unwrap();
+    fs::write(root.join("dist/bar.lua"), b"return {}\n").unwrap();
+
+    let manifest = Manifest::load(&root).unwrap();
+    assert_eq!(manifest.region_source("top-bar"), Some("dist/bar.lua"));
+    let lock = check(&root).unwrap();
+    assert!(
+        lock.file("dist/bar.lua").is_some(),
+        "the artifact the region resolves to is what the lock covers"
+    );
 }
 
 #[test]
@@ -107,6 +199,72 @@ fn packing_is_byte_identical() {
     let first = pack(&root).unwrap();
     let second = pack(&root).unwrap();
     assert_eq!(first, second, "repacking must not change a byte");
+}
+
+#[test]
+fn a_package_unpacks_to_the_tree_that_packed_it() {
+    let root = fixture();
+    let bytes = pack(&root).unwrap();
+    let dest = root.join("installed");
+    let lock = soil_spore::unpack(&bytes, &dest).unwrap();
+    assert_eq!(lock.id, "dev.fungos.markdown");
+    assert_eq!(lock.files.len(), 4);
+    for path in [
+        "spore.toml",
+        "module.wasm",
+        "ui/editor.lua",
+        "assets/site-map.png",
+    ] {
+        assert!(dest.join(path).is_file(), "{path} did not unpack");
+    }
+    assert_eq!(
+        fs::read(dest.join("module.wasm")).unwrap(),
+        fs::read(root.join("module.wasm")).unwrap()
+    );
+    // spore.lock is the archive's cover, not its contents.
+    assert!(
+        !dest.join("spore.lock").exists(),
+        "the lock is not unpacked"
+    );
+}
+
+#[test]
+fn unpack_writes_nothing_from_a_tampered_package() {
+    let root = fixture();
+    let bytes = pack(&root).unwrap();
+    let mut broken = bytes.clone();
+    let index = broken.len() / 2;
+    broken[index] ^= 0xff;
+    let dest = root.join("refused");
+    assert!(soil_spore::unpack(&broken, &dest).is_err());
+    assert!(
+        !dest.join("module.wasm").exists(),
+        "a failed verify must not leave files behind"
+    );
+}
+
+#[test]
+fn a_cid_is_the_bytes() {
+    // The documented CIDv1/raw/sha2-256 vector for an empty block. If this
+    // changes, every published CID in the wild changes with it.
+    assert_eq!(
+        soil_spore::cid_v1_raw(b""),
+        "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"
+    );
+    assert_ne!(
+        soil_spore::cid_v1_raw(b"a"),
+        soil_spore::cid_v1_raw(b"b"),
+        "one byte must move the identity"
+    );
+}
+
+#[test]
+fn the_same_tree_has_the_same_cid_twice() {
+    let root = fixture();
+    let first = soil_spore::cid_v1_raw(&pack(&root).unwrap());
+    let second = soil_spore::cid_v1_raw(&pack(&root).unwrap());
+    assert_eq!(first, second, "packing is deterministic, so the CID is too");
+    assert!(first.starts_with("bafkrei"), "{first}");
 }
 
 #[test]
@@ -225,4 +383,51 @@ fn safe_paths_are_the_ones_we_accept() {
         assert!(soil_spore::safe_relative(bad).is_err(), "{bad}");
     }
     let _ = Path::new("x");
+}
+
+#[test]
+fn a_chrome_region_declares_the_height_the_host_reserves() {
+    // The shell has to reserve the region before the package runs, so the number
+    // cannot be inferred from the view: it is declared, and the host's fallback
+    // uses the same one.
+    let declared = soil_spore::Manifest::parse(
+        r#"
+schema = 1
+[spore]
+id = "dev.fungos.test"
+name = "test"
+version = "0.1.0"
+license = "MIT"
+summary = "a bar"
+
+[engine]
+soil = ">=0.1"
+target = "soil"
+
+[ui]
+entry = "ui/view.lua"
+
+[launch]
+default = "canvas"
+surfaces = ["canvas"]
+
+[chrome]
+regions = ["top-bar"]
+height = 52
+"#,
+    )
+    .expect("manifest parses");
+    let chrome = declared.chrome.as_ref().expect("chrome table");
+    assert_eq!(chrome.height(), 52);
+
+    let mut silent = declared.clone();
+    silent.chrome = Some(soil_spore::Chrome {
+        regions: vec!["top-bar".into()],
+        sources: Default::default(),
+        height: None,
+    });
+    assert_eq!(
+        silent.chrome.as_ref().unwrap().height(),
+        soil_spore::chrome::DEFAULT_HEIGHT
+    );
 }
