@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "confluence-edge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+worker = "0.8.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1

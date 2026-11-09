@@ -1,9 +1,7 @@
 # `soil:unibus@0.1.0` — the Spore-facing bus edge
 
-Status: **contract, 2026-11-07.** `soil-wasi-host` implements `bus.publish` /
+Status: **wired, 2026-11-07.** `soil-wasi-host` implements `bus.publish` /
 `bus.poll` over `UnibusPublisher` and `UnibusBus`; `MemoryBus` backs tests.
-The adapter is implemented and tested in the Delta worktree; the WIT + `soil-abi`
-registration land here as the contract.
 
 ## What the contract is
 
@@ -28,16 +26,15 @@ interface bus {
   "all".
 - `producer` is presentation, not authorization. `fungos:http-context` and
   `soil:creds` carry the authenticated facts.
-- `receipt` has no `duplicate` flag. Unlike `fungos:events`, there is no
-  idempotency key on the WIT. Callers that need one dedupe on content
-  (Confluence does, on `provider` + `delivery_id`).
+- `receipt` has no `duplicate` flag and there is no idempotency key on the
+  WIT. Callers that need deduplication do so on content (Confluence does, on
+  `provider` + `delivery_id`).
 - `ttl_ms` is bounded by the host (`0` = default, 24h ceiling, else
   `invalid`). The Unibus SDK has no per-call TTL knob; the router enforces
   its freshness window.
 
-`fungos:events` stays: one-way publish with an explicit idempotency key and a
-`duplicate` receipt. `soil:unibus` is the poll/publish edge. Both may sit on
-the same session.
+`fungos:events` was removed. `soil:unibus` is the only publication surface:
+bounded poll/publish over the Unibus, not an intent/adapter split.
 
 ## Sparse hubs: pris, batty, studio, agora-one, titan
 
@@ -107,8 +104,7 @@ means "retained head", not index 0.
 - `destination` must be empty (fan-out fact, not addressed)
 - `poll` delegates so an observer Spore can share the host
 
-`soil-confluence serve-spore --transport bus` wires it; `--transport events`
-keeps the interim `fungos:events` Spore running.
+`soil-confluence serve-spore` wires it. There is no transport flag.
 
 ## Run
 

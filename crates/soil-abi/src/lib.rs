@@ -121,6 +121,18 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("http", &["fetch"])],
     },
     Contract {
+        file: "wit/soil-creds.wit",
+        source: include_str!("../../../wit/soil-creds.wit"),
+        package: "soil:creds@1.0.0",
+        interfaces: &[("creds", &["resolve", "sign", "verify"])],
+    },
+    Contract {
+        file: "wit/fungos-http-context.wit",
+        source: include_str!("../../../wit/fungos-http-context.wit"),
+        package: "fungos:http-context@0.1.0",
+        interfaces: &[("context", &["current"])],
+    },
+    Contract {
         file: "wit/soil-unibus.wit",
         source: include_str!("../../../wit/soil-unibus.wit"),
         package: "soil:unibus@0.1.0",

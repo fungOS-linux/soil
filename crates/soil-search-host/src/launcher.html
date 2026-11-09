@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Launcher</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d0f14;
+    --panel: #161a22;
+    --raised: #1e2430;
+    --line: #2a3241;
+    --text: #e6ebf5;
+    --muted: #8b96ab;
+    --accent: #7aa2ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(1200px 700px at 50% -10%, #1a2130 0%, var(--bg) 60%);
+    color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    display: grid;
+    place-items: start center;
+    padding: 8vh 0 6vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  .launcher {
+    width: min(860px, 94vw);
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.55), 0 2px 0 rgba(255,255,255,.03) inset;
+    overflow: hidden;
+    backdrop-filter: blur(18px);
+  }
+  .search {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .search svg { flex: none; opacity: .55; }
+  input[type=text] {
+    flex: 1; min-width: 0;
+    background: transparent; border: 0; outline: none;
+    color: var(--text); font-size: 20px; letter-spacing: -.01em;
+  }
+  input::placeholder { color: var(--muted); }
+  .scope {
+    flex: none;
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); border: 1px solid var(--line);
+    padding: 3px 7px; border-radius: 6px;
+  }
+  .avatar {
+    flex: none; width: 34px; height: 34px; border-radius: 50%;
+    border: 1px solid var(--line); cursor: pointer;
+    display: grid; place-items: center;
+    background: linear-gradient(150deg, hsl(220, 80%, 62%), hsl(268, 70%, 46%));
+    color: #fff; font-size: 12px; font-weight: 700; letter-spacing: .02em;
+    padding: 0;
+  }
+  .avatar:hover { box-shadow: 0 0 0 3px rgba(122,162,255,.18); }
+
+  /* At rest: a wall of tiles. */
+  .wall {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 4px;
+    padding: 14px;
+    max-height: 56vh;
+    overflow-y: auto;
+  }
+  .tile {
+    position: relative;
+    display: grid; justify-items: center; align-content: start; gap: 7px;
+    padding: 12px 6px 10px;
+    border: 1px solid transparent; border-radius: 12px;
+    background: transparent; color: var(--text); cursor: pointer;
+    font: inherit; text-align: center;
+  }
+  .tile:hover, .tile:focus-visible {
+    background: var(--raised); border-color: var(--line); outline: none;
+  }
+  .tile img {
+    width: 48px; height: 48px; display: block; border-radius: 11px;
+    box-shadow: 0 6px 16px rgba(0,0,0,.35);
+  }
+  .tile .mono {
+    width: 48px; height: 48px; border-radius: 12px; display: grid; place-items: center;
+    background: linear-gradient(180deg, #2b3444, #212836);
+    border: 1px solid var(--line); font-weight: 700;
+  }
+  .tile .name {
+    font-size: 12.5px; line-height: 1.25; max-width: 11ch;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tile .meta { font-size: 10.5px; color: var(--muted); }
+  .tile .pin {
+    position: absolute; top: 4px; right: 4px;
+    width: 16px; height: 16px; padding: 0; border-radius: 50%;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+    font-size: 9px; line-height: 1; cursor: pointer; opacity: 0;
+  }
+  .tile:hover .pin, .tile.pinned .pin { opacity: 1; }
+  .tile.pinned .pin { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+
+  /* On typing: a list, in match order. */
+  ul { list-style: none; margin: 0; padding: 6px; max-height: 52vh; overflow-y: auto; }
+  li {
+    display: grid; grid-template-columns: 34px 1fr auto; align-items: center;
+    gap: 12px; padding: 8px 12px; border-radius: 9px; cursor: default;
+  }
+  li.active { background: var(--raised); box-shadow: 0 0 0 1px var(--line) inset; }
+  .art { width: 34px; height: 34px; display: block; }
+  .art img { width: 34px; height: 34px; display: block; border-radius: 8px; }
+  .art .mono {
+    width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center;
+    background: linear-gradient(180deg, #2b3444, #212836);
+    border: 1px solid var(--line); font-size: 14px; font-weight: 650;
+  }
+  .title { font-weight: 550; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; }
+  .kind {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--muted); border: 1px solid var(--line);
+    padding: 3px 6px; border-radius: 5px; white-space: nowrap;
+  }
+  li.active .kind { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .empty { padding: 30px 18px 36px; text-align: center; color: var(--muted); }
+
+  footer {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 16px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 12px;
+    background: color-mix(in srgb, var(--panel) 60%, transparent);
+  }
+  kbd {
+    font: inherit; font-size: 11px; padding: 2px 6px; border-radius: 5px;
+    background: var(--raised); border: 1px solid var(--line); color: var(--text);
+  }
+  .spacer { margin-left: auto; }
+
+  /* Settings: the same page, one layer up. */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(6,8,12,.6);
+    display: grid; place-items: center; padding: 6vh 0;
+  }
+  .scrim[hidden] { display: none; }
+  .sheet {
+    width: min(440px, 92vw); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: 0 40px 90px rgba(0,0,0,.6); padding: 18px 18px 14px;
+  }
+  .sheet h2 { margin: 0 0 12px; font-size: 15px; letter-spacing: .01em; }
+  .field { display: grid; gap: 6px; margin-bottom: 12px; }
+  .field label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+  .field input {
+    background: var(--raised); border: 1px solid var(--line); border-radius: 8px;
+    color: var(--text); padding: 8px 10px; font: inherit;
+  }
+  .kinds { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+  .kinds label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
+  .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+  .actions button {
+    font: inherit; padding: 7px 14px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--raised); color: var(--text);
+  }
+  .actions .primary {
+    background: var(--accent); border-color: var(--accent); color: #0d0f14; font-weight: 650;
+  }
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 10px; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 6vh; transform: translateX(-50%);
+    background: var(--raised); border: 1px solid var(--line); color: var(--text);
+    padding: 9px 14px; border-radius: 9px; font-size: 13px;
+    opacity: 0; transition: opacity .18s ease; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <main class="launcher" role="dialog" aria-label="Launcher">
+    <div class="search">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+      <input id="q" type="text" autocomplete="off" spellcheck="false" placeholder="Search apps, files and spores" aria-label="Search">
+      <span class="scope" id="scope">home</span>
+      <button class="avatar" id="avatar" title="Settings" aria-label="Settings">Y</button>
+    </div>
+    <section class="wall" id="wall" aria-label="Common"></section>
+    <ul id="rows" role="listbox" aria-label="Results" hidden></ul>
+    <footer>
+      <span><kbd>enter</kbd> open</span>
+      <span><kbd>esc</kbd> home</span>
+      <span><kbd>cmd K</kbd> actions</span>
+      <span class="spacer" id="status">ready</span>
+    </footer>
+  </main>
+
+  <div class="scrim" id="scrim" hidden>
+    <form class="sheet" id="sheet">
+      <h2>Launcher</h2>
+      <div class="field">
+        <label for="name">Name</label>
+        <input id="name" type="text" maxlength="80" placeholder="You">
+      </div>
+      <div class="field">
+        <label for="avatarText">Avatar</label>
+        <input id="avatarText" type="text" maxlength="2" placeholder="one or two characters">
+      </div>
+      <div class="field">
+        <label>Hidden at rest</label>
+        <div class="kinds" id="kinds"></div>
+      </div>
+      <p class="hint">Click the dot on a tile to pin or unpin it. Pins stay in the order you set them.</p>
+      <div class="actions">
+        <button type="button" id="cancel">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </div>
+  <div class="toast" id="toast"></div>
+<script>
+const input = document.getElementById('q');
+const rows = document.getElementById('rows');
+const wall = document.getElementById('wall');
+const status = document.getElementById('status');
+const scope = document.getElementById('scope');
+const avatar = document.getElementById('avatar');
+const scrim = document.getElementById('scrim');
+const sheet = document.getElementById('sheet');
+const toast = document.getElementById('toast');
+const kindsBox = document.getElementById('kinds');
+
+const KIND_LABEL = {
+  application: 'App', file: 'File', 'record-entry': 'Record', repository: 'Repo',
+  spore: 'Spore', peer: 'Peer', service: 'Service', action: 'Action',
+  task: 'Task', principal: 'Person',
+};
+const ALL_KINDS = Object.keys(KIND_LABEL);
+
+let hits = [];
+let active = 0;
+let pins = [];
+let profile = { name: 'You', avatar: '' };
+
+function initials() {
+  if (profile.avatar) return profile.avatar;
+  const parts = (profile.name || 'You').trim().split(/\s+/);
+  return ((parts[0] || 'Y')[0] + (parts[1] ? parts[1][0] : '')).toUpperCase();
+}
+
+function paintProfile() {
+  avatar.textContent = initials();
+  document.getElementById('name').value = profile.name || '';
+  document.getElementById('avatarText').value = profile.avatar || '';
+}
+
+function showToast(text) {
+  toast.textContent = text;
+  toast.classList.add('show');
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => toast.classList.remove('show'), 1600);
+}
+
+function artOf(hit, size) {
+  const art = hit.art || {};
+  if (art.png || art.svg) {
+    return `<img src="${art.png || art.svg}" alt="" loading="lazy">`;
+  }
+  const mono = (hit.title[0] || '?').replace(/[<>&]/g, '');
+  return `<span class="mono">${mono}</span>`;
+}
+
+function metaOf(hit) {
+  const label = KIND_LABEL[hit.kind] || hit.kind;
+  if (hit.surfaces && hit.surfaces.length) return `${label} · ${hit.surfaces[0]}`;
+  return label;
+}
+
+function renderWall() {
+  wall.innerHTML = '';
+  if (!hits.length) {
+    wall.innerHTML = '<div class="empty" style="grid-column:1/-1">Nothing here yet. Open something and it lands here.</div>';
+    return;
+  }
+  hits.forEach((hit) => {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'tile' + (hit.pinned ? ' pinned' : '');
+    tile.innerHTML = `<span class="art">${artOf(hit)}</span>
+      <span class="name"></span><span class="meta"></span>
+      <span class="pin" title="Pin">●</span>`;
+    tile.querySelector('.name').textContent = hit.title;
+    tile.querySelector('.meta').textContent = metaOf(hit);
+    tile.addEventListener('click', (event) => {
+      if (event.target.classList.contains('pin')) return togglePin(hit);
+      open(hit);
+    });
+    wall.appendChild(tile);
+  });
+}
+
+function renderRows() {
+  rows.innerHTML = '';
+  if (!hits.length) {
+    rows.innerHTML = '<li class="empty" style="display:block">No matches</li>';
+    return;
+  }
+  hits.forEach((hit, index) => {
+    const li = document.createElement('li');
+    li.className = index === active ? 'active' : '';
+    li.innerHTML = `<span class="art">${artOf(hit)}</span>
+      <span><div class="title"></div><div class="sub"></div></span>
+      <span class="kind"></span>`;
+    li.querySelector('.title').textContent = hit.title;
+    li.querySelector('.sub').textContent = hit.subtitle || '';
+    li.querySelector('.kind').textContent = metaOf(hit);
+    li.addEventListener('mousemove', () => { if (active !== index) { active = index; renderRows(); } });
+    li.addEventListener('click', () => { active = index; open(hit); });
+    rows.appendChild(li);
+  });
+}
+
+async function refresh() {
+  const query = input.value.trim();
+  const atRest = query === '';
+  const url = atRest
+    ? '/api/tiles?limit=24'
+    : `/api/search?q=${encodeURIComponent(query)}&limit=12`;
+  const data = await (await fetch(url)).json();
+  hits = (atRest ? data.tiles : data.hits) || [];
+  profile = data.profile || profile;
+  active = 0;
+  wall.hidden = !atRest;
+  rows.hidden = atRest;
+  scope.textContent = atRest ? 'home' : 'all';
+  status.textContent = hits.length
+    ? `${hits.length} ${atRest ? 'tile' : 'result'}${hits.length === 1 ? '' : 's'}`
+    : 'nothing yet';
+  paintProfile();
+  atRest ? renderWall() : renderRows();
+}
+
+async function open(hit) {
+  const body = JSON.stringify({
+    id: hit.id, kind: hit.kind, title: hit.title,
+    subtitle: hit.subtitle, source: hit.source,
+  });
+  await fetch('/api/use', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+    .catch(() => {});
+  const via = hit.surfaces && hit.surfaces.length ? ` via ${hit.surfaces[0]}` : '';
+  showToast(`Open ${hit.title}${via}`);
+  if (input.value) { input.value = ''; }
+  refresh();
+}
+
+async function saveConfig() {
+  const hidden = Array.from(kindsBox.querySelectorAll('input:checked')).map((box) => box.value);
+  const body = JSON.stringify({ profile, pins, hidden_kinds: hidden });
+  const response = await fetch('/api/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+  });
+  if (!response.ok) { showToast('Could not save'); return; }
+  const saved = await response.json();
+  profile = saved.profile;
+  pins = saved.pins;
+  scrim.hidden = true;
+  refresh();
+}
+
+async function togglePin(hit) {
+  pins = pins.includes(hit.id) ? pins.filter((id) => id !== hit.id) : [...pins, hit.id];
+  const response = await fetch('/api/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile, pins, hidden_kinds: currentHidden() }),
+  });
+  if (!response.ok) { showToast('Could not change pins'); return; }
+  const saved = await response.json();
+  pins = saved.pins;
+  showToast(pins.includes(hit.id) ? `Pinned ${hit.title}` : `Unpinned ${hit.title}`);
+  refresh();
+}
+
+function currentHidden() {
+  return Array.from(kindsBox.querySelectorAll('input:checked')).map((box) => box.value);
+}
+
+async function openSettings() {
+  const config = await (await fetch('/api/config')).json();
+  profile = config.profile || profile;
+  pins = config.pins || [];
+  paintProfile();
+  kindsBox.innerHTML = '';
+  ALL_KINDS.forEach((kind) => {
+    const label = document.createElement('label');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = kind;
+    box.checked = (config.hidden_kinds || []).includes(kind);
+    label.appendChild(box);
+    label.appendChild(document.createTextNode(KIND_LABEL[kind]));
+    kindsBox.appendChild(label);
+  });
+  scrim.hidden = false;
+  document.getElementById('name').focus();
+}
+
+avatar.addEventListener('click', openSettings);
+document.getElementById('cancel').addEventListener('click', () => { scrim.hidden = true; });
+scrim.addEventListener('click', (event) => { if (event.target === scrim) scrim.hidden = true; });
+sheet.addEventListener('submit', (event) => {
+  event.preventDefault();
+  profile = {
+    name: document.getElementById('name').value.trim() || 'You',
+    avatar: document.getElementById('avatarText').value.trim(),
+  };
+  saveConfig();
+});
+
+input.addEventListener('input', refresh);
+input.addEventListener('keydown', (event) => {
+  if (event.key === 'ArrowDown' && !rows.hidden) { event.preventDefault(); active = Math.min(active + 1, hits.length - 1); renderRows(); }
+  if (event.key === 'ArrowUp' && !rows.hidden) { event.preventDefault(); active = Math.max(active - 1, 0); renderRows(); }
+  if (event.key === 'Enter') { event.preventDefault(); if (!rows.hidden) open(hits[active]); }
+  if (event.key === 'Escape') {
+    if (!scrim.hidden) { scrim.hidden = true; return; }
+    input.value = ''; refresh();
+  }
+  if (event.key === 'k' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); showToast('Action panel: open, copy, reveal, pin'); }
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !scrim.hidden) scrim.hidden = true;
+});
+
+refresh();
+input.focus();
+</script>
+</body>
+</html>
