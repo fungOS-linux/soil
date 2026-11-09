@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use fungos_vfs::{ContentId, Vfs};
+use fungos_vfs::{ApplyOutcome, ContentId, Expect, Vfs, pull_over_ssh};
 use rand::Rng;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use soil_records_host::{RecordsBookHost, records};
@@ -85,6 +85,19 @@ struct WorktreeState {
     base_tree: String,
     head_tree: String,
     updated_at_ms: u64,
+}
+
+/// Where a worktree stands on this device.
+#[derive(Debug, Serialize)]
+struct WorktreeStatus {
+    id: String,
+    path: String,
+    /// The tree this device last materialised.
+    local_head: String,
+    /// The tree the synced book points at, which may be newer.
+    ref_head: Option<String>,
+    /// Uncommitted ops in this store's log.
+    pending_ops: usize,
 }
 
 /// The worktree record as written before the split, when device state shared
@@ -436,6 +449,22 @@ impl State {
             .with_context(|| format!("worktree {id} not found"))
     }
 
+    fn status(&mut self, id: &str) -> Result<WorktreeStatus> {
+        let worktree = self.load_worktree(id)?;
+        let state = self.load_worktree_state(&worktree.id)?;
+        let ref_head = self
+            .get::<Ref>(&ref_record(&worktree.id, "head"))?
+            .map(|reference| reference.tree);
+        let pending_ops = self.vfs.pending(1000)?.len();
+        Ok(WorktreeStatus {
+            id: worktree.id,
+            path: state.path,
+            local_head: state.head_tree,
+            ref_head,
+            pending_ops,
+        })
+    }
+
     fn load_worktree_state(&mut self, id: &str) -> Result<WorktreeState> {
         self.get_local(&worktree_state_record(id))?
             .with_context(|| {
@@ -481,7 +510,8 @@ impl State {
             } else {
                 format!("{target}/{}", entry.path)
             };
-            self.vfs.put(&path, &bytes, &entry.media_type, None)?;
+            self.vfs
+                .put(&path, &bytes, &entry.media_type, Expect::Any)?;
             count += 1;
         }
         if let Some(worktree) = worktree {
@@ -629,6 +659,61 @@ fn run_worktree(state: &mut State, args: &mut Vec<String>) -> Result<()> {
             let left_tree = state.load_tree(&left_head)?;
             let right_tree = state.load_tree(&right_head)?;
             print_diff(&left_tree, &right_tree);
+            Ok(())
+        }
+        "status" => {
+            ensure_no_options(args)?;
+            ensure_arity(args, 1)?;
+            let status = state.status(&args[0])?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            if status.ref_head.as_deref() != Some(status.local_head.as_str()) {
+                // Not an error: the book may simply be ahead of this device.
+                eprintln!(
+                    "note: the book points at {} — this device has {}",
+                    status.ref_head.as_deref().unwrap_or("nothing"),
+                    status.local_head
+                );
+            }
+            Ok(())
+        }
+        "pull" => {
+            let from = take_option(args, "--from").ok_or_else(|| {
+                anyhow!("usage: mush worktree pull <id> --from <host> --remote-root <path>")
+            })?;
+            let remote_root = take_option(args, "--remote-root").ok_or_else(|| {
+                anyhow!("usage: mush worktree pull <id> --from <host> --remote-root <path>")
+            })?;
+            let remote_bin =
+                take_option(args, "--remote-bin").unwrap_or_else(|| "fungos-vfs".to_string());
+            ensure_no_options(args)?;
+            ensure_arity(args, 1)?;
+            // Fail before moving bytes if this device has never mounted the
+            // worktree: there would be nothing to reconcile against.
+            state.load_worktree_state(&args[0])?;
+            let outcomes = pull_over_ssh(&mut state.vfs, &from, &remote_root, &remote_bin, 500)?;
+            let mut applied = 0;
+            let mut duplicate = 0;
+            let mut diverged = 0;
+            for outcome in &outcomes {
+                match outcome {
+                    ApplyOutcome::Applied => applied += 1,
+                    ApplyOutcome::Duplicate => duplicate += 1,
+                    ApplyOutcome::Diverged => diverged += 1,
+                }
+            }
+            println!(
+                "{}",
+                serde_json::json!({
+                    "applied": applied,
+                    "duplicate": duplicate,
+                    "diverged": diverged,
+                })
+            );
+            if diverged > 0 {
+                // Fast-forward only in v0: a divergent op is never applied on
+                // top of local work, it is surfaced.
+                bail!("{diverged} op(s) diverged; this worktree needs reconciling");
+            }
             Ok(())
         }
         "schema" => {
@@ -795,6 +880,8 @@ fn worktree_help() -> Result<()> {
          mush worktree show <id>\n\
          mush worktree snapshot <id> [path]\n\
          mush worktree checkout <id> <target>\n\
+        mush worktree status <id>\n\
+        mush worktree pull <id> --from <host> --remote-root <path>\n\
          mush worktree diff <a> <b>\n\
          mush worktree schema"
     );
@@ -988,7 +1075,12 @@ mod tests {
         let (_dir, mut state) = state();
         state
             .vfs
-            .put("projects/demo/README.md", b"hello", "text/markdown", None)
+            .put(
+                "projects/demo/README.md",
+                b"hello",
+                "text/markdown",
+                Expect::Any,
+            )
             .unwrap();
         state
             .vfs
@@ -996,7 +1088,7 @@ mod tests {
                 "projects/demo/src/main.rs",
                 b"fn main() {}",
                 "text/x-rust",
-                None,
+                Expect::Any,
             )
             .unwrap();
 
@@ -1019,7 +1111,12 @@ mod tests {
         let (_dir, mut state) = state();
         state
             .vfs
-            .put("projects/demo/README.md", b"hello", "text/markdown", None)
+            .put(
+                "projects/demo/README.md",
+                b"hello",
+                "text/markdown",
+                Expect::Any,
+            )
             .unwrap();
         state
             .vfs
@@ -1027,7 +1124,7 @@ mod tests {
                 "projects/demo/src/main.rs",
                 b"fn main() {}",
                 "text/x-rust",
-                None,
+                Expect::Any,
             )
             .unwrap();
 
@@ -1045,7 +1142,7 @@ mod tests {
                 "projects/demo/src/main.rs",
                 b"fn main() { changed }",
                 "text/x-rust",
-                None,
+                Expect::Any,
             )
             .unwrap();
         state
@@ -1054,7 +1151,7 @@ mod tests {
                 "projects/demo/src/lib.rs",
                 b"pub fn lib() {}",
                 "text/x-rust",
-                None,
+                Expect::Any,
             )
             .unwrap();
         let updated = state.snapshot_worktree("wt_test", None).unwrap();

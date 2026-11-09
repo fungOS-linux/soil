@@ -14,7 +14,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use fungos_vfs::Vfs;
+use fungos_vfs::{Expect, Vfs};
 use ignore::WalkBuilder;
 use tempfile::TempDir;
 
@@ -132,7 +132,7 @@ impl Overlay {
                         .get(&change.path)
                         .with_context(|| format!("overlay lost {}", change.path))?;
                     let media = media_type(&change.path);
-                    vfs.put(&change.path, bytes, media, None)?;
+                    vfs.put(&change.path, bytes, media, Expect::Any)?;
                     written += 1;
                 }
                 ChangeKind::Deleted => {
@@ -286,10 +286,10 @@ mod tests {
         {
             let mut store = Vfs::open(vfs.path()).unwrap();
             store
-                .put("notes/a.txt", b"old", "text/plain", None)
+                .put("notes/a.txt", b"old", "text/plain", Expect::Any)
                 .unwrap();
             store
-                .put("notes/b.txt", b"remove me", "text/plain", None)
+                .put("notes/b.txt", b"remove me", "text/plain", Expect::Any)
                 .unwrap();
             store.mkdir("empty").unwrap();
         }
@@ -317,7 +317,7 @@ mod tests {
         {
             let mut store = Vfs::open(vfs.path()).unwrap();
             store
-                .put(".git/config", b"[core]\n", "text/plain", None)
+                .put(".git/config", b"[core]\n", "text/plain", Expect::Any)
                 .unwrap();
         }
         let overlay = Overlay::materialize(vfs.path()).unwrap();
@@ -342,17 +342,17 @@ mod tests {
         {
             let mut store = Vfs::open(vfs.path()).unwrap();
             store
-                .put(".gitignore", b"target/\n*.bin\n", "text/plain", None)
+                .put(".gitignore", b"target/\n*.bin\n", "text/plain", Expect::Any)
                 .unwrap();
             store
-                .put("src/lib.rs", b"old", "text/x-rust", None)
+                .put("src/lib.rs", b"old", "text/x-rust", Expect::Any)
                 .unwrap();
             store
                 .put(
                     "target/debug/app",
                     b"old binary",
                     "application/octet-stream",
-                    None,
+                    Expect::Any,
                 )
                 .unwrap();
         }

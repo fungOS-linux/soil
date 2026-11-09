@@ -15,7 +15,7 @@ fn wasm_spore_loads_mushrc_and_keeps_shell_state() {
             ".mushrc",
             b"export TERM=mush-test\nexport PS1=\"rc:\\w> \"\nmkdir notes\n",
             "text/plain",
-            None,
+            fungos_vfs::Expect::Any,
         )
         .unwrap();
     }
@@ -127,9 +127,20 @@ fn run_op_applies_overlay_and_respects_gitignore() {
     let dir = tempfile::tempdir().unwrap();
     {
         let mut vfs = Vfs::open(dir.path()).unwrap();
-        vfs.put(".gitignore", b"target/\n", "text/plain", None)
-            .unwrap();
-        vfs.put("src/main.rs", b"old", "text/x-rust", None).unwrap();
+        vfs.put(
+            ".gitignore",
+            b"target/\n",
+            "text/plain",
+            fungos_vfs::Expect::Any,
+        )
+        .unwrap();
+        vfs.put(
+            "src/main.rs",
+            b"old",
+            "text/x-rust",
+            fungos_vfs::Expect::Any,
+        )
+        .unwrap();
     }
     let script = dir.path().join("fake-operator.sh");
     std::fs::write(
