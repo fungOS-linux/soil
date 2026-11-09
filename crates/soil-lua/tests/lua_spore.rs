@@ -129,7 +129,13 @@ fn a_snapshot_reaches_the_view() {
             "ui/view.lua",
             r#"
 return { render = function(snapshot)
-  canvas.text { id = "label", text = snapshot.label, translation = { -3, 4 }, ink = "text" }
+  canvas.text {
+    id = "label",
+    text = snapshot.label,
+    translation = { -3, 4 },
+    scale = { 0.8, 0.8 },
+    ink = "text",
+  }
 end }
 "#,
         )],
@@ -146,6 +152,10 @@ end }
         Content::Text(text) => assert_eq!(text.text, "hi"),
         other => panic!("expected text, got {other:?}"),
     }
+    // The size is a ratio the renderer multiplies by its body size, so it has to
+    // survive the boundary: this is the value that was silently dropped, which
+    // made every label render at the host's default size.
+    assert_eq!(scene.nodes[0].transform.scale, [0.8, 0.8, 1.0]);
 }
 
 #[test]

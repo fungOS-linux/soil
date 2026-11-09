@@ -46,6 +46,10 @@ pub(crate) enum Prim {
         text: String,
         x: f32,
         y: f32,
+        /// Size relative to the host's body size. The ABI hands a view's chosen
+        /// pixel size over as a ratio, and the renderer multiplies it back by
+        /// `theme.body` — so passing it through is what makes a 13px label 13px.
+        scale: f32,
     },
 }
 
@@ -78,6 +82,7 @@ impl Prim {
             text: spec.get::<Option<String>>("text")?.unwrap_or_default(),
             x: coordinate(spec, "translation", 1)?,
             y: coordinate(spec, "translation", 2)?,
+            scale: coordinate_or(spec, "scale", 1, 1.0)?,
         })
     }
 
@@ -134,6 +139,7 @@ impl Prim {
                 text,
                 x,
                 y,
+                scale,
             } => {
                 let rgb = resolve(&id, ink.as_deref(), rgb, theme)?;
                 Ok(Node {
@@ -142,7 +148,9 @@ impl Prim {
                     transform: Transform {
                         translation: [x, y, 0.0],
                         rotation: [0.0; 3],
-                        scale: [1.0, 1.0, 1.0],
+                        // The size is a ratio, not the box size: text has no box
+                        // in the document, and the renderer owns the font.
+                        scale: [scale, scale, 1.0],
                     },
                     content: Content::Text(Text {
                         text,
@@ -278,9 +286,13 @@ fn identifier(spec: &Table) -> mlua::Result<String> {
 }
 
 fn coordinate(spec: &Table, key: &str, index: usize) -> mlua::Result<f32> {
+    coordinate_or(spec, key, index, 0.0)
+}
+
+fn coordinate_or(spec: &Table, key: &str, index: usize, fallback: f32) -> mlua::Result<f32> {
     match spec.get::<Option<Table>>(key)? {
         Some(pair) => pair.get::<f32>(index),
-        None => Ok(0.0),
+        None => Ok(fallback),
     }
 }
 
