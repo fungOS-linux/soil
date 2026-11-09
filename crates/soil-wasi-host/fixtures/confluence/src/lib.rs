@@ -59,9 +59,13 @@ fn receive(
 
     let path = request.path_with_query().unwrap_or_default();
     let path = path.split('?').next().unwrap_or_default();
-    let Some(provider) = path
+    // `/webhooks/<provider>` uses the deployment's single secret;
+    // `/webhooks/<provider>/<slug>` names one registered hook, and the slug is
+    // the credential name the host resolves. The path is the only thing that
+    // selects a secret, so adding a hook needs no restart and no new route.
+    let Some((provider, slug)) = path
         .strip_prefix("/webhooks/")
-        .filter(|provider| !provider.is_empty() && !provider.contains('/'))
+        .and_then(split_hook_path)
     else {
         return reply(response_out, 404, json_error(404), "");
     };
@@ -102,7 +106,7 @@ fn receive(
         body.as_slice(),
     ]
     .concat();
-    let Some(handle) = resolve_credential() else {
+    let Some(handle) = resolve_credential(slug) else {
         return reply(response_out, 503, json_error(503), "");
     };
     if !verify(&handle, &signable, &signature_header) {
@@ -169,8 +173,20 @@ fn read_body(request: &IncomingRequest) -> Result<Vec<u8>, u16> {
     Ok(data)
 }
 
-fn resolve_credential() -> Option<creds::Handle> {
-    creds::resolve(CREDENTIAL).ok()
+/// `provider` or `provider/slug`, with no further segments.
+fn split_hook_path(rest: &str) -> Option<(&str, &str)> {
+    let mut segments = rest.split('/');
+    let provider = segments.next().filter(|part| !part.is_empty())?;
+    let slug = match segments.next() {
+        Some(slug) if !slug.is_empty() => slug,
+        Some(_) => return None,
+        None => CREDENTIAL,
+    };
+    segments.next().is_none().then_some((provider, slug))
+}
+
+fn resolve_credential(name: &str) -> Option<creds::Handle> {
+    creds::resolve(name).ok()
 }
 
 fn verify(handle: &creds::Handle, message: &[u8], header: &str) -> bool {

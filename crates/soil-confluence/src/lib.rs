@@ -35,3 +35,5 @@ pub struct ConfluenceEvent {
 pub trait Publisher: Send + Sync {
     fn publish(&self, event: &ConfluenceEvent) -> anyhow::Result<String>;
 }
+
+pub mod webhooks;

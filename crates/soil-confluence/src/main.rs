@@ -8,9 +8,10 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use soil_confluence::spore::ConfluenceBus;
+use soil_confluence::webhooks::{Registry, Webhook};
 use soil_wasi_host::{
     GatewayRoute, HttpGatewayBuilder, HttpService, OriginAuth, StaticCredentials, UnibusBus,
     WasiHostBuilder, WasiHostPolicy,
@@ -30,6 +31,56 @@ struct Cli {
 enum Command {
     /// Run the Confluence Spore on the Soil HTTP surface.
     Spore(SporeArgs),
+    /// Create, list, and revoke webhook endpoints.
+    Webhook(WebhookArgs),
+}
+
+#[derive(Parser)]
+struct WebhookArgs {
+    #[command(subcommand)]
+    command: WebhookCommand,
+    /// Registry directory. One entry per hook, secrets beside them.
+    #[arg(
+        long,
+        env = "CONFLUENCE_REGISTRY",
+        default_value = ".confluence/webhooks"
+    )]
+    registry: PathBuf,
+    /// Base URL the endpoints are published under, for display only.
+    #[arg(long, default_value = "https://confluence.fpl.dev")]
+    base_url: String,
+}
+
+#[derive(Subcommand)]
+enum WebhookCommand {
+    /// Create a hook. The secret is printed once and never again.
+    Create {
+        /// Human name, e.g. `github avery/soil`.
+        #[arg(long)]
+        name: String,
+        /// Provider family, e.g. `github`.
+        #[arg(long, default_value = "github")]
+        provider: String,
+        /// Unibus tenant stamped on every event.
+        #[arg(long, default_value = "default")]
+        tenant: String,
+        /// Fixed path segment instead of a random one.
+        #[arg(long)]
+        slug: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List hooks. Secrets are never shown.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke a hook and delete its secret.
+    Revoke {
+        slug: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Parser)]
@@ -60,6 +111,11 @@ struct SporeArgs {
     credential_name: String,
     #[arg(long, env = "CONFLUENCE_WEBHOOK_SECRET")]
     webhook_secret: Option<String>,
+    /// Registry of webhooks to accept. Every entry's secret is loaded by slug,
+    /// so a hook created while the Spore is running needs a restart only to be
+    /// addressable by its own slug, never to be rotated.
+    #[arg(long)]
+    webhook_registry: Option<PathBuf>,
     #[arg(long, default_value_t = 64 * 1024)]
     max_body_bytes: usize,
     /// Address of a TLS terminator allowed to assert a verified client
@@ -82,12 +138,121 @@ async fn main() -> Result<()> {
         .init();
     match Cli::parse().command {
         Command::Spore(args) => serve_spore(args).await,
+        Command::Webhook(args) => run_webhook(args),
     }
 }
 
+fn run_webhook(args: WebhookArgs) -> Result<()> {
+    let registry = Registry::new(&args.registry);
+    match args.command {
+        WebhookCommand::Create {
+            name,
+            provider,
+            tenant,
+            slug,
+            json,
+        } => {
+            let created = registry.create(
+                &name,
+                &provider,
+                &tenant,
+                slug.as_deref(),
+                unix_millis(),
+            )?;
+            let url = endpoint(&args.base_url, &created.webhook);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "slug": created.webhook.slug,
+                        "name": created.webhook.name,
+                        "provider": created.webhook.provider,
+                        "tenant": created.webhook.tenant,
+                        "kind": created.webhook.kind,
+                        "url": url,
+                        "secret": created.secret,
+                    })
+                );
+            } else {
+                println!("url:    {url}");
+                println!("secret: {}", created.secret);
+                println!(
+                    "
+kind:   {} (tenant {})",
+                    created.webhook.kind, created.webhook.tenant
+                );
+                println!("\nThe secret is not stored anywhere else. Save it now.");
+            }
+        }
+        WebhookCommand::List { json } => {
+            let hooks = registry.list()?;
+            if json {
+                let rows: Vec<_> = hooks
+                    .iter()
+                    .map(|hook| {
+                        serde_json::json!({
+                            "slug": hook.slug,
+                            "name": hook.name,
+                            "provider": hook.provider,
+                            "tenant": hook.tenant,
+                            "kind": hook.kind,
+                            "url": endpoint(&args.base_url, hook),
+                            "created_at_ms": hook.created_at_ms,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::Value::Array(rows));
+            } else if hooks.is_empty() {
+                println!("no webhooks in {}", registry.dir().display());
+            } else {
+                for hook in hooks {
+                    println!(
+                        "{}  {}  {}",
+                        endpoint(&args.base_url, &hook),
+                        hook.name,
+                        hook.tenant
+                    );
+                }
+            }
+        }
+        WebhookCommand::Revoke { slug, json } => {
+            let removed = registry.revoke(&slug)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"slug": slug, "revoked": removed})
+                );
+            } else if removed {
+                println!("revoked {slug}");
+            } else {
+                println!("no webhook named {slug}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn endpoint(base_url: &str, webhook: &Webhook) -> String {
+    format!(
+        "{}/webhooks/{}/{}",
+        base_url.trim_end_matches('/'),
+        webhook.provider,
+        webhook.slug
+    )
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 async fn serve_spore(args: SporeArgs) -> Result<()> {
-    let secret = non_empty(args.webhook_secret)
-        .context("--webhook-secret or CONFLUENCE_WEBHOOK_SECRET is required")?;
+    ensure!(
+        args.webhook_registry.is_some() || non_empty(args.webhook_secret.clone()).is_some(),
+        "--webhook-registry, --webhook-secret, or CONFLUENCE_WEBHOOK_SECRET is required"
+    );
     let wasm = fs::read(&args.spore)
         .with_context(|| format!("read Spore component {}", args.spore.display()))?;
     let config = load_unibus_config(&args.unibus_config)?;
@@ -99,11 +264,19 @@ async fn serve_spore(args: SporeArgs) -> Result<()> {
     let bus = Arc::new(ConfluenceBus::new(args.tenant.clone(), inner));
 
     let mut credentials = StaticCredentials::new();
-    credentials.insert_hmac(
-        args.credential_name.clone(),
-        secret.into_bytes(),
-        "verify provider webhooks",
-    )?;
+    if let Some(secret) = non_empty(args.webhook_secret) {
+        credentials.insert_hmac(
+            args.credential_name.clone(),
+            secret.into_bytes(),
+            "verify provider webhooks",
+        )?;
+    }
+    if let Some(path) = &args.webhook_registry {
+        let registry = Registry::new(path);
+        for (slug, secret) in registry.secrets()? {
+            credentials.insert_hmac(slug, secret, "verify a registered webhook")?;
+        }
+    }
     let builder = WasiHostBuilder::new(WasiHostPolicy::default())
         .credential_provider(Arc::new(credentials))
         .bus(bus);
