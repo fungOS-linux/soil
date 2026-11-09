@@ -444,3 +444,16 @@ line-oriented; `soil:terminal` cell-grid rendering remains the next frontend.
 The host also owns command-package lookup. A command runs in a nested Wasmtime
 WASI instance with explicit args, piped stdin, the VFS cwd, no inherited host
 environment, and only the capabilities configured by the host.
+
+That boundary is what makes `mush` a safe execution layer and what stops it
+from replacing an agent's shell: there is no host process, no `PATH`, and no
+network. Measure the gap rather than assume it:
+
+```sh
+scripts/mush-agent-parity.sh
+```
+
+The probe runs the same command lines through the host shell and through Mush
+over equivalent content, and reports completions per class. It is only
+meaningful alongside honest exit statuses -- a shell that reports success for a
+command it could not run appears to pass every toolchain step.
