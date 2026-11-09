@@ -254,6 +254,14 @@ async function openTarget(name) {
       return;
     }
     const info = await response.json();
+    // One live session per target: the server reuses it, so drop any tab for the
+    // same target that was left behind by an earlier exit.
+    for (const [id, session] of sessions) {
+      if (session.target === info.target && id !== info.id) {
+        if (session.source) session.source.close();
+        sessions.delete(id);
+      }
+    }
     sessions.set(info.id, info);
     switchTo(info.id);
   } catch (error) {
@@ -485,6 +493,11 @@ async function boot() {
       const live = await (await fetch(api('/sessions'))).json();
       const found = (live.sessions || []).find((session) => String(session.id) === wanted);
       if (found) {
+        if (found.exited) {
+          // The URL points at a session that already ended; reopen its target.
+          openTarget(found.target);
+          return;
+        }
         sessions.set(found.id, found);
         switchTo(found.id);
         return;

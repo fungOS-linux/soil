@@ -150,6 +150,27 @@ struct Session {
 
 impl App {
     fn open(&self, target: &Target) -> Result<Arc<Session>> {
+        // A target has at most one live session: opening it again attaches. Mush
+        // takes a lock per desktop and a second instance exits 0 with no output,
+        // so a duplicate is not just wasteful, it looks like a crash.
+        if let Ok(mut sessions) = self.sessions.lock() {
+            if let Some(existing) = sessions
+                .values()
+                .find(|session| session.target == target.name && !session.pty.exited())
+            {
+                return Ok(Arc::clone(existing));
+            }
+            let stale: Vec<u64> = sessions
+                .values()
+                .filter(|session| session.target == target.name)
+                .map(|session| session.id)
+                .collect();
+            for id in stale {
+                if let Some(session) = sessions.remove(&id) {
+                    session.pty.kill();
+                }
+            }
+        }
         if let Some(program) = target.command.first()
             && !targets::program_exists(program)
         {
@@ -675,5 +696,30 @@ mod tests {
     fn command_and_ssh_cannot_be_combined() {
         let error = resolve_command(vec!["sh".into()], Some("pi"), &[]).unwrap_err();
         assert!(error.to_string().contains("mutually exclusive"), "{error}");
+    }
+
+    #[test]
+    fn a_live_session_is_reused_for_the_same_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App {
+            token: None,
+            paste: Paste::open(dir.path().to_path_buf()).unwrap(),
+            targets: Vec::new(),
+            sessions: Mutex::new(BTreeMap::new()),
+            next_id: AtomicU64::new(1),
+            cols: 40,
+            rows: 6,
+            scrollback: 100,
+        };
+        let target = Target {
+            name: "t".into(),
+            label: "t".into(),
+            kind: Kind::Shell,
+            detail: String::new(),
+            command: vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()],
+        };
+        let first = app.open(&target).unwrap();
+        let second = app.open(&target).unwrap();
+        assert_eq!(first.id, second.id);
     }
 }

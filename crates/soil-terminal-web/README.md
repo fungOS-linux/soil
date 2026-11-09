@@ -66,6 +66,11 @@ is how a virtual or shared desktop gets its own shell. The Mush Spore is
 embedded in the host binary; `wasm = "..."` is a development override, and a
 stale module fails its type check.
 
+A target has **at most one live session**: opening it again attaches to the one
+that is already running, and a session left behind by an exit is replaced. That
+is also what keeps Mush honest — it takes a lock per desktop and a second
+instance exits 0 without printing anything, which otherwise looks like a crash.
+
 Without a config file the catalog is discovered: the login shells that exist
 (`$SHELL`, zsh, bash, sh), the non-pattern `Host` aliases in `~/.ssh/config`,
 and `~/.config/fungos/desktops/*.toml` when a `mush` binary resolves
