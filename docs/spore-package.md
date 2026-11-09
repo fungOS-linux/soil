@@ -64,6 +64,33 @@ Validation is strict because a package is executable content:
   reason. A grant is reviewed with the pull request.
 - Asset media types must be real `type/subtype` strings.
 
+## Skills
+
+A Spore can ship the agent skill that teaches an agent to use it. Declare each
+`SKILL.md` by path, the same way an asset is declared, so the lock and the tar
+cover it:
+
+```toml
+[[skills]]
+name = "bob"
+path = "skills/bob/SKILL.md"
+```
+
+`name` must match the frontmatter and the directory the file lives in:
+
+```markdown
+---
+name: bob
+description: Use when a build must not land on this machine.
+---
+```
+
+`soil-spore` rejects a declared skill that is missing, has no `---` frontmatter,
+carries a `name` different from the declaration, lives in a directory of another
+name, or has an empty description. A man page describes a command to a human; a
+skill is how an agent learns when to reach for it. Both belong to the package,
+and the skill is the one the registry installs.
+
 ## Lock
 
 `spore.lock` is the package identity. It lists every file except
