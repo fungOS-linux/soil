@@ -809,7 +809,9 @@ fn usage() -> String {
          \x20 --records-book BOOK        records book, e.g. personal/avery/marbles\n\
          \x20 --records-collection NAME  records collection name\n\
          \x20 --principal ID             signed principal label for this session\n\
-         \x20 --socket PATH              Unix socket for --serve\n\
+         \x20 --socket PATH              Unix socket for --serve (default: per-root under ~/.local/share/fungos/mush/run)\n\
+         \x20 --idle-timeout SECONDS     stop an idle daemon after this long (default 1800)\n\
+         \x20 --no-daemon               run a one-shot command in-process instead of forwarding\n\
          \x20 --config PATH              config file (default: ~/.config/fungos/mush/config.toml)\n\
          \x20 --term TERM                terminal type passed to the Spore\n\
          \x20 --command LINE             execute one or more command lines\n\
@@ -817,6 +819,8 @@ fn usage() -> String {
          \x20 --timeout SECONDS          interrupt a command after this long (0 disables)\n\
          \x20 --background-after SECONDS hand the caller a job id after this long (0 disables)\n\
          \x20 --foreground               allow a server subcommand to take the terminal\n\n\
+         A one-shot command forwards to a daemon for its VFS root, starting one if\n\
+         none is listening; the daemon compiles the Spore once instead of per call.\n\
          A non-interactive command runs with a {}s deadline unless --timeout says otherwise.\n\
          A daemon call that outlives its background threshold keeps running and returns a job id.\n\
          Servers refuse to start without --foreground when stdin is not a terminal.\n",

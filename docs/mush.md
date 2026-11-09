@@ -183,6 +183,27 @@ mush request --json 'pwd'
 status. `--json` returns the full service envelope, including `status`, `exit`
 and `output`.
 
+### One-shot commands use it automatically
+
+Compiling the Spore costs about 13 seconds of CPU. Paying that for a single
+`pwd` is what makes `mush sh -c` unusable as an agent's shell, so a one-shot
+command (`sh -c`, `--command`) forwards to a daemon for its VFS root instead:
+
+```sh
+mush --desktop personal sh -c 'pwd'   # 11s: starts the daemon, compiles once
+mush --desktop personal sh -c 'pwd'   # 25ms
+```
+
+- The socket is per VFS root, under `~/.local/share/fungos/mush/run/`, so two
+  Desktops never share a command engine. `--socket` overrides the path.
+- The daemon detaches into its own process group, so the terminal that started
+  it can hang up without taking it down.
+- It stops after 30 minutes idle (`--idle-timeout`) and removes its socket.
+- The caller's `--timeout` becomes the daemon's background threshold: a command
+  you would wait 15 minutes for is not handed back as a job id after 60s.
+- `--no-daemon` (or `MUSH_NO_DAEMON=1`) runs in-process. Tests use it, because
+  a daemon started by a test outlives the test and holds the records store.
+
 For Operator, use the MCP endpoint:
 
 ```sh
