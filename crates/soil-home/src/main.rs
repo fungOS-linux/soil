@@ -263,25 +263,123 @@ fn default_source() -> Source {
     Source::default()
 }
 
+/// The machine's own numbers. Absent fields are simply not shown: a desktop
+/// has no battery, and a sandbox may have no `sysctl`.
+#[derive(Debug, Clone, Default)]
+struct System {
+    host: Option<String>,
+    load: Option<String>,
+    memory: Option<String>,
+    disk: Option<String>,
+    battery: Option<String>,
+}
+
 #[derive(Default)]
 struct Cache {
     at: Option<Instant>,
     state: StoreState,
+    system: System,
 }
 
-/// The store's snapshot, cached briefly: a page load should not wait on a
-/// service that is not answering, and three seconds of staleness is invisible.
-fn store_state(cache: &Mutex<Cache>) -> StoreState {
-    let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
-    if let Some(at) = cache.at
-        && at.elapsed() < STORE_TTL
-    {
-        return cache.state.clone();
+impl Cache {
+    fn take(&mut self) -> (StoreState, System) {
+        if let Some(at) = self.at
+            && at.elapsed() < STORE_TTL
+        {
+            return (self.state.clone(), self.system.clone());
+        }
+        self.state = fetch_store();
+        self.system = read_system();
+        self.at = Some(Instant::now());
+        (self.state.clone(), self.system.clone())
     }
-    let state = fetch_store();
-    cache.at = Some(Instant::now());
-    cache.state = state.clone();
-    state
+}
+
+fn read_system() -> System {
+    System {
+        host: command("hostname", &[])
+            .map(|host| host.split('.').next().unwrap_or(&host).to_owned()),
+        load: command("sysctl", &["-n", "vm.loadavg"]).and_then(|load| parse_load(&load)),
+        memory: read_memory(),
+        disk: command("df", &["-k", "/"]).and_then(|df| parse_disk(&df)),
+        battery: command("pmset", &["-g", "batt"]).and_then(|battery| parse_battery(&battery)),
+    }
+}
+
+fn command(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn parse_load(source: &str) -> Option<String> {
+    let values: Vec<String> = source
+        .trim_matches(|c: char| !c.is_ascii_digit() && c != '.')
+        .split_whitespace()
+        .take(3)
+        .filter_map(|value| value.parse::<f64>().ok())
+        .map(|value| format!("{value:.0}"))
+        .collect();
+    (values.len() == 3).then(|| values.join(" · "))
+}
+
+fn read_memory() -> Option<String> {
+    let total = command("sysctl", &["-n", "hw.memsize"])?
+        .parse::<u64>()
+        .ok()?;
+    let stats = command("vm_stat", &[])?;
+    let page = stats
+        .lines()
+        .next()
+        .and_then(|line| line.split("page size of ").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|size| size.parse::<u64>().ok())
+        .unwrap_or(16_384);
+    // Free pages alone undersell a Mac: inactive and speculative pages are
+    // reclaimable, and reporting them as used looks like a memory leak.
+    let mut available = 0u64;
+    for label in ["Pages free", "Pages inactive", "Pages speculative"] {
+        if let Some(value) = stats
+            .lines()
+            .find(|line| line.starts_with(label))
+            .and_then(|line| line.split(':').nth(1))
+            .and_then(|value| value.trim().trim_end_matches('.').parse::<u64>().ok())
+        {
+            available += value;
+        }
+    }
+    Some(format!(
+        "{} / {} GB",
+        available.saturating_mul(page) / 1_073_741_824,
+        total / 1_073_741_824
+    ))
+}
+
+fn parse_disk(source: &str) -> Option<String> {
+    let line = source.lines().nth(1)?;
+    let columns: Vec<&str> = line.split_whitespace().collect();
+    let free = columns.get(3)?.parse::<u64>().ok()?;
+    Some(format!("{} GB", free / 1_048_576))
+}
+
+fn parse_battery(source: &str) -> Option<String> {
+    if !source.contains("InternalBattery") {
+        return None;
+    }
+    let percent = source.split_whitespace().find(|word| word.ends_with('%'))?;
+    let state = if source.contains("charging") {
+        "charging"
+    } else if source.contains("discharging") {
+        "on battery"
+    } else {
+        "plugged in"
+    };
+    Some(format!("{percent} {state}"))
 }
 
 fn fetch_store() -> StoreState {
@@ -444,11 +542,14 @@ fn answer(
         },
         ("GET", "/") => match read_routes(routes_path) {
             Ok(routes) => {
-                let store = store_state(cache);
+                let (store, system) = cache
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .take();
                 (
                     "200 OK",
                     HTML,
-                    page(&routes, &store, wallpaper, icons).into_bytes(),
+                    page(&routes, &store, &system, wallpaper, icons).into_bytes(),
                 )
             }
             Err(error) => (
@@ -591,6 +692,39 @@ fn glyph(name: &str) -> &'static str {
         }
         "home" => r#"<path d="M3 11 12 3l9 8"/><path d="M5 10v10h14V10"/>"#,
         "mush" => r#"<path d="M4 14a8 8 0 0 1 16 0z"/><path d="M12 14v6"/>"#,
+        "chrome" | "spore-browser" => {
+            r#"<circle cx="12" cy="12" r="9"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M12 3a15 15 0 0 1 0 18"/><path d="M12 3a15 15 0 0 0 0 18"/>"#
+        }
+        "contacts" => {
+            r#"<circle cx="9" cy="8" r="3.4"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 8a3 3 0 1 1 0 6"/><path d="M17.5 20a6 6 0 0 0-2-4.5"/>"#
+        }
+        "crm" => {
+            r#"<rect x="3" y="4" width="5" height="16" rx="1.2"/><rect x="10" y="4" width="5" height="10" rx="1.2"/><rect x="17" y="4" width="4" height="13" rx="1.2"/>"#
+        }
+        "dfm" | "dfm-report" => {
+            r#"<path d="M4 20V4"/><path d="M4 20h16"/><path d="M8 16v-4"/><path d="M13 16V8"/><path d="M18 16v-6"/>"#
+        }
+        "gallery" => {
+            r#"<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="m3 17 5-4 4 3 3-2 6 5"/>"#
+        }
+        "git" => {
+            r#"<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="9" r="2.4"/><path d="M6 8.4v7.2"/><path d="M18 11.4c0 4-4 3.1-6 4.6"/>"#
+        }
+        "inbox" => r#"<path d="M3 12h5l2 3h4l2-3h5"/><path d="M5 4h14l2 8v8H3v-8z"/>"#,
+        "media-probe" => r#"<path d="M3 12h3l2-5 3 10 3-14 3 16 2-7h2"/>"#,
+        "notify" => {
+            r#"<path d="M6 16V9a6 6 0 0 1 12 0v7l2 3H4z"/><path d="M10 21a2 2 0 0 0 4 0"/>"#
+        }
+        "search" => r#"<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>"#,
+        "consent" => {
+            r#"<path d="M12 3 4 6v6c0 4.5 3.4 8 8 9 4.6-1 8-4.5 8-9V6z"/><path d="m8.5 12 2.5 2.5 4.5-5"/>"#
+        }
+        "surface-probe" => {
+            r#"<path d="M4 8V4h4"/><path d="M16 4h4v4"/><path d="M20 16v4h-4"/><path d="M8 20H4v-4"/><circle cx="12" cy="12" r="2.6"/>"#
+        }
+        "rooms" => {
+            r#"<rect x="3" y="4" width="8" height="7" rx="1.4"/><rect x="13" y="4" width="8" height="7" rx="1.4"/><rect x="3" y="13" width="8" height="7" rx="1.4"/><rect x="13" y="13" width="8" height="7" rx="1.4"/>"#
+        }
         _ => {
             r#"<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>"#
         }
@@ -600,6 +734,7 @@ fn glyph(name: &str) -> &'static str {
 fn page(
     routes: &[Route],
     store: &StoreState,
+    system: &System,
     wallpaper: Option<&Path>,
     icons: Option<&Path>,
 ) -> String {
@@ -689,6 +824,48 @@ fn page(
         if route.dock {
             docked.push_str(&tile);
         }
+    }
+    let mut served: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for route in routes {
+        if let Some(app) = mark(route, &store.apps) {
+            served.insert(app.id.as_str());
+        }
+    }
+    for app in &store.apps {
+        if served.contains(app.id.as_str()) {
+            continue;
+        }
+        let name = if app.name.is_empty() {
+            app.id.rsplit('.').next().unwrap_or(&app.id).to_owned()
+        } else {
+            app.name.clone()
+        };
+        let color = app.color.clone().unwrap_or_else(|| hashed_color(&name));
+        let sub = app.category.clone().unwrap_or_else(|| "Spore".to_owned());
+        let description = app
+            .summary
+            .clone()
+            .filter(|summary| !summary.is_empty())
+            .unwrap_or_else(|| "Listed in the store".to_owned());
+        let version = app
+            .version
+            .clone()
+            .filter(|version| !version.is_empty())
+            .map(|version| format!(" · v{version}"))
+            .unwrap_or_default();
+        let short = app.id.rsplit('.').next().unwrap_or(&app.id);
+        let needle = format!("{} {} {}", name, short, sub).to_lowercase();
+        tiles.push_str(&format!(
+            r#"<a class="app" href="https://store.myc/spore/{id}" data-search="{needle}" title="{name} · in the store"><span class="peek"><span class="peek-name">{name}</span><span class="peek-host">store.myc{version}</span><span class="peek-meta"><span class="dot gateway"></span>in the store</span><span class="peek-desc">{description}</span></span><span class="icon" style="--c:{color}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">{glyph}</svg><span class="dot gateway"></span></span><span class="label">{name}</span><span class="sub">{sub}</span></a>"#,
+            id = escape(&app.id),
+            needle = escape(&needle),
+            name = escape(&name),
+            color = escape(&color),
+            sub = escape(&sub),
+            version = escape(&version),
+            description = escape(&description),
+            glyph = glyph(short),
+        ));
     }
     if tiles.is_empty() {
         tiles.push_str("<p class=\"empty\">No apps are configured yet.</p>");
@@ -791,8 +968,31 @@ fn page(
         catalog.push_str("<li class=\"muted\">no categories</li>");
     }
 
+    let mut metrics = String::new();
+    for (label, value) in [
+        ("load", system.load.as_deref()),
+        ("memory", system.memory.as_deref()),
+        ("disk", system.disk.as_deref()),
+        ("battery", system.battery.as_deref()),
+    ] {
+        if let Some(value) = value {
+            metrics.push_str(&format!(
+                "<li><span>{label}</span><span>{}</span></li>",
+                escape(value)
+            ));
+        }
+    }
+    if metrics.is_empty() {
+        metrics.push_str("<li class=\"muted\"><span>no metrics</span></li>");
+    }
+    let who = system
+        .host
+        .as_deref()
+        .map(escape)
+        .unwrap_or_else(|| "fungOS".to_owned());
+
     let body = format!(
-        r#"<header class="bar"><div class="when"><span id="clock">--:--</span><span id="day">—</span></div><div class="who">fungOS</div><div class="find"><input id="search" type="search" placeholder="Search apps" autocomplete="off"></div></header><main><section class="widgets"><article class="widget"><span class="key">Today</span><p class="big" id="today">—</p><p class="muted" id="today-date"></p><p class="muted" id="today-year"></p></article><article class="widget"><span class="key">This machine</span><p class="big">{up}<span class="muted"> / {count} up</span></p><p class="muted">{median}</p><p class="muted">{down_list}</p></article><article class="widget"><span class="key">Store</span><p class="big">{spores}<span class="muted"> Spores</span></p><p class="muted">{source} · {current} current · {yanked} yanked</p><p class="classes">{classes}</p>{pending_block}<p class="muted"><a class="link" href="https://store.myc/updates">{store_link}</a></p></article><article class="widget"><span class="key">Catalog</span><ul class="rows">{catalog}</ul></article></section><section class="content"><section class="grid" id="grid">{tiles}</section><aside class="rail"><h2>Services</h2><ul class="services">{services}</ul></aside></section><p class="empty" id="none" hidden>Nothing matches that name.</p></main><footer class="dock"><div class="dock-inner">{docked}</div></footer><script>{script}</script>"#,
+        r#"<header class="bar"><div class="when"><span id="clock">--:--</span><span id="day">—</span></div><div class="who">{who}</div><div class="find"><input id="search" type="search" placeholder="Search apps" autocomplete="off"></div></header><main><section class="widgets"><article class="widget"><span class="key">Today</span><p class="big" id="today">—</p><p class="muted" id="today-date"></p><p class="muted" id="today-year"></p></article><article class="widget"><span class="key">This machine</span><p class="big">{up}<span class="muted"> / {count} up</span></p><p class="muted">{median}</p><p class="muted">{down_list}</p></article><article class="widget"><span class="key">Store</span><p class="big">{spores}<span class="muted"> Spores</span></p><p class="muted">{source} · {current} current · {yanked} yanked</p><p class="classes">{classes}</p>{pending_block}<p class="key inline-key">Catalog</p><ul class="rows">{catalog}</ul><p class="muted"><a class="link" href="https://store.myc/updates">{store_link}</a></p></article><article class="widget"><span class="key">System</span><ul class="rows">{metrics}</ul></article></section><section class="content"><section class="grid" id="grid">{tiles}</section><aside class="rail"><h2>Services</h2><ul class="services">{services}</ul></aside></section><p class="empty" id="none" hidden>Nothing matches that name.</p></main><footer class="dock"><div class="dock-inner">{docked}</div></footer><script>{script}</script>"#,
         up = up,
         count = routes.len(),
         median = median,
@@ -805,6 +1005,8 @@ fn page(
         pending_block = pending_block,
         store_link = store_link,
         catalog = catalog,
+        metrics = metrics,
+        who = who,
         tiles = tiles,
         services = services,
         docked = docked,
@@ -903,11 +1105,12 @@ a { color: inherit; text-decoration: none; }
 .who { font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; font-size: 11px; }
 .find input { width: 240px; padding: 8px 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.16); background: rgba(18,22,34,0.55); color: var(--ink); font: inherit; font-size: 13px; outline: none; backdrop-filter: blur(14px); }
 .find input:focus { border-color: rgba(255,255,255,0.38); background: rgba(24,30,46,0.72); }
-main { flex: 1; padding: 18px 32px 150px; max-width: 1120px; width: 100%; margin: 0 auto; }
-.widgets { display: grid; grid-template-columns: repeat(auto-fit, minmax(228px, 1fr)); gap: 14px; margin-bottom: 34px; }
-.widget { padding: 16px 18px; border-radius: 22px; border: 1px solid rgba(255,255,255,0.1); background: rgba(18,22,34,0.5); backdrop-filter: blur(18px); box-shadow: 0 18px 40px rgba(0,0,0,0.28); }
+main { flex: 1; padding: 18px 32px 120px; max-width: 1120px; width: 100%; margin: 0 auto; }
+.widgets { display: grid; grid-template-columns: repeat(auto-fit, minmax(196px, 1fr)); gap: 12px; margin-bottom: 26px; }
+.widget { padding: 14px 16px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.1); background: rgba(18,22,34,0.5); backdrop-filter: blur(18px); box-shadow: 0 18px 40px rgba(0,0,0,0.28); }
+.key.inline-key { margin-top: 10px; }
 .key { display: block; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
-.big { margin: 6px 0 2px; font-size: 30px; font-weight: 600; letter-spacing: -0.02em; }
+.big { margin: 5px 0 2px; font-size: 27px; font-weight: 600; letter-spacing: -0.02em; }
 .muted { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
 .link { color: #9db4ff; }
 .classes { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
@@ -917,26 +1120,26 @@ main { flex: 1; padding: 18px 32px 150px; max-width: 1120px; width: 100%; margin
 .chip.consent { background: #2a2618; color: #f2c14e; }
 .chip.system { background: #2d1a1c; color: #f08a8a; }
 .chip.hold { background: #232733; color: #9aa3b2; }
-.rows { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.rows { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 5px; font-size: 12.5px; color: var(--muted); }
 .rows li { display: flex; justify-content: space-between; gap: 10px; }
 .rows li span:last-child { color: var(--ink); font-variant-numeric: tabular-nums; }
 .content { display: grid; grid-template-columns: minmax(0, 1fr) 264px; gap: 22px; align-items: start; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, 128px); justify-content: center; gap: 34px 6px; justify-items: center; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, 108px); justify-content: center; gap: 22px 6px; justify-items: center; }
 .rail { padding: 16px 18px; border-radius: 22px; border: 1px solid rgba(255,255,255,0.1); background: rgba(18,22,34,0.5); backdrop-filter: blur(18px); box-shadow: 0 18px 40px rgba(0,0,0,0.28); position: sticky; top: 16px; }
 .rail h2 { margin: 0 0 12px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 .services { list-style: none; margin: 0; padding: 0; display: grid; gap: 11px; }
 .services li { display: grid; grid-template-columns: 9px 1fr auto; align-items: center; gap: 10px; font-size: 13px; }
 .svc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .svc-meta { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-.app { position: relative; display: flex; flex-direction: column; align-items: center; gap: 9px; width: 116px; outline: none; }
+.app { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; width: 104px; outline: none; }
 .app[hidden] { display: none; }
 .app:focus-visible .icon { box-shadow: 0 0 0 3px rgba(139,157,255,0.75), 0 14px 30px rgba(0,0,0,0.4); }
-.icon { position: relative; width: 94px; height: 94px; border-radius: 24px; display: grid; place-items: center; filter: saturate(1.06); background: linear-gradient(165deg, color-mix(in oklab, var(--c), white 13%), var(--c) 52%, color-mix(in oklab, var(--c), black 27%)); box-shadow: inset 0 1px 0 rgba(255,255,255,0.34), inset 0 -1px 0 rgba(0,0,0,0.18), 0 14px 30px rgba(0,0,0,0.4); transition: transform 120ms ease; }
+.icon { position: relative; width: 78px; height: 78px; border-radius: 20px; display: grid; place-items: center; filter: saturate(1.06); background: linear-gradient(165deg, color-mix(in oklab, var(--c), white 13%), var(--c) 52%, color-mix(in oklab, var(--c), black 27%)); box-shadow: inset 0 1px 0 rgba(255,255,255,0.34), inset 0 -1px 0 rgba(0,0,0,0.18), 0 14px 30px rgba(0,0,0,0.4); transition: transform 120ms ease; }
 .app:hover .icon, .app:focus-visible .icon { transform: translateY(-2px) scale(1.03); }
 .icon svg { width: 56%; height: 56%; color: rgba(255,255,255,0.96); }
 .icon img.art { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
 .sub { font-size: 10.5px; color: rgba(244,246,251,0.6); text-shadow: 0 1px 3px rgba(0,0,0,0.6); }
-.label { font-size: 13px; color: rgba(244,246,251,0.95); text-shadow: 0 1px 4px rgba(0,0,0,0.6); max-width: 116px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.label { font-size: 12.5px; color: rgba(244,246,251,0.95); text-shadow: 0 1px 4px rgba(0,0,0,0.6); max-width: 104px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .peek { position: absolute; left: 50%; bottom: calc(100% + 10px); width: 230px; transform: translate(-50%, 6px); padding: 12px 14px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.14); background: rgba(16,20,31,0.92); backdrop-filter: blur(18px); box-shadow: 0 20px 44px rgba(0,0,0,0.45); text-align: left; opacity: 0; pointer-events: none; transition: opacity 120ms ease, transform 120ms ease; z-index: 6; }
 .app:hover .peek, .app:focus-visible .peek { opacity: 1; transform: translate(-50%, 0); }
 .peek-name { display: block; font-size: 13px; font-weight: 600; }
@@ -1018,7 +1221,13 @@ mod tests {
         let parsed = routes(
             r#"{"routes":[{"name":"store","hosts":["store.myc"],"upstream":"http://127.0.0.1:1"},{"name":"psst","hosts":["psst.myc"]}]}"#,
         );
-        let page = page(&parsed, &StoreState::default(), None, None);
+        let page = page(
+            &parsed,
+            &StoreState::default(),
+            &System::default(),
+            None,
+            None,
+        );
         let store = page.find("href=\"https://store.myc/\"").unwrap();
         let psst = page.find("href=\"https://psst.myc/\"").unwrap();
         assert!(store < psst, "the routes file decides the order");
@@ -1038,7 +1247,7 @@ mod tests {
             }],
             ..StoreState::default()
         };
-        let page = page(&parsed, &store, None, None);
+        let page = page(&parsed, &store, &System::default(), None, None);
         assert!(page.contains("--c:#8bd5ca"));
         assert!(page.contains(">terminal</span>"));
         assert!(page.contains("A shell in the browser"));
