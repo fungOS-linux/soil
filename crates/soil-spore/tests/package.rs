@@ -260,6 +260,20 @@ fn a_package_ships_only_what_it_declares() {
 }
 
 #[test]
+fn a_composition_needs_no_module() {
+    let source = MANIFEST.replace("[module]\npath = \"module.wasm\"\n\n", "");
+    let manifest = Manifest::parse(&source).expect("a view is still a Spore");
+    assert!(manifest.module.is_none());
+    assert_eq!(
+        manifest.declared_paths(),
+        vec![
+            PathBuf::from("ui/editor.lua"),
+            PathBuf::from("assets/site-map.png")
+        ]
+    );
+}
+
+#[test]
 fn store_artwork_is_a_cid_and_never_a_path() {
     let with = |extra: &str| MANIFEST.replace("[engine]", &format!("{extra}\n[engine]"));
     let icon = |value: &str| {

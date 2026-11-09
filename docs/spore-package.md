@@ -1,8 +1,10 @@
 # Spore packages
 
-A Spore is a module (WASM), a UI (Lua), and a manifest that names every asset
-and grant. `soil-spore` builds and verifies the package. It does not publish,
-host, or resolve anything.
+A Spore is a manifest plus a Lua UI, and optionally a module (WASM) that owns
+semantics the view cannot: a composition such as chrome or the storefront ships
+no module, and therefore cannot call a host capability at all. `soil-spore`
+builds and verifies the package. It does not publish, host, or resolve
+anything.
 
 ```text
 markdown/
@@ -69,6 +71,9 @@ hot_reload = true
 [launch]
 default = "canvas"
 surfaces = ["web", "native", "canvas"]
+# Optional: the composed Lua Canvas opens, when the launcher starts a view
+# rather than the module. Composition writes it into the runtime modules dir.
+# canvas_module = "spore-dev-inbox"
 
 [grants]
 "soil:canvas" = "present the reader/editor surface"
@@ -107,8 +112,10 @@ content-addressed references — see `docs/spore-store.md`.
 Validation is strict because a package is executable content:
 
 - `id` is a stable reverse-DNS identifier; `version` is semver-ish.
-- Every path is relative, has no `..`, no backslash, no control characters, and
+- every path is relative, has no `..`, no backslash, no control characters, and
   no symlink. `module.wasm` must end in `.wasm`; the UI entry in `.lua`.
+- a Spore may omit `[module]`. What remains is a view: `ui.entry` is required,
+  and without a module there is nothing that can call a grant.
 - `launch.surfaces` is a subset of `web`, `native`, `canvas`; the default is one
   of them.
 - Grant keys are `soil:`, `wasi:`, or `fungos:` capabilities with a written
@@ -119,6 +126,9 @@ Validation is strict because a package is executable content:
 - `catalog.categories` uses the fixed vocabulary; keywords are lowercase, at
   most 12; screenshots are `ipfs://` references with alt text, at most 10.
   `presentation.icon` and `catalog.record` are the same kind of reference.
+- `[[actions]]` declares what the Spore offers to the action bus. Each needs an
+  identifier, a title, an input schema, and capabilities that actually parse as
+  `soil:`/`wasi:`/`fungos:`.
 
 ## Lock
 

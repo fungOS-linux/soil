@@ -88,8 +88,9 @@ pub struct Manifest {
     pub schema: u32,
     pub spore: SporeMeta,
     pub engine: Engine,
-    /// Absent for a Spore with no semantics of its own -- chrome, for instance:
-    /// a dock is a composition, not a program.
+    /// Absent for a Spore that is a composition rather than a program: chrome,
+    /// the gallery, the storefront. `ui.entry` is then the whole of it, and any
+    /// host capability it might want arrives with a module later.
     #[serde(default)]
     pub module: Option<Module>,
     pub ui: Ui,
@@ -118,6 +119,28 @@ pub struct Manifest {
     /// carries the reference, never the bytes.
     #[serde(default)]
     pub catalog: Option<Catalog>,
+    /// Declared actions: what this Spore offers to the action bus. A view that
+    /// could perform an effect is a second authority; an action is the one
+    /// place a capability is named, reviewed and routed.
+    #[serde(default)]
+    pub actions: Vec<Action>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Action {
+    pub id: String,
+    pub title: String,
+    /// Schema of the action's input, e.g. `mail/thread-ref@1`.
+    pub input: String,
+    #[serde(default)]
+    pub requires: Vec<String>,
+    #[serde(default)]
+    pub callers: Vec<String>,
+    #[serde(default)]
+    pub expose: Vec<String>,
+    #[serde(default)]
+    pub idempotent: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -221,7 +244,7 @@ pub const CATEGORIES: [&str; 12] = [
 
 /// Regions a Spore may claim. An unlisted name is a typo or a claim the host
 /// cannot honour, and both are better refused at install than discovered later.
-pub const CHROME_REGIONS: [&str; 7] = [
+pub const CHROME_REGIONS: [&str; 8] = [
     "top-bar",
     "dock",
     "launcher",
@@ -231,6 +254,8 @@ pub const CHROME_REGIONS: [&str; 7] = [
     // windows so the host still owns where they appear and when they dismiss.
     "notifications",
     "attention",
+    // The frame around a window a Spore owns: title bar, grip, resize edges.
+    "window",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -282,6 +307,11 @@ pub struct Ui {
 pub struct Launch {
     pub default: String,
     pub surfaces: Vec<String>,
+    /// The composed Lua module Canvas opens, when the launcher starts a view
+    /// rather than the module. Composition writes it into the runtime modules
+    /// directory; the entry point is a window, not a file in the package.
+    #[serde(default)]
+    pub canvas_module: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -342,22 +372,16 @@ impl Manifest {
             )));
         }
 
-        match &self.module {
-            Some(module) => {
-                safe_relative(&module.path)?;
-                if !module.path.ends_with(".wasm") {
-                    return Err(Error::Invalid("module.path must end in .wasm".into()));
-                }
+        if let Some(module) = &self.module {
+            safe_relative(&module.path)?;
+            if !module.path.ends_with(".wasm") {
+                return Err(Error::Invalid("module.path must end in .wasm".into()));
             }
-            // A Spore with no module must still do something: chrome draws a
-            // region, and nothing else is worth installing without semantics.
-            None if self.chrome.is_none() => {
-                return Err(Error::Invalid(
-                    "a Spore needs a module unless it draws chrome".into(),
-                ));
-            }
-            None => {}
         }
+        // A composition is still a program. `ui.entry` is required either way,
+        // so a Spore with no module renders something; what it cannot do is
+        // call a host capability, which is exactly what a UI-first Spore
+        // (gallery, storefront) should not be able to do yet.
         safe_relative(&self.ui.entry)?;
         if !self.ui.entry.ends_with(".lua") {
             return Err(Error::Invalid("ui.entry must end in .lua".into()));
@@ -514,6 +538,28 @@ impl Manifest {
             }
             if let Some(record) = &catalog.record {
                 reference(record)?;
+            }
+        }
+        for action in &self.actions {
+            if !identifier(&action.id) {
+                return Err(Error::Invalid(format!(
+                    "action id {:?} is not an identifier",
+                    action.id
+                )));
+            }
+            if action.title.trim().is_empty() || action.input.trim().is_empty() {
+                return Err(Error::Invalid(format!(
+                    "action {:?} needs a title and an input schema",
+                    action.id
+                )));
+            }
+            for capability in &action.requires {
+                if !grants(capability) {
+                    return Err(Error::Invalid(format!(
+                        "action {:?} requires {capability:?}, which is not a capability",
+                        action.id
+                    )));
+                }
             }
         }
         for (name, asset) in &self.assets {
