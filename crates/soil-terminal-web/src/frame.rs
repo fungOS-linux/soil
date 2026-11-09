@@ -105,7 +105,10 @@ pub fn lua(snapshot: &Snapshot) -> String {
             scroll.offset, scroll.total, scroll.len
         ));
     }
-    out.push_str("  rows = {\n");
+    // `rows` is the count and `lines` is the array: a table with one key holding
+    // both would silently keep whichever came last, and a view reading `rows` as
+    // a number would get the list (or nil) and draw the wrong grid.
+    out.push_str("  lines = {\n");
     for y in 0..snapshot.rows {
         let mut runs: Vec<String> = Vec::new();
         let mut current: Option<(String, Option<String>, Option<String>, u8)> = None;
@@ -211,6 +214,11 @@ mod tests {
         assert!(text.contains("cols = 12"));
         assert!(text.contains("{ \"red\", \"#"));
         assert!(text.contains("runs = {"));
+        // The count and the array must not share a key: `rows = 53` followed by
+        // `rows = { ... }` leaves the view reading a table where it expects a
+        // number, and it draws the wrong grid instead of failing.
+        assert!(text.contains("rows = 2,"), "the row count is not published");
+        assert!(text.contains("lines = {"), "the lines are not published");
     }
 
     #[test]
