@@ -644,3 +644,36 @@ projects are directories, not checkouts.
 
 Not in this slice yet: joining `mush worktree` records per project, and
 resolving the marbles project id through `mb` rather than a marker directory.
+
+### Remote discovery
+
+```sh
+mush projects --remote            # GitHub plus the Gitea mirror, deduped
+mush projects --claim NAME...     # group repositories into this Desktop
+```
+
+`--remote` asks `gh repo list` for every repository the authenticated account
+can see, and the Gitea mirror when the machine is pointed at one:
+
+```sh
+export GITEA_URL=https://gitea.example
+export GITEA_TOKEN=...            # repo read scope
+export GITEA_USER=...             # optional; defaults to the token's user
+```
+
+Hosts are merged on the lowercased repository name, so a mirror is one project
+with two hosts, not two projects:
+
+```text
+project                  source    branch   state   hosts        remote
+fungos-vfs               declared  -        -       github+gitea
+soil                     -         -        -       github
+ajmwagar.github.io       -         -        -       github       [archived]
+```
+
+Without `GITEA_URL`/`GITEA_TOKEN` the mirror is simply absent -- that is a
+configuration state, not an error.
+
+`--claim` writes names into the Desktop's `projects` list. It declares, it does
+not clone: a claimed repository that is not on the projection reports `missing`
+until something materializes it, which keeps the declaration honest.

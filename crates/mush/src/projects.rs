@@ -10,6 +10,7 @@
 //! I work on", which is a question about the projection.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -32,6 +33,9 @@ struct Project {
     git: Option<Git>,
     marbles: bool,
     path: Option<PathBuf>,
+    github: Option<String>,
+    gitea: Option<String>,
+    archived: bool,
 }
 
 fn git(path: &Path, args: &[&str]) -> Option<String> {
@@ -93,9 +97,154 @@ fn discover(desktop: &Desktop) -> Vec<Project> {
                 git,
                 marbles,
                 path: present.then_some(path),
+                github: None,
+                gitea: None,
+                archived: false,
             }
         })
         .collect()
+}
+
+/// One repository as a remote host knows it, before deduping.
+#[derive(Default, Clone)]
+struct Remote {
+    /// Lowercased repository name: the dedupe key across hosts.
+    key: String,
+    name: String,
+    github: Option<String>,
+    gitea: Option<String>,
+    archived: bool,
+    private: bool,
+}
+
+fn gh_repos() -> Result<Vec<Remote>> {
+    let output = Command::new("gh")
+        .args([
+            "repo",
+            "list",
+            "--limit",
+            "400",
+            "--json",
+            "name,nameWithOwner,isArchived,isPrivate",
+        ])
+        .output()
+        .map_err(|error| anyhow::anyhow!("run gh repo list: {error}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "gh repo list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = row
+                .get("name")
+                .and_then(|value| value.as_str())?
+                .to_string();
+            let full = row
+                .get("nameWithOwner")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&name)
+                .to_string();
+            Some(Remote {
+                key: name.to_lowercase(),
+                name,
+                github: Some(full),
+                gitea: None,
+                archived: row
+                    .get("isArchived")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                private: row
+                    .get("isPrivate")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+            })
+        })
+        .collect())
+}
+
+/// The Gitea mirror, when this machine is pointed at one.
+///
+/// Config: `GITEA_URL` and `GITEA_TOKEN` (a token with repo read scope). Absent
+/// means "no mirror configured", which is not an error.
+fn gitea_repos() -> Result<Vec<Remote>> {
+    let (Ok(base), Ok(token)) = (std::env::var("GITEA_URL"), std::env::var("GITEA_TOKEN")) else {
+        return Ok(Vec::new());
+    };
+    let user = std::env::var("GITEA_USER").unwrap_or_else(|_| "".into());
+    let path = if user.is_empty() {
+        format!("{}/api/v1/user/repos?limit=50", base.trim_end_matches('/'))
+    } else {
+        format!(
+            "{}/api/v1/users/{}/repos?limit=50",
+            base.trim_end_matches('/'),
+            user
+        )
+    };
+    let response = ureq::get(&path)
+        .set("Authorization", &format!("token {token}"))
+        .call()
+        .map_err(|error| anyhow::anyhow!("gitea {path}: {error}"))?;
+    let rows: Vec<serde_json::Value> = response.into_json()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = row
+                .get("name")
+                .and_then(|value| value.as_str())?
+                .to_string();
+            let full = row
+                .get("full_name")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&name)
+                .to_string();
+            Some(Remote {
+                key: name.to_lowercase(),
+                name,
+                github: None,
+                gitea: Some(full),
+                archived: row
+                    .get("archived")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                private: row
+                    .get("private")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+            })
+        })
+        .collect())
+}
+
+/// Merge hosts on the repository name, so a mirror is not a second project.
+fn remotes() -> Result<BTreeMap<String, Remote>> {
+    let mut merged: BTreeMap<String, Remote> = BTreeMap::new();
+    let mut errors = Vec::new();
+    for source in [gh_repos(), gitea_repos()] {
+        match source {
+            Ok(list) => {
+                for remote in list {
+                    merged
+                        .entry(remote.key.clone())
+                        .and_modify(|existing| {
+                            existing.github = existing.github.take().or(remote.github.clone());
+                            existing.gitea = existing.gitea.take().or(remote.gitea.clone());
+                            existing.archived |= remote.archived;
+                            existing.private |= remote.private;
+                        })
+                        .or_insert(remote);
+                }
+            }
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    for error in errors {
+        eprintln!("mush: {error}");
+    }
+    Ok(merged)
 }
 
 fn render(projects: &[Project], json_output: bool) {
@@ -112,6 +261,9 @@ fn render(projects: &[Project], json_output: bool) {
                     "dirty": project.git.as_ref().map(|git| git.dirty),
                     "remote": project.git.as_ref().and_then(|git| git.remote.clone()),
                     "marbles": project.marbles,
+                    "github": project.github,
+                    "gitea": project.gitea,
+                    "archived": project.archived,
                 })
             })
             .collect();
@@ -126,8 +278,8 @@ fn render(projects: &[Project], json_output: bool) {
         return;
     }
     println!(
-        "{:<24} {:<9} {:<14} {:<7} {}",
-        "project", "source", "branch", "state", "remote"
+        "{:<24} {:<9} {:<14} {:<7} {:<10} {}",
+        "project", "source", "branch", "state", "hosts", "remote"
     );
     for project in projects {
         let source = match (project.declared, project.present) {
@@ -150,12 +302,23 @@ fn render(projects: &[Project], json_output: bool) {
         if project.marbles {
             flags.push_str(" [marbles]");
         }
+        if project.archived {
+            flags.push_str(" [archived]");
+        }
+        let mut hosts = Vec::new();
+        if project.github.is_some() {
+            hosts.push("github");
+        }
+        if project.gitea.is_some() {
+            hosts.push("gitea");
+        }
         println!(
-            "{:<24} {:<9} {:<14} {:<7} {}{}",
+            "{:<24} {:<9} {:<14} {:<7} {:<10} {}{}",
             project.name,
             source,
             branch,
             state,
+            hosts.join("+"),
             project
                 .git
                 .as_ref()
@@ -170,6 +333,13 @@ fn render(projects: &[Project], json_output: bool) {
 pub fn run(config: &crate::config::Config, mut args: Vec<String>) -> Result<()> {
     let json_output = args.iter().any(|arg| arg == "--json");
     args.retain(|arg| arg != "--json");
+    let remote_mode = args.iter().any(|arg| arg == "--remote");
+    args.retain(|arg| arg != "--remote");
+    // `--claim a b c` groups repositories into this Desktop.
+    let claims = match args.iter().position(|arg| arg == "--claim") {
+        Some(index) => args.split_off(index + 1),
+        None => Vec::new(),
+    };
     let desktop_id = crate::take_option(&mut args, "--desktop")
         .or_else(|| std::env::var("MUSH_DESKTOP").ok())
         .or_else(|| config.desktop.clone())
@@ -183,7 +353,46 @@ pub fn run(config: &crate::config::Config, mut args: Vec<String>) -> Result<()> 
         std::process::exit(3);
     };
     let desktop = desktop::load(&id)?;
-    let projects = discover(&desktop);
+
+    if !claims.is_empty() {
+        for name in &claims {
+            desktop::add_project(&id, name)?;
+        }
+        println!("claimed {} in {id}", claims.join(", "));
+        return Ok(());
+    }
+
+    let mut projects = discover(&desktop);
+    if remote_mode {
+        let merged = remotes()?;
+        let mut seen = std::collections::BTreeSet::new();
+        for project in projects.iter_mut() {
+            let key = project.name.to_lowercase();
+            seen.insert(key.clone());
+            if let Some(remote) = merged.get(&key) {
+                project.github = remote.github.clone();
+                project.gitea = remote.gitea.clone();
+                project.archived = remote.archived;
+            }
+        }
+        for (key, remote) in merged {
+            if seen.contains(&key) {
+                continue;
+            }
+            projects.push(Project {
+                name: remote.name,
+                declared: false,
+                present: false,
+                git: None,
+                marbles: false,
+                path: None,
+                github: remote.github,
+                gitea: remote.gitea,
+                archived: remote.archived,
+            });
+        }
+        projects.sort_by_key(|project| project.name.to_lowercase());
+    }
     render(&projects, json_output);
     Ok(())
 }
