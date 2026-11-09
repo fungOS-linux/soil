@@ -13,8 +13,14 @@ not run host binaries.
 ## Start the server
 
 ```sh
-mush mcp --listen 127.0.0.1:0 --mcp-token "$MUSH_MCP_TOKEN"
+mush mcp --foreground --listen 127.0.0.1:0 --mcp-token "$MUSH_MCP_TOKEN"
 ```
+
+`mush mcp` and `mush --serve` are servers: they own the process until they are
+stopped. Mush refuses to start either one when stdin is not a terminal unless
+`--foreground` says a supervisor owns the process. That refusal exists because a
+server started from an agent tool call looks exactly like a hung tool call: no
+output, no exit status, nothing to recover from.
 
 If `--mcp-token` or `MUSH_MCP_TOKEN` is omitted, Mush generates a token and
 prints it once on stderr. The URL is printed on stderr:
@@ -50,8 +56,20 @@ Example arguments:
 ```
 
 The response includes MCP text content, combining stdout and stderr, plus
-`structuredContent` with separate `stdout`, `stderr`, `status`, and `exit`
-fields. `isError` is true when the command returns a non-zero shell status.
+`structuredContent` with separate `stdout`, `stderr`, `status`, `exit`,
+`state`, and `blocking` fields. `isError` is true when the command returns a
+non-zero shell status or did not finish.
+
+`state` is one of:
+
+| `state` | `blocking` | Meaning |
+|---|---|---|
+| `done` | `false` | The command ran to completion |
+| `timeout` | `true` | The command exceeded its deadline and the Spore was interrupted |
+
+A command that runs past the daemon deadline is interrupted at the engine level,
+not abandoned: `mush_exec` answers instead of hanging, with `state=timeout`,
+`status=124`, and a hint naming `--timeout`.
 
 ## Recommended placement
 

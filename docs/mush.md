@@ -134,11 +134,48 @@ and `output`.
 For Operator, use the MCP endpoint:
 
 ```sh
-mush mcp --listen 127.0.0.1:0
+mush mcp --foreground --listen 127.0.0.1:0
 ```
 
 It exposes `mcp__mush__mush_exec` over loopback HTTP. See
 [Operator integration](mush-operator.md).
+
+## Deadlines and servers
+
+A command runs inside the Spore, so nothing outside it can see progress. A
+command that never returns -- `while true; do :; done`, or `read` on a stdin
+that never closes -- would park the caller forever with no output and no exit
+status. That is the worst failure available to an agent harness, so it is
+prevented by contract rather than by hope.
+
+Every non-interactive command runs with a deadline:
+
+```text
+mush --command 'loop'                 default 120s
+mush --timeout 600 --command 'mb ...' longer budget
+mush --timeout 0 --command 'x'        deadline disabled
+mush request --timeout 30 'mb ready'  client bound and daemon budget
+```
+
+`MUSH_TIMEOUT` sets the same value in seconds. An interactive session has no
+deadline, because there the human is the clock.
+
+The deadline is enforced with Wasmtime epoch interruption, so the Spore is
+actually stopped rather than abandoned. The caller sees:
+
+```text
+mush: command exceeded 30s and was interrupted
+mush: hint: raise it with --timeout SECONDS, or split the work into steps that finish
+```
+
+with shell status `124` and, over the service or MCP envelope, `state`
+`"timeout"` and `blocking` `true`.
+
+Servers are the other way a Mush invocation can hold a process open. `mush
+--serve` and `mush mcp` do not return, so they refuse to start when stdin is not
+a terminal unless `--foreground` says a supervisor owns the process. A server
+started from a tool call is indistinguishable from a hung tool call; refusing
+converts that into one clear line the harness can act on.
 
 ## Interactive editing
 

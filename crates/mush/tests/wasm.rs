@@ -377,7 +377,73 @@ fn wasm_spore_supports_desktop_registry_and_project_mount() {
         .arg("--wasm")
         .arg(module())
         .arg("--command")
-        .arg("mkdir docs\nwrite docs/a.txt hello\nexit")
+        .arg("mkdir docs\nwrite docs/a.txt hello\ncat docs/a.txt\nexit")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "status {:?} stderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("hello"), "{stdout}");
+}
+
+#[test]
+fn command_that_outlives_its_deadline_is_interrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--timeout")
+        .arg("0.2")
+        .arg("--command")
+        .arg("while true; do write f.txt hello; done")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(124),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("exceeded"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn zero_timeout_disables_the_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--timeout")
+        .arg("0")
+        .arg("--command")
+        .arg("echo still-runs")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("still-runs"));
+}
+
+#[test]
+fn server_subcommand_help_does_not_start_a_server() {
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("mcp")
+        .arg("--help")
         .output()
         .unwrap();
     assert!(
@@ -386,5 +452,24 @@ fn wasm_spore_supports_desktop_registry_and_project_mount() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("hello"), "{stdout}");
+    assert!(stdout.contains("Usage:"), "{stdout}");
+    assert!(stdout.contains("--foreground"), "{stdout}");
+}
+
+#[test]
+fn server_refuses_to_start_without_a_terminal_or_foreground() {
+    let dir = tempfile::tempdir().unwrap();
+    // Command::output() gives the child a pipe, so stdin is not a terminal.
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("mcp")
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("is a server"), "{stderr}");
+    assert!(stderr.contains("--foreground"), "{stderr}");
 }

@@ -10,12 +10,14 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use tiny_http::{Header, Response, Server, StatusCode};
 
+use crate::outcome::{Executed, State};
+
 const MAX_REQUEST: u64 = 2 * 1024 * 1024;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 
 pub fn serve<F>(server: Server, token: &str, mut execute: F) -> Result<()>
 where
-    F: FnMut(&str) -> Result<(String, String, bool, i32)>,
+    F: FnMut(&str) -> Result<Executed>,
 {
     eprintln!("mush: mcp server http://{}/mcp", server.server_addr());
     for request in server.incoming_requests() {
@@ -28,7 +30,7 @@ where
 
 fn handle<F>(mut request: tiny_http::Request, token: &str, execute: &mut F) -> Result<()>
 where
-    F: FnMut(&str) -> Result<(String, String, bool, i32)>,
+    F: FnMut(&str) -> Result<Executed>,
 {
     if request.method().as_str() != "POST" || request.url() != "/mcp" {
         return respond(request, 404, &[], b"not found\n");
@@ -71,7 +73,7 @@ where
                 "result": {
                     "tools": [{
                         "name": "mush_exec",
-                        "description": "Execute a Mush command in the daemon's fixed VFS workspace. Use for VFS, records and installed wasm commands; no host process is involved.",
+                        "description": "Execute a Mush command in the daemon's fixed VFS workspace. Use for VFS, records and installed wasm commands; no host process is involved. A command that outlives the daemon deadline is interrupted and returns state=timeout rather than hanging.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -110,12 +112,16 @@ where
             }
             let (mut stdout, mut stderr, mut exit, mut status) =
                 (String::new(), String::new(), false, 0);
+            let mut state = State::Done;
             for line in command.lines() {
-                let (text, stderr_text, line_exit, line_status) = execute(line)?;
-                stdout.push_str(&text);
-                stderr.push_str(&stderr_text);
-                exit |= line_exit;
-                status = line_status;
+                let executed = execute(line)?;
+                stdout.push_str(&executed.output);
+                stderr.push_str(&executed.stderr);
+                exit |= executed.exit;
+                status = executed.status;
+                if executed.state != State::Done {
+                    state = executed.state;
+                }
                 if stdout.len() > MAX_OUTPUT {
                     stdout.truncate(MAX_OUTPUT);
                     stdout.push_str("\n[mush: output truncated]\n");
@@ -139,9 +145,11 @@ where
                             "stdout": stdout,
                             "stderr": stderr,
                             "status": status,
-                            "exit": exit
+                            "exit": exit,
+                            "state": state.as_str(),
+                            "blocking": state.blocking()
                         },
-                        "isError": status != 0 || exit
+                        "isError": status != 0 || exit || state != State::Done
                     }
                 }),
             )

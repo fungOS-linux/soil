@@ -18,13 +18,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-#[derive(Debug)]
-pub struct Executed {
-    pub output: String,
-    pub stderr: String,
-    pub exit: bool,
-    pub status: i32,
-}
+use crate::outcome::{Executed, State};
 
 pub fn serve<F>(socket: &Path, mut execute: F) -> Result<()>
 where
@@ -94,19 +88,31 @@ where
     let mut stderr = String::new();
     let mut exit = false;
     let mut status = 0;
+    let mut state = State::Done;
     for line in command.lines() {
         let executed = execute(line)?;
         output.push_str(&executed.output);
         stderr.push_str(&executed.stderr);
         exit |= executed.exit;
         status = executed.status;
+        if executed.state != State::Done {
+            state = executed.state;
+        }
         if exit {
             break;
         }
     }
     write_response(
         stream,
-        &json!({"ok": true, "output": output, "stderr": stderr, "exit": exit, "status": status}),
+        &json!({
+            "ok": true,
+            "output": output,
+            "stderr": stderr,
+            "exit": exit,
+            "status": status,
+            "state": state.as_str(),
+            "blocking": state.blocking(),
+        }),
     )?;
     Ok(())
 }

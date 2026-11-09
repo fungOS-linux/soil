@@ -57,8 +57,12 @@ mush doctor
 Start the service:
 
 ```sh
-mush --serve --config ~/.config/fungos/mush/config.toml
+mush --serve --foreground --config ~/.config/fungos/mush/config.toml
 ```
+
+`--serve` is a server: it owns the process until it is stopped, so it refuses to
+start when stdin is not a terminal unless `--foreground` says a supervisor owns
+it. A service unit passes `--foreground`.
 
 The service accepts one newline-delimited JSON request per connection:
 

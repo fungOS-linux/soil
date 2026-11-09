@@ -5,10 +5,12 @@
 //! line-oriented terminal.
 
 mod config;
+mod deadline;
 mod desktop;
 mod gateway;
 mod mcp_gateway;
 mod mcp_server;
+mod outcome;
 mod overlay;
 mod project;
 mod service;
@@ -241,6 +243,9 @@ impl vfs_mut::Host for Host {
 pub(crate) struct Runtime {
     store: Store<Host>,
     instance: Mush,
+    engine: Engine,
+    /// Deadline applied to every command, or `None` when a human is driving.
+    budget: Option<std::time::Duration>,
 }
 
 impl Runtime {
@@ -252,9 +257,13 @@ impl Runtime {
         records: Option<RecordsBinding>,
         principal: Option<&str>,
         desktop: Option<&desktop::Desktop>,
+        budget: Option<std::time::Duration>,
     ) -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
+        // Epoch interruption is what lets a timer stop a command that outlives
+        // its caller's patience instead of waiting for it forever.
+        config.epoch_interruption(true);
         let engine = Engine::new(&config)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
@@ -264,6 +273,9 @@ impl Runtime {
         let component = Component::new(&engine, wasm)?;
         let host = Host::new(root, command_root, records)?;
         let mut store = Store::new(&engine, host);
+        // An epoch-interrupted engine starts at deadline 0, which traps on the
+        // first tick. Disarm start-up; each command arms its own timer.
+        store.set_epoch_deadline(u64::MAX);
         let instance = Mush::instantiate(&mut store, &component, &linker)?;
         let mut args = vec![format!("--term={term}")];
         if let Some(principal) = principal {
@@ -280,13 +292,55 @@ impl Runtime {
         print!("{}", response.output);
         eprint!("{}", response.stderr);
         io::stdout().flush()?;
-        Ok(Self { store, instance })
+        Ok(Self {
+            store,
+            instance,
+            engine,
+            budget,
+        })
     }
 
-    pub(crate) fn execute(&mut self, line: &str) -> Result<Response> {
-        self.instance
-            .call_execute(&mut self.store, line)?
-            .map_err(anyhow::Error::msg)
+    /// Run one command line under the session deadline.
+    ///
+    /// A deadline trap is a result, not an internal error: the caller needs to
+    /// know the command did not finish so it can report that instead of
+    /// hanging or surfacing a Wasm trap the harness cannot act on.
+    pub(crate) fn execute(&mut self, line: &str) -> Result<outcome::Executed> {
+        // One epoch tick of headroom: the timer performs exactly one bump, so
+        // that bump is what interrupts this command and nothing else.
+        let timer = self
+            .budget
+            .map(|budget| deadline::Timer::arm(self.engine.clone(), budget));
+        self.store
+            .set_epoch_deadline(if timer.is_some() { 1 } else { u64::MAX });
+        let result = self.instance.call_execute(&mut self.store, line);
+        if let Some(timer) = &timer {
+            timer.finish();
+        }
+        match result {
+            Ok(response) => {
+                let response = response.map_err(anyhow::Error::msg)?;
+                Ok(outcome::Executed::done(
+                    response.output,
+                    response.stderr,
+                    response.exit,
+                    response.status,
+                ))
+            }
+            Err(error) => {
+                if !timer.as_ref().is_some_and(deadline::Timer::fired) {
+                    return Err(error.into());
+                }
+                let budget = self.budget.unwrap_or_default();
+                Ok(outcome::Executed {
+                    output: String::new(),
+                    stderr: deadline::timeout_hint(budget),
+                    exit: true,
+                    status: outcome::TIMEOUT_STATUS,
+                    state: outcome::State::Timeout,
+                })
+            }
+        }
     }
 
     pub(crate) fn prompt(&mut self) -> Result<String> {
@@ -307,13 +361,8 @@ fn run() -> Result<()> {
         println!("mush {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if args.first().map(String::as_str) == Some("--help") {
-        println!(
-            "mush {}\n\nUsage:\n  mush [OPTIONS]\n  mush doctor [OPTIONS]\n  mush run op [OPTIONS]\n  mush --serve --socket PATH --root DIR [OPTIONS]\n\nThe Mush Spore is embedded; --wasm overrides it for development.\n\nOptions:\n  --root DIR                 VFS root (default: ~/.local/share/fungos/vfs)\n  --wasm PATH                development Spore override\n  --command-root DIR         wasm command package root\n  --records-root DIR         Soil records root\n  --records-book BOOK        records book, e.g. personal/avery/marbles\n  --records-collection NAME  records collection name\n  --principal ID             signed principal label for this session
-  --desktop ID               select a Desktop registry entry
-  --root DIR                 explicit VFS root (mutually exclusive with --desktop)\n  --socket PATH              Unix socket for --serve\n  --config PATH              config file (default: ~/.config/fungos/mush/config.toml)\n  --term TERM                terminal type passed to the Spore\n  --command LINE             execute one or more command lines\n  --script PATH              source a VFS script",
-            env!("CARGO_PKG_VERSION")
-        );
+    if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
+        println!("{}", usage());
         return Ok(());
     }
     let doctor = args.first().map(String::as_str) == Some("doctor");
@@ -326,6 +375,24 @@ fn run() -> Result<()> {
     }
     let serve = args.iter().any(|arg| arg == "--serve");
     args.retain(|arg| arg != "--serve");
+    // A server subcommand owns the process until it is stopped. Starting one
+    // from a caller that cannot interrupt it is the invocation that hangs an
+    // agent harness forever, so it has to be asked for by name.
+    let foreground = args.iter().any(|arg| arg == "--foreground");
+    args.retain(|arg| arg != "--foreground");
+    if mcp || serve {
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+        {
+            println!("{}", usage());
+            return Ok(());
+        }
+        if !foreground && !io::stdin().is_terminal() {
+            eprintln!("{}", server_hint(if mcp { "mcp" } else { "--serve" }));
+            std::process::exit(2);
+        }
+    }
     let config_path = take_option(&mut args, "--config")
         .map(|value| config::expand_home(&value))
         .unwrap_or_else(config::default_path);
@@ -376,6 +443,15 @@ fn run() -> Result<()> {
         .unwrap_or_else(|| "xterm-256color".into());
     let script = take_option(&mut args, "--script");
     let command = take_option(&mut args, "--command");
+    // A human at a prompt is the clock; every other caller gets a deadline so
+    // no command can park it indefinitely.
+    let interactive = command.is_none() && script.is_none() && io::stdin().is_terminal();
+    let budget =
+        match take_option(&mut args, "--timeout").or_else(|| std::env::var("MUSH_TIMEOUT").ok()) {
+            Some(value) => deadline::parse_budget(&value)?,
+            None if interactive => None,
+            None => Some(deadline::DEFAULT_TIMEOUT),
+        };
     let history = take_option(&mut args, "--history")
         .or_else(|| std::env::var("MUSH_HISTORY").ok())
         .map(|value| config::expand_home(&value))
@@ -445,6 +521,7 @@ fn run() -> Result<()> {
             principal.as_deref(),
             socket.as_deref(),
             desktop.as_ref(),
+            budget,
         );
     }
 
@@ -461,21 +538,14 @@ fn run() -> Result<()> {
         records,
         principal.as_deref(),
         desktop.as_ref(),
+        budget,
     )?;
 
     if serve {
         let socket = socket
             .as_deref()
             .context("mush --serve needs --socket PATH or a config socket")?;
-        return service::serve(socket, |line| {
-            let response = runtime.execute(line)?;
-            Ok(service::Executed {
-                output: response.output,
-                stderr: response.stderr,
-                exit: response.exit,
-                status: response.status,
-            })
-        });
+        return service::serve(socket, |line| runtime.execute(line));
     }
 
     if mcp {
@@ -484,15 +554,7 @@ fn run() -> Result<()> {
         if configured_token.is_none() {
             eprintln!("mush: mcp bearer token {mcp_token}");
         }
-        return mcp_server::serve(server, &mcp_token, |line| {
-            let response = runtime.execute(line)?;
-            Ok((
-                response.output,
-                response.stderr,
-                response.exit,
-                response.status,
-            ))
-        });
+        return mcp_server::serve(server, &mcp_token, |line| runtime.execute(line));
     }
 
     if let Some(command) = command {
@@ -501,7 +563,7 @@ fn run() -> Result<()> {
             print!("{}", response.output);
             eprint!("{}", response.stderr);
             if response.exit {
-                return Ok(());
+                return finish(response.status);
             }
         }
         return Ok(());
@@ -511,6 +573,9 @@ fn run() -> Result<()> {
         let response = runtime.execute(&format!("source {script}"))?;
         print!("{}", response.output);
         eprint!("{}", response.stderr);
+        if response.exit {
+            return finish(response.status);
+        }
         return Ok(());
     }
 
@@ -525,6 +590,54 @@ fn new_mcp_token() -> String {
     let mut bytes = [0u8; 24];
     rand::rng().fill(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// What a caller sees when it asks to start a server it cannot stop.
+fn server_hint(name: &str) -> String {
+    format!(
+        "mush: {name} is a server and does not return\n\
+         mush: hint: pass --foreground to start it anyway, or run it under a supervisor\n\
+         mush: this refused instead of blocking your caller indefinitely"
+    )
+}
+
+/// Exit with a command's own status so a wrapper sees what the command saw.
+fn finish(status: i32) -> Result<()> {
+    io::stdout().flush()?;
+    std::process::exit(status);
+}
+
+fn usage() -> String {
+    format!(
+        "mush {}\n\n\
+         Usage:\n\
+         \x20 mush [OPTIONS]\n\
+         \x20 mush doctor [OPTIONS]\n\
+         \x20 mush run op [OPTIONS]\n\
+         \x20 mush --serve --socket PATH --root DIR [--foreground] [OPTIONS]\n\
+         \x20 mush mcp [--listen ADDR] [--foreground] [OPTIONS]\n\n\
+         The Mush Spore is embedded; --wasm overrides it for development.\n\n\
+         Options:\n\
+         \x20 --root DIR                 VFS root (mutually exclusive with --desktop)\n\
+         \x20 --desktop ID               select a Desktop registry entry\n\
+         \x20 --wasm PATH                development Spore override\n\
+         \x20 --command-root DIR         wasm command package root\n\
+         \x20 --records-root DIR         Soil records root\n\
+         \x20 --records-book BOOK        records book, e.g. personal/avery/marbles\n\
+         \x20 --records-collection NAME  records collection name\n\
+         \x20 --principal ID             signed principal label for this session\n\
+         \x20 --socket PATH              Unix socket for --serve\n\
+         \x20 --config PATH              config file (default: ~/.config/fungos/mush/config.toml)\n\
+         \x20 --term TERM                terminal type passed to the Spore\n\
+         \x20 --command LINE             execute one or more command lines\n\
+         \x20 --script PATH              source a VFS script\n\
+         \x20 --timeout SECONDS          interrupt a command after this long (0 disables)\n\
+         \x20 --foreground               allow a server subcommand to take the terminal\n\n\
+         A non-interactive command runs with a {}s deadline unless --timeout says otherwise.\n\
+         Servers refuse to start without --foreground when stdin is not a terminal.\n",
+        env!("CARGO_PKG_VERSION"),
+        deadline::DEFAULT_TIMEOUT.as_secs()
+    )
 }
 
 fn run_desktop(mut args: Vec<String>) -> Result<()> {
@@ -608,18 +721,41 @@ fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
         .context("mush request needs --socket PATH or a config socket")?;
     let json = args.iter().any(|arg| arg == "--json");
     args.retain(|arg| arg != "--json");
+    // The client needs its own bound: a wedged daemon must not hang the
+    // caller either, and the deadline here is what the agent harness sees.
+    let budget =
+        match take_option(&mut args, "--timeout").or_else(|| std::env::var("MUSH_TIMEOUT").ok()) {
+            Some(value) => deadline::parse_budget(&value)?,
+            None => Some(deadline::DEFAULT_TIMEOUT),
+        };
     if args.is_empty() {
-        anyhow::bail!("usage: mush request [--socket PATH] [--json] COMMAND...");
+        anyhow::bail!(
+            "usage: mush request [--socket PATH] [--json] [--timeout SECONDS] COMMAND..."
+        );
     }
     let command = args.join(" ");
     let mut stream = UnixStream::connect(&socket)
         .with_context(|| format!("connect Mush service {}", socket.display()))?;
+    if let Some(budget) = budget {
+        stream.set_read_timeout(Some(budget))?;
+        stream.set_write_timeout(Some(budget))?;
+    }
     stream
         .write_all(serde_json::to_string(&serde_json::json!({"command": command}))?.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line)?;
+    let read = BufReader::new(stream).read_line(&mut line);
+    if let Err(error) = read {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            eprintln!("{}", deadline::timeout_hint(budget.unwrap_or_default()));
+            std::process::exit(outcome::TIMEOUT_STATUS);
+        }
+        return Err(error.into());
+    }
     let response: serde_json::Value = serde_json::from_str(&line).context("parse Mush response")?;
     if json {
         print!("{line}");
@@ -660,12 +796,17 @@ fn doctor_report(
     principal: Option<&str>,
     socket: Option<&Path>,
     desktop: Option<&desktop::Desktop>,
+    budget: Option<std::time::Duration>,
 ) -> Result<()> {
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
     let uid = unsafe { libc::geteuid() };
     println!("mush {}", env!("CARGO_PKG_VERSION"));
     println!("user: {user} (uid {uid})");
     println!("config: {}", config_path.display());
+    match budget {
+        Some(budget) => println!("command deadline: {}s [enabled]", budget.as_secs_f64()),
+        None => println!("command deadline: disabled [interactive]"),
+    }
     let mut problems = Vec::new();
     if root.is_dir() {
         println!("vfs root: {} [ok]", root.display());
