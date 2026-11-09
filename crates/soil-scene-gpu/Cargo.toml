@@ -12,15 +12,22 @@ base64 = "0.22"
 bytemuck = { version = "1", features = ["derive"] }
 fontdue = "0.9"
 pollster = "0.4"
-portable-pty = "0.9"
+portable-pty = { version = "0.9", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 soil-scene = { path = "../soil-scene" }
-soil-vt = { path = "../soil-vt" }
-soil-input = { path = "../soil-input", features = ["winit"] }
+soil-vt = { path = "../soil-vt", optional = true }
+soil-input = { path = "../soil-input", features = ["winit"], optional = true }
 wgpu = "27"
-winit = "0.30"
-sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+winit = { version = "0.30", optional = true }
+sysinfo = { version = "0.40", default-features = false, features = ["system"], optional = true }
+
+[features]
+default = ["term"]
+# The terminal shell: pty, VT, a standalone window, host telemetry. None of it
+# belongs in the render core, which is wgpu plus a glyph atlas and has to
+# compile for wasm32 where there is no process, window or system to query.
+term = ["dep:portable-pty", "dep:soil-vt", "dep:soil-input", "dep:winit", "dep:sysinfo"]
 
 [[bin]]
 name = "soil-scene-gpu"
@@ -29,3 +36,24 @@ path = "src/main.rs"
 [[bin]]
 name = "soil-viz"
 path = "src/bin/soil-viz.rs"
+required-features = ["term"]
+
+[[bin]]
+name = "soil-grafana"
+path = "src/bin/soil-grafana.rs"
+required-features = ["term"]
+
+[[bin]]
+name = "soil-live-frame"
+path = "src/bin/soil-live-frame.rs"
+required-features = ["term"]
+
+[[bin]]
+name = "soil-vt-gpu"
+path = "src/bin/soil-vt-gpu.rs"
+required-features = ["term"]
+
+[[bin]]
+name = "soil-vt-window"
+path = "src/bin/soil-vt-window.rs"
+required-features = ["term"]
