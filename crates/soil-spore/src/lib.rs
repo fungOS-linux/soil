@@ -20,7 +20,7 @@
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io::Cursor;
@@ -605,6 +605,82 @@ fn lock_of(id: &str, version: &str, files: &[(String, Vec<u8>)]) -> Lock {
 }
 
 /// Check a directory: manifest, declared files, and the lock if present.
+/// The WIT packages a component imports, e.g. `wasi:http`, `soil:records`.
+///
+/// A package is the unit a manifest declares, so this is what `[grants]` must
+/// cover: an import nobody declared is a capability the package author did not
+/// write down.
+pub fn imported_packages(bytes: &[u8]) -> Result<BTreeSet<String>> {
+    // `wit_component::decode` also accepts a bare core module and reports an
+    // empty world for it, which would make the manifest rule vacuous. A Spore
+    // module is a component by definition, so check the preamble first: a
+    // component starts `\0asm\x0d\x00`, a core module `\0asm\x01\x00`.
+    if !(bytes.len() >= 8 && &bytes[..4] == b"\0asm" && bytes[4] == 0x0d && bytes[5] == 0x00) {
+        return Err(Error::Invalid(
+            "module is a core wasm module, not a component".into(),
+        ));
+    }
+    let decoded = wit_component::decode(bytes)
+        .map_err(|error| Error::Invalid(format!("module is not a component: {error}")))?;
+    let (resolve, world) = match decoded {
+        wit_component::DecodedWasm::Component(resolve, world) => (resolve, world),
+        wit_component::DecodedWasm::WitPackage(..) => {
+            return Err(Error::Invalid(
+                "module is a WIT package, not a component".into(),
+            ));
+        }
+    };
+    let mut packages = BTreeSet::new();
+    for key in resolve.worlds[world].imports.keys() {
+        let wit_parser::WorldKey::Interface(id) = key else {
+            continue;
+        };
+        let Some(package) = resolve.interfaces[*id].package else {
+            continue;
+        };
+        let name = &resolve.packages[package].name;
+        packages.insert(format!("{}:{}", name.namespace, name.name));
+    }
+    Ok(packages)
+}
+
+fn undeclared_packages(
+    imported: &BTreeSet<String>,
+    grants: &BTreeMap<String, String>,
+) -> Vec<String> {
+    imported
+        .iter()
+        .filter(|package| !grants.contains_key(package.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Run the module's real imports past the manifest.
+///
+/// The manifest is intent; this makes it checkable. A module that imports
+/// `soil:records` while the manifest lists only WASI fails here instead of at
+/// review time.
+fn check_declared_grants(root: &Path, manifest: &Manifest) -> Result<()> {
+    // A chrome-only Spore has no module, so there is nothing to import.
+    let Some(module) = &manifest.module else {
+        return Ok(());
+    };
+    let path = root.join(&module.path);
+    let bytes =
+        fs::read(&path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
+    let imported = imported_packages(&bytes)?;
+    let undeclared = undeclared_packages(&imported, &manifest.grants);
+    if !undeclared.is_empty() {
+        return Err(Error::Invalid(format!(
+            "{} imports {} but [grants] does not declare {}",
+            module.path,
+            undeclared.join(", "),
+            if undeclared.len() == 1 { "it" } else { "them" },
+        )));
+    }
+    Ok(())
+}
+
 pub fn check(root: &Path) -> Result<Lock> {
     let manifest = Manifest::load(root)?;
     for path in manifest.declared_paths() {
@@ -616,6 +692,7 @@ pub fn check(root: &Path) -> Result<Lock> {
             )));
         }
     }
+    check_declared_grants(root, &manifest)?;
     let lock = compute_lock(root, &manifest)?;
     let path = root.join(LOCK_NAME);
     if path.is_file() {

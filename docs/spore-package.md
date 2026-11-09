@@ -131,7 +131,7 @@ grants stay separate.
 ## Commands
 
 ```sh
-soil-spore check   <dir>                 # manifest, declared files, lock freshness
+soil-spore check   <dir>                 # manifest, declared files, imports, lock freshness
 soil-spore lock    <dir>                 # write or refresh spore.lock
 soil-spore digest  <dir>                 # package digest (pre-pack)
 soil-spore pack    <dir> [-o file.spore] # deterministic tar
@@ -139,6 +139,13 @@ soil-spore verify  <file.spore>          # tar safety, lock, digests
 soil-spore sign    <file.spore> [--key ID]
 soil-spore verify-signature <file.spore> [--keyring FILE] [--key ID]
 ```
+
+`check` reads the module's component type and fails when an imported WIT package
+is missing from `[grants]`. A module that imports `soil:records` while the
+manifest lists only WASI is rejected before anyone signs it. The manifest stays
+intent — the host still enforces — but it can no longer be wrong about what the
+module asks for. A core module is rejected outright: a Spore module is a
+component, and a core module has no component type to check.
 
 ## Not implemented
 

@@ -186,3 +186,26 @@ cargo run -p wasi-audio-wasmtime -- crates/wasi-audio-wasmtime/fixtures/tone.was
 - `webgpu` — optional wgpu-shaped helper
 
 Each feature should have a real consumer before it lands.
+
+## Lua SDK
+
+Lua guests use the generated bindings in
+[`crates/soil-sdk-lua`](../crates/soil-sdk-lua). The generator reads the canonical
+`wit/` contracts and emits `generated/soil.lua` plus a machine-readable
+`soil-sdk.json` signature manifest.
+
+```sh
+cargo run -p soil-sdk-lua -- --wit wit --out crates/soil-sdk-lua/generated
+cargo run -p soil-sdk-lua -- --check
+```
+
+The Lua module calls one host-provided dispatcher:
+
+```lua
+__soil_call(interface_id, function_name, args, self)
+```
+
+The host owns grants, credentials, transport, limits and value validation. The
+generated module is a naming and shape layer over WIT, not another host
+implementation. It is suitable for either a host-side Lua runtime or a Lua
+interpreter embedded in a Wasm guest.
