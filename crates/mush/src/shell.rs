@@ -56,8 +56,76 @@ enum Connector {
     Always,
 }
 
+/// Where a command line's output goes.
+///
+/// An interactive shell writes to the terminal and lets host programs inherit
+/// the process's stdio, so prompts and pagers still work. The service daemon
+/// captures instead: its output has to travel back over the socket, and a host
+/// program that inherits a detached daemon's stdio would lose its output.
+pub trait Output {
+    fn stdout(&mut self, text: &str);
+    fn stderr(&mut self, text: &str);
+    /// Whether a host program may use the process's own stdio.
+    fn inherits_stdio(&self) -> bool;
+}
+
+/// The caller's terminal.
+pub struct Terminal;
+
+impl Output for Terminal {
+    fn stdout(&mut self, text: &str) {
+        print!("{text}");
+    }
+    fn stderr(&mut self, text: &str) {
+        eprint!("{text}");
+    }
+    fn inherits_stdio(&self) -> bool {
+        true
+    }
+}
+
+/// Buffers for a command that runs inside the daemon.
+#[derive(Default)]
+pub struct Capture {
+    pub out: String,
+    pub err: String,
+}
+
+impl Output for Capture {
+    fn stdout(&mut self, text: &str) {
+        self.out.push_str(text);
+    }
+    fn stderr(&mut self, text: &str) {
+        self.err.push_str(text);
+    }
+    fn inherits_stdio(&self) -> bool {
+        false
+    }
+}
+
 /// Run a whole command line, chaining on `&&`, `||` and `;`.
 pub fn run_line(runtime: &mut Runtime, root: &Path, line: &str) -> Result<i32> {
+    let mut terminal = Terminal;
+    run_line_with(&mut terminal, runtime, root, line)
+}
+
+/// Run a command line and return what it printed, for the service daemon.
+pub fn run_line_captured(
+    runtime: &mut Runtime,
+    root: &Path,
+    line: &str,
+) -> Result<(i32, String, String)> {
+    let mut capture = Capture::default();
+    let status = run_line_with(&mut capture, runtime, root, line)?;
+    Ok((status, capture.out, capture.err))
+}
+
+fn run_line_with(
+    output: &mut dyn Output,
+    runtime: &mut Runtime,
+    root: &Path,
+    line: &str,
+) -> Result<i32> {
     let mut status = 0;
     for (connector, command) in split_commands(line) {
         let should_run = match connector {
@@ -68,12 +136,17 @@ pub fn run_line(runtime: &mut Runtime, root: &Path, line: &str) -> Result<i32> {
         if !should_run {
             continue;
         }
-        status = run_one(runtime, root, &command)?;
+        status = run_one(output, runtime, root, &command)?;
     }
     Ok(status)
 }
 
-fn run_one(runtime: &mut Runtime, root: &Path, command: &str) -> Result<i32> {
+fn run_one(
+    output: &mut dyn Output,
+    runtime: &mut Runtime,
+    root: &Path,
+    command: &str,
+) -> Result<i32> {
     // Redirection and pipelines are the Spore's job; hand it the whole line so
     // its parser sees the operators it understands.
     let words = split_words(command);
@@ -81,23 +154,28 @@ fn run_one(runtime: &mut Runtime, root: &Path, command: &str) -> Result<i32> {
         return Ok(0);
     }
     if command.contains('|') || command.contains('>') || command.contains('<') {
-        return run_in_spore(runtime, command);
+        return run_in_spore(output, runtime, command);
     }
     if host_allowed(&words[0]) {
-        return run_host(root, &words[0], &words[1..]);
+        return run_host(output, root, &words[0], &words[1..]);
     }
-    run_in_spore(runtime, command)
+    run_in_spore(output, runtime, command)
 }
 
-fn run_in_spore(runtime: &mut Runtime, command: &str) -> Result<i32> {
+fn run_in_spore(output: &mut dyn Output, runtime: &mut Runtime, command: &str) -> Result<i32> {
     let executed = runtime.execute(command)?;
-    print!("{}", executed.output);
-    eprint!("{}", executed.stderr);
+    output.stdout(&executed.output);
+    output.stderr(&executed.stderr);
     Ok(executed.status)
 }
 
 /// Materialize the VFS, run the program there, apply whatever it changed.
-fn run_host(root: &Path, program: &str, args: &[String]) -> Result<i32> {
+fn run_host(
+    output: &mut dyn Output,
+    root: &Path,
+    program: &str,
+    args: &[String],
+) -> Result<i32> {
     let overlay = Overlay::materialize(root)
         .with_context(|| format!("materialize a workspace for {program}"))?;
     let mut command = Command::new(program);
@@ -108,7 +186,14 @@ fn run_host(root: &Path, program: &str, args: &[String]) -> Result<i32> {
     for (key, value) in identity(root) {
         command.env(key, value);
     }
-    let status = command.status().with_context(|| format!("run {program}"))?;
+    let status = if output.inherits_stdio() {
+        command.status().with_context(|| format!("run {program}"))?
+    } else {
+        let captured = command.output().with_context(|| format!("run {program}"))?;
+        output.stdout(&String::from_utf8_lossy(&captured.stdout));
+        output.stderr(&String::from_utf8_lossy(&captured.stderr));
+        captured.status
+    };
     overlay
         .apply(root)
         .with_context(|| format!("apply what {program} changed"))?;

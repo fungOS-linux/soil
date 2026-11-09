@@ -25,6 +25,7 @@ use std::{
     io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -602,6 +603,19 @@ fn run() -> Result<()> {
         Some(value) => deadline::parse_budget(&value)?,
         None => None,
     };
+    // How long an idle daemon stays alive. Long enough to cover the gap
+    // between an agent's tool calls, short enough to not leak a process per
+    // Desktop for the rest of the day.
+    let idle_timeout = match take_option(&mut args, "--idle-timeout")
+        .or_else(|| std::env::var("MUSH_IDLE_TIMEOUT").ok())
+    {
+        Some(value) => deadline::parse_budget(&value)?,
+        None => Some(Duration::from_secs(30 * 60)),
+    };
+    // The escape hatch: run in-process even when a daemon would answer.
+    let no_daemon = args.iter().any(|arg| arg == "--no-daemon")
+        || std::env::var("MUSH_NO_DAEMON").is_ok();
+    args.retain(|arg| arg != "--no-daemon");
     let configured_token =
         take_option(&mut args, "--mcp-token").or_else(|| std::env::var("MUSH_MCP_TOKEN").ok());
     let mcp_token = configured_token.clone().unwrap_or_else(new_mcp_token);
@@ -618,6 +632,29 @@ fn run() -> Result<()> {
             desktop.as_ref(),
             budget,
         );
+    }
+
+    // A one-shot command is the case that pays the Spore's compile cost for a
+    // single line. When a daemon for this root is already up, hand the line to
+    // it instead; when none is up, start one so the next call is warm.
+    if !serve
+        && !mcp
+        && !no_daemon
+        && script.is_none()
+        && let Some(line) = shell_command.clone().or_else(|| command.clone())
+    {
+        let socket_path = service::socket_for(socket.as_deref().map(Path::new), &root);
+        if let Some(status) = service::forward(
+            &socket_path,
+            &root,
+            desktop_id.as_deref(),
+            &line,
+            shell_command.is_some(),
+            idle_timeout.unwrap_or(Duration::from_secs(30 * 60)),
+            budget,
+        ) {
+            return finish(status);
+        }
     }
 
     let bytes = match wasm {
@@ -641,8 +678,8 @@ fn run() -> Result<()> {
         let socket = socket
             .as_deref()
             .context("mush --serve needs --socket PATH or a config socket")?;
-        let jobs = job::Jobs::start(runtime, background_after);
-        return service::serve(socket, &jobs);
+        let jobs = job::Jobs::start(runtime, root.clone(), background_after);
+        return service::serve(socket, &jobs, idle_timeout);
     }
 
     if mcp {
@@ -651,7 +688,7 @@ fn run() -> Result<()> {
         if configured_token.is_none() {
             eprintln!("mush: mcp bearer token {mcp_token}");
         }
-        let jobs = job::Jobs::start(runtime, background_after);
+        let jobs = job::Jobs::start(runtime, root.clone(), background_after);
         return mcp_server::serve(server, &mcp_token, &jobs);
     }
 

@@ -12,6 +12,7 @@
 
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -63,7 +64,7 @@ struct Shared {
 
 pub struct Jobs {
     shared: Arc<Shared>,
-    sender: std::sync::mpsc::Sender<(String, String)>,
+    sender: std::sync::mpsc::Sender<(String, String, bool)>,
     /// Threshold from `--background-after`, overriding the adaptive default.
     default_threshold: Option<Duration>,
     _worker: thread::JoinHandle<()>,
@@ -74,17 +75,17 @@ impl Jobs {
     ///
     /// One worker, one engine: Mush serialises commands today, and a single
     /// owner keeps the VFS and records view consistent without locking them.
-    pub fn start(runtime: Runtime, default_threshold: Option<Duration>) -> Self {
+    pub fn start(runtime: Runtime, root: PathBuf, default_threshold: Option<Duration>) -> Self {
         let shared = Arc::new(Shared {
             inner: Mutex::new(Inner::default()),
             changed: Condvar::new(),
         });
-        let (sender, receiver) = std::sync::mpsc::channel::<(String, String)>();
+        let (sender, receiver) = std::sync::mpsc::channel::<(String, String, bool)>();
         let worker_shared = Arc::clone(&shared);
         let mut runtime = runtime;
         let worker = thread::spawn(move || {
-            while let Ok((id, command)) = receiver.recv() {
-                let executed = run_command(&mut runtime, &command);
+            while let Ok((id, command, shell)) = receiver.recv() {
+                let executed = run_command(&mut runtime, &root, &command, shell);
                 worker_shared.finish(&id, command, executed);
             }
         });
@@ -97,7 +98,14 @@ impl Jobs {
     }
 
     /// Run `command`, waiting at most `threshold` before handing back an id.
-    pub fn submit(&self, command: &str, threshold: Option<Duration>) -> Result<Outcome> {
+    /// Queue `command`. `shell` runs it as a shell line (builtins, `&&`/`||`,
+    /// allowlisted host programs); otherwise it goes straight to the Spore.
+    pub fn submit(
+        &self,
+        command: &str,
+        threshold: Option<Duration>,
+        shell: bool,
+    ) -> Result<Outcome> {
         let after = threshold
             .or(self.default_threshold)
             .unwrap_or_else(|| self.suggest(command));
@@ -116,7 +124,7 @@ impl Jobs {
             );
             id
         };
-        if self.sender.send((id.clone(), command.to_string())).is_err() {
+        if self.sender.send((id.clone(), command.to_string(), shell)).is_err() {
             bail!("mush worker stopped; cannot run {command:?}");
         }
 
@@ -244,7 +252,13 @@ impl Shared {
 }
 
 /// Run every line of a command the way the CLI does, as one result.
-fn run_command(runtime: &mut Runtime, command: &str) -> Executed {
+fn run_command(runtime: &mut Runtime, root: &Path, command: &str, shell: bool) -> Executed {
+    if shell {
+        return match crate::shell::run_line_captured(runtime, root, command) {
+            Ok((status, output, stderr)) => Executed::done(output, stderr, false, status),
+            Err(error) => Executed::done(String::new(), format!("mush: {error:#}\n"), false, 1),
+        };
+    }
     let mut output = String::new();
     let mut stderr = String::new();
     let mut status = 0;

@@ -2,6 +2,16 @@ use std::{path::PathBuf, process::Command};
 
 use fungos_vfs::Vfs;
 
+/// Every test runs the binary without a daemon: one started here would outlive
+/// the test, keep the shared records store open, and block the next test (or
+/// the next `cargo test` run) behind it.
+fn mush_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mush"));
+    command.env("MUSH_NO_DAEMON", "1");
+    command
+}
+
+
 fn module() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spores/mush/module.wasm")
 }
@@ -20,7 +30,7 @@ fn wasm_spore_loads_mushrc_and_keeps_shell_state() {
         .unwrap();
     }
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -44,7 +54,7 @@ fn wasm_spore_loads_mushrc_and_keeps_shell_state() {
 #[test]
 fn wasm_spore_supports_mkdir_rmdir_and_files() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -68,7 +78,7 @@ fn wasm_spore_supports_mkdir_rmdir_and_files() {
 #[test]
 fn wasm_spore_supports_append_grep_wc_tree_and_recursive_rm() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -98,7 +108,7 @@ fn wasm_spore_supports_append_grep_wc_tree_and_recursive_rm() {
 #[test]
 fn wasm_spore_supports_redirection_recursive_mkdir_cp_and_find() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -147,7 +157,7 @@ fn run_op_applies_overlay_and_respects_gitignore() {
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("run")
         .arg("op")
         .arg("--root")
@@ -171,7 +181,7 @@ fn run_op_applies_overlay_and_respects_gitignore() {
 #[test]
 fn wasm_spore_supports_pipelines_sequences_and_input_redirection() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -216,7 +226,7 @@ fn wasm_spore_supports_pipelines_sequences_and_input_redirection() {
 #[test]
 fn wasm_spore_supports_globs_substitution_comments_and_printf() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -257,7 +267,7 @@ fn wasm_spore_supports_globs_substitution_comments_and_printf() {
 #[test]
 fn wasm_spore_supports_control_flow_test_read_and_script_args() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -299,7 +309,7 @@ fn wasm_spore_supports_control_flow_test_read_and_script_args() {
 #[test]
 fn wasm_spore_supports_loop_control_and_stderr_redirection() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -333,7 +343,7 @@ fn wasm_spore_supports_loop_control_and_stderr_redirection() {
 #[test]
 fn wasm_spore_supports_tgrep_over_vfs() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -371,7 +381,7 @@ fn wasm_spore_supports_tgrep_over_vfs() {
 #[test]
 fn wasm_spore_supports_desktop_registry_and_project_mount() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -393,7 +403,7 @@ fn wasm_spore_supports_desktop_registry_and_project_mount() {
 #[test]
 fn command_that_outlives_its_deadline_is_interrupted() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -420,7 +430,7 @@ fn command_that_outlives_its_deadline_is_interrupted() {
 #[test]
 fn zero_timeout_disables_the_deadline() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("--root")
         .arg(dir.path())
         .arg("--wasm")
@@ -441,7 +451,7 @@ fn zero_timeout_disables_the_deadline() {
 
 #[test]
 fn server_subcommand_help_does_not_start_a_server() {
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("mcp")
         .arg("--help")
         .output()
@@ -460,7 +470,7 @@ fn server_subcommand_help_does_not_start_a_server() {
 fn server_refuses_to_start_without_a_terminal_or_foreground() {
     let dir = tempfile::tempdir().unwrap();
     // Command::output() gives the child a pipe, so stdin is not a terminal.
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("mcp")
         .arg("--root")
         .arg(dir.path())
@@ -478,7 +488,7 @@ fn server_refuses_to_start_without_a_terminal_or_foreground() {
 fn exit_status_reports_what_the_command_did() {
     let dir = tempfile::tempdir().unwrap();
     let status = |command: &str| {
-        Command::new(env!("CARGO_BIN_EXE_mush"))
+        mush_command()
             .arg("--root")
             .arg(dir.path())
             .arg("--wasm")
@@ -522,7 +532,7 @@ fn origin_resolves_a_desktop_but_refuses_to_call_it_ready() {
     let checkout = home.path().join("soil/.delta/worktrees/abc123/soil");
     std::fs::create_dir_all(&checkout).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("origin")
         .arg("--json")
         .arg("--cwd")
@@ -551,7 +561,7 @@ fn origin_reports_an_unregistered_path() {
     let home = tempfile::tempdir().unwrap();
     let elsewhere = home.path().join("somewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+    let output = mush_command()
         .arg("origin")
         .arg("--json")
         .arg("--cwd")
