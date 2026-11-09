@@ -20,8 +20,11 @@ use crate::{Runtime, overlay::Overlay};
 /// Bare program names that may run as host processes.
 ///
 /// Compilers, version control, and text tools: they see the overlay and nothing
-/// of the VFS. `gh` is intentionally absent -- it carries credentials and
-/// network access, which is a boundary decision rather than a convenience.
+/// of the VFS. `gh` is here by decision, not by default -- it carries the
+/// user's credentials and network access, so a run can push a branch and open a
+/// PR. It cannot merge: `fab` owns checks and the landing decision, and an
+/// allowlisted `gh` is the shortest path from a prompt to something reviewable
+/// without putting a merge button behind a tool call.
 const HOST_ALLOWLIST: &[&str] = &[
     "cargo",
     "rustc",
@@ -30,6 +33,7 @@ const HOST_ALLOWLIST: &[&str] = &[
     "clang++",
     "c++",
     "git",
+    "gh",
     "make",
     "cmake",
     "ninja",
@@ -219,7 +223,9 @@ mod tests {
     fn a_path_is_never_a_host_program() {
         assert!(host_allowed("git"));
         assert!(!host_allowed("./git"));
-        // Credential-bearing tools are a decision, not a default.
-        assert!(!host_allowed("gh"));
+        // Credential-bearing, but allowed by decision so a run can open a PR.
+        assert!(host_allowed("gh"));
+        // A random binary is still refused.
+        assert!(!host_allowed("python3"));
     }
 }
