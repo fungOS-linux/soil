@@ -6578,6 +6578,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-canvas-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "soil-scene",
+ "tempfile",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "soil-canvas-input"
 version = "0.1.0"
 
@@ -6908,6 +6920,7 @@ version = "0.1.0"
 dependencies = [
  "soil-sdk-appdata",
  "soil-sdk-audio",
+ "soil-sdk-canvas",
  "soil-sdk-records",
 ]
 
@@ -6925,6 +6938,15 @@ dependencies = [
 name = "soil-sdk-audio"
 version = "0.1.0"
 dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "soil-sdk-canvas"
+version = "0.1.0"
+dependencies = [
+ "soil-scene",
+ "thiserror 2.0.21",
  "wit-bindgen",
 ]
 

@@ -14,6 +14,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Producer-owned shared frames. Native hosts only; a wasm guest cannot own a
+/// path or a file, and the lease metadata is enough for the guest SDK.
+#[cfg(unix)]
 pub mod shm;
 
 /// The schema this crate speaks. Bumped when a change is not additive.
