@@ -14,8 +14,12 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Producer-owned shared frames. Native hosts only; a wasm guest cannot own a
-/// path or a file, and the lease metadata is enough for the guest SDK.
+/// Shared-memory frames for the lease transport.
+///
+/// Unix-only by nature: a lease here is a file descriptor plus a byte range, and
+/// a browser has neither. The document type that *describes* a lease stays
+/// portable — only opening one is platform work — so a wasm renderer can read
+/// every scene and simply cannot map a lease.
 #[cfg(unix)]
 pub mod shm;
 
