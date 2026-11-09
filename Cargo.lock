@@ -2396,6 +2396,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fungos-records"
+version = "0.1.0"
+source = "git+https://github.com/fungOS-linux/records.git?rev=eb25c69f906eee645b5507f09017a776b1f39377#eb25c69f906eee645b5507f09017a776b1f39377"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "clap",
+ "feed-rs",
+ "ical_vcard",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "unibus 0.1.0 (git+https://github.com/fungOS-linux/unibus.git?rev=8bf8f79)",
+ "ureq",
+ "uuid",
+]
+
+[[package]]
 name = "fungos-vfs"
 version = "0.1.0"
 source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=bcd2bc682662467d1371a2c9f8436e08934132d9#bcd2bc682662467d1371a2c9f8436e08934132d9"
@@ -4070,9 +4090,11 @@ dependencies = [
  "ignore",
  "rand 0.9.5",
  "rustyline",
+ "serde",
  "serde_json",
  "soil-command",
  "soil-inference",
+ "soil-records-host",
  "soil-scrub",
  "soil-vfs-host",
  "tempfile",
@@ -6525,6 +6547,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-appdata-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=eb25c69f906eee645b5507f09017a776b1f39377)",
+ "serde_json",
+ "tempfile",
+ "wasmtime",
+]
+
+[[package]]
 name = "soil-ble-host"
 version = "0.1.0"
 dependencies = [
@@ -6545,6 +6579,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "soil-actions-host",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
+name = "soil-canvas-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "soil-scene",
+ "tempfile",
  "wasmtime",
  "wasmtime-wasi",
 ]
@@ -6897,6 +6943,7 @@ version = "0.1.0"
 dependencies = [
  "soil-sdk-appdata",
  "soil-sdk-audio",
+ "soil-sdk-canvas",
  "soil-sdk-records",
 ]
 
@@ -6914,6 +6961,15 @@ dependencies = [
 name = "soil-sdk-audio"
 version = "0.1.0"
 dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "soil-sdk-canvas"
+version = "0.1.0"
+dependencies = [
+ "soil-scene",
+ "thiserror 2.0.21",
  "wit-bindgen",
 ]
 
@@ -6944,6 +7000,7 @@ dependencies = [
  "anyhow",
  "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=46450ede02588e533984378bc979cb4010f9867b)",
  "fungos-vfs",
+ "plist",
  "serde",
  "serde_json",
  "soil-marbles",

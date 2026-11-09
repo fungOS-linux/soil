@@ -1,21 +1,31 @@
 # Soil Canvas: the cross-platform owner surface
 
-Status: **decision + contract, 2026-11-01.** Canvas is the cross-platform owner
-for windows, layout, theme, rendering and input. Spores do not submit UI trees.
-The canonical contract is [`wit/soil-canvas.wit`](../wit/soil-canvas.wit); the
-portable input normalizer is
-[`crates/soil-canvas-input`](../crates/soil-canvas-input).
+Status: **contract + SDK/host, 2026-11-09.** Canvas is the cross-platform owner
+for windows, layout, theme, rendering and input. A Spore may present a bounded
+`soil-scene` document; the host validates it and Canvas renders it. The
+canonical contract is [`wit/soil-canvas.wit`](../wit/soil-canvas.wit); the
+guest SDK is [`crates/soil-sdk-canvas`](../crates/soil-sdk-canvas) and the host
+adapter is [`crates/soil-canvas-host`](../crates/soil-canvas-host). The portable
+input normalizer is [`crates/soil-canvas-input`](../crates/soil-canvas-input).
+
+Canvas layouts are scoped to a **Desktop**. A Desktop owns its projects, VFS
+root, records scope, and theme; switching Desktops must switch the background,
+accent, project set, and saved Canvas layout together. See
+[Desktops](desktop.md).
 
 ## Decision
 
 - **Canvas owns the UI.** It owns the window/compositor, retained owner model,
   layout, theme, renderer, frame pacing, focus, visibility and input lifecycle.
-- **A Spore is logic/data.** It asks the granted Canvas surface to present or to
-  receive one normalized input event. It never receives pixels, a framebuffer,
-  a DRM/window handle, a path, a socket or a clock.
-- **`soil:surface` is deferred, not rejected.** The scene-submission design
-  remains a reference for a future where a Spore brings its own UI, or where a
-  non-Canvas host exists. It is not on the v1 path.
+- **A Spore is logic/data.** It asks the granted Canvas surface to present a
+  versioned `soil-scene` document or to receive one normalized input event. It
+  never receives pixels, a framebuffer, a DRM/window handle, a path, a socket or
+  a clock.
+- **The scene document is the payload, not a second UI ABI.** A Spore may
+  describe rects, text, charts and other `soil-scene` content, but Canvas keeps
+  layout, theme, extent, input lifecycle and the actual presenter. A host that
+  is not Canvas can implement the same `Presenter` trait with a native
+  renderer.
 - **Canvas ships with the host**, not through the Spore Store. `soil:canvas` is
   therefore an explicit host-shell capability, like SystemUI, rather than a
   generic application capability.
@@ -26,19 +36,13 @@ portable input normalizer is
   render, but its pixels still have to reach Canvas through a host-owned target;
   it never gets a window or swapchain.
 
-Revisit `soil:surface` only when one of these is real:
-
-1. a Spore must draw its own interface, not a Canvas owner view;
-2. a host runs without Canvas;
-3. an external pixel producer needs a bounded surface-ingress contract.
-
 ## Contract
 
 `soil:canvas@1.0.0` has one interface, `surface`, with four calls:
 
 | Call | Meaning |
 |---|---|
-| `present()` | Render the granted owner surface; the host retains the pixels. Returns `state`. |
+| `present(document)` | Validate and draw a `soil-scene` document; the host retains the pixels. Returns `state`. |
 | `observe()` | Read the current owner state without presenting. |
 | `input(generation, key)` | Deliver one normalized event. A stale generation is refused. |
 | `close()` | Release the grant; later calls return `closed`. |
@@ -98,12 +102,53 @@ The S22 keymap is covered directly: digits, `*`, `#`, phone, soft keys,
 app-select, voice/PTT, media and volume. Raw keycodes, device paths and
 `{keydown,keyup}` transport details never cross the capability boundary.
 
+## SDK and host
+
+The rendering path is:
+
+```text
+Spore
+  -> soil-sdk-canvas::Surface::present
+     -> soil:canvas/surface.present(document)
+        -> soil-canvas-host::CanvasHost (validation, budget, generation)
+           -> Presenter
+              -> CanvasSocket -> Canvas ui.sock -> Canvas renderer
+```
+
+`soil-sdk-canvas` depends on `soil-scene`, so a guest builds the same document
+types the host validates. `present`, `present_scene`, `present_rgba` and
+`present_lease` cover the three payload kinds. `observe`, `input`, `close`,
+`supports` and `budget` are the rest of the contract.
+
+`soil-canvas-host` is the host half. It enforces the one-present/one-input
+budget, validates with `soil_scene::Present::from_bytes`, and maps presenter
+failures onto the named `failure` taxonomy. `CanvasSocket` forwards a validated
+document to Canvas's existing producer socket, so Canvas uses its normal
+renderer and no second rasterizer is introduced. `CanvasRuntime` links WASI,
+`soil:canvas` and `soil:scene` into a component runner.
+
+Canvas's current `spore_present` bridge draws `Rect` and `Text`; chart
+primitives such as `Polyline`, `Area` and `Candles` still degrade to `Group`.
+`CanvasSocket` inherits that coverage. A Spore that needs the full Soil scene
+vocabulary should use a `Presenter` backed by the native `soil-scene-gpu`
+renderer instead of the Canvas socket.
+
+The Lua `fungos.ui` library is a capability peer, not a second renderer. Its
+`ui.document` returns the same `soil-scene` document shape, and `ui.present`
+calls the host's `canvas.present` (or `soil.canvas.present`). Canvas's module
+host exposes `canvas.present` by validating the document and converting it
+through `spore_present`. The legacy `ui.render` path remains as the
+compatibility fallback for an older Canvas. `ui.host_surface` placement is
+still layout-only until Canvas exposes a renderable host-resource kind; the
+Rust SDK path above does not change that Lua rule.
+
 ## Host obligations
 
 A Canvas host must:
 
 1. create one owner surface and choose its extent from host policy;
-2. present only a complete, opaque owner frame of the granted size;
+2. present only a complete, validated `soil-scene` document or an opaque owner
+   frame of the granted size;
 3. keep the last good frame visible on presenter/frame errors;
 4. normalize input before calling the guest, and bind it to a generation;
 5. keep input delivery ordered with presentation, with a bounded queue;
@@ -111,6 +156,11 @@ A Canvas host must:
 7. treat lid, display, focus and visibility as host policy.
 
 ## S22 reference host
+
+The S22 core-Wasm adapter in `crates/soil-runtime` is the legacy `present()`
+lowering. Component Spores use `soil-canvas-host` instead. Both are hosts for
+the same WIT contract; new guest work should use the component path.
+
 
 The first real host is the S22 native Linux track:
 
@@ -136,7 +186,8 @@ the definition.
 
 ## Non-goals for v1
 
-- Spore-authored scene trees or arbitrary widgets;
+- arbitrary widget trees outside the `soil-scene` vocabulary; a Spore may
+  submit a bounded scene document, not a host widget tree;
 - custom shaders, render passes or raw GPU buffers;
 - more than one window per grant, or guest-chosen geometry/display;
 - raw keycodes, pointer capture or access to other windows' input;

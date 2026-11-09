@@ -50,7 +50,7 @@ Principles:
 | [`soil:view@1.0.0`](wit/soil-view.wit) | `soil:view`, optional `soil:view.capture` | WIT + Viewer state machine |
 | [`soil:time@1.0.0`](wit/soil-time.wit) | `soil:time` | WIT |
 | [`soil:storage@1.0.0`](wit/soil-storage.wit) | `soil:storage.read`, optional `soil:storage.write` | WIT |
-| [`soil:appdata@1.0.0`](wit/soil-appdata.wit) | `soil:appdata` | WIT + guest SDK; native host next |
+| [`soil:appdata@1.0.0`](wit/soil-appdata.wit) | `soil:appdata` | WIT + guest SDK + records-backed host |
 | [`soil:records@0.1.0`](wit/soil-records.wit) | `soil:records` read/write/sync | WIT + generic/contacts host + guest SDK |
 | [`soil:http@0.1.0`](wit/soil-http.wit) | `soil:http` | WIT + bounded host + direct transport proof |
 | [`soil:index@1.1.0`](wit/soil-index.wit) | `soil:index` | derived browse/search + explicit KNN; fast direct-child traversal |
@@ -124,6 +124,26 @@ cargo check -p viewer-spore --target wasm32-wasip2
 cargo check --manifest-path ../ajmwagar/spores/spores/colmi-ring/Cargo.toml \
   --target wasm32-wasip2
 ```
+
+### One build cache, one installed host
+
+The hosts link Wasmtime. A private `target/` per worktree therefore costs several
+gigabytes each, and a machine running several worktrees at once fills its disk
+long before it runs out of source. Build once and share:
+
+```sh
+export CARGO_TARGET_DIR="$HOME/Library/Caches/soil/cargo-target"
+export CARGO_INCREMENTAL=0
+cargo install --path crates/soil-search-host --bin soil-search-web \
+  --root "$HOME/.local"
+```
+
+Agents and Spores then run `soil-search-web` from `~/.local/bin` against whatever
+`target/` the shared cache already holds. Rebuilding is a soil decision, not a
+Spore decision: the WIT packages and the hosts that implement them move together
+(`soil:search@0.6.0`, `soil:index@1.1.0`), so a change to `wit/` or a host crate
+means a rebuild and a reinstall, while work in `spores/` or a canvas worktree does
+not.
 
 The capability contracts parse as WIT, and the Viewer state machine has no host
 authority.

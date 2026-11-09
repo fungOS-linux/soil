@@ -104,11 +104,10 @@ impl Registry {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            let text = fs::read_to_string(&path)
-                .with_context(|| format!("read {}", path.display()))?;
+            let text =
+                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
             hooks.push(
-                serde_json::from_str(&text)
-                    .with_context(|| format!("parse {}", path.display()))?,
+                serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?,
             );
         }
         hooks.sort_by(|a, b| a.name.cmp(&b.name).then(a.slug.cmp(&b.slug)));
@@ -129,7 +128,9 @@ impl Registry {
             match fs::remove_file(&path) {
                 Ok(()) => removed = true,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
+                Err(error) => {
+                    return Err(error).with_context(|| format!("remove {}", path.display()));
+                }
             }
         }
         Ok(removed)
@@ -143,8 +144,8 @@ impl Registry {
         let mut secrets = Vec::new();
         for webhook in self.list()? {
             let path = self.secret_path(&webhook.slug);
-            let secret = fs::read(&path)
-                .with_context(|| format!("read secret for {}", webhook.slug))?;
+            let secret =
+                fs::read(&path).with_context(|| format!("read secret for {}", webhook.slug))?;
             secrets.push((webhook.slug, secret));
         }
         Ok(secrets)
@@ -178,7 +179,10 @@ fn slugify(value: &str) -> Result<String> {
 }
 
 fn random_slug() -> Result<String> {
-    Ok(random_bytes(8)?.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(random_bytes(8)?
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 fn random_secret() -> Result<String> {

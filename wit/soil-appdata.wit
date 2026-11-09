@@ -69,6 +69,10 @@ interface appdata {
   open: func(scope: scope) -> result<store, error>;
 }
 
+world appdata-host {
+  import appdata;
+}
+
 world guest {
   import appdata;
 }

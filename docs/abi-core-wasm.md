@@ -30,8 +30,12 @@ wit/soil-device.wit            semantic battery, estimate and lid
 wit/soil-canvas.wit            semantic owner surface
 crates/soil-runtime/src/       core-Wasm imports and layouts
 crates/soil-runtime/fixtures/  core-Wasm fixtures using those imports
+crates/soil-canvas-host/       component `soil:canvas@1.0.0` host
+crates/soil-sdk-canvas/        component guest SDK
 ```
 
-When the component host replaces the S22 core runner, these imports should move
-to normal WIT linker bindings and this document should shrink to a compatibility
-note.
+The component path is now real for new guests: `soil-canvas-host` links
+`soil:canvas` and `soil:scene` through normal WIT bindings and validates the
+same documents. The S22 core runner remains for the legacy `@0.1.0` owner
+surface and its fixtures. When those fixtures move to the component host, this
+document can shrink to a compatibility note.

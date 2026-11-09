@@ -205,7 +205,8 @@ async fn context_is_host_attested() {
 }
 
 #[test]
-fn rejects_ambiguous_grants() {    let echo = service("echo", ECHO);
+fn rejects_ambiguous_grants() {
+    let echo = service("echo", ECHO);
     let route = || GatewayRoute::new([Method::POST], "/webhooks/").unwrap();
 
     let duplicate = HttpGatewayBuilder::new()

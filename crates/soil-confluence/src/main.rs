@@ -1,12 +1,4 @@
-use std::{
-    fs,
-    net::IpAddr,
-    net::SocketAddr,
-    path::Path,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs, net::IpAddr, net::SocketAddr, path::Path, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -152,13 +144,8 @@ fn run_webhook(args: WebhookArgs) -> Result<()> {
             slug,
             json,
         } => {
-            let created = registry.create(
-                &name,
-                &provider,
-                &tenant,
-                slug.as_deref(),
-                unix_millis(),
-            )?;
+            let created =
+                registry.create(&name, &provider, &tenant, slug.as_deref(), unix_millis())?;
             let url = endpoint(&args.base_url, &created.webhook);
             if json {
                 println!(
@@ -218,10 +205,7 @@ kind:   {} (tenant {})",
         WebhookCommand::Revoke { slug, json } => {
             let removed = registry.revoke(&slug)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({"slug": slug, "revoked": removed})
-                );
+                println!("{}", serde_json::json!({"slug": slug, "revoked": removed}));
             } else if removed {
                 println!("revoked {slug}");
             } else {

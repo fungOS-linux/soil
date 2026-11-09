@@ -271,8 +271,8 @@ struct LeaseEndpoint {
 /// An expired lease is refused rather than tried: a stale endpoint id is how a
 /// rotation quietly becomes an outage.
 fn resolve_lease(path: &Path, now: i64) -> Result<(EndpointId, Vec<SocketAddr>, String)> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read lease {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("read lease {}", path.display()))?;
     let lease: LeaseRecord =
         serde_json::from_str(&text).with_context(|| format!("parse lease {}", path.display()))?;
     if let Some(expires_at) = lease.endpoint.expires_at {
@@ -315,8 +315,12 @@ fn now_seconds() -> i64 {
 }
 
 /// One HTTP exchange, byte for byte, until either side closes.
-async fn pump<R, S>(mut recv: R, mut send: S, read: &mut tokio::net::tcp::OwnedReadHalf, write: &mut tokio::net::tcp::OwnedWriteHalf)
-where
+async fn pump<R, S>(
+    mut recv: R,
+    mut send: S,
+    read: &mut tokio::net::tcp::OwnedReadHalf,
+    write: &mut tokio::net::tcp::OwnedWriteHalf,
+) where
     R: AsyncRead + Unpin,
     S: AsyncWrite + Unpin,
 {

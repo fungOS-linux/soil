@@ -12,12 +12,7 @@
 //! tricked into reading.
 
 use std::{
-    collections::BTreeSet,
-    convert::Infallible,
-    fmt,
-    net::IpAddr,
-    pin::Pin,
-    sync::Arc,
+    collections::BTreeSet, convert::Infallible, fmt, net::IpAddr, pin::Pin, sync::Arc,
     time::Duration,
 };
 
@@ -656,7 +651,9 @@ mod tests {
             .uri("http://confluence.test/webhooks/github")
             .body(())
             .unwrap();
-        let assertion = auth.verify(&mut request, IpAddr::from([127, 0, 0, 1])).unwrap();
+        let assertion = auth
+            .verify(&mut request, IpAddr::from([127, 0, 0, 1]))
+            .unwrap();
         assert_eq!(assertion.verifier, "none");
         assert_eq!(assertion.tls_peer, None);
     }
@@ -672,7 +669,9 @@ mod tests {
             OriginAuth::ORIGIN_HEADER,
             http::HeaderValue::from_bytes(b"\xff\xfe").unwrap(),
         );
-        let assertion = auth.verify(&mut request, IpAddr::from([127, 0, 0, 1])).unwrap();
+        let assertion = auth
+            .verify(&mut request, IpAddr::from([127, 0, 0, 1]))
+            .unwrap();
         assert_eq!(assertion.verifier, "none");
     }
 
