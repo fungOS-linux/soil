@@ -10,6 +10,7 @@ mod desktop;
 mod gateway;
 mod mcp_gateway;
 mod mcp_server;
+mod origin;
 mod outcome;
 mod overlay;
 mod project;
@@ -405,10 +406,30 @@ fn run() -> Result<()> {
         args.remove(0);
         return run_request(&config, args);
     }
+    if args.first().map(String::as_str) == Some("origin") {
+        args.remove(0);
+        return origin::run(args);
+    }
     let explicit_root = args.iter().any(|arg| arg == "--root");
-    let desktop_id = take_option(&mut args, "--desktop")
+    let mut desktop_id = take_option(&mut args, "--desktop")
         .or_else(|| std::env::var("MUSH_DESKTOP").ok())
         .or_else(|| config.desktop.clone());
+    // Nothing named a Desktop and nothing named a root: let the caller's origin
+    // decide, so an agent started in a Delta worktree lands in its Desktop
+    // instead of the default scratch root. The notice goes to stderr so it
+    // never mixes with command output.
+    if desktop_id.is_none() && !explicit_root {
+        let cwd = std::env::current_dir()?;
+        let origin = origin::resolve(&cwd);
+        if let Some(id) = origin.desktop.clone() {
+            eprintln!(
+                "mush: origin desktop {id} ({}) from {}",
+                origin.readiness.as_str(),
+                cwd.display()
+            );
+            desktop_id = Some(id);
+        }
+    }
     let desktop = match desktop_id.as_deref() {
         Some(id) => {
             if explicit_root {
@@ -615,7 +636,8 @@ fn usage() -> String {
          \x20 mush doctor [OPTIONS]\n\
          \x20 mush run op [OPTIONS]\n\
          \x20 mush --serve --socket PATH --root DIR [--foreground] [OPTIONS]\n\
-         \x20 mush mcp [--listen ADDR] [--foreground] [OPTIONS]\n\n\
+         \x20 mush mcp [--listen ADDR] [--foreground] [OPTIONS]\n\
+         \x20 mush origin [--cwd PATH] [--json]\n\n\
          The Mush Spore is embedded; --wasm overrides it for development.\n\n\
          Options:\n\
          \x20 --root DIR                 VFS root (mutually exclusive with --desktop)\n\
@@ -648,10 +670,11 @@ fn run_desktop(mut args: Vec<String>) -> Result<()> {
         "list" => {
             for desktop in desktop::list()? {
                 println!(
-                    "{}\t{}\t{}\ttheme={}",
+                    "{}\t{}\t{}\tmount={}\ttheme={}",
                     desktop.id,
                     desktop.name,
                     desktop.root.display(),
+                    desktop.mount.display(),
                     desktop.theme
                 );
             }
@@ -664,6 +687,7 @@ fn run_desktop(mut args: Vec<String>) -> Result<()> {
             println!("id: {}", desktop.id);
             println!("name: {}", desktop.name);
             println!("root: {}", desktop.root.display());
+            println!("mount: {}", desktop.mount.display());
             println!("theme: {}", desktop.theme);
             println!("projects: {}", desktop.projects.join(", "));
         }
@@ -671,12 +695,15 @@ fn run_desktop(mut args: Vec<String>) -> Result<()> {
             let id = args
                 .get(1)
                 .ok_or_else(|| {
-                    anyhow::anyhow!("usage: mush desktop create ID [--name NAME] [--theme THEME]")
+                    anyhow::anyhow!(
+                        "usage: mush desktop create ID [--name NAME] [--theme THEME] [--mount PATH]"
+                    )
                 })?
                 .clone();
             let name = take_option(&mut args, "--name").unwrap_or_else(|| id.clone());
             let theme = take_option(&mut args, "--theme").unwrap_or_else(|| "deep".into());
-            let desktop = desktop::create(&id, &name, &theme)?;
+            let mount = take_option(&mut args, "--mount");
+            let desktop = desktop::create(&id, &name, &theme, mount.as_deref())?;
             println!("{}", desktop.id);
         }
         "add-project" => {

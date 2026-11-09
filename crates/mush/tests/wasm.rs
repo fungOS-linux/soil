@@ -501,3 +501,70 @@ fn exit_status_reports_what_the_command_did() {
     assert_eq!(status("true; false"), 1);
     assert_eq!(status("false; true"), 0);
 }
+
+#[test]
+fn origin_resolves_a_desktop_but_refuses_to_call_it_ready() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = home.path().join(".config/fungos/desktops");
+    std::fs::create_dir_all(&registry).unwrap();
+    let mount = home.path().join("mnt/personal");
+    std::fs::write(
+        registry.join("personal.toml"),
+        format!(
+            "id = \"personal\"\nname = \"Personal\"\nmount = \"{}\"\nprojects = \"soil\"\n",
+            mount.display()
+        ),
+    )
+    .unwrap();
+    // The projection path exists, but nothing is mounted there.
+    std::fs::create_dir_all(mount.join("projects/soil")).unwrap();
+
+    let checkout = home.path().join("soil/.delta/worktrees/abc123/soil");
+    std::fs::create_dir_all(&checkout).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("origin")
+        .arg("--json")
+        .arg("--cwd")
+        .arg(&checkout)
+        .env("HOME", home.path())
+        .env("DELTA_CURRENT_THREAD_ID", "thread-under-test")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a path that is not a mount must not report ready: {stdout}"
+    );
+    assert!(stdout.contains("\"desktop\":\"personal\""), "{stdout}");
+    assert!(stdout.contains("\"delta_worktree\":\"abc123\""), "{stdout}");
+    assert!(
+        stdout.contains("\"thread\":\"thread-under-test\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\"readiness\":\"not-mounted\""), "{stdout}");
+}
+
+#[test]
+fn origin_reports_an_unregistered_path() {
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = home.path().join("somewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .arg("origin")
+        .arg("--json")
+        .arg("--cwd")
+        .arg(&elsewhere)
+        .env("HOME", home.path())
+        .env_remove("DELTA_CURRENT_THREAD_ID")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"readiness\":\"unregistered\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\"desktop\":null"), "{stdout}");
+}

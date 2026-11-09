@@ -113,6 +113,53 @@ A Desktop selects a VFS root under `~/.local/share/fungos/desktops/<id>`.
 That root can later grow project worktree mounts; today it is a namespace with
 `projects/`, `notes/`, and `scratch/` directories. See [Desktops](desktop.md).
 
+A Desktop also records `mount`, where this device projects it for host tools
+(default `~/mnt/<id>`). The root is the store; the mount is a filesystem view of
+it, and they are separate because a Desktop follows a principal across machines
+while each device projects it somewhere different.
+
+### Origin
+
+`mush origin` answers "which Desktop owns this caller?" from the only two hints
+a Delta agent has: `DELTA_CURRENT_THREAD_ID` and a working directory shaped like
+`<repo>/.delta/worktrees/<id>/<repo>`.
+
+```sh
+mush origin                 # human-readable
+mush origin --json          # machine-readable
+mush origin --cwd PATH      # resolve somewhere else
+```
+
+```text
+cwd: /src/soil/.delta/worktrees/abc123/soil
+thread: ksQQ...
+delta worktree: abc123
+repo: soil
+desktop: personal
+vfs root: /Users/me/.local/share/fungos/desktops/personal
+mount: /Users/me/mnt/personal [mounted]
+project: /Users/me/mnt/personal/projects/soil
+status: ready
+```
+
+`status` is honest about what is actually there:
+
+| `status` | Meaning | Exit |
+|---|---|---|
+| `ready` | The projection is mounted and the project exists under it | 0 |
+| `not-mounted` | A Desktop matched, but nothing is mounted at its path | 2 |
+| `no-project` | The projection is mounted, but this repository is not under it | 2 |
+| `unregistered` | No Desktop claims this repository or path | 3 |
+
+Resolution never invents a mount. Handing back a path where nothing is mounted
+would send an agent's writes into an empty directory that looks exactly like
+success, so `not-mounted` is a distinct, non-zero answer.
+
+When no `--root`, `--desktop`, `MUSH_DESKTOP`, or `desktop` config names a
+Desktop, `mush` selects the one its origin resolves to and says so on stderr.
+A caller that wants the default root or a specific Desktop passes one
+explicitly, which always wins.
+
 ## Service mode
 
 `mush --serve` binds a `0600` Unix socket and accepts one JSON command request

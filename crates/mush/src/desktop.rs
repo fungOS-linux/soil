@@ -11,7 +11,14 @@ use anyhow::{Context, Result, bail};
 pub struct Desktop {
     pub id: String,
     pub name: String,
+    /// Local VFS root that Mush reads and writes.
     pub root: PathBuf,
+    /// Where this Desktop is projected for host tools, if the device has one.
+    ///
+    /// The VFS root is the store; the mount is a filesystem view of it. They
+    /// are separate because a Desktop can follow a principal across machines
+    /// while each device projects it somewhere different.
+    pub mount: PathBuf,
     pub theme: String,
     pub projects: Vec<String>,
 }
@@ -58,11 +65,17 @@ pub fn list_at(base: &Path) -> Result<Vec<Desktop>> {
     Ok(desktops)
 }
 
-pub fn create(id: &str, name: &str, theme: &str) -> Result<Desktop> {
-    create_at(&registry_path(), id, name, theme)
+pub fn create(id: &str, name: &str, theme: &str, mount: Option<&str>) -> Result<Desktop> {
+    create_at(&registry_path(), id, name, theme, mount)
 }
 
-pub fn create_at(base: &Path, id: &str, name: &str, theme: &str) -> Result<Desktop> {
+pub fn create_at(
+    base: &Path,
+    id: &str,
+    name: &str,
+    theme: &str,
+    mount: Option<&str>,
+) -> Result<Desktop> {
     validate_id(id)?;
     let name = if name.trim().is_empty() {
         id
@@ -81,6 +94,9 @@ pub fn create_at(base: &Path, id: &str, name: &str, theme: &str) -> Result<Deskt
         id: id.to_string(),
         name: name.to_string(),
         root: root.clone(),
+        mount: mount
+            .map(crate::config::expand_home)
+            .unwrap_or_else(|| default_mount(id)),
         theme: theme.to_string(),
         projects: Vec::new(),
     };
@@ -114,6 +130,10 @@ fn write_config(path: &Path, desktop: &Desktop) -> Result<()> {
         "root = \"{}\"\n",
         escape(&desktop.root.display().to_string())
     ));
+    text.push_str(&format!(
+        "mount = \"{}\"\n",
+        escape(&desktop.mount.display().to_string())
+    ));
     text.push_str(&format!("theme = \"{}\"\n", escape(&desktop.theme)));
     text.push_str(&format!(
         "projects = \"{}\"\n",
@@ -127,6 +147,7 @@ fn parse(id: &str, text: &str) -> Result<Desktop> {
     let mut root = crate::config::home_dir()
         .join(".local/share/fungos/desktops")
         .join(id);
+    let mut mount = default_mount(id);
     let mut theme = "deep".to_string();
     let mut projects = Vec::new();
     for (line_number, raw) in text.lines().enumerate() {
@@ -145,6 +166,7 @@ fn parse(id: &str, text: &str) -> Result<Desktop> {
             "id" => {}
             "name" => name = value,
             "root" => root = crate::config::expand_home(&value),
+            "mount" => mount = crate::config::expand_home(&value),
             "theme" => theme = value,
             "projects" => {
                 projects = value
@@ -164,9 +186,18 @@ fn parse(id: &str, text: &str) -> Result<Desktop> {
         id: id.to_string(),
         name,
         root,
+        mount,
         theme,
         projects,
     })
+}
+
+/// Where a Desktop is projected on this device when the registry is silent.
+///
+/// This is a convention, not a claim: `mush origin` checks whether anything is
+/// actually mounted there before reporting it as usable.
+pub fn default_mount(id: &str) -> PathBuf {
+    crate::config::home_dir().join("mnt").join(id)
 }
 
 pub fn validate_id(id: &str) -> Result<()> {
@@ -209,6 +240,7 @@ mod tests {
             r#"
             name = "Acme"
             root = "~/fungos/acme"
+            mount = "~/mnt/acme"
             theme = "ocean"
             projects = "soil, marbles"
             "#,
@@ -216,8 +248,16 @@ mod tests {
         .unwrap();
         assert_eq!(desktop.name, "Acme");
         assert!(desktop.root.ends_with("fungos/acme"));
+        assert!(desktop.mount.ends_with("mnt/acme"));
         assert_eq!(desktop.theme, "ocean");
         assert_eq!(desktop.projects, vec!["soil", "marbles"]);
+    }
+
+    #[test]
+    fn a_desktop_without_a_mount_falls_back_to_the_device_convention() {
+        let desktop = parse("acme", "name = \"Acme\"").unwrap();
+        assert_eq!(desktop.mount, default_mount("acme"));
+        assert!(desktop.mount.ends_with("mnt/acme"));
     }
 
     #[test]
