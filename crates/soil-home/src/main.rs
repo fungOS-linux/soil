@@ -45,6 +45,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
         println!("{}", usage());
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("snapshot") {
+        return snapshot(&args[1..]);
+    }
 
     let routes = named(&args, "--routes").map_or_else(default_routes, PathBuf::from);
     let wallpaper = named(&args, "--wallpaper")
@@ -120,7 +123,7 @@ fn named(args: &[String], flag: &str) -> Option<String> {
 }
 
 fn usage() -> String {
-    "usage: soil-home [--routes PATH] [--wallpaper PATH] [--icons DIR] [--addr HOST:PORT]\n       soil-home --version".into()
+    "usage: soil-home [--routes PATH] [--wallpaper PATH] [--icons DIR] [--addr HOST:PORT]\n       soil-home snapshot [--routes PATH] [-o FILE]\n       soil-home --version".into()
 }
 
 // ---- the route table ------------------------------------------------------
@@ -426,6 +429,199 @@ fn get(address: &str, path: &str) -> Result<String, String> {
         return Err(format!("{address}: {}", head.lines().next().unwrap_or("")));
     }
     Ok(body.to_owned())
+}
+
+// ---- snapshot -------------------------------------------------------------
+
+/// The Lua table the home Spore draws.
+///
+/// This is the same data the HTML presenter renders: routes become app and
+/// service entries, the store contributes marks and the catalog, and the
+/// machine contributes its metrics. The Spore never fetches; it receives this
+/// file from the host.
+fn snapshot(args: &[String]) -> Result<(), String> {
+    let routes = read_routes(&named(args, "--routes").map_or_else(default_routes, PathBuf::from))?;
+    let store = fetch_store();
+    let system = read_system();
+    let probes = probes(&routes);
+
+    let mut lua = String::from("return {\n");
+    lua.push_str(&format!(
+        "  host = {},\n  wallpaper = \"undergrowth\",\n",
+        lua_string(system.host.as_deref().unwrap_or("fungOS"))
+    ));
+
+    let mut apps = String::new();
+    let mut served: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut dock = Vec::new();
+    for route in &routes {
+        if route.name == "home" || route.is_service() {
+            continue;
+        }
+        let app = mark(route, &store.apps);
+        let id = app
+            .map(|app| app.id.clone())
+            .unwrap_or_else(|| route.name.clone());
+        served.insert(app.map(|app| app.id.clone()).unwrap_or_default());
+        let name = app
+            .map(|app| app.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| route.name.clone());
+        let category = app
+            .and_then(|app| app.category.clone())
+            .unwrap_or_else(|| "app".into());
+        let color = app
+            .and_then(|app| app.color.clone())
+            .unwrap_or_else(|| hashed_color(&route.name));
+        apps.push_str(&format!(
+            "    {{ id = {}, name = {}, glyph = {}, host = {}, category = {}, color = {}, state = \"installed\" }},\n",
+            lua_string(&id),
+            lua_string(&name),
+            lua_string(&route.name),
+            lua_string(route.host().unwrap_or("")),
+            lua_string(&category),
+            lua_string(&color),
+        ));
+        if route.dock {
+            dock.push(id);
+        }
+    }
+    for app in &store.apps {
+        if served.contains(&app.id) {
+            continue;
+        }
+        let name = if app.name.is_empty() {
+            app.id.rsplit('.').next().unwrap_or(&app.id).to_owned()
+        } else {
+            app.name.clone()
+        };
+        let short = app.id.rsplit('.').next().unwrap_or(&app.id);
+        apps.push_str(&format!(
+            "    {{ id = {}, name = {}, glyph = {}, host = \"store.myc\", category = {}, color = {}, state = \"installed\" }},\n",
+            lua_string(&app.id),
+            lua_string(&name),
+            lua_string(short),
+            lua_string(app.category.as_deref().unwrap_or("app")),
+            lua_string(&app.color.clone().unwrap_or_else(|| hashed_color(&name))),
+        ));
+    }
+    lua.push_str(&format!("  apps = {{\n{apps}  }},\n"));
+
+    let mut services = String::new();
+    for (route, probe) in routes.iter().zip(&probes) {
+        if !route.is_service() {
+            continue;
+        }
+        services.push_str(&format!(
+            "    {{ name = {}, host = {}, status = {}, ms = {} }},\n",
+            lua_string(&route.name),
+            lua_string(route.host().unwrap_or("")),
+            lua_string(probe.status),
+            probe
+                .ms
+                .map(|ms| ms.to_string())
+                .unwrap_or_else(|| "nil".into()),
+        ));
+    }
+    lua.push_str(&format!("  services = {{\n{services}  }},\n"));
+
+    let up = probes.iter().filter(|probe| probe.status == "up").count();
+    let down: Vec<&str> = routes
+        .iter()
+        .zip(&probes)
+        .filter(|(_, probe)| probe.status == "down")
+        .map(|(route, _)| route.name.as_str())
+        .collect();
+    let mut latencies: Vec<u128> = probes.iter().filter_map(|probe| probe.ms).collect();
+    latencies.sort_unstable();
+    let median = latencies
+        .get(latencies.len() / 2)
+        .map(|ms| format!("{ms} ms median"))
+        .unwrap_or_else(|| "no latencies".to_owned());
+    let down_text = if down.is_empty() {
+        "everything answering".to_owned()
+    } else {
+        format!("down: {}", down.join(", "))
+    };
+    let time = command("date", &["+%H:%M"]).unwrap_or_default();
+    let date = command("date", &["+%A, %B %-d"]).unwrap_or_default();
+    let day = command("date", &["+%j"]).unwrap_or_default();
+    let year = command("date", &["+%Y"]).unwrap_or_default();
+
+    let mut classes = String::new();
+    for class in ["live", "restart", "consent", "system", "hold"] {
+        let count = store
+            .updates
+            .updates
+            .iter()
+            .filter(|update| update.class == class)
+            .count();
+        if count > 0 {
+            let ink = match class {
+                "live" => "success",
+                "restart" => "info",
+                "consent" => "warning",
+                "system" => "danger",
+                _ => "muted",
+            };
+            classes.push_str(&format!(
+                "        {{ name = {}, count = {count}, ink = {} }},\n",
+                lua_string(class),
+                lua_string(ink)
+            ));
+        }
+    }
+
+    lua.push_str(&format!(
+        "  widgets = {{\n    today = {{ time = {}, date = {}, day = {} }},\n    machine = {{ up = {up}, total = {}, median = {}, down = {} }},\n    store = {{ spores = {}, source = {}, current = {}, yanked = {}, classes = {{\n{classes}    }} }},\n    system = {{ load = {}, memory = {}, disk = {}, battery = {} }},\n  }},\n",
+        lua_string(&time),
+        lua_string(&date),
+        lua_string(&format!("day {day} of {year}")),
+        routes.len(),
+        lua_string(&median),
+        lua_string(&down_text),
+        store.apps.len(),
+        lua_string(&format!(
+            "{} · {}",
+            store.source.name,
+            if store.source.verified {
+                "signed index"
+            } else {
+                "no signed index"
+            }
+        )),
+        store.updates.current.len(),
+        store.updates.yanked.len(),
+        lua_string(system.load.as_deref().unwrap_or("")),
+        lua_string(system.memory.as_deref().unwrap_or("")),
+        lua_string(system.disk.as_deref().unwrap_or("")),
+        lua_string(system.battery.as_deref().unwrap_or("")),
+    ));
+
+    let docked: Vec<String> = dock.iter().map(|id| lua_string(id)).collect();
+    lua.push_str(&format!("  dock = {{ {} }},\n}}\n", docked.join(", ")));
+
+    match named(args, "-o") {
+        Some(path) => std::fs::write(&path, lua).map_err(|error| format!("{path}: {error}"))?,
+        None => print!("{lua}"),
+    }
+    Ok(())
+}
+
+fn lua_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 // ---- probes ---------------------------------------------------------------
