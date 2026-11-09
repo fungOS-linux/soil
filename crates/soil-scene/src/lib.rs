@@ -14,6 +14,13 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Shared-memory frames for the lease transport.
+///
+/// Unix-only by nature: a lease here is a file descriptor plus a byte range, and
+/// a browser has neither. The document type that *describes* a lease stays
+/// portable — only opening one is platform work — so a wasm renderer can read
+/// every scene and simply cannot map a lease.
+#[cfg(unix)]
 pub mod shm;
 
 /// The schema this crate speaks. Bumped when a change is not additive.

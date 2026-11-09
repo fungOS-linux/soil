@@ -12,8 +12,14 @@ use std::collections::HashMap;
 use std::io::Read;
 
 mod gpu;
+// The terminal shell. Everything below needs a pty, a VT engine, a window or
+// host telemetry, and none of it is reachable from a browser — which is why it
+// is a feature and not a module the render core can see.
+#[cfg(feature = "term")]
 pub mod live;
+#[cfg(feature = "term")]
 pub mod terminal;
+#[cfg(feature = "term")]
 pub mod window;
 
 /// Theme values the renderer needs. The scene carries semantic inks, never
