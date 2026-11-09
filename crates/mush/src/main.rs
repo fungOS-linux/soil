@@ -699,6 +699,49 @@ fn session_key(explicit: Option<String>, root: &Path) -> String {
         })
 }
 
+/// The cargo home for this worktree set, provisioned by bob.
+///
+/// `~/.cargo` carries a single `.package-cache` flock, so every build that
+/// shares it serializes against every other build on the machine. bob clones
+/// the registry copy-on-write per key and drops the shared lock file. The key
+/// here is the one that names the mush session, so a set of worktrees built
+/// together shares one lock and nothing outside it does.
+///
+/// Fail-open by design: a host without bob loses parallelism, not correctness.
+fn bob_cargo_home(root: &Path) -> Result<PathBuf> {
+    let key = session_key(None, root);
+    let attempts: [&[&str]; 2] = [
+        &["fpl", "bob", "cargo-home", "--key", key.as_str()],
+        &["fpl-bob", "cargo-home", "--key", key.as_str()],
+    ];
+    let mut last = String::from("no bob on PATH");
+    for argv in attempts {
+        let out = match Command::new(argv[0]).args(&argv[1..]).output() {
+            Ok(out) => out,
+            Err(err) => {
+                last = format!("{}: {err}", argv[0]);
+                continue;
+            }
+        };
+        if !out.status.success() {
+            last = format!(
+                "{} exited {}: {}",
+                argv[0],
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            continue;
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if path.is_empty() {
+            last = format!("{} printed no path", argv[0]);
+            continue;
+        }
+        return Ok(PathBuf::from(path));
+    }
+    anyhow::bail!("{last}")
+}
+
 /// Quote for the Spore's line parser. Values it cannot round-trip are dropped
 /// by `plain_word` rather than written back corrupted.
 fn quote_word(value: &str) -> String {
@@ -1064,6 +1107,19 @@ fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
     for var in &extra_env {
         if let Ok(value) = std::env::var(var) {
             command.env(var, value);
+        }
+    }
+    // The host build must not inherit the agent's shell state, but it also must
+    // not fall back to the one shared `~/.cargo` lock. Resolve the home for this
+    // worktree set when the caller did not name one.
+    if std::env::var_os("CARGO_HOME").is_none() && std::env::var_os("BOB_NO_CARGO_HOME").is_none() {
+        match bob_cargo_home(root) {
+            Ok(home) => {
+                command.env("CARGO_HOME", &home);
+            }
+            Err(err) => eprintln!(
+                "mush: no per-worktree CARGO_HOME ({err}); cargo will share ~/.cargo and serialize on its lock"
+            ),
         }
     }
     command.env("MUSH_ROOT", root);
