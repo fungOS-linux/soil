@@ -2,19 +2,19 @@
 //!
 //! The Mycelium gateway owns DNS, TLS and routing; this only answers `home.myc`
 //! with the routes in `~/.mycelium/gateway/routes.json`, drawn as a launcher:
-//! wallpaper, a status bar, widgets, and a grid of app tiles. It reads the route
-//! file per request, so a new route appears without restarting anything, and it
-//! reads the store's catalog for each Spore's mark (badge and colour) and the
-//! pending-update count.
+//! wallpaper, a status bar, widgets, a grid of app tiles and a dock. It reads
+//! the route file per request, so a new route appears without restarting
+//! anything, and it reads the store for each Spore's mark, its summary, the
+//! catalog and the pending-update classes.
 //!
-//! The route file decides the order. Nothing here curates names or descriptions;
-//! an unknown surface gets a colour hashed from its name and its first letter.
+//! The route file decides the order and the dock. Nothing here curates names or
+//! descriptions; an unknown surface gets a hashed colour and a generic glyph.
 //!
 //! The palette matches `soil-store`'s presenter on purpose: these are two pages
 //! of one front door, not two products.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8801";
 const STORE_ADDR: &str = "127.0.0.1:8800";
-const PROBE_TIMEOUT: Duration = Duration::from_millis(200);
+const PROBE_TIMEOUT: Duration = Duration::from_millis(220);
 const STORE_TIMEOUT: Duration = Duration::from_millis(350);
 const STORE_TTL: Duration = Duration::from_secs(3);
 
@@ -49,8 +49,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let routes = named(&args, "--routes").map_or_else(default_routes, PathBuf::from);
     let wallpaper = named(&args, "--wallpaper")
         .map(PathBuf::from)
-        .or_else(default_wallpaper)
-        .filter(|path| path.is_file());
+        .or_else(|| default_wallpaper().filter(|path| path.is_file()));
+    let icons = named(&args, "--icons")
+        .map(PathBuf::from)
+        .or_else(|| default_icons().filter(|path| path.is_dir()));
     let address = named(&args, "--addr").unwrap_or_else(|| DEFAULT_ADDR.to_owned());
     let listener =
         TcpListener::bind(&address).map_err(|error| format!("listen {address}: {error}"))?;
@@ -61,6 +63,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
     if let Some(wallpaper) = &wallpaper {
         eprintln!("soil-home: wallpaper {}", wallpaper.display());
     }
+    if let Some(icons) = &icons {
+        eprintln!("soil-home: icons {}", icons.display());
+    }
 
     let cache = Arc::new(Mutex::new(Cache::default()));
     for stream in listener.incoming() {
@@ -68,8 +73,15 @@ fn run(args: Vec<String>) -> Result<(), String> {
         let routes = routes.clone();
         let cache = Arc::clone(&cache);
         let wallpaper = wallpaper.clone();
+        let icons = icons.clone();
         std::thread::spawn(move || {
-            let _ = answer(stream, &routes, &cache, wallpaper.as_deref());
+            let _ = answer(
+                stream,
+                &routes,
+                &cache,
+                wallpaper.as_deref(),
+                icons.as_deref(),
+            );
         });
     }
     Ok(())
@@ -80,10 +92,24 @@ fn default_routes() -> PathBuf {
     PathBuf::from(home).join(".mycelium/gateway/routes.json")
 }
 
-/// A wallpaper is a file the person chose, not something this page ships.
 fn default_wallpaper() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join(".local/share/fungos/home/wallpaper"))
+    let chosen = PathBuf::from(&home).join(".local/share/fungos/home/wallpaper");
+    if chosen.is_file() {
+        return Some(chosen);
+    }
+    // Canvas' bundled default, "Undergrowth": the same art the desktop shows
+    // until somebody picks something else.
+    let canvas =
+        PathBuf::from(home).join("src/fungOS/canvas-native/config/appearance/undergrowth.png");
+    canvas.is_file().then_some(canvas)
+}
+
+/// A theme's icons, kept on this machine. Nothing from a theme is vendored:
+/// a person points this at marks they have the right to use.
+fn default_icons() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(".local/share/fungos/home/icons"))
 }
 
 fn named(args: &[String], flag: &str) -> Option<String> {
@@ -94,7 +120,7 @@ fn named(args: &[String], flag: &str) -> Option<String> {
 }
 
 fn usage() -> String {
-    "usage: soil-home [--routes PATH] [--wallpaper PATH] [--addr HOST:PORT]\n       soil-home --version".into()
+    "usage: soil-home [--routes PATH] [--wallpaper PATH] [--icons DIR] [--addr HOST:PORT]\n       soil-home --version".into()
 }
 
 // ---- the route table ------------------------------------------------------
@@ -118,6 +144,13 @@ struct Route {
     /// one. The gateway ignores the field; it is read here and by nothing else.
     #[serde(default)]
     spore: Option<String>,
+    /// Whether the surface belongs in the dock rather than the grid.
+    #[serde(default)]
+    dock: bool,
+    /// `service` for a backend with no UI of its own: it belongs in the status
+    /// rail, not the grid. Anything else is an app to open.
+    #[serde(default)]
+    role: Option<String>,
 }
 
 /// `upstream` is a string in most routes and a list in the ones with fallbacks.
@@ -135,9 +168,20 @@ impl Upstream {
             Self::Many(urls) => urls.first().map(String::as_str),
         }
     }
+
+    fn all(&self) -> Vec<&str> {
+        match self {
+            Self::One(url) => vec![url.as_str()],
+            Self::Many(urls) => urls.iter().map(String::as_str).collect(),
+        }
+    }
 }
 
 impl Route {
+    fn is_service(&self) -> bool {
+        self.role.as_deref() == Some("service")
+    }
+
     /// The name a browser should visit: the first `.myc` host, else the first.
     fn host(&self) -> Option<&str> {
         self.hosts
@@ -166,23 +210,57 @@ struct App {
     #[serde(default)]
     name: String,
     #[serde(default)]
-    badge: Option<String>,
-    #[serde(default)]
     color: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
-struct Pending {
+struct Update {
     #[serde(default)]
-    total: u64,
+    id: String,
+    #[serde(default)]
+    class: String,
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct Plan {
+    #[serde(default)]
+    updates: Vec<Update>,
+    #[serde(default)]
+    current: Vec<String>,
+    #[serde(default)]
+    yanked: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct Source {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    verified: bool,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 struct StoreState {
     #[serde(default)]
     apps: Vec<App>,
+    #[serde(default = "default_source")]
+    source: Source,
     #[serde(default)]
-    pending: Pending,
+    updates: Plan,
+}
+
+fn default_source() -> Source {
+    Source::default()
 }
 
 #[derive(Default)]
@@ -207,10 +285,16 @@ fn store_state(cache: &Mutex<Cache>) -> StoreState {
 }
 
 fn fetch_store() -> StoreState {
-    let Ok(body) = get(STORE_ADDR, "/api/apps") else {
-        return StoreState::default();
+    let mut state = match get(STORE_ADDR, "/api/apps") {
+        Ok(body) => serde_json::from_str::<StoreState>(&body).unwrap_or_default(),
+        Err(_) => return StoreState::default(),
     };
-    serde_json::from_str(&body).unwrap_or_default()
+    if let Ok(body) = get(STORE_ADDR, "/api/plan")
+        && let Ok(plan) = serde_json::from_str::<Plan>(&body)
+    {
+        state.updates = plan;
+    }
+    state
 }
 
 /// One loopback GET. The store is a local presenter, so this is a socket read,
@@ -246,34 +330,64 @@ fn get(address: &str, path: &str) -> Result<String, String> {
     Ok(body.to_owned())
 }
 
-/// Whether the route's first upstream accepts a connection right now.
-fn probe(route: &Route) -> &'static str {
-    let Some(url) = route.upstream.as_ref().and_then(Upstream::first) else {
-        return if route.service_kind.is_some() {
-            "gateway"
-        } else {
-            "unknown"
+// ---- probes ---------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+struct Probe {
+    status: &'static str,
+    ms: Option<u128>,
+}
+
+/// Whether any of the route's upstreams accepts a connection right now, and how
+/// long the fastest one took. A route with a dead local upstream but a live
+/// fallback is up, which is what a person sees when they open the name.
+fn probe(route: &Route) -> Probe {
+    let Some(upstream) = &route.upstream else {
+        return Probe {
+            status: if route.service_kind.is_some() {
+                "gateway"
+            } else {
+                "unknown"
+            },
+            ms: None,
         };
     };
-    let Some(host) = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-    else {
-        return "unknown";
-    };
-    let host = host.split('/').next().unwrap_or(host);
-    match host.parse() {
-        Ok(address) => match TcpStream::connect_timeout(&address, PROBE_TIMEOUT) {
-            Ok(_) => "up",
-            Err(_) => "down",
-        },
-        Err(_) => "unknown",
+    let mut best: Option<u128> = None;
+    for url in upstream.all() {
+        let (rest, port) = if let Some(rest) = url.strip_prefix("http://") {
+            (rest, 80)
+        } else if let Some(rest) = url.strip_prefix("https://") {
+            (rest, 443)
+        } else {
+            continue;
+        };
+        let host = rest.split('/').next().unwrap_or(rest);
+        let address = match host.parse::<SocketAddr>() {
+            Ok(address) => address,
+            Err(_) => match (host, port)
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut it| it.next())
+            {
+                Some(address) => address,
+                None => continue,
+            },
+        };
+        let started = Instant::now();
+        if TcpStream::connect_timeout(&address, PROBE_TIMEOUT).is_ok() {
+            let elapsed = started.elapsed().as_millis();
+            best = Some(best.map_or(elapsed, |best: u128| best.min(elapsed)));
+        }
+    }
+    Probe {
+        status: if best.is_some() { "up" } else { "down" },
+        ms: best,
     }
 }
 
 /// One probe per route, in parallel, so a stopped upstream costs one timeout and
-/// not one per card.
-fn statuses(routes: &[Route]) -> Vec<&'static str> {
+/// not one per tile.
+fn probes(routes: &[Route]) -> Vec<Probe> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = routes
             .iter()
@@ -281,7 +395,12 @@ fn statuses(routes: &[Route]) -> Vec<&'static str> {
             .collect();
         handles
             .into_iter()
-            .map(|handle| handle.join().unwrap_or("unknown"))
+            .map(|handle| {
+                handle.join().unwrap_or(Probe {
+                    status: "unknown",
+                    ms: None,
+                })
+            })
             .collect()
     })
 }
@@ -293,6 +412,7 @@ fn answer(
     routes_path: &Path,
     cache: &Mutex<Cache>,
     wallpaper: Option<&Path>,
+    icons: Option<&Path>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request = String::new();
@@ -328,7 +448,7 @@ fn answer(
                 (
                     "200 OK",
                     HTML,
-                    page(&routes, &store, wallpaper).into_bytes(),
+                    page(&routes, &store, wallpaper, icons).into_bytes(),
                 )
             }
             Err(error) => (
@@ -341,12 +461,29 @@ fn answer(
                 .into_bytes(),
             ),
         },
+        ("GET", other) if other.starts_with("/icon/") => {
+            let name = &other[6..];
+            let safe = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+            match (safe, icons) {
+                (true, Some(dir)) => match icon_for(dir, name) {
+                    Some(path) => match std::fs::read(&path) {
+                        Ok(bytes) => ("200 OK", icon_type(&path), bytes),
+                        Err(_) => ("404 Not Found", TEXT, b"no icon\n".to_vec()),
+                    },
+                    None => ("404 Not Found", TEXT, b"no icon\n".to_vec()),
+                },
+                _ => ("404 Not Found", TEXT, b"no icon\n".to_vec()),
+            }
+        }
         ("GET", "/wallpaper") => match wallpaper {
             Some(path) => match std::fs::read(path) {
-                Ok(bytes) => ("200 OK", wallpaper_type(path), bytes),
-                Err(_) => ("404 Not Found", TEXT, "no wallpaper\n".as_bytes().to_vec()),
+                Ok(bytes) => ("200 OK", icon_type(path), bytes),
+                Err(_) => ("404 Not Found", TEXT, b"no wallpaper\n".to_vec()),
             },
-            None => ("404 Not Found", TEXT, "no wallpaper\n".as_bytes().to_vec()),
+            None => ("404 Not Found", TEXT, b"no wallpaper\n".to_vec()),
         },
         _ => ("404 Not Found", TEXT, b"not found\n".to_vec()),
     };
@@ -360,7 +497,18 @@ fn answer(
     stream.flush()
 }
 
-fn wallpaper_type(path: &Path) -> &'static str {
+/// The file a theme provides for one surface, if it does.
+fn icon_for(dir: &Path, name: &str) -> Option<PathBuf> {
+    for extension in ["png", "svg", "webp", "jpg", "jpeg"] {
+        let path = dir.join(format!("{name}.{extension}"));
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn icon_type(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -385,7 +533,7 @@ fn routes_json(routes: &[Route]) -> String {
                 "hosts": route.hosts,
                 "upstream": route.upstream.as_ref().and_then(Upstream::first),
                 "service_kind": route.service_kind,
-                "status": probe(route),
+                "status": probe(route).status,
             })
         })
         .collect();
@@ -414,10 +562,53 @@ fn hashed_color(name: &str) -> String {
     format!("hsl({hue} 58% 55%)")
 }
 
-fn page(routes: &[Route], store: &StoreState, wallpaper: Option<&Path>) -> String {
-    let statuses = statuses(routes);
+/// A descriptive glyph per surface. These are stroke paths on a 24-unit grid,
+/// so a tile reads as "terminal" before anyone reads its label.
+fn glyph(name: &str) -> &'static str {
+    match name {
+        "store" => {
+            r#"<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>"#
+        }
+        "term" | "terminal" => r#"<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>"#,
+        "wiki" => {
+            r#"<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>"#
+        }
+        "worklog" => r#"<path d="M4 4h16v16H4z"/><path d="M8 9h8"/><path d="M8 13h5"/>"#,
+        "ai" => {
+            r#"<path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 3v4"/><path d="M21 5h-4"/>"#
+        }
+        "mcp" => {
+            r#"<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z"/>"#
+        }
+        "sfx" => {
+            r#"<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>"#
+        }
+        "webhook" | "confluence" => {
+            r#"<path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6-1.7A4 4 0 0 0 6 19z"/>"#
+        }
+        "manavault" => {
+            r#"<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V8a5 5 0 0 1 10 0v3"/>"#
+        }
+        "home" => r#"<path d="M3 11 12 3l9 8"/><path d="M5 10v10h14V10"/>"#,
+        "mush" => r#"<path d="M4 14a8 8 0 0 1 16 0z"/><path d="M12 14v6"/>"#,
+        _ => {
+            r#"<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>"#
+        }
+    }
+}
+
+fn page(
+    routes: &[Route],
+    store: &StoreState,
+    wallpaper: Option<&Path>,
+    icons: Option<&Path>,
+) -> String {
+    let probes = probes(routes);
     let mut tiles = String::new();
-    for (route, status) in routes.iter().zip(statuses) {
+    let mut docked = String::new();
+    let mut services = String::new();
+
+    for (route, probe) in routes.iter().zip(&probes) {
         // The launcher is not one of its own apps.
         if route.name == "home" {
             continue;
@@ -428,49 +619,195 @@ fn page(routes: &[Route], store: &StoreState, wallpaper: Option<&Path>) -> Strin
             .map(|app| app.name.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| route.name.clone());
-        let badge = app
-            .and_then(|app| app.badge.clone())
-            .filter(|badge| !badge.is_empty() && badge != "?")
-            .unwrap_or_else(|| label.chars().next().map(String::from).unwrap_or_default())
-            .to_uppercase();
+        let latency = probe
+            .ms
+            .map(|ms| format!("{ms} ms"))
+            .unwrap_or_else(|| "no answer".to_owned());
+
+        if route.is_service() {
+            services.push_str(&format!(
+                r#"<li title="{label} — {host}"><span class="dot {status}"></span><span class="svc-name">{label}</span><span class="svc-meta">{latency}</span></li>"#,
+                status = probe.status,
+                label = escape(&label),
+                host = escape(host),
+                latency = escape(&latency),
+            ));
+            continue;
+        }
+
         let color = app
             .and_then(|app| app.color.clone())
             .unwrap_or_else(|| hashed_color(&route.name));
+        let art = icons
+            .and_then(|dir| icon_for(dir, &route.name))
+            .map(|_| {
+                format!(
+                    "<img class=\"art\" src=\"/icon/{}\" alt=\"\">",
+                    escape(&route.name)
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">{}</svg>",
+                    glyph(&route.name)
+                )
+            });
+        let kind = route
+            .service_kind
+            .as_deref()
+            .map(|kind| format!(" · {kind}"))
+            .unwrap_or_default();
+        let description = app
+            .and_then(|app| app.summary.clone())
+            .filter(|summary| !summary.is_empty())
+            .unwrap_or_else(|| format!("{} on this machine", host));
+        let version = app
+            .and_then(|app| app.version.clone())
+            .filter(|version| !version.is_empty())
+            .map(|version| format!(" · v{version}"))
+            .unwrap_or_default();
+        let sub = app
+            .and_then(|app| app.category.clone())
+            .or_else(|| route.service_kind.clone())
+            .unwrap_or_else(|| "app".to_owned());
         let needle = format!("{} {} {}", route.name, label, host).to_lowercase();
-        tiles.push_str(&format!(
-            r#"<a class="app" href="https://{host}/" data-search="{needle}"><span class="icon" style="--c:{color}"><span class="badge">{badge}</span><span class="dot {status}"></span></span><span class="label">{label}</span></a>"#,
+        let tile = format!(
+            r#"<a class="app" href="https://{host}/" data-search="{needle}" title="{label} · {host}"><span class="peek"><span class="peek-name">{label}</span><span class="peek-host">{host}{kind}{version}</span><span class="peek-meta"><span class="dot {status}"></span>{status} · {latency}</span><span class="peek-desc">{description}</span></span><span class="icon" style="--c:{color}">{art}<span class="dot {status}"></span></span><span class="label">{label}</span><span class="sub">{sub}</span></a>"#,
             host = escape(host),
             needle = escape(&needle),
             color = escape(&color),
-            badge = escape(&badge),
-            status = status,
+            art = art,
+            status = probe.status,
+            latency = escape(&latency),
+            kind = escape(&kind),
+            version = escape(&version),
             label = escape(&label),
-        ));
+            sub = escape(&sub),
+            description = escape(&description),
+        );
+        tiles.push_str(&tile);
+        if route.dock {
+            docked.push_str(&tile);
+        }
     }
     if tiles.is_empty() {
-        tiles.push_str("<p class=\"empty\">No routes are configured yet.</p>");
+        tiles.push_str("<p class=\"empty\">No apps are configured yet.</p>");
+    }
+    if services.is_empty() {
+        services.push_str("<li class=\"muted\">No services configured.</li>");
     }
 
-    let up = routes.iter().filter(|route| probe(route) == "up").count();
-    let down = routes.iter().filter(|route| probe(route) == "down").count();
-    let pending = if store.apps.is_empty() {
-        "<p class=\"muted\">the store is not answering</p>".to_owned()
-    } else if store.pending.total == 0 {
-        "<p class=\"muted\">every Spore is current</p>".to_owned()
+    let up = probes.iter().filter(|probe| probe.status == "up").count();
+    let down: Vec<&str> = routes
+        .iter()
+        .zip(&probes)
+        .filter(|(_, probe)| probe.status == "down")
+        .map(|(route, _)| route.name.as_str())
+        .collect();
+    let mut latencies: Vec<u128> = probes.iter().filter_map(|probe| probe.ms).collect();
+    latencies.sort_unstable();
+    let median = latencies
+        .get(latencies.len() / 2)
+        .map(|ms| format!("{ms} ms median"))
+        .unwrap_or_else(|| "no latencies".to_owned());
+    let down_list = if down.is_empty() {
+        "everything answering".to_owned()
+    } else {
+        format!("down: {}", down.join(", "))
+    };
+
+    let updates = store.updates.updates.len();
+    let mut classes = String::new();
+    for class in ["live", "restart", "consent", "system", "hold"] {
+        let count = store
+            .updates
+            .updates
+            .iter()
+            .filter(|update| update.class == class)
+            .count();
+        if count > 0 {
+            classes.push_str(&format!(
+                "<span class=\"chip {class}\">{count} {class}</span>",
+                class = class
+            ));
+        }
+    }
+    if classes.is_empty() {
+        classes.push_str("<span class=\"muted\">every Spore is current</span>");
+    }
+    let mut pending = String::new();
+    for update in store.updates.updates.iter().take(3) {
+        pending.push_str(&format!(
+            "<li><span>{}</span><span>{} → {}</span></li>",
+            escape(&update.id),
+            escape(&update.from),
+            escape(&update.to)
+        ));
+    }
+    if pending.is_empty() {
+        pending.push_str("<li class=\"muted\"><span>nothing waiting</span></li>");
+    }
+    let pending_block = if updates == 0 {
+        String::new()
+    } else {
+        format!("<ul class=\"rows\">{pending}</ul>")
+    };
+    let store_link = if updates == 0 {
+        "open the store".to_owned()
+    } else {
+        format!("{updates} updates · see all")
+    };
+    let source = if store.apps.is_empty() {
+        "the store is not answering".to_owned()
     } else {
         format!(
-            "<p><a class=\"link\" href=\"https://store.myc/updates\">{} updates ready</a></p>",
-            store.pending.total
+            "{} · {}",
+            escape(&store.source.name),
+            if store.source.verified {
+                "signed index"
+            } else {
+                "no signed index"
+            }
         )
     };
 
+    let mut categories: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for app in &store.apps {
+        if let Some(category) = app.category.as_deref() {
+            *categories.entry(category).or_default() += 1;
+        }
+    }
+    let mut categories: Vec<(&str, usize)> = categories.into_iter().collect();
+    categories.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let mut catalog = String::new();
+    for (category, count) in categories.iter().take(4) {
+        catalog.push_str(&format!(
+            "<li><span>{}</span><span>{}</span></li>",
+            escape(category),
+            count
+        ));
+    }
+    if catalog.is_empty() {
+        catalog.push_str("<li class=\"muted\">no categories</li>");
+    }
+
     let body = format!(
-        r#"<header class="bar"><div class="when"><span id="clock">--:--</span><span id="day">—</span></div><div class="who">fungOS</div><div class="find"><input id="search" type="search" placeholder="Search apps" autocomplete="off"></div></header><main><section class="widgets"><article class="widget"><span class="key">Today</span><p class="big" id="today">—</p><p class="muted" id="today-date"></p></article><article class="widget"><span class="key">This machine</span><p class="big">{up}<span class="muted"> of {count} services up</span></p>{pending}<p class="muted">{down} down</p></article></section><section class="grid" id="grid">{tiles}</section><p class="empty" id="none" hidden>Nothing matches that name.</p></main><script>{script}</script>"#,
+        r#"<header class="bar"><div class="when"><span id="clock">--:--</span><span id="day">—</span></div><div class="who">fungOS</div><div class="find"><input id="search" type="search" placeholder="Search apps" autocomplete="off"></div></header><main><section class="widgets"><article class="widget"><span class="key">Today</span><p class="big" id="today">—</p><p class="muted" id="today-date"></p><p class="muted" id="today-year"></p></article><article class="widget"><span class="key">This machine</span><p class="big">{up}<span class="muted"> / {count} up</span></p><p class="muted">{median}</p><p class="muted">{down_list}</p></article><article class="widget"><span class="key">Store</span><p class="big">{spores}<span class="muted"> Spores</span></p><p class="muted">{source} · {current} current · {yanked} yanked</p><p class="classes">{classes}</p>{pending_block}<p class="muted"><a class="link" href="https://store.myc/updates">{store_link}</a></p></article><article class="widget"><span class="key">Catalog</span><ul class="rows">{catalog}</ul></article></section><section class="content"><section class="grid" id="grid">{tiles}</section><aside class="rail"><h2>Services</h2><ul class="services">{services}</ul></aside></section><p class="empty" id="none" hidden>Nothing matches that name.</p></main><footer class="dock"><div class="dock-inner">{docked}</div></footer><script>{script}</script>"#,
         up = up,
         count = routes.len(),
-        down = down,
-        pending = pending,
+        median = median,
+        down_list = escape(&down_list),
+        spores = store.apps.len(),
+        source = source,
+        current = store.updates.current.len(),
+        yanked = store.updates.yanked.len(),
+        classes = classes,
+        pending_block = pending_block,
+        store_link = store_link,
+        catalog = catalog,
         tiles = tiles,
+        services = services,
+        docked = docked,
         script = SCRIPT,
     );
     document(&body, wallpaper.is_some())
@@ -479,7 +816,7 @@ fn page(routes: &[Route], store: &StoreState, wallpaper: Option<&Path>) -> Strin
 fn document(body: &str, wall: bool) -> String {
     let class = if wall { " class=\"wall\"" } else { "" };
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content='#0b1020'><title>fungOS</title><style>{STYLE}</style></head><body{class}>{body}</body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content='#0b1020'><title>fungOS</title><link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><text y='19' font-size='19'>◧</text></svg>"><style>{STYLE}</style></head><body{class}>{body}</body></html>"#
     )
 }
 
@@ -508,10 +845,14 @@ const SCRIPT: &str = r#"
 const pad = (n) => String(n).padStart(2, '0');
 const update = () => {
   const now = new Date();
-  document.getElementById('clock').textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  document.getElementById('clock').textContent = time;
   document.getElementById('day').textContent = now.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
-  document.getElementById('today').textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  document.getElementById('today').textContent = time;
   document.getElementById('today-date').textContent = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  const start = new Date(now.getFullYear(), 0, 0);
+  const day = Math.floor((now - start) / 86400000);
+  document.getElementById('today-year').textContent = `day ${day} of ${now.getFullYear()}`;
 };
 update();
 setInterval(update, 10000);
@@ -554,7 +895,7 @@ body {
 }
 body.wall { background: #05070d; }
 body.wall::before { content: ""; position: fixed; inset: 0; z-index: -2; background: url("/wallpaper") center / cover no-repeat; }
-body.wall::after { content: ""; position: fixed; inset: 0; z-index: -1; background: linear-gradient(rgba(5,7,13,0.45), rgba(5,7,13,0.72)); }
+body.wall::after { content: ""; position: fixed; inset: 0; z-index: -1; background: linear-gradient(rgba(5,7,13,0.3), rgba(5,7,13,0.62)); }
 a { color: inherit; text-decoration: none; }
 .bar { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: calc(14px + env(safe-area-inset-top)) 26px 10px; font-size: 13px; color: var(--muted); }
 .when { display: flex; gap: 10px; align-items: baseline; }
@@ -562,33 +903,71 @@ a { color: inherit; text-decoration: none; }
 .who { font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; font-size: 11px; }
 .find input { width: 240px; padding: 8px 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.16); background: rgba(18,22,34,0.55); color: var(--ink); font: inherit; font-size: 13px; outline: none; backdrop-filter: blur(14px); }
 .find input:focus { border-color: rgba(255,255,255,0.38); background: rgba(24,30,46,0.72); }
-main { flex: 1; padding: 18px 32px 72px; max-width: 1180px; width: 100%; margin: 0 auto; }
-.widgets { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-bottom: 34px; }
-.widget { padding: 18px 20px; border-radius: 22px; border: 1px solid rgba(255,255,255,0.1); background: rgba(18,22,34,0.5); backdrop-filter: blur(18px); box-shadow: 0 18px 40px rgba(0,0,0,0.28); }
+main { flex: 1; padding: 18px 32px 150px; max-width: 1120px; width: 100%; margin: 0 auto; }
+.widgets { display: grid; grid-template-columns: repeat(auto-fit, minmax(228px, 1fr)); gap: 14px; margin-bottom: 34px; }
+.widget { padding: 16px 18px; border-radius: 22px; border: 1px solid rgba(255,255,255,0.1); background: rgba(18,22,34,0.5); backdrop-filter: blur(18px); box-shadow: 0 18px 40px rgba(0,0,0,0.28); }
 .key { display: block; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
 .big { margin: 6px 0 2px; font-size: 30px; font-weight: 600; letter-spacing: -0.02em; }
-.muted { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+.muted { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
 .link { color: #9db4ff; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 30px 14px; justify-items: center; }
-.app { position: relative; display: flex; flex-direction: column; align-items: center; gap: 9px; width: 100px; }
+.classes { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+.chip { padding: 2px 8px; border-radius: 999px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; background: rgba(255,255,255,0.08); color: var(--muted); }
+.chip.live { background: #1d2a22; color: #7ad0a3; }
+.chip.restart { background: #1a2130; color: #8b9dff; }
+.chip.consent { background: #2a2618; color: #f2c14e; }
+.chip.system { background: #2d1a1c; color: #f08a8a; }
+.chip.hold { background: #232733; color: #9aa3b2; }
+.rows { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.rows li { display: flex; justify-content: space-between; gap: 10px; }
+.rows li span:last-child { color: var(--ink); font-variant-numeric: tabular-nums; }
+.content { display: grid; grid-template-columns: minmax(0, 1fr) 264px; gap: 22px; align-items: start; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, 128px); justify-content: center; gap: 34px 6px; justify-items: center; }
+.rail { padding: 16px 18px; border-radius: 22px; border: 1px solid rgba(255,255,255,0.1); background: rgba(18,22,34,0.5); backdrop-filter: blur(18px); box-shadow: 0 18px 40px rgba(0,0,0,0.28); position: sticky; top: 16px; }
+.rail h2 { margin: 0 0 12px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.services { list-style: none; margin: 0; padding: 0; display: grid; gap: 11px; }
+.services li { display: grid; grid-template-columns: 9px 1fr auto; align-items: center; gap: 10px; font-size: 13px; }
+.svc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.svc-meta { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.app { position: relative; display: flex; flex-direction: column; align-items: center; gap: 9px; width: 116px; outline: none; }
 .app[hidden] { display: none; }
-.icon { position: relative; width: 84px; height: 84px; border-radius: 22px; display: grid; place-items: center; background: linear-gradient(160deg, color-mix(in oklab, var(--c), white 22%), var(--c) 55%, color-mix(in oklab, var(--c), black 20%)); box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 12px 26px rgba(0,0,0,0.38); transition: transform 120ms ease; }
-.app:hover .icon { transform: translateY(-2px) scale(1.03); }
-.badge { font-size: 32px; font-weight: 600; color: rgba(255,255,255,0.96); text-shadow: 0 1px 3px rgba(0,0,0,0.3); }
-.label { font-size: 12px; color: rgba(244,246,251,0.92); text-shadow: 0 1px 3px rgba(0,0,0,0.55); max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app:focus-visible .icon { box-shadow: 0 0 0 3px rgba(139,157,255,0.75), 0 14px 30px rgba(0,0,0,0.4); }
+.icon { position: relative; width: 94px; height: 94px; border-radius: 24px; display: grid; place-items: center; filter: saturate(1.06); background: linear-gradient(165deg, color-mix(in oklab, var(--c), white 13%), var(--c) 52%, color-mix(in oklab, var(--c), black 27%)); box-shadow: inset 0 1px 0 rgba(255,255,255,0.34), inset 0 -1px 0 rgba(0,0,0,0.18), 0 14px 30px rgba(0,0,0,0.4); transition: transform 120ms ease; }
+.app:hover .icon, .app:focus-visible .icon { transform: translateY(-2px) scale(1.03); }
+.icon svg { width: 56%; height: 56%; color: rgba(255,255,255,0.96); }
+.icon img.art { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
+.sub { font-size: 10.5px; color: rgba(244,246,251,0.6); text-shadow: 0 1px 3px rgba(0,0,0,0.6); }
+.label { font-size: 13px; color: rgba(244,246,251,0.95); text-shadow: 0 1px 4px rgba(0,0,0,0.6); max-width: 116px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.peek { position: absolute; left: 50%; bottom: calc(100% + 10px); width: 230px; transform: translate(-50%, 6px); padding: 12px 14px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.14); background: rgba(16,20,31,0.92); backdrop-filter: blur(18px); box-shadow: 0 20px 44px rgba(0,0,0,0.45); text-align: left; opacity: 0; pointer-events: none; transition: opacity 120ms ease, transform 120ms ease; z-index: 6; }
+.app:hover .peek, .app:focus-visible .peek { opacity: 1; transform: translate(-50%, 0); }
+.peek-name { display: block; font-size: 13px; font-weight: 600; }
+.peek-host { display: block; margin-top: 1px; font-size: 11.5px; color: #8b9dff; }
+.peek-meta { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+.peek-desc { display: block; margin-top: 6px; font-size: 12px; color: #c3c9d4; line-height: 1.35; }
 .dot { width: 9px; height: 9px; border-radius: 999px; background: #6f7787; box-shadow: 0 0 0 2px rgba(9,12,20,0.6); }
 .icon .dot { position: absolute; right: -2px; bottom: -2px; }
 .dot.up { background: #7ad0a3; }
 .dot.down { background: #f08a8a; }
 .dot.gateway { background: #8b9dff; }
 .empty { color: var(--muted); }
+.dock { position: fixed; left: 0; right: 0; bottom: 0; display: flex; justify-content: center; padding: 10px 22px calc(14px + env(safe-area-inset-bottom)); pointer-events: none; z-index: 7; }
+.dock-inner { display: flex; gap: 22px; padding: 12px 18px; border-radius: 26px; border: 1px solid rgba(255,255,255,0.13); background: rgba(22,28,42,0.42); backdrop-filter: blur(22px); box-shadow: 0 20px 50px rgba(0,0,0,0.4); pointer-events: auto; }
+.dock-inner:empty { display: none; }
+.dock .app { width: 76px; gap: 0; }
+.dock .icon { width: 70px; height: 70px; border-radius: 18px; }
+.dock .peek { bottom: calc(100% + 12px); }
+.dock .label, .dock .sub { display: none; }
+@media (max-width: 960px) {
+  .content { grid-template-columns: 1fr; }
+  .rail { position: static; }
+}
 @media (max-width: 640px) {
-  main { padding: 14px 18px 56px; }
+  main { padding: 14px 18px 120px; }
   .find input { width: 150px; }
-  .icon { width: 72px; height: 72px; border-radius: 19px; }
-  .badge { font-size: 27px; }
-  .grid { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 22px 10px; }
-  .app, .label { width: 84px; }
+  .icon { width: 74px; height: 74px; border-radius: 19px; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 24px 8px; }
+  .app, .label { width: 92px; }
+  .dock .icon { width: 58px; height: 58px; border-radius: 16px; }
+  .peek { display: none; }
 }
 "#;
 
@@ -609,6 +988,8 @@ mod tests {
             upstream: None,
             service_kind: None,
             spore: None,
+            dock: false,
+            role: None,
         };
         assert_eq!(route.host(), Some("store.myc"));
     }
@@ -626,6 +1007,10 @@ mod tests {
             parsed[1].upstream.as_ref().and_then(Upstream::first),
             Some("http://127.0.0.1:2")
         );
+        assert_eq!(
+            parsed[1].upstream.as_ref().map(Upstream::all),
+            Some(vec!["http://127.0.0.1:2", "https://b.example"])
+        );
     }
 
     #[test]
@@ -633,7 +1018,7 @@ mod tests {
         let parsed = routes(
             r#"{"routes":[{"name":"store","hosts":["store.myc"],"upstream":"http://127.0.0.1:1"},{"name":"psst","hosts":["psst.myc"]}]}"#,
         );
-        let page = page(&parsed, &StoreState::default(), None);
+        let page = page(&parsed, &StoreState::default(), None, None);
         let store = page.find("href=\"https://store.myc/\"").unwrap();
         let psst = page.find("href=\"https://psst.myc/\"").unwrap();
         assert!(store < psst, "the routes file decides the order");
@@ -646,15 +1031,18 @@ mod tests {
             apps: vec![App {
                 id: "dev.fungos.terminal".into(),
                 name: "terminal".into(),
-                badge: Some("T".into()),
                 color: Some("#8bd5ca".into()),
+                summary: Some("A shell in the browser".into()),
+                category: Some("developer-tools".into()),
+                version: Some("0.1.0".into()),
             }],
-            pending: Pending::default(),
+            ..StoreState::default()
         };
-        let page = page(&parsed, &store, None);
-        assert!(page.contains("<span class=\"badge\">T</span>"));
+        let page = page(&parsed, &store, None, None);
         assert!(page.contains("--c:#8bd5ca"));
         assert!(page.contains(">terminal</span>"));
+        assert!(page.contains("A shell in the browser"));
+        assert!(page.contains("developer-tools"));
     }
 
     #[test]
