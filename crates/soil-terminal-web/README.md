@@ -95,6 +95,22 @@ should be gated by the gateway (`fpl-auth`) before the request reaches the
 loopback listener, and the listener keeps `--token` for anything that is not
 loopback.
 
+## Session lifetime
+
+A session is a pty and a `soil-vt` grid held by the server; it does not outlive
+a server restart yet (that is the session-daemon follow-up, and mush is the
+kind worth keeping). Within a run:
+
+| kind | default idle limit |
+|---|---|
+| ssh, fleet | 30 minutes (`--ssh-idle SECS`, 0 = never) |
+| mush | never (`--mush-idle SECS`) |
+| shell | never |
+
+The reaper runs every 30 seconds, kills the pty, and forgets the session; an
+attached stream sees the exit and the tab says the session ended. Input,
+resize, scroll, and a reconnect count as activity.
+
 ## Mush
 
 A Mush target runs the host's embedded Spore. Two things are per desktop:

@@ -62,6 +62,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const KEEPALIVE: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_SCROLL: i64 = 10_000;
+/// How often the reaper looks for sessions that outlived their policy.
+const REAP_INTERVAL: Duration = Duration::from_secs(30);
 
 const USAGE: &str = "\
 soil-terminal-web [OPTIONS]
@@ -73,6 +75,8 @@ soil-terminal-web [OPTIONS]
   --ssh-arg VALUE      extra ssh argument, repeatable (e.g. -p 2222)
   --command CMD [ARGS] run CMD as the only target; consumes the rest
   --paste-root DIR     where pasted bytes are stored (default ~/.local/share/fungos/paste)
+  --ssh-idle SECS      close an idle ssh/fleet session (default 1800; 0 = never)
+  --mush-idle SECS     close an idle mush session (default 0 = never)
   --cols N             initial columns (default 80)
   --rows N             initial rows (default 24)
   --scrollback N       scrollback lines (default 5000)
@@ -89,6 +93,27 @@ struct Args {
     scrollback: usize,
     paste_root: PathBuf,
     targets: Option<PathBuf>,
+    ssh_idle: u64,
+    mush_idle: u64,
+}
+
+/// How long a session may sit untouched before the reaper closes it. Local
+/// shells are the user's own machine and have no limit; mush is the durable
+/// "mainframe" shell and defaults to none.
+#[derive(Clone, Copy)]
+struct Policy {
+    ssh_idle: Option<Duration>,
+    mush_idle: Option<Duration>,
+}
+
+impl Policy {
+    fn idle_limit(self, kind: Kind) -> Option<Duration> {
+        match kind {
+            Kind::Ssh | Kind::Fleet => self.ssh_idle,
+            Kind::Mush => self.mush_idle,
+            Kind::Shell => None,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -96,6 +121,10 @@ fn main() -> Result<()> {
         return Ok(());
     };
     let targets = resolve_targets(&args)?;
+    let policy = Policy {
+        ssh_idle: (args.ssh_idle > 0).then(|| Duration::from_secs(args.ssh_idle)),
+        mush_idle: (args.mush_idle > 0).then(|| Duration::from_secs(args.mush_idle)),
+    };
     let app = Arc::new(App {
         token: args.token,
         paste: Paste::open(args.paste_root.clone())?,
@@ -105,7 +134,17 @@ fn main() -> Result<()> {
         cols: args.cols,
         rows: args.rows,
         scrollback: args.scrollback,
+        policy,
     });
+    {
+        let app = Arc::clone(&app);
+        thread::spawn(move || {
+            loop {
+                thread::sleep(REAP_INTERVAL);
+                app.reap();
+            }
+        });
+    }
 
     let listener =
         TcpListener::bind(&args.listen).with_context(|| format!("bind {}", args.listen))?;
@@ -138,14 +177,32 @@ struct App {
     cols: u16,
     rows: u16,
     scrollback: usize,
+    policy: Policy,
 }
 
 struct Session {
     id: u64,
     target: String,
     label: String,
+    kind: Kind,
     host: Host,
     pty: Pty,
+    last_active: Mutex<Instant>,
+}
+
+impl Session {
+    fn touch(&self) {
+        if let Ok(mut last) = self.last_active.lock() {
+            *last = Instant::now();
+        }
+    }
+
+    fn idle(&self) -> Duration {
+        self.last_active
+            .lock()
+            .map(|last| last.elapsed())
+            .unwrap_or_default()
+    }
 }
 
 impl App {
@@ -158,6 +215,7 @@ impl App {
                 .values()
                 .find(|session| session.target == target.name && !session.pty.exited())
             {
+                existing.touch();
                 return Ok(Arc::clone(existing));
             }
             let stale: Vec<u64> = sessions
@@ -184,13 +242,43 @@ impl App {
             id,
             target: target.name.clone(),
             label: target.label.clone(),
+            kind: target.kind,
             host,
             pty,
+            last_active: Mutex::new(Instant::now()),
         });
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.insert(id, Arc::clone(&session));
         }
         Ok(session)
+    }
+
+    /// Close sessions that sat idle past their policy. The pty is killed; an
+    /// attached event stream sees the exit and the tab says so.
+    fn reap(&self) {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        let expired: Vec<u64> = sessions
+            .values()
+            .filter(|session| {
+                self.policy
+                    .idle_limit(session.kind)
+                    .is_some_and(|limit| session.idle() >= limit)
+            })
+            .map(|session| session.id)
+            .collect();
+        for id in expired {
+            if let Some(session) = sessions.remove(&id) {
+                session.pty.kill();
+                eprintln!(
+                    "soil terminal: closed {} session {:?} after {:?} idle",
+                    session.kind.as_str(),
+                    session.target,
+                    session.idle()
+                );
+            }
+        }
     }
 
     fn session(&self, id: u64) -> Option<Arc<Session>> {
@@ -264,12 +352,14 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
             let Some(session) = app.pick(wanted) else {
                 return not_found(&mut stream);
             };
+            session.touch();
             return sse(stream, session);
         }
         ("POST", "/input") => {
             let Some(session) = app.pick(wanted) else {
                 return not_found(&mut stream);
             };
+            session.touch();
             // Typing while reading history means "back to the prompt".
             session.host.scroll_to_bottom();
             session.pty.write(&request.body);
@@ -288,6 +378,7 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
                 )?;
                 return Ok(());
             };
+            session.touch();
             session.host.scroll(delta);
             respond(&mut stream, "204 No Content", "text/plain", b"")?;
         }
@@ -326,6 +417,7 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
                 )?;
                 return Ok(());
             };
+            session.touch();
             session.host.resize(cols, rows);
             session.pty.resize(cols, rows);
             respond(&mut stream, "204 No Content", "text/plain", b"")?;
@@ -520,6 +612,8 @@ fn parse_args() -> Result<Option<Args>> {
         scrollback: DEFAULT_SCROLLBACK,
         paste_root: expand_home("~/.local/share/fungos/paste"),
         targets: None,
+        ssh_idle: 1_800,
+        mush_idle: 0,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -532,6 +626,18 @@ fn parse_args() -> Result<Option<Args>> {
                 .push(iter.next().context("--ssh-arg needs a value")?),
             "--targets" => {
                 args.targets = Some(expand_home(&iter.next().context("--targets needs FILE")?))
+            }
+            "--ssh-idle" => {
+                args.ssh_idle = iter
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                    .context("--ssh-idle needs a number of seconds")?
+            }
+            "--mush-idle" => {
+                args.mush_idle = iter
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                    .context("--mush-idle needs a number of seconds")?
             }
             "--cols" => {
                 args.cols = iter
@@ -569,6 +675,10 @@ fn parse_args() -> Result<Option<Args>> {
                     args.paste_root = expand_home(value);
                 } else if let Some(value) = other.strip_prefix("--targets=") {
                     args.targets = Some(expand_home(value));
+                } else if let Some(value) = other.strip_prefix("--ssh-idle=") {
+                    args.ssh_idle = value.parse().context("--ssh-idle needs seconds")?;
+                } else if let Some(value) = other.strip_prefix("--mush-idle=") {
+                    args.mush_idle = value.parse().context("--mush-idle needs seconds")?;
                 } else {
                     anyhow::bail!("unknown argument {other}; try --help");
                 }
@@ -698,28 +808,79 @@ mod tests {
         assert!(error.to_string().contains("mutually exclusive"), "{error}");
     }
 
-    #[test]
-    fn a_live_session_is_reused_for_the_same_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let app = App {
+    fn test_app(policy: Policy) -> App {
+        let dir = tempfile::tempdir().unwrap().keep();
+        App {
             token: None,
-            paste: Paste::open(dir.path().to_path_buf()).unwrap(),
+            paste: Paste::open(dir).unwrap(),
             targets: Vec::new(),
             sessions: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             cols: 40,
             rows: 6,
             scrollback: 100,
-        };
-        let target = Target {
+            policy,
+        }
+    }
+
+    fn sleeping_target(kind: Kind) -> Target {
+        Target {
             name: "t".into(),
             label: "t".into(),
-            kind: Kind::Shell,
+            kind,
             detail: String::new(),
             command: vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()],
-        };
+        }
+    }
+
+    #[test]
+    fn a_live_session_is_reused_for_the_same_target() {
+        let app = test_app(Policy {
+            ssh_idle: None,
+            mush_idle: None,
+        });
+        let target = sleeping_target(Kind::Shell);
         let first = app.open(&target).unwrap();
         let second = app.open(&target).unwrap();
         assert_eq!(first.id, second.id);
+    }
+
+    #[test]
+    fn idle_limits_cover_ssh_and_mush_but_not_local_shells() {
+        let policy = Policy {
+            ssh_idle: Some(Duration::from_secs(60)),
+            mush_idle: None,
+        };
+        assert_eq!(policy.idle_limit(Kind::Ssh), Some(Duration::from_secs(60)));
+        assert_eq!(
+            policy.idle_limit(Kind::Fleet),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(policy.idle_limit(Kind::Mush), None);
+        assert_eq!(policy.idle_limit(Kind::Shell), None);
+    }
+
+    #[test]
+    fn an_idle_ssh_session_is_reaped() {
+        let app = test_app(Policy {
+            ssh_idle: Some(Duration::from_millis(40)),
+            mush_idle: None,
+        });
+        let session = app.open(&sleeping_target(Kind::Ssh)).unwrap();
+        thread::sleep(Duration::from_millis(60));
+        app.reap();
+        assert!(app.session(session.id).is_none());
+    }
+
+    #[test]
+    fn a_local_shell_is_not_reaped() {
+        let app = test_app(Policy {
+            ssh_idle: Some(Duration::from_millis(10)),
+            mush_idle: None,
+        });
+        let session = app.open(&sleeping_target(Kind::Shell)).unwrap();
+        thread::sleep(Duration::from_millis(30));
+        app.reap();
+        assert!(app.session(session.id).is_some());
     }
 }
