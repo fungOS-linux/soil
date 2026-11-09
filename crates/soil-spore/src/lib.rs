@@ -26,6 +26,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
+pub mod identity;
 pub mod lease;
 pub mod publisher;
 
@@ -1153,11 +1154,15 @@ mod chrome_tests {
 
 #[cfg(test)]
 mod anycast_tests {
-    use super::publisher::TrustedPublisher;
     use super::fixtures::manifest;
+    use super::identity::Identity;
+    use super::publisher::TrustedPublisher;
     use super::{Error, Lock, Manifest, lease};
 
-    const CLAIM: &str = "[anycast]\nname = \"confluence\"\nkind = \"confluence\"\nalpns = [\"soil/http/1\"]\n";
+    const CLAIM: &str =
+        "[anycast]\nname = \"confluence\"\nkind = \"confluence\"\nalpns = [\"soil/http/1\"]\n";
+    const PEM: &str =
+        "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ==\n-----END CERTIFICATE-----\n";
 
     fn lock() -> Lock {
         Lock {
@@ -1176,27 +1181,68 @@ mod anycast_tests {
         }
     }
 
+    fn identity() -> Identity {
+        Identity::derived(PEM, "").expect("the fixture certificate denotes a node")
+    }
+
     #[test]
     fn a_claim_renders_a_lease_the_daemon_would_accept() {
         let parsed = Manifest::parse(&manifest(CLAIM)).expect("claim parses");
+        let identity = identity();
         let document = lease::document(
             &parsed,
             &lock(),
             &publisher(),
-            "2fd5bf85",
+            &identity,
             &["http://10.253.0.6:8788".into()],
             1_000,
         )
         .expect("lease renders");
         let observation = &document["observations"][0];
-        assert_eq!(observation["service_id"], "service/2fd5bf85/application/confluence");
+        assert_eq!(
+            observation["service_id"],
+            format!("service/{}/application/confluence", identity.node_id)
+        );
         assert_eq!(observation["value"]["kind"], "confluence");
-        assert_eq!(observation["value"]["endpoints"][0], "http://10.253.0.6:8788");
+        assert_eq!(
+            observation["value"]["endpoints"][0],
+            "http://10.253.0.6:8788"
+        );
         assert_eq!(observation["value"]["attributes"]["grant_id"], "grant-7");
-        assert_eq!(observation["value"]["attributes"]["package_digest"], "sha256:abc");
+        assert_eq!(
+            observation["value"]["attributes"]["package_digest"],
+            "sha256:abc"
+        );
+        assert_eq!(
+            observation["value"]["attributes"]["node_id"],
+            identity.node_id.as_str()
+        );
         // The lease the daemon accepts expires; a lease it must renew cannot
         // carry a longer life than it is allowed to honour.
         assert_eq!(observation["expires_at"], 1_240);
+    }
+
+    #[test]
+    fn a_named_node_is_findable_from_its_lease() {
+        let parsed = Manifest::parse(&manifest(CLAIM)).expect("claim parses");
+        let named = Identity::derived(
+            PEM,
+            "MYCELIUM_SITE=wagar-house\nMYCELIUM_IROH_SERVER_NAME=runner-3.wagar-house.myc\n",
+        )
+        .expect("identity");
+        let document = lease::document(
+            &parsed,
+            &lock(),
+            &publisher(),
+            &named,
+            &["http://10.253.0.6:8788".into()],
+            1_000,
+        )
+        .expect("lease renders");
+        let attributes = &document["observations"][0]["value"]["attributes"];
+        // A digest alone tells an operator nothing about which host answered.
+        assert_eq!(attributes["node_name"], "runner-3.wagar-house.myc");
+        assert_eq!(attributes["site"], "wagar-house");
     }
 
     #[test]
@@ -1232,7 +1278,7 @@ mod anycast_tests {
             &plain,
             &lock(),
             &publisher(),
-            "2fd5bf85",
+            &identity(),
             &["http://10.253.0.6:8788".into()],
             1_000,
         );
@@ -1252,7 +1298,7 @@ mod anycast_tests {
                 &parsed,
                 &lock(),
                 &publisher(),
-                "2fd5bf85",
+                &identity(),
                 &[bad.into()],
                 1_000,
             );
@@ -1260,7 +1306,15 @@ mod anycast_tests {
         }
         let too_many: Vec<String> = (0..33).map(|i| format!("tcp://10.0.0.{i}:1")).collect();
         assert!(
-            lease::document(&parsed, &lock(), &publisher(), "2fd5bf85", &too_many, 1_000).is_err(),
+            lease::document(
+                &parsed,
+                &lock(),
+                &publisher(),
+                &identity(),
+                &too_many,
+                1_000
+            )
+            .is_err(),
             "the daemon drops an observation with more than 32 endpoints"
         );
     }

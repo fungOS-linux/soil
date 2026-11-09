@@ -11,6 +11,7 @@
 
 use serde_json::{Value, json};
 
+use crate::identity::Identity;
 use crate::publisher::TrustedPublisher;
 use crate::{Error, Lock, Manifest, Result};
 
@@ -29,7 +30,7 @@ pub fn document(
     manifest: &Manifest,
     lock: &Lock,
     publisher: &TrustedPublisher,
-    node_id: &str,
+    identity: &Identity,
     endpoints: &[String],
     now_unix_s: u64,
 ) -> Result<Value> {
@@ -38,11 +39,8 @@ pub fn document(
             "this Spore declares no [anycast] claim".into(),
         ));
     };
-    if node_id.is_empty() || !node_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-        return Err(Error::Invalid(format!(
-            "{node_id:?} is not a node id"
-        )));
-    }
+    let node_id = identity.node_id.as_str();
+    let service_id = service_id(manifest, identity)?;
     if endpoints.is_empty() || endpoints.len() > MAX_ENDPOINTS {
         return Err(Error::Invalid(format!(
             "an anycast lease needs 1..={MAX_ENDPOINTS} endpoints"
@@ -56,8 +54,25 @@ pub fn document(
         }
     }
 
-    let service_id = format!("service/{node_id}/application/{}", anycast.name);
     let expires_at = now_unix_s + anycast.ttl_secs;
+    let mut attributes = json!({
+        "node_id": node_id,
+        "spore_id": manifest.spore.id.clone(),
+        "spore_version": manifest.spore.version.clone(),
+        "package_digest": lock.digest.clone(),
+        "principal": publisher.principal.clone(),
+        "grant_id": publisher.grant_id.clone(),
+        "publisher_key_id": publisher.key_id.clone(),
+        "alpns": serde_json::to_string(&anycast.alpns).unwrap_or_else(|_| "[]".into()),
+    });
+    // A digest is what identifies the replica; the name is what lets an
+    // operator find it. Present only when the certificate carried one.
+    if let (Some(name), Some(site)) = (&identity.name, &identity.site)
+        && let Some(map) = attributes.as_object_mut()
+    {
+        map.insert("node_name".into(), json!(name));
+        map.insert("site".into(), json!(site));
+    }
     Ok(json!({
         "schema_version": 1,
         "observations": [{
@@ -76,19 +91,27 @@ pub fn document(
                 "endpoints": endpoints,
                 "protocols": [scheme_of(&endpoints[0])],
                 "formats": [],
-                "attributes": {
-                    "node_id": node_id,
-                    "spore_id": manifest.spore.id.clone(),
-                    "spore_version": manifest.spore.version.clone(),
-                    "package_digest": lock.digest.clone(),
-                    "principal": publisher.principal.clone(),
-                    "grant_id": publisher.grant_id.clone(),
-                    "publisher_key_id": publisher.key_id.clone(),
-                    "alpns": serde_json::to_string(&anycast.alpns).unwrap_or_else(|_| "[]".into()),
-                },
+                "attributes": attributes,
             },
         }],
     }))
+}
+
+/// The service identity one node claims for one Spore.
+///
+/// Constant for the life of an enrollment, which is what lets a renewer
+/// withdraw exactly its own claim and nothing else's.
+pub fn service_id(manifest: &Manifest, identity: &Identity) -> Result<String> {
+    let Some(anycast) = &manifest.anycast else {
+        return Err(Error::Invalid(
+            "this Spore declares no [anycast] claim".into(),
+        ));
+    };
+    let node_id = identity.node_id.as_str();
+    if node_id.is_empty() || !node_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return Err(Error::Invalid(format!("{node_id:?} is not a node id")));
+    }
+    Ok(format!("service/{node_id}/application/{}", anycast.name))
 }
 
 /// `scheme://host[:port]`, no userinfo, no path, no query.
