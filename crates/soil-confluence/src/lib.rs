@@ -25,6 +25,12 @@ pub const MAX_BODY: usize = 64 * 1024;
 pub struct ConfluenceEvent {
     pub tenant: String,
     pub provider: String,
+    /// Which signature scheme accepted the delivery (`github`, `gitea`,
+    /// `standard-webhooks`). Provenance, not policy: a consumer that needs to
+    /// know how the hook was authenticated reads it here instead of guessing
+    /// from the provider name.
+    #[serde(default)]
+    pub scheme: String,
     pub delivery_id: String,
     pub event_type: String,
     pub received_at_ms: u64,
