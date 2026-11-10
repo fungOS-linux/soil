@@ -72,11 +72,13 @@ struct Shared {
 
 pub struct Jobs {
     shared: Arc<Shared>,
-    sender: std::sync::mpsc::Sender<(String, String, bool)>,
+    sender: std::sync::mpsc::Sender<(String, String, bool, Option<Duration>)>,
     /// The worker's cancel flag and engine, so a caller can stop a command
     /// that is already running instead of waiting for it to finish.
     cancel: Arc<AtomicBool>,
     engine: wasmtime::Engine,
+    /// The running command's handle, so cancel can kill a host program too.
+    control: crate::shell::Control,
     /// Threshold from `--background-after`, overriding the adaptive default.
     default_threshold: Option<Duration>,
     _worker: thread::JoinHandle<()>,
@@ -92,13 +94,16 @@ impl Jobs {
             inner: Mutex::new(Inner::default()),
             changed: Condvar::new(),
         });
-        let (sender, receiver) = std::sync::mpsc::channel::<(String, String, bool)>();
+        let (sender, receiver) = std::sync::mpsc::channel::<(String, String, bool, Option<Duration>)>();
         let worker_shared = Arc::clone(&shared);
         let cancel = runtime.cancel_flag();
         let engine = runtime.engine_handle();
+        let control = crate::shell::Control::new(Arc::clone(&cancel)).with_budget(runtime.budget());
+        let worker_control = control.clone();
+        let worker_control_budget = runtime.budget();
         let mut runtime = runtime;
         let worker = thread::spawn(move || {
-            while let Ok((id, command, shell)) = receiver.recv() {
+            while let Ok((id, command, shell, budget)) = receiver.recv() {
                 // Cancelled while it sat in the queue: never run it.
                 if {
                     let mut inner = worker_shared.inner.lock().expect("job lock");
@@ -115,7 +120,9 @@ impl Jobs {
                     worker_shared.finish(&id, command, Executed::cancelled());
                     continue;
                 }
-                let executed = run_command(&mut runtime, &root, &command, shell);
+                let mut control = worker_control.clone();
+                control.set_budget(budget.or(worker_control_budget));
+                let executed = run_command(&mut runtime, &root, &command, shell, &control);
                 worker_shared.inner.lock().expect("job lock").running = None;
                 worker_shared.finish(&id, command, executed);
             }
@@ -125,6 +132,7 @@ impl Jobs {
             sender,
             cancel,
             engine,
+            control,
             default_threshold,
             _worker: worker,
         }
@@ -144,7 +152,9 @@ impl Jobs {
         let running = inner.running.as_deref() == Some(id);
         if running {
             self.cancel.store(true, Ordering::SeqCst);
+            // A guest traps on the epoch bump; a host program has to be killed.
             self.engine.increment_epoch();
+            self.control.kill();
         }
         Ok(json!({
             "ok": true,
@@ -162,6 +172,7 @@ impl Jobs {
         command: &str,
         threshold: Option<Duration>,
         shell: bool,
+        budget: Option<Duration>,
     ) -> Result<Outcome> {
         let after = threshold
             .or(self.default_threshold)
@@ -182,7 +193,7 @@ impl Jobs {
             );
             id
         };
-        if self.sender.send((id.clone(), command.to_string(), shell)).is_err() {
+        if self.sender.send((id.clone(), command.to_string(), shell, budget)).is_err() {
             bail!("mush worker stopped; cannot run {command:?}");
         }
 
@@ -310,9 +321,15 @@ impl Shared {
 }
 
 /// Run every line of a command the way the CLI does, as one result.
-fn run_command(runtime: &mut Runtime, root: &Path, command: &str, shell: bool) -> Executed {
+fn run_command(
+    runtime: &mut Runtime,
+    root: &Path,
+    command: &str,
+    shell: bool,
+    control: &crate::shell::Control,
+) -> Executed {
     if shell {
-        return match crate::shell::run_line_captured(runtime, root, command) {
+        return match crate::shell::run_line_captured(runtime, root, command, control) {
             Ok((status, output, stderr)) => Executed::done(output, stderr, false, status),
             Err(error) => Executed::done(String::new(), format!("mush: {error:#}\n"), false, 1),
         };

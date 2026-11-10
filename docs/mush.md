@@ -206,9 +206,10 @@ mush --desktop personal sh -c 'pwd'   # 25ms
 - Requests are served one connection per thread, so `mush jobs` and
   `mush cancel JOB` reach a daemon that is busy. `cancel` drops queued work and
   traps a running guest through the same epoch the deadline uses.
-  **Known gap:** a host program (`git`, `cargo`, `awk`) is an OS process, and
-  cancelling one is not wired yet — only its VFS side is trapped, so it keeps
-  running until it exits.
+  A host program (`git`, `cargo`, `awk`) is an OS process rather than guest
+  code, so it is spawned, polled, and killed on cancel — and `--timeout` now
+  interrupts it the same way it interrupts the guest (exit 124 for a deadline,
+  130 for a cancel, with the reason on stderr).
 
 For Operator, use the MCP endpoint:
 

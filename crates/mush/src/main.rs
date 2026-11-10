@@ -360,6 +360,11 @@ impl Runtime {
         }
     }
 
+    /// The deadline a caller asked for, so host programs honour it too.
+    pub(crate) fn budget(&self) -> Option<std::time::Duration> {
+        self.budget
+    }
+
     /// The flag the service sets to stop the running command.
     pub(crate) fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         std::sync::Arc::clone(&self.cancelled)

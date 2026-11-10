@@ -152,7 +152,13 @@ fn handle(stream: UnixStream, jobs: &Jobs) -> Result<()> {
                 .and_then(Value::as_u64)
                 .map(Duration::from_secs);
             let shell = kind == "shell";
-            match jobs.submit(command, threshold, shell)? {
+            // A caller's own deadline, so a long build one client asked for is
+            // not inherited by the next short command.
+            let budget = request
+                .get("timeout_secs")
+                .and_then(Value::as_u64)
+                .map(Duration::from_secs);
+            match jobs.submit(command, threshold, shell, budget)? {
                 Outcome::Completed(executed) => json!({
                     "ok": true,
                     "output": executed.output,
@@ -273,6 +279,7 @@ pub fn forward(
     });
     if let Some(budget) = budget {
         request["background_after_secs"] = json!(budget.as_secs());
+        request["timeout_secs"] = json!(budget.as_secs());
     }
     let wait = budget.unwrap_or(Duration::from_secs(120)) + Duration::from_secs(5);
     let mut response = request_once(socket, &request, wait);

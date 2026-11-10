@@ -103,10 +103,67 @@ impl Output for Capture {
     }
 }
 
+
+/// What a caller can do to a command that is already running.
+///
+/// A guest can be interrupted through the engine epoch; a host program is an
+/// OS process, so the only way to stop it is to hold its handle. Both live
+/// here, because `cancel` and `--timeout` have to mean the same thing whether
+/// the command is Spore code or `cargo`.
+#[derive(Clone)]
+pub struct Control {
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    child: std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    /// Wall-clock budget for one command line, enforced for host programs too.
+    budget: Option<std::time::Duration>,
+}
+
+impl Control {
+    pub fn new(cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            cancel,
+            child: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            budget: None,
+        }
+    }
+
+    pub fn with_budget(mut self, budget: Option<std::time::Duration>) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// A per-request deadline, so one caller's `--timeout` is not the whole
+    /// daemon's.
+    pub(crate) fn set_budget(&mut self, budget: Option<std::time::Duration>) {
+        self.budget = budget;
+    }
+
+    /// True once, if a caller asked for this command to stop.
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn track(&self, child: std::process::Child) {
+        *self.child.lock().expect("child slot") = Some(child);
+    }
+
+    /// Kill the running host program, if there is one.
+    pub fn kill(&self) -> bool {
+        let Some(mut child) = self.child.lock().expect("child slot").take() else {
+            return false;
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        true
+    }
+}
+
 /// Run a whole command line, chaining on `&&`, `||` and `;`.
 pub fn run_line(runtime: &mut Runtime, root: &Path, line: &str) -> Result<i32> {
     let mut terminal = Terminal;
-    run_line_with(&mut terminal, runtime, root, line)
+    let control = Control::new(std::sync::Arc::new(Default::default())).with_budget(runtime.budget());
+    run_line_with(&mut terminal, runtime, root, line, &control)
 }
 
 /// Run a command line and return what it printed, for the service daemon.
@@ -114,9 +171,10 @@ pub fn run_line_captured(
     runtime: &mut Runtime,
     root: &Path,
     line: &str,
+    control: &Control,
 ) -> Result<(i32, String, String)> {
     let mut capture = Capture::default();
-    let status = run_line_with(&mut capture, runtime, root, line)?;
+    let status = run_line_with(&mut capture, runtime, root, line, control)?;
     Ok((status, capture.out, capture.err))
 }
 
@@ -125,6 +183,7 @@ fn run_line_with(
     runtime: &mut Runtime,
     root: &Path,
     line: &str,
+    control: &Control,
 ) -> Result<i32> {
     let mut status = 0;
     for (connector, command) in split_commands(line) {
@@ -136,7 +195,7 @@ fn run_line_with(
         if !should_run {
             continue;
         }
-        status = run_one(output, runtime, root, &command)?;
+        status = run_one(output, runtime, root, &command, control)?;
     }
     Ok(status)
 }
@@ -146,6 +205,7 @@ fn run_one(
     runtime: &mut Runtime,
     root: &Path,
     command: &str,
+    control: &Control,
 ) -> Result<i32> {
     // Redirection and pipelines are the Spore's job; hand it the whole line so
     // its parser sees the operators it understands.
@@ -157,7 +217,7 @@ fn run_one(
         return run_in_spore(output, runtime, command);
     }
     if host_allowed(&words[0]) {
-        return run_host(output, root, &words[0], &words[1..]);
+        return run_host(output, root, &words[0], &words[1..], control);
     }
     run_in_spore(output, runtime, command)
 }
@@ -170,12 +230,20 @@ fn run_in_spore(output: &mut dyn Output, runtime: &mut Runtime, command: &str) -
 }
 
 /// Materialize the VFS, run the program there, apply whatever it changed.
+///
+/// The child is spawned rather than waited on so a cancel or a deadline can
+/// take its handle and kill it: a `cargo build` that ignores the epoch must
+/// still be stoppable, or `--timeout` and `mush cancel` would be true only for
+/// commands nobody needs to interrupt.
 fn run_host(
     output: &mut dyn Output,
     root: &Path,
     program: &str,
     args: &[String],
+    control: &Control,
 ) -> Result<i32> {
+    use crate::outcome::{CANCELLED_STATUS, TIMEOUT_STATUS};
+
     let overlay = Overlay::materialize(root)
         .with_context(|| format!("materialize a workspace for {program}"))?;
     let mut command = Command::new(program);
@@ -186,18 +254,87 @@ fn run_host(
     for (key, value) in identity(root) {
         command.env(key, value);
     }
-    let status = if output.inherits_stdio() {
-        command.status().with_context(|| format!("run {program}"))?
-    } else {
-        let captured = command.output().with_context(|| format!("run {program}"))?;
-        output.stdout(&String::from_utf8_lossy(&captured.stdout));
-        output.stderr(&String::from_utf8_lossy(&captured.stderr));
-        captured.status
+    let capturing = !output.inherits_stdio();
+    if capturing {
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+    }
+    let mut child = command.spawn().with_context(|| format!("run {program}"))?;
+    let stdout_reader = capturing.then(|| {
+        let pipe = child.stdout.take().expect("piped stdout");
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut std::io::BufReader::new(pipe), &mut buffer);
+            buffer
+        })
+    });
+    let stderr_reader = capturing.then(|| {
+        let pipe = child.stderr.take().expect("piped stderr");
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut std::io::BufReader::new(pipe), &mut buffer);
+            buffer
+        })
+    });
+
+    let deadline = control.budget.map(|budget| std::time::Instant::now() + budget);
+    control.track(child);
+
+    let mut stopped: Option<i32> = None;
+    let status = loop {
+        // Poll through the shared slot: a canceller takes the handle away.
+        let mut slot = control.child.lock().expect("child slot");
+        let finished = match slot.as_mut() {
+            None => {
+                // The killer took the handle; consume the flag so the next
+                // command in this session is not born cancelled.
+                control.cancelled();
+                Some(stopped.unwrap_or(CANCELLED_STATUS))
+            }
+            Some(child) => match child.try_wait().with_context(|| format!("wait for {program}"))? {
+                Some(status) => {
+                    *slot = None;
+                    Some(status.code().unwrap_or(1))
+                }
+                None => None,
+            },
+        };
+        drop(slot);
+        if let Some(status) = finished {
+            break status;
+        }
+        let expired = deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
+        if expired || control.cancelled() {
+            stopped = Some(if expired { TIMEOUT_STATUS } else { CANCELLED_STATUS });
+            control.kill();
+            continue;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     };
+
+    // The caller sees the same words a guest-interrupted command gets, so
+    // "why did this stop" never depends on which lane it ran in.
+    if status == CANCELLED_STATUS {
+        output.stderr("mush: command cancelled\n");
+    } else if status == TIMEOUT_STATUS {
+        output.stderr(&crate::deadline::timeout_hint(
+            control.budget.unwrap_or_default(),
+        ));
+    }
+    if let Some(reader) = stdout_reader
+        && let Ok(bytes) = reader.join()
+    {
+        output.stdout(&String::from_utf8_lossy(&bytes));
+    }
+    if let Some(reader) = stderr_reader
+        && let Ok(bytes) = reader.join()
+    {
+        output.stderr(&String::from_utf8_lossy(&bytes));
+    }
     overlay
         .apply(root)
         .with_context(|| format!("apply what {program} changed"))?;
-    Ok(status.code().unwrap_or(1))
+    Ok(status)
 }
 
 /// The identity of the caller, as environment for a host program.

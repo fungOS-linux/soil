@@ -139,7 +139,7 @@ fn handle(mut request: tiny_http::Request, token: &str, jobs: &Jobs) -> Result<(
                     &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"command is required"}}),
                 );
             }
-            let outcome = jobs.submit(command, None, false)?;
+            let outcome = jobs.submit(command, None, false, None)?;
             let (text, structured, is_error) = match outcome {
                 Outcome::Completed(executed) => {
                     let mut stdout = executed.output;
