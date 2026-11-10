@@ -123,6 +123,17 @@ obligations, [`docs/soil-canvas-s22.md`](docs/soil-canvas-s22.md) records the S2
 proving run, and [`docs/android.md`](docs/android.md) records the first Android
 JNI proof.
 
+## Device telemetry
+
+Wearable and edge-node data has a model, not just a stream:
+[`docs/device-telemetry.md`](docs/device-telemetry.md) defines identity, time,
+signal envelopes, fusion precedence, retention, privacy, and the boundary
+between `soil:records` for durable history and `soil:unibus` for live state.
+[`docs/device-profiles.md`](docs/device-profiles.md) records what the PineTime,
+COLMI Ring 2, OMI CV1, KZ AZ09, and CAT S22 actually expose today, including
+the limits that make a vendor-app-only device unsupported until its protocol is
+mapped.
+
 ## Terminal in the browser
 
 [`crates/soil-terminal-web`](crates/soil-terminal-web) runs a real pty per
