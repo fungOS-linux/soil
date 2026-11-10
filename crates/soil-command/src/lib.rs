@@ -118,6 +118,15 @@ impl CommandRegistry {
             let dir = entry.path();
             let manifest_path = dir.join("command.toml");
             if !manifest_path.is_file() {
+                // A Spore installs commands too. The package owns both faces -
+                // a canvas and a terminal program - and the shell should not
+                // care which kind of manifest declared them.
+                for entry in spore_commands(&dir)? {
+                    if commands.contains_key(&entry.name) {
+                        bail!("duplicate command {}", entry.name);
+                    }
+                    commands.insert(entry.name.clone(), entry);
+                }
                 continue;
             }
             let source = std::fs::read_to_string(&manifest_path)
@@ -172,6 +181,37 @@ impl CommandRegistry {
     pub fn get(&self, name: &str) -> Option<&CommandEntry> {
         self.commands.get(name)
     }
+}
+
+/// The commands an installed Spore declares.
+///
+/// Limits are the command defaults: a Spore declares what it runs, not how much
+/// memory the host may give it.
+fn spore_commands(dir: &Path) -> Result<Vec<CommandEntry>> {
+    if !dir.join("spore.toml").is_file() {
+        return Ok(Vec::new());
+    }
+    let manifest = soil_spore::Manifest::load(dir)
+        .map_err(|error| anyhow::anyhow!("{}: {error}", dir.display()))?;
+    let limits = Limits::default();
+    let mut entries = Vec::new();
+    for command in &manifest.commands {
+        let module = dir.join(&command.module);
+        if !module.is_file() {
+            bail!("spore command {} module missing", command.name);
+        }
+        entries.push(CommandEntry {
+            name: command.name.clone(),
+            version: manifest.spore.version.clone(),
+            summary: command.summary.clone(),
+            module,
+            timeout_ms: limits.timeout_ms,
+            max_stdout_bytes: limits.max_stdout_bytes,
+            max_stderr_bytes: limits.max_stderr_bytes,
+            max_memory_bytes: limits.max_memory_bytes,
+        });
+    }
+    Ok(entries)
 }
 
 #[derive(Debug, Clone)]
@@ -402,5 +442,79 @@ mod tests {
         let registry = CommandRegistry::scan(dir.path()).unwrap();
         assert_eq!(registry.path(), vec!["a", "b"]);
         assert!(registry.get("a").is_some());
+    }
+}
+
+#[cfg(test)]
+mod spore_command_tests {
+    use super::*;
+
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "soil-command-scan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ))
+    }
+
+    const SPORE: &str = r#"schema = 1
+
+[spore]
+id = "dev.fungos.unibus"
+name = "unibus"
+version = "0.2.0"
+license = "MIT"
+summary = "inbox"
+
+[engine]
+soil = ">=0.1"
+target = "wasm32-wasip2"
+
+[ui]
+entry = "ui/inbox.lua"
+
+[launch]
+default = "canvas"
+surfaces = ["canvas"]
+
+[[commands]]
+name = "unibus"
+summary = "read the inbox"
+module = "bin/unibus.wasm"
+"#;
+
+    #[test]
+    fn a_spore_installs_its_commands_into_the_registry() {
+        let root = scratch();
+        let spore = root.join("unibus");
+        std::fs::create_dir_all(spore.join("bin")).expect("scratch");
+        std::fs::write(spore.join("spore.toml"), SPORE).expect("manifest");
+        std::fs::write(spore.join("bin/unibus.wasm"), b"\0asm").expect("module");
+
+        let registry = CommandRegistry::scan(&root).expect("scan");
+        let entry = registry.get("unibus").expect("the Spore's command");
+        assert_eq!(
+            entry.version, "0.2.0",
+            "the package's version, not the command's"
+        );
+        assert_eq!(entry.summary, "read the inbox");
+        assert!(entry.module.ends_with("bin/unibus.wasm"));
+        assert_eq!(registry.path(), vec!["unibus"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_command_whose_module_is_missing_is_refused() {
+        let root = scratch();
+        let spore = root.join("unibus");
+        std::fs::create_dir_all(&spore).expect("scratch");
+        std::fs::write(spore.join("spore.toml"), SPORE).expect("manifest");
+        // No bin/unibus.wasm: a registry that listed it would promise a program
+        // that cannot run.
+        assert!(CommandRegistry::scan(&root).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
