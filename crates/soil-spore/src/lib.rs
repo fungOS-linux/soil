@@ -129,6 +129,15 @@ pub struct Manifest {
     /// authorizes it.
     #[serde(default)]
     pub anycast: Option<Anycast>,
+    /// The names this Spore answers on, and what it will accept there.
+    ///
+    /// A claim is routing, not privilege. Claiming `contacts.myc` says where
+    /// requests arrive; it says nothing about what the Spore may do with them,
+    /// which stays in `[grants]`. The host refuses two live claims on one name
+    /// unless an operator pins the name, because a silently stolen name is the
+    /// failure that never shows up in a unit test.
+    #[serde(default)]
+    pub http: Option<Http>,
     /// Chrome regions this Spore draws, when it draws any.
     #[serde(default)]
     pub chrome: Option<Chrome>,
@@ -440,6 +449,75 @@ pub struct Anycast {
 }
 
 pub const MAX_LEASE_SECS: u64 = 300;
+
+/// A hostname a vhost could be granted: lowercase labels, no scheme, no port.
+fn http_host(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+}
+
+/// Most hostnames one Spore may claim. A Spore serving a handful of names is
+/// ordinary; one claiming dozens is a registry, not a Spore.
+pub const MAX_HTTP_HOSTS: usize = 16;
+
+/// Most routes one Spore may declare.
+pub const MAX_HTTP_ROUTES: usize = 32;
+
+/// Largest request body a claimed route may accept.
+pub const MAX_HTTP_BODY: usize = 1024 * 1024;
+
+/// Methods a route may name.
+///
+/// A closed set: an unknown method is a typo or a fresh idea, and both should
+/// arrive as a change to this list rather than as a route that silently never
+/// matches.
+pub const HTTP_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+/// Where a Spore answers, declared by the Spore so an install needs no sidecar
+/// config.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Http {
+    /// Hostnames, as a vhost would match them: no scheme, no port, no path.
+    pub hosts: Vec<String>,
+    #[serde(default = "default_max_body")]
+    pub max_body: usize,
+    #[serde(default)]
+    pub origin_auth: OriginAuth,
+    pub routes: Vec<HttpRoute>,
+}
+
+/// One URL prefix this Spore will service, and the methods it accepts there.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpRoute {
+    pub methods: Vec<String>,
+    /// Prefix, beginning with `/`. A grant is a prefix rather than a pattern:
+    /// the vhost already decides which Spore sees the request.
+    pub path: String,
+}
+
+/// Transport truth for a listener.
+///
+/// Most Spores verify a provider's own signature. A declared terminator says
+/// the reverse: only that peer may assert a verified identity, because it saw
+/// the client certificate and this process did not.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OriginAuth {
+    #[default]
+    ProviderSignature,
+    TrustedTerminator,
+}
+
+const fn default_max_body() -> usize {
+    64 * 1024
+}
 
 const fn default_lease_secs() -> u64 {
     240
@@ -917,6 +995,67 @@ impl Manifest {
                     "anycast.ttl_secs {} must be 1..={MAX_LEASE_SECS}",
                     anycast.ttl_secs
                 )));
+            }
+        }
+
+        if let Some(http) = &self.http {
+            if self.module.is_none() {
+                return Err(Error::Invalid(
+                    "[http] needs a module: a Spore that answers on a name must be able to answer"
+                        .into(),
+                ));
+            }
+            if http.hosts.is_empty() || http.hosts.len() > MAX_HTTP_HOSTS {
+                return Err(Error::Invalid(format!(
+                    "[http] needs 1..={MAX_HTTP_HOSTS} hosts"
+                )));
+            }
+            for host in &http.hosts {
+                if !http_host(host) {
+                    return Err(Error::Invalid(format!(
+                        "http host {host:?} must be a lowercase hostname, no scheme, port or path"
+                    )));
+                }
+            }
+            if http.max_body == 0 || http.max_body > MAX_HTTP_BODY {
+                return Err(Error::Invalid(format!(
+                    "http.max_body {} must be 1..={MAX_HTTP_BODY}",
+                    http.max_body
+                )));
+            }
+            if http.routes.is_empty() || http.routes.len() > MAX_HTTP_ROUTES {
+                return Err(Error::Invalid(format!(
+                    "[http] needs 1..={MAX_HTTP_ROUTES} routes"
+                )));
+            }
+            for route in &http.routes {
+                if !route.path.starts_with('/')
+                    || route.path.len() > 128
+                    || route
+                        .path
+                        .chars()
+                        .any(|c| c.is_whitespace() || c.is_control())
+                {
+                    return Err(Error::Invalid(format!(
+                        "route path {:?} must start with `/`, be at most 128 bytes, and contain no whitespace",
+                        route.path
+                    )));
+                }
+                if route.methods.is_empty() {
+                    return Err(Error::Invalid(format!(
+                        "route {} names no methods",
+                        route.path
+                    )));
+                }
+                for method in &route.methods {
+                    if !HTTP_METHODS.contains(&method.as_str()) {
+                        return Err(Error::Invalid(format!(
+                            "route {} names method {method:?}; allowed: {}",
+                            route.path,
+                            HTTP_METHODS.join(", ")
+                        )));
+                    }
+                }
             }
         }
 
@@ -2557,5 +2696,84 @@ mod anycast_tests {
             .is_err(),
             "the daemon drops an observation with more than 32 endpoints"
         );
+    }
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::fixtures::{manifest, with_ui};
+    use super::{HTTP_METHODS, Manifest, OriginAuth};
+
+    fn claim(extra: &str) -> String {
+        format!(
+            "[http]\nhosts = [\"contacts.myc\"]\nroutes = [{{ methods = [\"GET\", \"POST\"], path = \"/\" }}]\n{extra}"
+        )
+    }
+
+    #[test]
+    fn a_spore_declares_where_it_answers() {
+        let parsed = Manifest::parse(&manifest(&claim(""))).expect("claim parses");
+        let http = parsed.http.expect("an [http] table");
+        assert_eq!(http.hosts, vec!["contacts.myc"]);
+        assert_eq!(http.max_body, 64 * 1024, "a body limit exists by default");
+        assert_eq!(http.routes[0].path, "/");
+        assert_eq!(http.routes[0].methods, vec!["GET", "POST"]);
+        assert_eq!(http.origin_auth, OriginAuth::ProviderSignature);
+        assert!(HTTP_METHODS.contains(&"PATCH"), "the method set is closed");
+    }
+
+    #[test]
+    fn a_host_a_vhost_could_not_match_is_refused() {
+        for bad in [
+            "Contacts.myc",
+            "contacts.myc:443",
+            "https://contacts.myc",
+            ".myc",
+            "contacts.myc/",
+        ] {
+            let text = format!(
+                "[http]\nhosts = [{bad:?}]\nroutes = [{{ methods = [\"GET\"], path = \"/\" }}]\n"
+            );
+            assert!(
+                Manifest::parse(&manifest(&text)).is_err(),
+                "{bad} is not a hostname a vhost can match"
+            );
+        }
+    }
+
+    #[test]
+    fn a_route_needs_a_prefix_and_a_known_method() {
+        for bad in ["contacts", "/a b", ""] {
+            let text = format!(
+                "[http]\nhosts = [\"contacts.myc\"]\nroutes = [{{ methods = [\"GET\"], path = {bad:?} }}]\n"
+            );
+            assert!(
+                Manifest::parse(&manifest(&text)).is_err(),
+                "{bad:?} is not a prefix"
+            );
+        }
+        let unknown = "[http]\nhosts = [\"contacts.myc\"]\nroutes = [{ methods = [\"FETCH\"], path = \"/\" }]\n";
+        assert!(
+            Manifest::parse(&manifest(unknown)).is_err(),
+            "an unknown method would silently never match"
+        );
+    }
+
+    #[test]
+    fn a_spore_without_a_module_cannot_claim_a_name() {
+        let text = claim("");
+        let bare = with_ui("[ui]\nentry = \"ui/main.lua\"\n", &text)
+            .replace("[module]\npath = \"module.wasm\"\n", "");
+        let refused = Manifest::parse(&bare);
+        assert!(
+            refused.is_err(),
+            "a Spore must be able to answer on the name it claims"
+        );
+    }
+
+    #[test]
+    fn a_body_limit_past_a_megabyte_is_refused() {
+        let text = format!("{}\nmax_body = {}\n", claim(""), super::MAX_HTTP_BODY + 1);
+        assert!(Manifest::parse(&manifest(&text)).is_err());
     }
 }
