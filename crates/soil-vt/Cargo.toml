@@ -7,7 +7,12 @@ repository.workspace = true
 description = "Terminal emulation for Soil: bytes in, a grid out."
 
 [dependencies]
-libghostty-vt = "0.2.2"
+# Fork of `libghostty-vt` 0.2.2 pinned to a newer Ghostty commit. Same module,
+# type and method names; effects arrive as queued `terminal::Event` values
+# instead of boxed callbacks, and handles have no allocator lifetime. Its build
+# script accepts `ZIG`, so the toolchain is pinned in `.cargo/config.toml`
+# rather than inherited from `PATH`.
+ghostty-vt = "0.8"
 
 [lints]
 workspace = true

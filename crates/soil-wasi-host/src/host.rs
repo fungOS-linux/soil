@@ -3,11 +3,12 @@
 use std::{
     future::Future,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::Result;
 use http_body_util::BodyExt;
+use soil_records_host::{RecordsBookHost, records};
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
@@ -41,6 +42,9 @@ pub struct WasiHostBuilder {
     preopens: Vec<Preopen>,
     credentials: Option<Arc<dyn CredentialProvider>>,
     bus: Option<Arc<dyn Bus>>,
+    /// Shared across requests on purpose: one SQLite store per process, not one
+    /// per invocation.
+    records: Option<Arc<Mutex<RecordsBookHost>>>,
 }
 
 impl WasiHostBuilder {
@@ -112,6 +116,18 @@ impl WasiHostBuilder {
         self
     }
 
+    /// Link `soil:records` for this host. A component that imports the
+    /// interface without a book configured fails at instantiation, naming the
+    /// import, rather than answering `unsupported` on the first call.
+    pub fn records_book(mut self, book: RecordsBookHost) -> Self {
+        self.records = Some(Arc::new(Mutex::new(book)));
+        self
+    }
+
+    pub fn has_records(&self) -> bool {
+        self.records.is_some()
+    }
+
     /// Create fresh WASI state for one component invocation.
     pub fn build(&self) -> Result<WasiHost> {
         let mut wasi = WasiCtxBuilder::new();
@@ -139,6 +155,7 @@ impl WasiHostBuilder {
             context: None,
             credentials: self.credentials.clone(),
             bus: self.bus.clone(),
+            records: self.records.clone(),
         })
     }
 
@@ -157,6 +174,7 @@ pub struct WasiHost {
     context: Option<HttpContext>,
     credentials: Option<Arc<dyn CredentialProvider>>,
     bus: Option<Arc<dyn Bus>>,
+    records: Option<Arc<Mutex<RecordsBookHost>>>,
 }
 
 impl WasiHost {
@@ -180,6 +198,71 @@ impl WasiHost {
 
     pub(crate) fn bus(&self) -> Option<Arc<dyn Bus>> {
         self.bus.clone()
+    }
+
+    /// Run one `soil:records` call under the shared book lock.
+    ///
+    /// The guard never crosses an await: every trait method is synchronous, so a
+    /// blocked writer delays the next request instead of deadlocking the runtime.
+    fn with_records<T>(
+        &mut self,
+        call: impl FnOnce(&mut RecordsBookHost) -> std::result::Result<T, records::Error>,
+    ) -> std::result::Result<T, records::Error> {
+        let Some(records) = &self.records else {
+            return Err(records::Error::Unsupported);
+        };
+        let mut book = records.lock().map_err(|_| records::Error::Io)?;
+        call(&mut book)
+    }
+}
+
+impl records::Host for WasiHost {
+    fn get(&mut self, key: records::Key) -> std::result::Result<records::Entry, records::Error> {
+        self.with_records(|book| records::Host::get(book, key))
+    }
+
+    fn scan(
+        &mut self,
+        collection: String,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> std::result::Result<records::Page, records::Error> {
+        self.with_records(|book| records::Host::scan(book, collection, cursor, limit))
+    }
+
+    fn upsert(
+        &mut self,
+        entry: records::Entry,
+    ) -> std::result::Result<records::Entry, records::Error> {
+        self.with_records(|book| records::Host::upsert(book, entry))
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        key: records::Key,
+        expected: Option<records::Version>,
+        entry: records::Entry,
+    ) -> std::result::Result<records::CasResult, records::Error> {
+        self.with_records(|book| records::Host::compare_and_swap(book, key, expected, entry))
+    }
+
+    fn delete(&mut self, key: records::Key) -> std::result::Result<(), records::Error> {
+        self.with_records(|book| records::Host::delete(book, key))
+    }
+
+    fn changes(
+        &mut self,
+        since: Option<String>,
+        limit: u32,
+    ) -> std::result::Result<records::Page, records::Error> {
+        self.with_records(|book| records::Host::changes(book, since, limit))
+    }
+
+    fn apply(
+        &mut self,
+        entries: Vec<records::Entry>,
+    ) -> std::result::Result<records::ApplyResult, records::Error> {
+        self.with_records(|book| records::Host::apply(book, entries))
     }
 }
 

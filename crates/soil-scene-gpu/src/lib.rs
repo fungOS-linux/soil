@@ -12,8 +12,14 @@ use std::collections::HashMap;
 use std::io::Read;
 
 mod gpu;
+// The terminal shell. Everything below needs a pty, a VT engine, a window or
+// host telemetry, and none of it is reachable from a browser — which is why it
+// is a feature and not a module the render core can see.
+#[cfg(feature = "term")]
 pub mod live;
+#[cfg(feature = "term")]
 pub mod terminal;
+#[cfg(feature = "term")]
 pub mod window;
 
 /// Theme values the renderer needs. The scene carries semantic inks, never
@@ -160,6 +166,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 /// frame cost. Hosts that render continuously (a terminal window, a live chart,
 /// a presentation loop) should build one `Renderer` and call `render` on it;
 /// [`render`] remains the one-shot convenience for callers that truly need it.
+// A browser host uses `draw_to` and never reads a frame back, so the fields the
+// native readback path owns are unreachable there.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -215,24 +224,42 @@ fn write_vertices<T: Pod>(queue: &wgpu::Queue, buffer: &Option<wgpu::Buffer>, da
 }
 
 impl Renderer {
-    pub fn new() -> Result<Self> {
+    /// Acquires a GPU device asynchronously.
+    ///
+    /// A browser only offers a device through a promise, and a promise cannot be
+    /// blocked on — so acquisition is the one async step. Everything after it is
+    /// synchronous: a wasm host renders into the canvas surface with
+    /// [`Renderer::draw_to`] and never reads pixels back.
+    pub async fn new_async() -> Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .context("request a GPU adapter")?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("soil-scene-gpu"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            memory_hints: wgpu::MemoryHints::default(),
-            trace: wgpu::Trace::Off,
-            experimental_features: Default::default(),
-        }))
-        .context("request a GPU device")?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+            .context("request a GPU adapter")?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("soil-scene-gpu"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+                experimental_features: Default::default(),
+            })
+            .await
+            .context("request a GPU device")?;
         Self::from_device_sampled(device, queue, wgpu::TextureFormat::Rgba8Unorm, 1)
+    }
+
+    /// Acquires a GPU device, blocking. Native hosts only: a browser has no
+    /// thread to block, which is why [`Renderer::new_async`] is the real entry
+    /// point and this is the wrapper.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new() -> Result<Self> {
+        pollster::block_on(Self::new_async())
     }
 
     /// Build the pipelines for an existing device. Native window hosts use this
@@ -586,6 +613,11 @@ impl Renderer {
     }
 
     /// Render one scene into a CPU-readable frame.
+    ///
+    /// Native only: reading a frame back needs a blocking map, and a browser has
+    /// nothing to block. Wasm hosts call [`Renderer::draw_to`] against a surface
+    /// texture instead.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn render(
         &mut self,
         scene: &soil_scene::Scene,
@@ -683,7 +715,10 @@ impl Renderer {
 
 /// Render one scene with a fresh renderer.
 ///
-/// Prefer [`Renderer`] for repeated frames.
+/// Prefer [`Renderer`] for repeated frames, and
+/// [`Renderer::draw_to`] where the target is a surface rather than a frame to
+/// read back — which is what a browser host does.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn render(scene: &soil_scene::Scene, width: u32, height: u32, theme: Theme) -> Result<Frame> {
     let mut renderer = Renderer::new()?;
     renderer.render(scene, width, height, theme)

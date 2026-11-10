@@ -1,0 +1,6 @@
+# libghostty-vt is compiled by Zig, and Zig's unstable standard library means
+# Ghostty requires an exact minor version. `ghostty-vt-sys` honours `ZIG`, so
+# pin the toolchain here instead of inheriting whatever `zig` is on PATH.
+# Fetch it once with `scripts/bootstrap-toolchain.sh`.
+[env]
+ZIG = { value = ".toolchain/zig/zig", relative = true }

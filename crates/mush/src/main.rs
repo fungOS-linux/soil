@@ -22,6 +22,7 @@ mod shell;
 mod worktree;
 
 use std::{
+    collections::BTreeMap,
     io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -31,9 +32,11 @@ use std::{
 use anyhow::{Context, Result};
 use rand::Rng;
 use rustyline::{Editor, error::ReadlineError, history::FileHistory};
+use serde::{Deserialize, Serialize};
 use soil::command::command as command_abi;
 use soil_command::{CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
 use soil_inference::{GeodeResolver, SoilConfig};
+use soil_spore::manual::{Manual, read_prose};
 use soil_vfs_host::{VfsHost, index, vfs, vfs_mut};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -50,6 +53,66 @@ struct Host {
     wasi: WasiCtx,
     table: ResourceTable,
     commands: CommandHost,
+    spores: SporeCatalog,
+}
+
+/// Installed Spore packages, as much of them as a manual needs.
+///
+/// `man` is a shell builtin, but the guest has no way to read a package: the
+/// manifest and the authored body live behind this process. Reading them here
+/// keeps the guest's authority unchanged -- no new grant, no filesystem access,
+/// just the metadata the host already owns.
+struct SporeCatalog {
+    root: PathBuf,
+}
+
+impl SporeCatalog {
+    fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn find(&self, name: &str) -> Result<Option<(PathBuf, soil_spore::Manifest)>> {
+        let direct = self.root.join(name);
+        if direct.join("spore.toml").is_file() {
+            let manifest = soil_spore::Manifest::load(&direct)
+                .with_context(|| format!("read Spore package {}", direct.display()))?;
+            return Ok(Some((direct, manifest)));
+        }
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Ok(None);
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.join("spore.toml").is_file() {
+                continue;
+            }
+            let Ok(manifest) = soil_spore::Manifest::load(&dir) else {
+                continue;
+            };
+            if manifest.spore.name == name || manifest.spore.id == name {
+                return Ok(Some((dir, manifest)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn manual(&self, name: &str) -> Result<Option<String>> {
+        let Some((dir, manifest)) = self.find(name)? else {
+            return Ok(None);
+        };
+        let prose = read_prose(&dir, &manifest)?;
+        Ok(Some(Manual::from_manifest(&manifest, prose).render(80)))
+    }
+
+    fn identity(&self, name: &str) -> Result<Option<String>> {
+        let Some((_, manifest)) = self.find(name)? else {
+            return Ok(None);
+        };
+        Ok(Some(format!(
+            "{} {} ({}, {})\n",
+            manifest.spore.name, manifest.spore.version, manifest.spore.id, manifest.spore.license
+        )))
+    }
 }
 
 struct CommandHost {
@@ -133,12 +196,61 @@ impl Host {
         command_root: PathBuf,
         records: Option<RecordsBinding>,
     ) -> Result<Self> {
+        // Commands and Spores are siblings under the fungOS data directory;
+        // `--command-root` and `FUNGOS_COMMAND_ROOT` therefore move both.
+        let spore_root = std::env::var_os("MUSH_SPORE_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| command_root.parent().map(|parent| parent.join("spores")))
+            .unwrap_or_else(|| PathBuf::from("spores"));
         Ok(Self {
             vfs: VfsHost::open(root)?,
             wasi: WasiCtxBuilder::new().inherit_stdio().build(),
             table: ResourceTable::new(),
             commands: CommandHost::new(command_root, records)?,
+            spores: SporeCatalog::new(spore_root),
         })
+    }
+
+    /// Answer for a Spore without running anything.
+    ///
+    /// `man NAME` prints the generated page and `NAME --version` prints the
+    /// identity line, exactly as they would for an installed command. Both are
+    /// reads of installed metadata, so they work in a session with no display.
+    fn builtin(&self, name: &str, args: &[String]) -> Result<Option<command_abi::Output>> {
+        let stdout = |text: String| command_abi::Output {
+            code: 0,
+            stdout: text.into_bytes(),
+            stderr: Vec::new(),
+        };
+        if name == "man" {
+            let Some(target) = args.first() else {
+                return Ok(Some(command_abi::Output {
+                    code: 2,
+                    stdout: Vec::new(),
+                    stderr: b"usage: man NAME\n".to_vec(),
+                }));
+            };
+            return Ok(Some(match self.spores.manual(target)? {
+                Some(page) => stdout(page),
+                None => command_abi::Output {
+                    code: 1,
+                    stdout: Vec::new(),
+                    stderr: format!("man: no entry for {target}\n").into_bytes(),
+                },
+            }));
+        }
+        let single = |flag: &str| args.len() == 1 && args[0] == flag;
+        if single("--version") || single("-V") {
+            if let Some(line) = self.spores.identity(name)? {
+                return Ok(Some(stdout(line)));
+            }
+        }
+        if single("--help") || single("-h") {
+            if let Some(page) = self.spores.manual(name)? {
+                return Ok(Some(stdout(page)));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -209,6 +321,12 @@ impl command_abi::Host for Host {
         stdin: Vec<u8>,
         cwd: Option<String>,
     ) -> Result<command_abi::Output, String> {
+        if let Some(output) = self
+            .builtin(&name, &args)
+            .map_err(|error| format!("{error:#}"))?
+        {
+            return Ok(output);
+        }
         self.commands
             .run(&name, args, stdin, cwd)
             .map_err(|error| format!("{error:#}"))
@@ -387,6 +505,107 @@ fn main() {
     }
 }
 
+/// A login shell is invoked as `-mush` (argv[0] with a leading dash). That is
+/// the only signal a shell gets that nothing else sourced a profile for it.
+fn login_invocation() -> bool {
+    std::env::args_os()
+        .next()
+        .and_then(|arg0| {
+            Path::new(&arg0)
+                .file_name()
+                .map(|name| name.to_string_lossy().starts_with('-'))
+        })
+        .unwrap_or(false)
+}
+
+fn push_dir(dirs: &mut Vec<String>, dir: String) {
+    if Path::new(&dir).is_dir() && !dirs.iter().any(|existing| existing == &dir) {
+        dirs.push(dir);
+    }
+}
+
+/// The PATH a login shell would have had. A user toolchain wins over the system
+/// one, duplicates collapse, and only directories that exist are kept.
+fn login_path(existing: &str, home: &str) -> String {
+    let mut dirs = Vec::new();
+    for dir in [
+        format!("{home}/.cargo/bin"),
+        "/opt/homebrew/bin".to_string(),
+        "/opt/homebrew/sbin".to_string(),
+        "/usr/local/bin".to_string(),
+        "/usr/local/sbin".to_string(),
+        "/usr/bin".to_string(),
+        "/bin".to_string(),
+        "/usr/sbin".to_string(),
+        "/sbin".to_string(),
+    ] {
+        push_dir(&mut dirs, dir);
+    }
+    for dir in existing.split(':').filter(|dir| !dir.is_empty()) {
+        push_dir(&mut dirs, dir.to_string());
+    }
+    dirs.join(":")
+}
+
+/// Login shells have no profile to source, so they build the environment the
+/// host bridge will inherit. `run host` copies PATH from this process, which is
+/// why setting it here is enough for `cargo` and `git` to resolve.
+fn apply_login_env() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let existing = std::env::var("PATH").unwrap_or_default();
+    let path = login_path(&existing, &home);
+    // Single-threaded: no runtime, no thread, nothing else reads the
+    // environment yet.
+    unsafe {
+        if !path.is_empty() {
+            std::env::set_var("PATH", path);
+        }
+        std::env::set_var("MUSH_LOGIN", "1");
+    }
+}
+
+/// `-l`, `-i`, `-lc`, `-lic`: a flag that carries a command is the one that
+/// decides whether we are a shell or a REPL.
+fn has_shell_command_flag(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg.starts_with('-')
+            && arg.len() > 1
+            && arg[1..].chars().all(|c| matches!(c, 'l' | 'i' | 'c'))
+            && arg.contains('c')
+    })
+}
+
+/// A flag that asks for login semantics: `-l`, `-li`, `-lc`, `-lic`.
+fn is_login_flag(arg: &str) -> bool {
+    arg.starts_with('-')
+        && arg.len() > 1
+        && arg[1..].chars().all(|c| matches!(c, 'l' | 'i' | 'c'))
+        && arg.contains('l')
+}
+
+/// A script that starts with `#!` keeps everything after that line.
+fn strip_shebang(body: &str) -> &str {
+    match body.strip_prefix("#!") {
+        Some(rest) => rest.split_once('\n').map(|(_, tail)| tail).unwrap_or(""),
+        None => body,
+    }
+}
+
+/// Run a host file line by line. Scripts are host files: the kernel resolves the
+/// path, so the Spore's `source` (which reads the VFS) is not the right tool.
+fn run_script(runtime: &mut Runtime, path: &Path) -> Result<()> {
+    let body =
+        std::fs::read_to_string(path).with_context(|| format!("read script {}", path.display()))?;
+    for line in strip_shebang(&body).lines() {
+        let response = runtime.execute(line)?;
+        print!("{}", response.output);
+        if response.exit {
+            break;
+        }
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().map(String::as_str) == Some("--version") {
@@ -396,6 +615,12 @@ fn run() -> Result<()> {
     if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
         println!("{}", usage());
         return Ok(());
+    }
+    // A login shell is invoked as `-mush` (argv[0] with a leading dash) or
+    // with `-l`. Nothing sources /etc/profile for it, so it builds its own
+    // environment before anything else runs.
+    if login_invocation() || args.iter().any(|arg| is_login_flag(arg)) {
+        apply_login_env();
     }
     let doctor = args.first().map(String::as_str) == Some("doctor");
     if doctor {
@@ -518,6 +743,38 @@ fn run() -> Result<()> {
                 .unwrap_or_else(|| "~/.local/share/fungos/vfs".into()),
         )
     };
+
+    // `mush sh` (and a bare `mush -c CMD`) is the POSIX-ish entry point: one
+    // command line, VFS commands through the Spore, allowlisted host programs
+    // through the overlay bridge, and session state that outlives the process
+    // because a terminal spawns a fresh shell for every tool call. The flags are
+    // parsed later, once every other option has been consumed: `--wasm X sh -c`
+    // must not be mistaken for a shell flag.
+    let shell_requested = if args.first().map(String::as_str) == Some("sh") {
+        args.remove(0);
+        true
+    } else {
+        args.first().map(String::as_str) == Some("-c") || has_shell_command_flag(&args)
+    };
+
+    // A pure `-l` / `-i` flag carries no command, so what follows it may still be
+    // a script path. Drop the flags, keep the path.
+    while let Some(flag) = args.first() {
+        let is_flag = flag.starts_with('-')
+            && flag.len() > 1
+            && flag[1..].chars().all(|c| matches!(c, 'l' | 'i'));
+        if !is_flag {
+            break;
+        }
+        args.remove(0);
+    }
+
+    if args.first().map(String::as_str) == Some("run")
+        && args.get(1).map(String::as_str) == Some("host")
+    {
+        args.drain(0..2);
+        return run_host(&root, args);
+    }
 
     if args.first().map(String::as_str) == Some("run")
         && args.get(1).map(String::as_str) == Some("op")
@@ -691,6 +948,14 @@ fn run() -> Result<()> {
             .with_context(|| format!("read Mush component {}", wasm.display()))?,
         None => EMBEDDED_MUSH.to_vec(),
     };
+    // An interactive shell owns its own Runtime because it restores per-session
+    // state (cwd, environment) that one-shot commands must not share. `-c`
+    // already went to the daemon above; this is the human-at-a-prompt path.
+    if shell_mode && shell_command.is_none() {
+        let shell_args = parse_shell_args(&mut args)?;
+        return run_shell(&root, &bytes, &term, command_root, records, shell_args);
+    }
+
     let interactive_command_root = command_root.clone();
     let mut runtime = Runtime::open(
         &root,
@@ -722,22 +987,8 @@ fn run() -> Result<()> {
     }
 
     if shell_mode {
-        let status = match shell_command {
-            Some(line) => shell::run_line(&mut runtime, &root, &line)?,
-            None => {
-                let stdin = io::stdin();
-                let mut status = 0;
-                for line in stdin.lock().lines() {
-                    let line = line?;
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    status = shell::run_line(&mut runtime, &root, &line)?;
-                }
-                status
-            }
-        };
-        return finish(status);
+        let line = shell_command.expect("an interactive shell returned above");
+        return finish(shell::run_line(&mut runtime, &root, &line)?);
     }
 
     if let Some(command) = command {
@@ -759,6 +1010,16 @@ fn run() -> Result<()> {
         print!("{}", response.output);
         eprint!("{}", response.stderr);
         return finish(response.status);
+    }
+
+    // `mush path/to/script.mush`, which is what `#!/usr/local/bin/mush` becomes
+    // once the kernel hands us the file. The shebang line is stripped here, not
+    // in the Spore: the Spore has no comment marker to skip it with.
+    if let Some(first) = args.first() {
+        let path = PathBuf::from(first);
+        if path.is_file() {
+            return run_script(&mut runtime, &path);
+        }
     }
 
     // Nothing positional is valid here. Silently falling through to reading
@@ -1429,6 +1690,557 @@ fn run_lines(runtime: &mut Runtime) -> Result<i32> {
     Ok(status)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Connector {
+    First,
+    Always,
+    And,
+    Or,
+}
+
+/// Commands the Spore owns. Anything else has to be an allowlisted host program.
+const VFS_COMMANDS: &[&str] = &[
+    "help", "pwd", "cd", "ls", "mkdir", "rmdir", "cat", "write", "append", "touch", "head", "tail",
+    "grep", "wc", "stat", "tree", "find", "rm", "mv", "cp", "search", "source", "echo", "export",
+    "unset", "env", "set", "exit",
+];
+
+#[derive(Debug, Default)]
+struct ShellArgs {
+    /// The `-c` command line. None means read stdin.
+    command: Option<String>,
+    session: Option<String>,
+}
+
+/// Accept what a terminal actually passes to a shell (`-l`, `-i`, `-lc`,
+/// `-lic`) and ignore the parts that only matter to a login shell.
+fn parse_shell_args(args: &mut Vec<String>) -> Result<ShellArgs> {
+    let mut command = None;
+    loop {
+        let Some(flag) = args.first().cloned() else {
+            break;
+        };
+        let is_flag = flag.starts_with('-')
+            && flag.len() > 1
+            && flag[1..].chars().all(|c| matches!(c, 'l' | 'i' | 'c'));
+        if !is_flag {
+            break;
+        }
+        args.remove(0);
+        if flag.contains('c') {
+            command = Some(args.first().cloned().context("mush: -c needs a command")?);
+            args.remove(0);
+        }
+    }
+    Ok(ShellArgs {
+        command,
+        session: take_option(args, "--session"),
+    })
+}
+
+/// Shell state that has to survive a process: a terminal spawns a new shell for
+/// every tool call, so `cd` and `export` would otherwise reset each time.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Session {
+    #[serde(default = "root_pwd")]
+    pwd: String,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    /// Identifies the file; not content.
+    #[serde(skip)]
+    key: String,
+}
+
+fn root_pwd() -> String {
+    "/".into()
+}
+
+fn sanitize_key(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "default".into()
+    } else {
+        cleaned
+    }
+}
+
+/// One session per agent when the runtime names it, otherwise one per VFS root.
+fn session_key(explicit: Option<String>, root: &Path) -> String {
+    explicit
+        .filter(|k| !k.is_empty())
+        .or_else(|| std::env::var("MUSH_SESSION").ok().filter(|k| !k.is_empty()))
+        .or_else(|| {
+            std::env::var("BOB_AGENT_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+        })
+        .unwrap_or_else(|| {
+            let mut h: u64 = 1469598103934665603;
+            for byte in root.to_string_lossy().as_bytes() {
+                h ^= *byte as u64;
+                h = h.wrapping_mul(1099511628211);
+            }
+            format!("root-{h:x}")
+        })
+}
+
+/// The cargo home for this worktree set, provisioned by bob.
+///
+/// `~/.cargo` carries a single `.package-cache` flock, so every build that
+/// shares it serializes against every other build on the machine. bob clones
+/// the registry copy-on-write per key and drops the shared lock file. The key
+/// here is the one that names the mush session, so a set of worktrees built
+/// together shares one lock and nothing outside it does.
+///
+/// Fail-open by design: a host without bob loses parallelism, not correctness.
+fn bob_cargo_home(root: &Path) -> Result<PathBuf> {
+    let key = session_key(None, root);
+    let attempts: [&[&str]; 2] = [
+        &["fpl", "bob", "cargo-home", "--key", key.as_str()],
+        &["fpl-bob", "cargo-home", "--key", key.as_str()],
+    ];
+    let mut last = String::from("no bob on PATH");
+    for argv in attempts {
+        let out = match Command::new(argv[0]).args(&argv[1..]).output() {
+            Ok(out) => out,
+            Err(err) => {
+                last = format!("{}: {err}", argv[0]);
+                continue;
+            }
+        };
+        if !out.status.success() {
+            last = format!(
+                "{} exited {}: {}",
+                argv[0],
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            continue;
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if path.is_empty() {
+            last = format!("{} printed no path", argv[0]);
+            continue;
+        }
+        return Ok(PathBuf::from(path));
+    }
+    anyhow::bail!("{last}")
+}
+
+/// Quote for the Spore's line parser. Values it cannot round-trip are dropped
+/// by `plain_word` rather than written back corrupted.
+fn quote_word(value: &str) -> String {
+    if plain_word(value) {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', ""))
+    }
+}
+
+fn plain_word(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:@%+,=".contains(c))
+}
+
+impl Session {
+    fn path(root: &Path, key: &str) -> PathBuf {
+        root.join(".fungos/sessions")
+            .join(format!("{}.json", sanitize_key(key)))
+    }
+
+    fn load(root: &Path, key: &str) -> Session {
+        let mut session = std::fs::read(Self::path(root, key))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Session>(&bytes).ok())
+            .unwrap_or_default();
+        if session.pwd.is_empty() {
+            session.pwd = root_pwd();
+        }
+        session.key = key.to_string();
+        session
+    }
+
+    /// Fail-open: session state is a convenience, never a build dependency.
+    fn save(&self, root: &Path) {
+        let path = Self::path(root, &self.key);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(self) {
+            let _ = std::fs::write(path, bytes);
+        }
+    }
+
+    fn restore(&self, runtime: &mut Runtime) -> Result<()> {
+        if self.pwd != root_pwd() {
+            let response = runtime.execute(&format!("cd {}", quote_word(&self.pwd)))?;
+            print!("{}", response.output);
+        }
+        for (key, value) in &self.env {
+            let _ = runtime.execute(&format!("export {key}={}", quote_word(value)));
+        }
+        Ok(())
+    }
+
+    fn capture(&mut self, runtime: &mut Runtime) -> Result<()> {
+        let pwd = runtime.execute("pwd")?;
+        if let Some(line) = pwd.output.lines().next() {
+            let line = line.trim();
+            if line.starts_with('/') {
+                self.pwd = line.to_string();
+            }
+        }
+        let env = runtime.execute("env")?;
+        let mut map = BTreeMap::new();
+        for line in env.output.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            if matches!(key, "PWD" | "OLDPWD" | "SHLVL" | "_") {
+                continue;
+            }
+            if !plain_word(value) {
+                continue;
+            }
+            map.insert(key.to_string(), value.to_string());
+        }
+        self.env = map;
+        Ok(())
+    }
+}
+
+/// Split a command line on `;`, `&&`, and `||`, leaving quoted operators alone.
+fn split_commands(line: &str) -> Vec<(Connector, String)> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut connector = Connector::First;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                buf.push(c);
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    buf.push(c);
+                }
+                ';' => {
+                    out.push((connector, buf.trim().to_string()));
+                    buf.clear();
+                    connector = Connector::Always;
+                }
+                '&' if chars.peek() == Some(&'&') => {
+                    chars.next();
+                    out.push((connector, buf.trim().to_string()));
+                    buf.clear();
+                    connector = Connector::And;
+                }
+                '|' if chars.peek() == Some(&'|') => {
+                    chars.next();
+                    out.push((connector, buf.trim().to_string()));
+                    buf.clear();
+                    connector = Connector::Or;
+                }
+                _ => buf.push(c),
+            },
+        }
+    }
+    if !buf.trim().is_empty() || out.is_empty() {
+        out.push((connector, buf.trim().to_string()));
+    }
+    out
+}
+
+/// Split one simple command into argv, resolving quotes and backslashes.
+fn split_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut buf = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    buf.push(c);
+                }
+                started = true;
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    started = true;
+                }
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        buf.push(next);
+                        started = true;
+                    }
+                }
+                c if c.is_whitespace() => {
+                    if started {
+                        words.push(std::mem::take(&mut buf));
+                        started = false;
+                    }
+                }
+                c => {
+                    buf.push(c);
+                    started = true;
+                }
+            },
+        }
+    }
+    if started {
+        words.push(buf);
+    }
+    words
+}
+
+fn execute_one(runtime: &mut Runtime, root: &Path, session: &Session, line: &str) -> Result<i32> {
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(0);
+    }
+    let words = split_words(line);
+    let Some(program) = words.first().cloned() else {
+        return Ok(0);
+    };
+    if VFS_COMMANDS.contains(&program.as_str()) {
+        let response = runtime.execute(line)?;
+        print!("{}", response.output);
+        io::stdout().flush()?;
+        return Ok(0);
+    }
+    if host_allowed(&program) {
+        if line.contains('>') {
+            anyhow::bail!("mush: {program}: redirection is only supported for VFS commands");
+        }
+        let mut args = vec![
+            "--cwd".to_string(),
+            session.pwd.trim_start_matches('/').to_string(),
+        ];
+        args.push("--".into());
+        args.extend(words);
+        return run_host_status(root, args);
+    }
+    eprintln!("mush: {program}: not a VFS command and not an allowlisted host program");
+    Ok(127)
+}
+
+fn execute_line(runtime: &mut Runtime, root: &Path, session: &Session, line: &str) -> Result<i32> {
+    let mut status = 0;
+    for (connector, command) in split_commands(line) {
+        let should_run = match connector {
+            Connector::First | Connector::Always => true,
+            Connector::And => status == 0,
+            Connector::Or => status != 0,
+        };
+        if !should_run || command.is_empty() {
+            continue;
+        }
+        status = execute_one(runtime, root, session, &command)?;
+    }
+    Ok(status)
+}
+
+fn run_shell(
+    root: &Path,
+    wasm: &[u8],
+    term: &str,
+    command_root: PathBuf,
+    records: Option<RecordsBinding>,
+    args: ShellArgs,
+) -> Result<()> {
+    let key = session_key(args.session, root);
+    let mut session = Session::load(root, &key);
+    let mut runtime = Runtime::open(root, wasm, term, command_root, records, None, None, None)?;
+    session.restore(&mut runtime)?;
+    let status = match args.command {
+        Some(command) => execute_line(&mut runtime, root, &session, &command)?,
+        None => {
+            let stdin = io::stdin();
+            let mut status = 0;
+            for line in stdin.lock().lines() {
+                let line = line?;
+                if line.trim() == "exit" {
+                    break;
+                }
+                status = execute_line(&mut runtime, root, &session, &line)?;
+            }
+            status
+        }
+    };
+    session.capture(&mut runtime)?;
+    session.save(root);
+    if status != 0 {
+        std::process::exit(status);
+    }
+    Ok(())
+}
+
+/// Host commands allowed to run against a materialized VFS overlay. This is a
+/// policy boundary, not a sandbox: an allowed program still runs as the user
+/// and can read their home. Keep it to build tools, and never add a shell.
+const HOST_ALLOWLIST: &[&str] = &[
+    "cargo",
+    "rustc",
+    "cc",
+    "clang",
+    "clang++",
+    "c++",
+    "git",
+    "make",
+    "cmake",
+    "ninja",
+    "pkg-config",
+];
+
+/// A bare program name only. A path like `./cargo` would run code from the
+/// overlay itself, which is exactly what the allowlist is meant to prevent.
+fn host_allowed(program: &str) -> bool {
+    !program.contains('/') && HOST_ALLOWLIST.contains(&program)
+}
+
+fn run_host(root: &Path, args: Vec<String>) -> Result<()> {
+    let status = run_host_status(root, args)?;
+    if status != 0 {
+        std::process::exit(status);
+    }
+    Ok(())
+}
+
+/// The status-returning form, so a shell can chain `&&` and `||` without
+/// exiting the process.
+fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
+    let passthrough = args
+        .iter()
+        .position(|arg| arg == "--")
+        .map(|index| args.split_off(index + 1));
+    if args.last().map(String::as_str) == Some("--") {
+        args.pop();
+    }
+    let keep = args.iter().any(|arg| arg == "--keep");
+    let no_apply = args.iter().any(|arg| arg == "--no-apply");
+    args.retain(|arg| arg != "--keep" && arg != "--no-apply");
+    let cwd = take_option(&mut args, "--cwd").unwrap_or_default();
+    let mut extra_env = Vec::new();
+    while let Some(var) = take_option(&mut args, "--allow-env") {
+        extra_env.push(var);
+    }
+    let cmd = passthrough.unwrap_or_default();
+    if cmd.is_empty() {
+        anyhow::bail!("mush run host: no command (use `mush run host -- cargo build`)");
+    }
+    if !host_allowed(&cmd[0]) {
+        anyhow::bail!(
+            "mush run host: `{}` is not allowlisted (allowed: {})",
+            cmd[0],
+            HOST_ALLOWLIST.join(", ")
+        );
+    }
+
+    let overlay = overlay::Overlay::materialize(root)?;
+    let workspace = overlay.path().to_path_buf();
+    let dir = if cwd.is_empty() {
+        workspace.clone()
+    } else {
+        workspace.join(&cwd)
+    };
+    if !dir.starts_with(&workspace) {
+        anyhow::bail!("mush run host: --cwd escapes the overlay");
+    }
+    if !dir.is_dir() {
+        anyhow::bail!("mush run host: --cwd {} is not a directory", cwd);
+    }
+
+    let mut command = Command::new(&cmd[0]);
+    command.args(&cmd[1..]).current_dir(&dir);
+    // Start empty: a host build needs its toolchain, not the agent's tokens.
+    // Anything beyond this list is opt-in via --allow-env.
+    command.env_clear();
+    for var in [
+        "PATH",
+        "HOME",
+        "USER",
+        "LANG",
+        "TERM",
+        "TMPDIR",
+        "RUSTUP_HOME",
+        "CARGO_HOME",
+        "CARGO_TARGET_DIR",
+        "SCCACHE_CONF",
+        "RUSTC_WRAPPER",
+        "SCCACHE_SKIP_CACHE_CHECK",
+        "BOB_AGENT_KEY",
+    ] {
+        if let Ok(value) = std::env::var(var) {
+            command.env(var, value);
+        }
+    }
+    for var in &extra_env {
+        if let Ok(value) = std::env::var(var) {
+            command.env(var, value);
+        }
+    }
+    // The host build must not inherit the agent's shell state, but it also must
+    // not fall back to the one shared `~/.cargo` lock. Resolve the home for this
+    // worktree set when the caller did not name one.
+    if std::env::var_os("CARGO_HOME").is_none() && std::env::var_os("BOB_NO_CARGO_HOME").is_none() {
+        match bob_cargo_home(root) {
+            Ok(home) => {
+                command.env("CARGO_HOME", &home);
+            }
+            Err(err) => eprintln!(
+                "mush: no per-worktree CARGO_HOME ({err}); cargo will share ~/.cargo and serialize on its lock"
+            ),
+        }
+    }
+    command.env("MUSH_ROOT", root);
+    command.env("MUSH_OVERLAY", &workspace);
+    eprintln!("mush: overlay {}", workspace.display());
+
+    let status = command.status().context("run host command")?;
+    let changes = overlay.diff()?;
+    for change in &changes {
+        eprintln!("mush: {:?} {}", change.kind, change.path);
+    }
+    if no_apply {
+        eprintln!("mush: overlay discarded ({})", changes.len());
+    } else {
+        let report = overlay.apply(root)?;
+        eprintln!(
+            "mush: applied {} written, {} deleted, {} directories",
+            report.written, report.deleted, report.directories
+        );
+    }
+    if keep {
+        let kept = overlay.keep();
+        eprintln!("mush: kept {}", kept.display());
+    }
+    Ok(status.code().unwrap_or(1))
+}
+
 fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     let passthrough = args
         .iter()
@@ -1437,7 +2249,6 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     if args.last().map(String::as_str) == Some("--") {
         args.pop();
     }
-
     let config_path = take_option(&mut args, "--config").map(|value| expand_home(&value));
     let profile = take_option(&mut args, "--inference-profile")
         .or_else(|| std::env::var("MUSH_INFERENCE_PROFILE").ok());
@@ -1580,4 +2391,96 @@ fn expand_home(value: &str) -> PathBuf {
         return PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest);
     }
     PathBuf::from(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_allowlist_is_a_bare_program_name() {
+        assert!(host_allowed("cargo"));
+        assert!(host_allowed("clang++"));
+        assert!(host_allowed("pkg-config"));
+        assert!(!host_allowed("sh"));
+        assert!(!host_allowed("/bin/sh"));
+        assert!(!host_allowed("./cargo"));
+        assert!(!host_allowed("cargo/../cargo"));
+    }
+
+    #[test]
+    fn shell_splits_commands_without_breaking_quotes() {
+        let parts = split_commands("cd /a && echo 'x && y'; false || true");
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], (Connector::First, "cd /a".to_string()));
+        assert_eq!(parts[1], (Connector::And, "echo 'x && y'".to_string()));
+        assert_eq!(parts[2], (Connector::Always, "false".to_string()));
+        assert_eq!(parts[3], (Connector::Or, "true".to_string()));
+    }
+
+    #[test]
+    fn shell_words_resolve_quotes_and_backslashes() {
+        assert_eq!(
+            split_words("cargo build --features 'a b'"),
+            vec!["cargo", "build", "--features", "a b"]
+        );
+        assert_eq!(split_words(r#"echo "x y" z"#), vec!["echo", "x y", "z"]);
+        assert_eq!(split_words(r"echo a\ b"), vec!["echo", "a b"]);
+    }
+
+    #[test]
+    fn session_round_trips_and_keys_are_sanitized() {
+        let mut session = Session::default();
+        session.pwd = "/projects/app".into();
+        session.env.insert("FOO".into(), "bar".into());
+        session.key = "agent/1".into();
+        let bytes = serde_json::to_vec(&session).unwrap();
+        let back: Session = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.pwd, "/projects/app");
+        assert_eq!(back.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(sanitize_key("agent/1"), "agent-1");
+        assert_eq!(sanitize_key(""), "default");
+        assert_eq!(quote_word("plain"), "plain");
+        assert_eq!(quote_word("a b"), "'a b'");
+        assert!(!plain_word("a b"));
+    }
+
+    #[test]
+    fn login_path_prefers_existing_dirs_and_dedups() {
+        let path = login_path("/usr/bin:/usr/bin:/definitely-not-here", "/home/u");
+        assert_eq!(path.matches("/usr/bin").count(), 1, "{path}");
+        assert!(!path.contains("/definitely-not-here"));
+        assert!(
+            path.split(':').all(|dir| Path::new(dir).is_dir()),
+            "every entry must exist: {path}"
+        );
+    }
+
+    #[test]
+    fn shell_command_flag_distinguishes_login_from_command() {
+        let args = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        assert!(has_shell_command_flag(&args(&["-c", "pwd"])));
+        assert!(has_shell_command_flag(&args(&["-lc", "pwd"])));
+        assert!(has_shell_command_flag(&args(&["-lic", "pwd"])));
+        assert!(!has_shell_command_flag(&args(&["-l"])));
+        assert!(!has_shell_command_flag(&args(&["-i"])));
+        assert!(!has_shell_command_flag(&args(&["--command", "pwd"])));
+    }
+
+    #[test]
+    fn shebang_line_is_not_executed() {
+        assert_eq!(strip_shebang("#!/usr/local/bin/mush\npwd\n"), "pwd\n");
+        assert_eq!(strip_shebang("pwd\n"), "pwd\n");
+        assert_eq!(strip_shebang("#!/bin/mush"), "");
+    }
+
+    #[test]
+    fn login_flags_are_recognised_without_swallowing_commands() {
+        assert!(is_login_flag("-l"));
+        assert!(is_login_flag("-lc"));
+        assert!(is_login_flag("-lic"));
+        assert!(!is_login_flag("-c"));
+        assert!(!is_login_flag("-i"));
+        assert!(!is_login_flag("--command"));
+    }
 }

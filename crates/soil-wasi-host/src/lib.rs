@@ -27,7 +27,9 @@ pub use context::HttpContext;
 pub use creds::{
     Algorithm, CredentialError, CredentialProvider, ResolvedHandle, StaticCredentials,
 };
-pub use gateway::{GatewayRoute, GatewayVhost, HttpGateway, HttpGatewayBuilder, IngressError};
+pub use gateway::{
+    GatewayRoute, GatewayVhost, HttpGateway, HttpGatewayBuilder, IngressError, OriginAuth,
+};
 pub use host::{Preopen, WasiHost, WasiHostBuilder};
 pub use policy::{HttpPolicy, NetworkPolicy, WasiHostPolicy};
 pub use service::HttpService;

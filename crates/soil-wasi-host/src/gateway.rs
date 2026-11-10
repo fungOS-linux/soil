@@ -4,8 +4,17 @@
 //! method and path grants, and the body ceiling; the guest never sees a route
 //! it was not granted. Every invocation carries a [`HttpContext`] that names
 //! the granted Spore and route rather than trusting request headers.
+//!
+//! The listener speaks plain HTTP, so the only identity it can report is the
+//! peer address — unless an [`OriginAuth::TrustedTerminator`] sits in front and
+//! verified a client certificate. That assertion reaches the guest through
+//! [`HttpContext::tls_peer`], never through a request header a Spore could be
+//! tricked into reading.
 
-use std::{collections::BTreeSet, convert::Infallible, fmt, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet, convert::Infallible, fmt, net::IpAddr, pin::Pin, sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
@@ -77,6 +86,89 @@ impl GatewayRoute {
     }
 }
 
+/// How the host decides whether a request arrived through an authenticated
+/// transport.
+///
+/// This is transport truth only: it says what the listener can prove about the
+/// connection, not whether the request should be acted on. A provider webhook
+/// signature is the Spore's job; this decides what the host may assert to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum OriginAuth {
+    /// Nothing is asserted about the transport; `tls_peer` stays empty and the
+    /// Spore verifies the caller itself (a webhook HMAC, for example). Any peer
+    /// may connect.
+    #[default]
+    ProviderSignature,
+    /// A TLS terminator in front of this listener verified the caller — a
+    /// client certificate, Cloudflare Authenticated Origin Pulls, an Access
+    /// token — and reported it in the trusted-terminator headers. Only the
+    /// listed peers may connect at all, because a direct hit from anywhere else
+    /// is precisely the bypass this policy exists to refuse.
+    TrustedTerminator { peers: Vec<IpAddr> },
+}
+
+impl OriginAuth {
+    /// Where the terminator names the verifier that accepted the caller. Its
+    /// value is what the gateway logs as `verifier`.
+    pub const ORIGIN_HEADER: &str = "x-palisade-origin";
+
+    /// Where the terminator reports the subject certificate it verified, e.g.
+    /// a certificate fingerprint. Its value becomes [`HttpContext::tls_peer`].
+    pub const AUTH_HEADER: &str = "x-palisade-auth";
+
+    /// Trust assertions from `peers` only.
+    pub fn trusted_terminator(peers: impl IntoIterator<Item = IpAddr>) -> Self {
+        Self::TrustedTerminator {
+            peers: peers.into_iter().collect(),
+        }
+    }
+
+    /// Decide what this request may assert, or `None` if the peer may not
+    /// connect under this policy.
+    ///
+    /// The assertion headers are removed from the request in every case. A
+    /// Spore cannot tell a forged header from an asserted one, so the host
+    /// never lets either through: the value travels in [`HttpContext`].
+    fn verify<B>(&self, request: &mut Request<B>, peer: IpAddr) -> Option<Assertion> {
+        let headers = request.headers_mut();
+        let origin = headers.remove(Self::ORIGIN_HEADER);
+        let subject = headers.remove(Self::AUTH_HEADER);
+
+        match self {
+            Self::ProviderSignature => Some(Assertion {
+                verifier: "provider-signature".to_owned(),
+                tls_peer: None,
+            }),
+            Self::TrustedTerminator { peers } => {
+                if !peers.contains(&peer) {
+                    return None;
+                }
+                // A trusted peer that asserts nothing simply did not verify a
+                // caller on this request. That is not a failure: the Spore
+                // still checks its own signature. Reporting the absence keeps
+                // the log honest rather than implying a verifier ran.
+                Some(Assertion {
+                    verifier: header_text(origin).unwrap_or_else(|| "none".to_owned()),
+                    tls_peer: header_text(subject),
+                })
+            }
+        }
+    }
+}
+
+/// What an [`OriginAuth`] policy proved about one request.
+struct Assertion {
+    /// Name of the verifier that accepted the caller, for the audit log.
+    verifier: String,
+    /// The verified subject, when the terminator saw one.
+    tls_peer: Option<String>,
+}
+
+fn header_text(value: Option<http::HeaderValue>) -> Option<String> {
+    let text = value?.to_str().ok()?.trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
 /// A compiled Spore plus the hostnames and routes it may serve.
 #[derive(Clone)]
 pub struct GatewayVhost {
@@ -99,6 +191,7 @@ impl GatewayVhost {
 #[derive(Clone)]
 pub struct HttpGatewayBuilder {
     vhosts: Vec<GatewayVhost>,
+    origin_auth: OriginAuth,
     max_body_bytes: usize,
     request_timeout: Duration,
 }
@@ -107,6 +200,7 @@ impl Default for HttpGatewayBuilder {
     fn default() -> Self {
         Self {
             vhosts: Vec::new(),
+            origin_auth: OriginAuth::default(),
             max_body_bytes: 1024 * 1024,
             request_timeout: Duration::from_secs(30),
         }
@@ -150,6 +244,16 @@ impl HttpGatewayBuilder {
         Ok(self)
     }
 
+    /// What the listener may assert about the caller's transport.
+    ///
+    /// Applies to every vhost on the listener: which address a terminator
+    /// connects from does not depend on the hostname, and a second guarantee
+    /// for a second hostname is a second listener.
+    pub fn origin_auth(mut self, origin_auth: OriginAuth) -> Self {
+        self.origin_auth = origin_auth;
+        self
+    }
+
     /// Default request body ceiling, in bytes.
     pub fn max_body_bytes(mut self, limit: usize) -> Self {
         self.max_body_bytes = limit;
@@ -169,8 +273,10 @@ impl HttpGatewayBuilder {
         if self.max_body_bytes == 0 {
             return Err(IngressError::ZeroBodyLimit);
         }
+        validate_origin_auth(&self.origin_auth)?;
         Ok(HttpGateway {
             vhosts: self.vhosts,
+            origin_auth: self.origin_auth,
             max_body_bytes: self.max_body_bytes,
             request_timeout: self.request_timeout,
         })
@@ -181,6 +287,7 @@ impl HttpGatewayBuilder {
 #[derive(Clone)]
 pub struct HttpGateway {
     vhosts: Vec<GatewayVhost>,
+    origin_auth: OriginAuth,
     max_body_bytes: usize,
     request_timeout: Duration,
 }
@@ -221,9 +328,17 @@ impl HttpGateway {
 
     async fn handle(
         &self,
-        request: Request<Incoming>,
+        mut request: Request<Incoming>,
         remote: std::net::SocketAddr,
     ) -> Response<HyperOutgoingBody> {
+        let Some(assertion) = self.origin_auth.verify(&mut request, remote.ip()) else {
+            // Refused before the grant table is consulted: a direct hit on the
+            // origin is not a routing miss, and answering 404 would invite the
+            // caller to keep guessing hostnames.
+            tracing::warn!(peer = %remote, "refused: not a trusted terminator");
+            return text_response(StatusCode::FORBIDDEN, "untrusted origin");
+        };
+
         let Some(authority) = request_authority(&request) else {
             return text_response(StatusCode::BAD_REQUEST, "missing or invalid Host");
         };
@@ -257,11 +372,20 @@ impl HttpGateway {
             return text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
         }
 
+        tracing::info!(
+            vhost = %authority,
+            spore = %vhost.spore,
+            path,
+            verifier = %assertion.verifier,
+            tls_peer = assertion.tls_peer.as_deref().unwrap_or(""),
+            "accepted request"
+        );
+
         let context = HttpContext::new(
             vhost.spore.clone(),
             route.prefix.clone(),
             Some(remote.to_string()),
-            None,
+            assertion.tls_peer,
         );
         let service = Arc::clone(&vhost.service);
         let request = request.map(|body| CappedBody::new(body, limit));
@@ -272,12 +396,30 @@ impl HttpGateway {
     }
 }
 
+fn validate_origin_auth(origin_auth: &OriginAuth) -> std::result::Result<(), IngressError> {
+    let OriginAuth::TrustedTerminator { peers } = origin_auth else {
+        return Ok(());
+    };
+    if peers.is_empty() {
+        return Err(IngressError::NoTrustedTerminator);
+    }
+    match peers.iter().find(|peer| peer.is_unspecified()) {
+        Some(peer) => Err(IngressError::UnspecifiedTrustedTerminator(*peer)),
+        None => Ok(()),
+    }
+}
+
 /// Why a gateway could not be built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IngressError {
     Empty,
     ZeroBodyLimit,
     InvalidHost(String),
+    /// A trusted-terminator policy named no peers, so it could never accept a
+    /// request; that is a typo, not a lockout.
+    NoTrustedTerminator,
+    /// `0.0.0.0` is not a peer address.
+    UnspecifiedTrustedTerminator(IpAddr),
 }
 
 impl fmt::Display for IngressError {
@@ -286,6 +428,12 @@ impl fmt::Display for IngressError {
             Self::Empty => f.write_str("HTTP gateway has no vhost grants"),
             Self::ZeroBodyLimit => f.write_str("HTTP gateway body limit must be positive"),
             Self::InvalidHost(host) => write!(f, "invalid vhost {host:?}"),
+            Self::NoTrustedTerminator => {
+                f.write_str("trusted-terminator origin auth names no peers")
+            }
+            Self::UnspecifiedTrustedTerminator(peer) => {
+                write!(f, "trusted-terminator peer {peer} is not a host address")
+            }
         }
     }
 }
@@ -441,5 +589,112 @@ mod tests {
         assert!(normalize_host("").is_err());
         assert!(normalize_host("*").is_err());
         assert!(normalize_host("a/b").is_err());
+    }
+
+    fn asserted(auth: &OriginAuth, peer: [u8; 4]) -> Option<Assertion> {
+        let mut request = Request::builder()
+            .uri("http://confluence.test/webhooks/github")
+            .body(())
+            .unwrap();
+        request.headers_mut().extend(request_headers());
+        let assertion = auth.verify(&mut request, IpAddr::from(peer))?;
+        // The assertion headers never reach the guest, whatever the policy.
+        assert!(request.headers().get(OriginAuth::ORIGIN_HEADER).is_none());
+        assert!(request.headers().get(OriginAuth::AUTH_HEADER).is_none());
+        assert!(
+            request.headers().get("x-palisade-unrelated").is_some(),
+            "only the assertion headers are stripped"
+        );
+        Some(assertion)
+    }
+
+    fn request_headers() -> Vec<(http::HeaderName, http::HeaderValue)> {
+        [
+            (OriginAuth::ORIGIN_HEADER, "cf-aop"),
+            (OriginAuth::AUTH_HEADER, "sha256:5f1e"),
+            ("x-palisade-unrelated", "kept"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.parse().unwrap(), value.parse().unwrap()))
+        .collect()
+    }
+
+    #[test]
+    fn provider_signature_ignores_the_transport() {
+        let assertion = asserted(&OriginAuth::ProviderSignature, [10, 0, 0, 1])
+            .expect("every peer may connect");
+        assert_eq!(assertion.verifier, "provider-signature");
+        assert_eq!(assertion.tls_peer, None);
+    }
+
+    #[test]
+    fn trusted_terminator_refuses_other_peers() {
+        let auth = OriginAuth::trusted_terminator([IpAddr::from([10, 0, 0, 2])]);
+        assert!(
+            asserted(&auth, [10, 0, 0, 1]).is_none(),
+            "a direct hit on the origin is the bypass the policy exists to stop"
+        );
+    }
+
+    #[test]
+    fn trusted_terminator_reports_the_verified_certificate() {
+        let auth = OriginAuth::trusted_terminator([IpAddr::from([127, 0, 0, 1])]);
+        let assertion = asserted(&auth, [127, 0, 0, 1]).unwrap();
+        assert_eq!(assertion.verifier, "cf-aop");
+        assert_eq!(assertion.tls_peer.as_deref(), Some("sha256:5f1e"));
+    }
+
+    #[test]
+    fn trusted_terminator_without_an_assertion_says_so() {
+        let auth = OriginAuth::trusted_terminator([IpAddr::from([127, 0, 0, 1])]);
+        let mut request = Request::builder()
+            .uri("http://confluence.test/webhooks/github")
+            .body(())
+            .unwrap();
+        let assertion = auth
+            .verify(&mut request, IpAddr::from([127, 0, 0, 1]))
+            .unwrap();
+        assert_eq!(assertion.verifier, "none");
+        assert_eq!(assertion.tls_peer, None);
+    }
+
+    #[test]
+    fn trusted_terminator_rejects_an_unreadable_assertion() {
+        let auth = OriginAuth::trusted_terminator([IpAddr::from([127, 0, 0, 1])]);
+        let mut request = Request::builder()
+            .uri("http://confluence.test/webhooks/github")
+            .body(())
+            .unwrap();
+        request.headers_mut().insert(
+            OriginAuth::ORIGIN_HEADER,
+            http::HeaderValue::from_bytes(b"\xff\xfe").unwrap(),
+        );
+        let assertion = auth
+            .verify(&mut request, IpAddr::from([127, 0, 0, 1]))
+            .unwrap();
+        assert_eq!(assertion.verifier, "none");
+    }
+
+    #[test]
+    fn a_terminator_policy_needs_a_real_peer() {
+        assert_eq!(
+            validate_origin_auth(&OriginAuth::trusted_terminator([] as [IpAddr; 0])),
+            Err(IngressError::NoTrustedTerminator)
+        );
+        assert_eq!(
+            validate_origin_auth(&OriginAuth::trusted_terminator([IpAddr::from([
+                0, 0, 0, 0
+            ])])),
+            Err(IngressError::UnspecifiedTrustedTerminator(IpAddr::from([
+                0, 0, 0, 0
+            ])))
+        );
+        assert_eq!(validate_origin_auth(&OriginAuth::ProviderSignature), Ok(()));
+        assert_eq!(
+            validate_origin_auth(&OriginAuth::trusted_terminator([IpAddr::from([
+                127, 0, 0, 1
+            ])])),
+            Ok(())
+        );
     }
 }

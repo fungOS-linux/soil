@@ -1,0 +1,22 @@
+[package]
+name = "soil-termd"
+description = "The session daemon: ptys that outlive the server that serves them"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+soil-vt = { path = "../soil-vt" }
+
+[[bin]]
+name = "soil-termd"
+path = "src/main.rs"
+
+[lints]
+workspace = true

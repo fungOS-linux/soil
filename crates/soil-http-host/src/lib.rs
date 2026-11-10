@@ -20,6 +20,7 @@ use soil::http::http;
 const ALLOWED_HEADERS: &[&str] = &[
     "accept",
     "accept-language",
+    "content-type",
     "user-agent",
     "if-none-match",
     "if-modified-since",
@@ -80,12 +81,35 @@ impl CredentialProvider for NoCredentials {
     }
 }
 
+/// One bearer token, handed to a guest that asks for the `default` handle.
+///
+/// The token stays in the host process: a CLI can read it from the environment
+/// so it never appears in a Spore's arguments, its output, or `ps`.
+pub struct BearerCredential {
+    value: String,
+}
+
+impl BearerCredential {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self {
+            value: format!("Bearer {}", token.into()),
+        }
+    }
+}
+
+impl CredentialProvider for BearerCredential {
+    fn resolve(&self, handle: &str) -> Result<Option<(String, String)>> {
+        Ok((handle == "default").then(|| ("authorization".to_string(), self.value.clone())))
+    }
+}
+
 /// One host-internal transport request. The Spore never sees this shape.
 #[derive(Clone, Debug)]
 pub struct TransportRequest {
     pub url: Url,
     pub method: http::Method,
     pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
     pub timeout: Duration,
     pub max_bytes: usize,
 }
@@ -126,17 +150,15 @@ impl HttpTransport for DirectTransport {
             .timeout(request.timeout)
             .redirects(0)
             .build();
-        let mut call = agent.request(
-            match request.method {
-                http::Method::Get => "GET",
-                http::Method::Head => "HEAD",
-            },
-            request.url.as_str(),
-        );
+        let mut call = agent.request(method_name(request.method), request.url.as_str());
         for (name, value) in &request.headers {
             call = call.set(name, value);
         }
-        let response = match call.call() {
+        let sent = match &request.body {
+            Some(body) => call.send_bytes(body),
+            None => call.call(),
+        };
+        let response = match sent {
             Ok(response) => response,
             Err(ureq::Error::Status(_, response)) => response,
             Err(ureq::Error::Transport(error)) => {
@@ -162,7 +184,9 @@ impl HttpTransport for DirectTransport {
             }
         }
         let mut body = Vec::new();
-        if request.method == http::Method::Get {
+        // HEAD promises no body; every other method can carry one, including
+        // the 204 from a successful Hue or Spotify write.
+        if request.method != http::Method::Head {
             response
                 .into_reader()
                 .take(request.max_bytes as u64 + 1)
@@ -178,6 +202,17 @@ impl HttpTransport for DirectTransport {
             headers,
             body,
         })
+    }
+}
+
+fn method_name(method: http::Method) -> &'static str {
+    match method {
+        http::Method::Get => "GET",
+        http::Method::Head => "HEAD",
+        http::Method::Post => "POST",
+        http::Method::Put => "PUT",
+        http::Method::Patch => "PATCH",
+        http::Method::Delete => "DELETE",
     }
 }
 
@@ -251,6 +286,21 @@ impl http::Host for HttpHost {
                 return Err(http::Error::Invalid);
             }
         }
+        // A body belongs to a write. Allowing one on GET/HEAD would make a
+        // read look like an action and is not something any transport here
+        // supports predictably.
+        if matches!(request.method, http::Method::Get | http::Method::Head)
+            && request.body.is_some()
+        {
+            return Err(http::Error::Invalid);
+        }
+        if request
+            .body
+            .as_ref()
+            .is_some_and(|body| body.len() > self.policy.max_bytes)
+        {
+            return Err(http::Error::OverBudget);
+        }
         let mut auth = None;
         if let Some(handle) = &request.credential {
             let header = self
@@ -276,6 +326,7 @@ impl http::Host for HttpHost {
             url,
             method: request.method,
             headers,
+            body: request.body,
             timeout: Duration::from_millis(request.timeout_ms as u64),
             max_bytes: request.max_bytes as usize,
         };
@@ -371,9 +422,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0u8; 4096];
-            let n = stream.read(&mut request).unwrap();
-            let text = String::from_utf8_lossy(&request[..n]).to_string();
+            let text = read_request(&mut stream);
             tx.send(text.clone()).unwrap();
             if let Some(expected) = expected_auth {
                 assert!(
@@ -386,6 +435,37 @@ mod tests {
                 .unwrap();
         });
         (format!("http://{addr}"), rx, handle)
+    }
+
+    /// Read one request, headers and body. A write may arrive in more than one
+    /// packet, so a single `read` is not enough to see its body.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            let Some(end) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&buf[..end]);
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if buf.len() >= end + 4 + length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
     }
 
     #[test]
@@ -401,6 +481,7 @@ mod tests {
                     name: "accept".into(),
                     value: "text/xml".into(),
                 }],
+                body: None,
                 credential: None,
                 max_bytes: 128,
                 timeout_ms: 2_000,
@@ -421,6 +502,7 @@ mod tests {
                 url: format!("{origin}/private.xml"),
                 method: http::Method::Get,
                 headers: vec![],
+                body: None,
                 credential: Some("test".into()),
                 max_bytes: 128,
                 timeout_ms: 2_000,
@@ -449,12 +531,92 @@ mod tests {
                     url: "https://not-allowed.invalid/".into(),
                     method: http::Method::Get,
                     headers: vec![],
+                    body: None,
                     credential: None,
                     max_bytes: 128,
                     timeout_ms: 2_000,
                 })
                 .unwrap_err(),
             http::Error::Denied
+        );
+    }
+
+    #[test]
+    fn put_carries_a_json_body_to_the_origin() {
+        let (origin, rx, handle) = serve_once("{}", None);
+        let policy = HttpPolicy::new([origin.clone()], 1024, Duration::from_secs(5)).unwrap();
+        let mut host = HttpHost::new(policy);
+        let response = host
+            .fetch(http::Request {
+                url: format!("{origin}/api/key/groups/0/action"),
+                method: http::Method::Put,
+                headers: vec![http::Header {
+                    name: "content-type".into(),
+                    value: "application/json".into(),
+                }],
+                body: Some(br#"{"on":true}"#.to_vec()),
+                credential: None,
+                max_bytes: 128,
+                timeout_ms: 2_000,
+            })
+            .unwrap();
+        assert_eq!(response.status, 200);
+        let request = rx.recv().unwrap();
+        assert!(
+            request.starts_with("PUT /api/key/groups/0/action"),
+            "{request}"
+        );
+        assert!(request.contains(r#"{"on":true}"#), "{request}");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_body_on_a_read_is_rejected() {
+        let mut host = HttpHost::new(
+            HttpPolicy::new(
+                vec!["https://example.com".to_string()],
+                1024,
+                Duration::from_secs(5),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            host.fetch(http::Request {
+                url: "https://example.com/".into(),
+                method: http::Method::Get,
+                headers: vec![],
+                body: Some(b"unexpected".to_vec()),
+                credential: None,
+                max_bytes: 128,
+                timeout_ms: 2_000,
+            })
+            .unwrap_err(),
+            http::Error::Invalid
+        );
+    }
+
+    #[test]
+    fn an_oversized_body_is_rejected_before_the_transport() {
+        let mut host = HttpHost::new(
+            HttpPolicy::new(
+                vec!["https://example.com".to_string()],
+                8,
+                Duration::from_secs(5),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            host.fetch(http::Request {
+                url: "https://example.com/".into(),
+                method: http::Method::Post,
+                headers: vec![],
+                body: Some(b"more than eight bytes".to_vec()),
+                credential: None,
+                max_bytes: 8,
+                timeout_ms: 2_000,
+            })
+            .unwrap_err(),
+            http::Error::OverBudget
         );
     }
 }

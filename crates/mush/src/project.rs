@@ -11,7 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use fungos_vfs::Vfs;
+use fungos_vfs::{Expect, Vfs};
 use ignore::WalkBuilder;
 use serde_json::json;
 
@@ -78,7 +78,7 @@ pub fn attach(desktop_id: &str, project: &str, source: &str) -> Result<(usize, u
             "projects/{project}/{}",
             relative.to_string_lossy().replace('\\', "/")
         );
-        vfs.put(&vfs_path, &bytes, media_type(path), None)
+        vfs.put(&vfs_path, &bytes, media_type(path), Expect::Any)
             .with_context(|| format!("write VFS path {vfs_path}"))?;
         files += 1;
         imported_bytes += bytes.len();
@@ -106,7 +106,7 @@ pub fn attach(desktop_id: &str, project: &str, source: &str) -> Result<(usize, u
         &manifest_path,
         serde_json::to_string_pretty(&manifest)?.as_bytes(),
         "application/json",
-        None,
+        Expect::Any,
     )
     .with_context(|| format!("write VFS path {manifest_path}"))?;
     desktop::add_project(desktop_id, project)?;

@@ -77,9 +77,98 @@ unibus-watch /tmp/soil-confluence-e2e/elmers.json confluence.webhook.received.v1
 
 The host owns the listener, the route grant (`POST /webhooks/`), the 64 KiB
 body ceiling, the Unibus session, and the tenant stamp. The Spore owns the
-provider semantics: it verifies the Standard Webhooks signature through
-`soil:creds` (the secret never enters wasm), checks clock skew against the
-host-attested receive time, and emits one `soil:unibus` publication.
+provider semantics: it verifies the provider's signature through `soil:creds`
+(the secret never enters wasm), checks clock skew against the host-attested
+receive time, and emits one `soil:unibus` publication.
+
+## Verifiers are a table
+
+Every provider signs with HMAC-SHA256; what differs is where the signature is,
+how it is encoded, what it covers, and where the delivery id comes from. That is
+a row, not a branch:
+
+| Provider | Header | Value | Covers | Delivery id |
+|---|---|---|---|---|
+| `github` | `x-hub-signature-256` | `sha256=<hex>` | body | `x-github-delivery` |
+| `gitea` | `x-gitea-signature` | `<hex>` | body | `x-gitea-delivery` |
+| `standard-webhooks` | `webhook-signature` | `v1,<base64>` | `id.timestamp.body` | `webhook-id` |
+
+The Spore picks the row by which signature header is present. A missing
+delivery id is `401`: without one there is nothing to dedupe a redelivery on,
+and the event would be accepted twice.
+
+Adding a provider means adding a row. The table is compiled into the guest
+rather than configured because Lua is not available inside a WASI guest; when it
+must become configuration, the host passes the row through a capability.
+
+## Webhook registry
+
+```sh
+soil-confluence webhook create --name "github avery/soil" --provider github
+soil-confluence webhook list
+soil-confluence webhook revoke <slug>
+```
+
+One JSON document per hook, named by its slug, with its secret beside it. A
+created hook is addressable at `/webhooks/<provider>/<slug>` and is loaded by
+`--webhook-registry <dir>`: every slug's secret becomes a `soil:creds` name, so
+adding a hook needs no restart to rotate a secret.
+
+The directory is a **stand-in for `soil:creds` backed by Geode**. Secrets
+belong in Geode; the registry should keep names, not material. See
+[docs/soil-creds.md](../../docs/soil-creds.md).
+
+## Origin auth
+
+A webhook can arrive directly, or through a TLS terminator that has already
+authenticated the client certificate. The two cases cannot be told apart from
+the request, so it is declared:
+
+```sh
+--trusted-terminator 10.253.0.6 --trusted-terminator 100.80.85.86
+```
+
+With a terminator declared, every other peer is refused — a direct hit on a
+terminated listener is exactly the origin bypass the policy exists to stop. The
+assertion headers are stripped, and the chosen mode is logged as
+`verifier="provider-signature"` or `verifier="trusted-terminator"`. Without
+the flag nothing about the transport is asserted and each Spore verifies the
+provider's own signature.
+
+## Deployment
+
+Three units, one host (agora-one in the reference setup):
+
+| Unit | Role |
+|---|---|
+| `confluence-spore` | this process, on `127.0.0.1:8788` |
+| `unibus-router` | the hub the Spore registers with; the Spore is down without it |
+| `confluence-tunnel` | `cloudflared` for the public name |
+
+The Spore **fails closed** if no hub answers — it exits rather than accepting
+events it cannot publish. Order the unit after the hub, or give it
+`--unibus-hub` failover endpoints.
+
+`Host` must be granted as it will be seen. The Mycelium HTTP gateway rewrites
+`Host` to the upstream address, so a name routed through it is granted as
+`127.0.0.1` as well as its public name.
+
+## Console (planned)
+
+A Spore with a Lua UI, following `dev.fungos.notify`: a table of hooks, per-hook
+accept/reject counts, last delivery, and the reason for a rejection. Data splits
+three ways, one source per fact:
+
+| Store | Holds |
+|---|---|
+| `soil:records` → `hooks` | slug, provider, tenant, url, created, **credential name** |
+| `soil:records` → `deliveries` | slug, delivery id, status, reason, bytes, received at, node |
+| `soil:appdata` | the console's own filter, sort, and `changes` cursor |
+
+No secret is in any of them: the credential name is an address. The ingress has
+to write the `deliveries` rows first — today nothing counts deliveries, which is
+also why the hub logs "matched no live node" for `confluence.consume`.
+
 
 ```json
 {

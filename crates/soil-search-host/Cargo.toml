@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "46450ede02588e533984378bc979cb4010f9867b" }
+fungos-records.workspace = true
 soil-spore = { path = "../soil-spore" }
 soil-marbles = { path = "../soil-marbles" }
 soil-vfs-host = { path = "../soil-vfs-host" }
