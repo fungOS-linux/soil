@@ -203,6 +203,12 @@ mush --desktop personal sh -c 'pwd'   # 25ms
   you would wait 15 minutes for is not handed back as a job id after 60s.
 - `--no-daemon` (or `MUSH_NO_DAEMON=1`) runs in-process. Tests use it, because
   a daemon started by a test outlives the test and holds the records store.
+- Requests are served one connection per thread, so `mush jobs` and
+  `mush cancel JOB` reach a daemon that is busy. `cancel` drops queued work and
+  traps a running guest through the same epoch the deadline uses.
+  **Known gap:** a host program (`git`, `cargo`, `awk`) is an OS process, and
+  cancelling one is not wired yet — only its VFS side is trapped, so it keeps
+  running until it exits.
 
 For Operator, use the MCP endpoint:
 

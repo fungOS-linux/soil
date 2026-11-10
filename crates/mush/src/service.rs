@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 
 use crate::job::{Jobs, Outcome};
 
-pub fn serve(socket: &Path, jobs: &Jobs, idle: Option<Duration>) -> Result<()> {
+pub fn serve(socket: &Path, jobs: std::sync::Arc<Jobs>, idle: Option<Duration>) -> Result<()> {
     prepare_socket(socket)?;
     let listener = UnixListener::bind(socket)
         .with_context(|| format!("bind Mush service socket {}", socket.display()))?;
@@ -36,9 +36,16 @@ pub fn serve(socket: &Path, jobs: &Jobs, idle: Option<Duration>) -> Result<()> {
         match listener.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false)?;
-                if let Err(error) = handle(stream, jobs) {
-                    eprintln!("mush: request: {error:#}");
-                }
+                // One connection at a time would make `cancel` unreachable
+                // while the command it is meant to stop is running. Each
+                // request gets its own thread; the command engine still
+                // serialises the work itself.
+                let jobs = std::sync::Arc::clone(&jobs);
+                std::thread::spawn(move || {
+                    if let Err(error) = handle(stream, &jobs) {
+                        eprintln!("mush: request: {error:#}");
+                    }
+                });
                 idle_since = std::time::Instant::now();
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -104,6 +111,16 @@ fn handle(stream: UnixStream, jobs: &Jobs) -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("exec");
     let response = match kind {
+        "cancel" => {
+            let id = request
+                .get("job")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match jobs.cancel(id) {
+                Ok(response) => response,
+                Err(error) => json!({"ok": false, "error": format!("{error:#}")}),
+            }
+        }
         "jobs" => {
             let mut listing = jobs.list();
             listing["ok"] = json!(true);
@@ -300,7 +317,11 @@ pub fn forward(
 }
 
 /// One request/response exchange, or `None` when no daemon is listening.
-fn request_once(socket: &Path, request: &Value, wait: Duration) -> Option<Value> {
+pub(crate) fn request_once(
+    socket: &Path,
+    request: &Value,
+    wait: Duration,
+) -> Option<Value> {
     let mut stream = UnixStream::connect(socket).ok()?;
     stream.set_read_timeout(Some(wait)).ok()?;
     stream.set_write_timeout(Some(wait)).ok()?;

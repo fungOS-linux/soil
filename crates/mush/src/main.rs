@@ -253,6 +253,8 @@ pub(crate) struct Runtime {
     engine: Engine,
     /// Deadline applied to every command, or `None` when a human is driving.
     budget: Option<std::time::Duration>,
+    /// Set by the service when a caller cancels the running command.
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Runtime {
@@ -304,6 +306,7 @@ impl Runtime {
             instance,
             engine,
             budget,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -313,13 +316,17 @@ impl Runtime {
     /// know the command did not finish so it can report that instead of
     /// hanging or surfacing a Wasm trap the harness cannot act on.
     pub(crate) fn execute(&mut self, line: &str) -> Result<outcome::Executed> {
-        // One epoch tick of headroom: the timer performs exactly one bump, so
-        // that bump is what interrupts this command and nothing else.
+        use std::sync::atomic::Ordering;
+        // A cancel that arrived before this line started means it never runs.
+        if self.cancelled.swap(false, Ordering::SeqCst) {
+            return Ok(outcome::Executed::cancelled());
+        }
+        // One epoch tick of headroom: the timer performs exactly one bump, and
+        // a cancel performs one too, so the bump interrupts this command.
         let timer = self
             .budget
             .map(|budget| deadline::Timer::arm(self.engine.clone(), budget));
-        self.store
-            .set_epoch_deadline(if timer.is_some() { 1 } else { u64::MAX });
+        self.store.set_epoch_deadline(1);
         let result = self.instance.call_execute(&mut self.store, line);
         if let Some(timer) = &timer {
             timer.finish();
@@ -335,6 +342,9 @@ impl Runtime {
                 ))
             }
             Err(error) => {
+                if self.cancelled.swap(false, Ordering::SeqCst) {
+                    return Ok(outcome::Executed::cancelled());
+                }
                 if !timer.as_ref().is_some_and(deadline::Timer::fired) {
                     return Err(error.into());
                 }
@@ -348,6 +358,16 @@ impl Runtime {
                 })
             }
         }
+    }
+
+    /// The flag the service sets to stop the running command.
+    pub(crate) fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.cancelled)
+    }
+
+    /// A handle the service uses to bump the epoch and trap a running guest.
+    pub(crate) fn engine_handle(&self) -> Engine {
+        self.engine.clone()
     }
 
     pub(crate) fn prompt(&mut self) -> Result<String> {
@@ -422,6 +442,10 @@ fn run() -> Result<()> {
     if args.first().map(String::as_str) == Some("request") {
         args.remove(0);
         return run_request(&config, args);
+    }
+    if args.first().map(String::as_str) == Some("cancel") {
+        args.remove(0);
+        return run_cancel(&config, args);
     }
     if args.first().map(String::as_str) == Some("job") {
         args.remove(0);
@@ -678,8 +702,8 @@ fn run() -> Result<()> {
         let socket = socket
             .as_deref()
             .context("mush --serve needs --socket PATH or a config socket")?;
-        let jobs = job::Jobs::start(runtime, root.clone(), background_after);
-        return service::serve(socket, &jobs, idle_timeout);
+        let jobs = std::sync::Arc::new(job::Jobs::start(runtime, root.clone(), background_after));
+        return service::serve(socket, std::sync::Arc::clone(&jobs), idle_timeout);
     }
 
     if mcp {
@@ -688,7 +712,7 @@ fn run() -> Result<()> {
         if configured_token.is_none() {
             eprintln!("mush: mcp bearer token {mcp_token}");
         }
-        let jobs = job::Jobs::start(runtime, root.clone(), background_after);
+        let jobs = std::sync::Arc::new(job::Jobs::start(runtime, root.clone(), background_after));
         return mcp_server::serve(server, &mcp_token, &jobs);
     }
 
@@ -899,6 +923,30 @@ fn run_desktop(mut args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+/// Stop a job by id: queued work is dropped, running work is interrupted.
+fn run_cancel(config: &config::Config, mut args: Vec<String>) -> Result<()> {
+    let socket = service_socket(config, &mut args)?;
+    let json = args.iter().any(|arg| arg == "--json");
+    args.retain(|arg| arg != "--json");
+    let Some(id) = args.first().cloned() else {
+        anyhow::bail!("usage: mush cancel [--socket PATH] [--json] JOB");
+    };
+    let request = serde_json::json!({"kind": "cancel", "job": id});
+    let response = service_query(&socket, &request)?;
+    if json {
+        println!("{}", serde_json::to_string(&response)?);
+    } else if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        println!("cancelled {id}");
+    } else {
+        let error = response
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("cancel failed");
+        anyhow::bail!("{error}");
+    }
+    Ok(())
+}
+
 fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -996,7 +1044,7 @@ fn run_request(config: &config::Config, mut args: Vec<String>) -> Result<()> {
 
 /// Resolve the daemon socket from flags, environment, or config.
 fn service_socket(config: &config::Config, args: &mut Vec<String>) -> Result<PathBuf> {
-    take_option(args, "--socket")
+    if let Some(path) = take_option(args, "--socket")
         .or_else(|| std::env::var("MUSH_SOCKET").ok())
         .or_else(|| {
             config
@@ -1004,8 +1052,26 @@ fn service_socket(config: &config::Config, args: &mut Vec<String>) -> Result<Pat
                 .as_ref()
                 .map(|path| path.display().to_string())
         })
-        .map(|value| config::expand_home(&value))
-        .context("needs --socket PATH or a config socket")
+    {
+        return Ok(config::expand_home(&path));
+    }
+    // No socket configured: derive the per-root path a one-shot command would
+    // have used, so `mush jobs` and `mush cancel` reach the daemon for the
+    // Desktop they are standing in without being told a path.
+    let desktop_id = take_option(args, "--desktop")
+        .or_else(|| std::env::var("MUSH_DESKTOP").ok())
+        .or_else(|| config.desktop.clone())
+        .or_else(|| origin::resolve(&std::env::current_dir().ok()?).desktop);
+    let root = match desktop_id {
+        Some(id) => desktop::load(&id)?.root,
+        None => config::expand_home(
+            &take_option(args, "--root")
+                .or_else(|| std::env::var("MUSH_ROOT").ok())
+                .or_else(|| config.root.as_ref().map(|path| path.display().to_string()))
+                .unwrap_or_else(|| "~/.local/share/fungos/vfs".into()),
+        ),
+    };
+    Ok(service::socket_for(None, &root))
 }
 
 /// One request, one response line, bounded so a wedged daemon cannot park us.

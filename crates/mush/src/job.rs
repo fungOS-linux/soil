@@ -13,7 +13,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -48,6 +51,9 @@ struct Job {
     command: String,
     started_ms: u64,
     finished: Option<Executed>,
+    /// Set by `cancel`; a job that has not started yet is dropped instead of
+    /// run, and a running job is interrupted through the engine epoch.
+    cancel_requested: bool,
 }
 
 #[derive(Default)]
@@ -55,6 +61,8 @@ struct Inner {
     jobs: HashMap<String, Job>,
     durations: HashMap<String, Vec<u64>>,
     seq: u64,
+    /// The job the worker is executing right now.
+    running: Option<String>,
 }
 
 struct Shared {
@@ -65,6 +73,10 @@ struct Shared {
 pub struct Jobs {
     shared: Arc<Shared>,
     sender: std::sync::mpsc::Sender<(String, String, bool)>,
+    /// The worker's cancel flag and engine, so a caller can stop a command
+    /// that is already running instead of waiting for it to finish.
+    cancel: Arc<AtomicBool>,
+    engine: wasmtime::Engine,
     /// Threshold from `--background-after`, overriding the adaptive default.
     default_threshold: Option<Duration>,
     _worker: thread::JoinHandle<()>,
@@ -82,19 +94,64 @@ impl Jobs {
         });
         let (sender, receiver) = std::sync::mpsc::channel::<(String, String, bool)>();
         let worker_shared = Arc::clone(&shared);
+        let cancel = runtime.cancel_flag();
+        let engine = runtime.engine_handle();
         let mut runtime = runtime;
         let worker = thread::spawn(move || {
             while let Ok((id, command, shell)) = receiver.recv() {
+                // Cancelled while it sat in the queue: never run it.
+                if {
+                    let mut inner = worker_shared.inner.lock().expect("job lock");
+                    let requested = inner
+                        .jobs
+                        .get(&id)
+                        .map(|job| job.cancel_requested)
+                        .unwrap_or(false);
+                    if !requested {
+                        inner.running = Some(id.clone());
+                    }
+                    requested
+                } {
+                    worker_shared.finish(&id, command, Executed::cancelled());
+                    continue;
+                }
                 let executed = run_command(&mut runtime, &root, &command, shell);
+                worker_shared.inner.lock().expect("job lock").running = None;
                 worker_shared.finish(&id, command, executed);
             }
         });
         Self {
             shared,
             sender,
+            cancel,
+            engine,
             default_threshold,
             _worker: worker,
         }
+    }
+
+    /// Stop a job: queued work is dropped, running work is trapped.
+    ///
+    /// The trap reuses the epoch machinery the deadline uses, so a cancelled
+    /// command returns as a result (`state: cancelled`) instead of surfacing a
+    /// Wasm trap the caller cannot act on.
+    pub fn cancel(&self, id: &str) -> Result<Value> {
+        let mut inner = self.lock();
+        let Some(job) = inner.jobs.get_mut(id) else {
+            bail!("no job {id:?}");
+        };
+        job.cancel_requested = true;
+        let running = inner.running.as_deref() == Some(id);
+        if running {
+            self.cancel.store(true, Ordering::SeqCst);
+            self.engine.increment_epoch();
+        }
+        Ok(json!({
+            "ok": true,
+            "job": id,
+            "cancelled": true,
+            "state": if running { "running" } else { "queued" },
+        }))
     }
 
     /// Run `command`, waiting at most `threshold` before handing back an id.
@@ -120,6 +177,7 @@ impl Jobs {
                     command: command.to_string(),
                     started_ms: now_ms(),
                     finished: None,
+                    cancel_requested: false,
                 },
             );
             id
