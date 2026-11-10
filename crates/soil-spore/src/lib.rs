@@ -170,6 +170,14 @@ pub struct Manifest {
     /// keeps working untouched.
     #[serde(default)]
     pub surfaces: Vec<Surface>,
+    /// Command-line programs this Spore installs into a shell's virtual PATH.
+    ///
+    /// A command is not an action: an action takes one JSON request, a command
+    /// takes argv and stdin and answers on stdout with an exit code. Both are
+    /// declared here because the package owns both faces; the shell decides
+    /// which of them it exposes.
+    #[serde(default)]
+    pub commands: Vec<SporeCommand>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -187,6 +195,17 @@ pub struct Action {
     pub expose: Vec<String>,
     #[serde(default)]
     pub idempotent: bool,
+}
+
+/// One program a Spore installs into a shell's virtual PATH.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SporeCommand {
+    /// The name a shell resolves. A slug, so it cannot be mistaken for a path.
+    pub name: String,
+    pub summary: String,
+    /// A `wasi:cli` command component, relative to the package root.
+    pub module: String,
 }
 
 /// One agent skill: a `SKILL.md` whose frontmatter names it.
@@ -449,6 +468,21 @@ pub struct Anycast {
 }
 
 pub const MAX_LEASE_SECS: u64 = 300;
+
+/// A command name: a slug a shell resolves, never a path or a flag.
+fn command_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        // It must start like a word, not like a flag: `--force` in a PATH is a
+        // name a shell would hand to the wrong program.
+        && value
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
 
 /// A hostname a vhost could be granted: lowercase labels, no scheme, no port.
 fn http_host(value: &str) -> bool {
@@ -1059,6 +1093,35 @@ impl Manifest {
             }
         }
 
+        let mut command_names = std::collections::BTreeSet::new();
+        for command in &self.commands {
+            if !command_slug(&command.name) {
+                return Err(Error::Invalid(format!(
+                    "command name {:?} must be lowercase [a-z0-9-] and at most 32 bytes",
+                    command.name
+                )));
+            }
+            if !command_names.insert(command.name.clone()) {
+                return Err(Error::Invalid(format!(
+                    "command {:?} is declared twice",
+                    command.name
+                )));
+            }
+            if command.summary.trim().is_empty() {
+                return Err(Error::Invalid(format!(
+                    "command {:?} has no summary, so a shell cannot list it",
+                    command.name
+                )));
+            }
+            safe_relative(&command.module)?;
+            if !command.module.ends_with(".wasm") {
+                return Err(Error::Invalid(format!(
+                    "command {:?} module must end in .wasm",
+                    command.name
+                )));
+            }
+        }
+
         for capability in self.grants.keys() {
             if !grants(capability) {
                 return Err(Error::Invalid(format!(
@@ -1238,6 +1301,7 @@ impl Manifest {
         }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
         paths.extend(self.skills.iter().map(|skill| skill.path.clone()));
+        paths.extend(self.commands.iter().map(|command| command.module.clone()));
         if let Some(man) = self.docs.as_ref().and_then(|docs| docs.man.clone()) {
             paths.push(man);
         }
@@ -2775,5 +2839,49 @@ mod http_tests {
     fn a_body_limit_past_a_megabyte_is_refused() {
         let text = format!("{}\nmax_body = {}\n", claim(""), super::MAX_HTTP_BODY + 1);
         assert!(Manifest::parse(&manifest(&text)).is_err());
+    }
+}
+#[cfg(test)]
+mod command_tests {
+    use super::Manifest;
+    use super::fixtures::manifest;
+
+    const OK: &str = "[[commands]]\nname = \"unibus\"\nsummary = \"read the inbox\"\nmodule = \"bin/unibus.wasm\"\n";
+
+    #[test]
+    fn a_spore_installs_its_own_commands() {
+        let parsed = Manifest::parse(&manifest(OK)).expect("command parses");
+        assert_eq!(parsed.commands.len(), 1);
+        assert_eq!(parsed.commands[0].name, "unibus");
+        // The module travels with the package like any other declared path.
+        assert!(
+            parsed
+                .declared_paths()
+                .iter()
+                .any(|path| path == std::path::Path::new("bin/unibus.wasm")),
+            "a command module that is not locked could vanish from the package"
+        );
+    }
+
+    #[test]
+    fn a_command_a_shell_could_misread_is_refused() {
+        for bad in [
+            // A path, a flag, or an empty name: a shell resolves names, not paths.
+            "[[commands]]\nname = \"bin/x\"\nsummary = \"s\"\nmodule = \"bin/x.wasm\"\n",
+            "[[commands]]\nname = \"--force\"\nsummary = \"s\"\nmodule = \"bin/x.wasm\"\n",
+            "[[commands]]\nname = \"\"\nsummary = \"s\"\nmodule = \"bin/x.wasm\"\n",
+            // No summary means a shell cannot list what it would run.
+            "[[commands]]\nname = \"x\"\nsummary = \"  \"\nmodule = \"bin/x.wasm\"\n",
+            // A module must be a wasm component, not a script.
+            "[[commands]]\nname = \"x\"\nsummary = \"s\"\nmodule = \"bin/x.lua\"\n",
+        ] {
+            assert!(Manifest::parse(&manifest(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn two_commands_cannot_share_a_name() {
+        let twice = format!("{OK}{OK}");
+        assert!(Manifest::parse(&manifest(&twice)).is_err());
     }
 }

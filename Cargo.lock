@@ -6692,6 +6692,7 @@ dependencies = [
  "serde",
  "serde_json",
  "soil-records-host",
+ "soil-spore",
  "tempfile",
  "toml 0.8.23",
  "wasmtime",
