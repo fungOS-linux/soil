@@ -52,6 +52,32 @@ function M.fungos.http_context.context.current(args)
   return dispatch("fungos:http-context@0.1.0/context", "current", args)
 end
 M.fungos.http_context = M.fungos.http_context.context
+M.fungos.webhooks = M.fungos.webhooks or {}
+M.fungos.webhooks.admin = M.fungos.webhooks.admin or {}
+M.fungos.webhooks.admin.types = M.fungos.webhooks.admin.types or {}
+M.fungos.webhooks.admin.types.Created = { fields = { { name = "hook", type = "hook" }, { name = "secret", type = "string" } } }
+M.fungos.webhooks.admin.types.Error = { INVALID = "invalid", CONFLICT = "conflict", DENIED = "denied", UNAVAILABLE = "unavailable" }
+M.fungos.webhooks.admin.types.Hook = { fields = { { name = "slug", type = "string" }, { name = "provider", type = "string" }, { name = "tenant", type = "string" }, { name = "created-at-ms", type = "u64" } } }
+--- Register a hook and mint its credential.
+--- 
+--- One call, not two: a hook without a credential accepts nothing, and a
+--- credential without a hook is a secret nobody owns.
+-- WIT: create -> result<created, error>
+function M.fungos.webhooks.admin.create(args)
+  return dispatch("fungos:webhooks@0.1.0/admin", "create", args)
+end
+--- Every hook the caller may see. Never includes secrets.
+-- WIT: hooks -> result<list<hook>, error>
+function M.fungos.webhooks.admin.hooks(args)
+  return dispatch("fungos:webhooks@0.1.0/admin", "hooks", args)
+end
+--- Revoke a hook and its credential. `false` means it was already gone,
+--- which is not an error - the caller wanted it absent and it is absent.
+-- WIT: revoke -> result<bool, error>
+function M.fungos.webhooks.admin.revoke(args)
+  return dispatch("fungos:webhooks@0.1.0/admin", "revoke", args)
+end
+M.fungos.webhooks = M.fungos.webhooks.admin
 M.soil = M.soil or {}
 M.soil.appdata = M.soil.appdata or {}
 M.soil.appdata.appdata = M.soil.appdata.appdata or {}
