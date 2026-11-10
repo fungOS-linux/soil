@@ -945,13 +945,13 @@ impl Manifest {
                         surface.name, surface.kind
                     )));
                 }
-                if let Some(requires) = &surface.requires {
-                    if !identifier(requires) {
-                        return Err(Error::Invalid(format!(
-                            "surface {:?} requires {requires:?}, which must be lowercase letters, digits, - or _",
-                            surface.name
-                        )));
-                    }
+                if let Some(requires) = &surface.requires
+                    && !identifier(requires)
+                {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} requires {requires:?}, which must be lowercase letters, digits, - or _",
+                        surface.name
+                    )));
                 }
                 // A kind list, when given, is an outer bound: one artifact can
                 // render on more engines than the package names surfaces for,
