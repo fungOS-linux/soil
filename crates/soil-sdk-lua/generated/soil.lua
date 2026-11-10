@@ -43,6 +43,15 @@ M.fungos.actions.catalog.types.Idempotency = { type = "idempotency" }
 function M.fungos.actions.catalog.list_actions(args)
   return dispatch("fungos:actions@1.0.0/catalog", "list-actions", args)
 end
+M.fungos.http_context = M.fungos.http_context or {}
+M.fungos.http_context.context = M.fungos.http_context.context or {}
+M.fungos.http_context.context.types = M.fungos.http_context.context.types or {}
+M.fungos.http_context.context.types.RequestContext = { fields = { { name = "request-id", type = "string" }, { name = "spore", type = "string" }, { name = "route", type = "string" }, { name = "peer", type = "option<string>" }, { name = "tls-peer", type = "option<string>" }, { name = "received-at-ms", type = "u64" } } }
+-- WIT: current -> request-context
+function M.fungos.http_context.context.current(args)
+  return dispatch("fungos:http-context@0.1.0/context", "current", args)
+end
+M.fungos.http_context = M.fungos.http_context.context
 M.soil = M.soil or {}
 M.soil.appdata = M.soil.appdata or {}
 M.soil.appdata.appdata = M.soil.appdata.appdata or {}
@@ -156,7 +165,10 @@ M.soil.canvas.surface.types.Event = { fields = { { name = "key", type = "key" },
 M.soil.canvas.surface.types.Failure = { DENIED = "denied", NOT_READY = "not-ready", STALE = "stale", OVER_BUDGET = "over-budget", INVALID = "invalid", CLOSED = "closed", BACKEND = "backend" }
 M.soil.canvas.surface.types.Key = { type = "key" }
 M.soil.canvas.surface.types.Modifiers = { type = "modifiers" }
-M.soil.canvas.surface.types.State = { fields = { { name = "generation", type = "u64" }, { name = "width", type = "u32" }, { name = "height", type = "u32" }, { name = "scale", type = "f32" }, { name = "focused", type = "bool" }, { name = "visible", type = "bool" } } }
+M.soil.canvas.surface.types.Rgb = { fields = { { name = "r", type = "u8" }, { name = "g", type = "u8" }, { name = "b", type = "u8" } } }
+M.soil.canvas.surface.types.State = { fields = { { name = "generation", type = "u64" }, { name = "width", type = "u32" }, { name = "height", type = "u32" }, { name = "scale", type = "f32" }, { name = "focused", type = "bool" }, { name = "visible", type = "bool" }, { name = "theme", type = "theme" } } }
+M.soil.canvas.surface.types.Theme = { fields = { { name = "mode", type = "theme-mode" }, { name = "background", type = "rgb" }, { name = "surface", type = "rgb" }, { name = "text", type = "rgb" }, { name = "muted", type = "rgb" }, { name = "primary", type = "rgb" }, { name = "success", type = "rgb" }, { name = "warning", type = "rgb" }, { name = "danger", type = "rgb" }, { name = "info", type = "rgb" }, { name = "micro", type = "f32" }, { name = "small", type = "f32" }, { name = "body", type = "f32" }, { name = "large", type = "f32" }, { name = "title", type = "f32" }, { name = "display", type = "f32" }, { name = "hero", type = "f32" }, { name = "space-two", type = "f32" }, { name = "radius", type = "f32" } } }
+M.soil.canvas.surface.types.ThemeMode = { LIGHT = "light", DARK = "dark" }
 --- Release the grant. Further calls return `closed`.
 -- WIT: close -> result<_, failure>
 function M.soil.canvas.surface.close(args)
@@ -175,12 +187,41 @@ end
 function M.soil.canvas.surface.observe(args)
   return dispatch("soil:canvas@1.0.0/surface", "observe", args)
 end
---- Render the granted owner surface. The host retains the pixels.
+--- Present into the space the host granted.
+--- 
+--- `document` is a versioned payload from `soil-scene`: a scene the host
+--- rasterizes, an RGBA frame the Spore rendered, or a lease on a GPU texture.
+--- It is bytes rather than a WIT type on purpose -- a new node kind must not
+--- rebuild every Spore that draws. The host validates it and refuses anything
+--- it cannot present, naming the reason.
 -- WIT: present -> result<state, failure>
 function M.soil.canvas.surface.present(args)
   return dispatch("soil:canvas@1.0.0/surface", "present", args)
 end
 M.soil.canvas = M.soil.canvas.surface
+M.soil.creds = M.soil.creds or {}
+M.soil.creds.creds = M.soil.creds.creds or {}
+M.soil.creds.creds.types = M.soil.creds.creds.types or {}
+M.soil.creds.creds.types.Algorithm = { HMAC_SHA256 = "hmac-sha256", ED25519 = "ed25519" }
+M.soil.creds.creds.types.Error = { DENIED = "denied", INVALID = "invalid", EXPIRED = "expired", UNAVAILABLE = "unavailable" }
+M.soil.creds.creds.types.Handle = { fields = { { name = "id", type = "string" }, { name = "purpose", type = "string" }, { name = "expires-at-ms", type = "option<u64>" } } }
+--- Resolve a granted credential name to an opaque handle.
+-- WIT: resolve -> result<handle, error>
+function M.soil.creds.creds.resolve(args)
+  return dispatch("soil:creds@1.0.0/creds", "resolve", args)
+end
+--- Sign a message with a resolved handle.
+-- WIT: sign -> result<list<u8>, error>
+function M.soil.creds.creds.sign(args)
+  return dispatch("soil:creds@1.0.0/creds", "sign", args)
+end
+--- Verify a signature with a resolved handle. A mismatched signature is
+--- `ok(false)`, not an error; errors describe the credential or request.
+-- WIT: verify -> result<bool, error>
+function M.soil.creds.creds.verify(args)
+  return dispatch("soil:creds@1.0.0/creds", "verify", args)
+end
+M.soil.creds = M.soil.creds.creds
 M.soil.device = M.soil.device or {}
 M.soil.device.battery = M.soil.device.battery or {}
 --- Semantic interface. Runtime uses the documented core-Wasm lowering, not
@@ -261,8 +302,8 @@ M.soil.http.http = M.soil.http.http or {}
 M.soil.http.http.types = M.soil.http.http.types or {}
 M.soil.http.http.types.Error = { DENIED = "denied", INVALID = "invalid", OVER_BUDGET = "over-budget", TIMEOUT = "timeout", UNAVAILABLE = "unavailable", TLS = "tls", HTTP = "http", IO = "io", UNSUPPORTED = "unsupported" }
 M.soil.http.http.types.Header = { fields = { { name = "name", type = "string" }, { name = "value", type = "string" } } }
-M.soil.http.http.types.Method = { GET = "get", HEAD = "head" }
-M.soil.http.http.types.Request = { fields = { { name = "url", type = "string" }, { name = "method", type = "method" }, { name = "headers", type = "list<header>" }, { name = "credential", type = "option<string>" }, { name = "max-bytes", type = "u32" }, { name = "timeout-ms", type = "u32" } } }
+M.soil.http.http.types.Method = { GET = "get", HEAD = "head", POST = "post", PUT = "put", PATCH = "patch", DELETE = "delete" }
+M.soil.http.http.types.Request = { fields = { { name = "url", type = "string" }, { name = "method", type = "method" }, { name = "headers", type = "list<header>" }, { name = "body", type = "option<list<u8>>" }, { name = "credential", type = "option<string>" }, { name = "max-bytes", type = "u32" }, { name = "timeout-ms", type = "u32" } } }
 M.soil.http.http.types.Response = { fields = { { name = "status", type = "u16" }, { name = "final-url", type = "string" }, { name = "headers", type = "list<header>" }, { name = "body", type = "list<u8>" } } }
 -- WIT: fetch -> result<response, error>
 function M.soil.http.http.fetch(args)
@@ -704,6 +745,23 @@ function M.soil.records.records.upsert(args)
   return dispatch("soil:records@0.1.0/records", "upsert", args)
 end
 M.soil.records = M.soil.records.records
+M.soil.scene = M.soil.scene or {}
+M.soil.scene.payload = M.soil.scene.payload or {}
+M.soil.scene.payload.types = M.soil.scene.payload.types or {}
+M.soil.scene.payload.types.Limits = { fields = { { name = "max-nodes", type = "u32" }, { name = "max-text-bytes", type = "u32" }, { name = "max-payload-bytes", type = "u32" }, { name = "width", type = "u32" }, { name = "height", type = "u32" }, { name = "scale", type = "f32" } } }
+--- Host-enforced ceilings, so a producer can budget against the same numbers
+--- the host will refuse at rather than discovering them by trial.
+-- WIT: budget -> limits
+function M.soil.scene.payload.budget(args)
+  return dispatch("soil:scene@1.0.0/payload", "budget", args)
+end
+--- Highest schema version the host can draw. A producer that needs newer
+--- nodes gets `false` here instead of a failure at present time.
+-- WIT: supports -> bool
+function M.soil.scene.payload.supports(args)
+  return dispatch("soil:scene@1.0.0/payload", "supports", args)
+end
+M.soil.scene = M.soil.scene.payload
 M.soil.search = M.soil.search or {}
 M.soil.search.mentions = M.soil.search.mentions or {}
 --- Typed mention resolver for `@` autocomplete.
@@ -719,13 +777,13 @@ M.soil.search.mentions.types.Error = { type = "error" }
 --- kinds. `limit` is host-bounded.
 -- WIT: suggest -> result<list<candidate>, error>
 function M.soil.search.mentions.suggest(args)
-  return dispatch("soil:search@0.5.0/mentions", "suggest", args)
+  return dispatch("soil:search@0.6.0/mentions", "suggest", args)
 end
 M.soil.search.search = M.soil.search.search or {}
 M.soil.search.search.types = M.soil.search.search.types or {}
 M.soil.search.search.types.Error = { DENIED = "denied", NOT_READY = "not-ready", OVER_BUDGET = "over-budget", INVALID = "invalid", STALE = "stale", IO = "io", UNSUPPORTED = "unsupported" }
-M.soil.search.search.types.Hit = { fields = { { name = "kind", type = "kind" }, { name = "id", type = "string" }, { name = "title", type = "string" }, { name = "subtitle", type = "option<string>" }, { name = "snippet", type = "option<string>" }, { name = "score", type = "u32" }, { name = "source", type = "string" }, { name = "updated-at-ms", type = "option<u64>" }, { name = "references", type = "list<reference>" } } }
-M.soil.search.search.types.Kind = { FILE = "file", RECORD_ENTRY = "record-entry", REPOSITORY = "repository", SPORE = "spore", PEER = "peer", SERVICE = "service", ACTION = "action", TASK = "task", PRINCIPAL = "principal" }
+M.soil.search.search.types.Hit = { fields = { { name = "kind", type = "kind" }, { name = "id", type = "string" }, { name = "title", type = "string" }, { name = "subtitle", type = "option<string>" }, { name = "snippet", type = "option<string>" }, { name = "score", type = "u32" }, { name = "source", type = "string" }, { name = "updated-at-ms", type = "option<u64>" }, { name = "references", type = "list<reference>" }, { name = "icon", type = "option<string>" } } }
+M.soil.search.search.types.Kind = { FILE = "file", RECORD_ENTRY = "record-entry", REPOSITORY = "repository", SPORE = "spore", PEER = "peer", SERVICE = "service", APPLICATION = "application", ACTION = "action", TASK = "task", PRINCIPAL = "principal" }
 M.soil.search.search.types.Mode = { SUBSTRING = "substring", FUZZY = "fuzzy", FULL_TEXT = "full-text", SEMANTIC = "semantic", REGEX = "regex" }
 M.soil.search.search.types.Page = { fields = { { name = "hits", type = "list<hit>" }, { name = "next", type = "option<u64>" }, { name = "generation", type = "u64" } } }
 M.soil.search.search.types.Query = { fields = { { name = "text", type = "string" }, { name = "kinds", type = "list<kind>" }, { name = "mode", type = "option<mode>" }, { name = "offset", type = "u64" }, { name = "limit", type = "u32" } } }
@@ -733,16 +791,39 @@ M.soil.search.search.types.Reference = { fields = { { name = "kind", type = "str
 M.soil.search.search.types.SearchState = { fields = { { name = "ready", type = "bool" }, { name = "generation", type = "u64" }, { name = "sources", type = "u32" } } }
 -- WIT: refresh -> result<search-state, error>
 function M.soil.search.search.refresh(args)
-  return dispatch("soil:search@0.5.0/search", "refresh", args)
+  return dispatch("soil:search@0.6.0/search", "refresh", args)
 end
 -- WIT: search -> result<page, error>
 function M.soil.search.search.search(args)
-  return dispatch("soil:search@0.5.0/search", "search", args)
+  return dispatch("soil:search@0.6.0/search", "search", args)
 end
 -- WIT: state -> result<search-state, error>
 function M.soil.search.search.state(args)
-  return dispatch("soil:search@0.5.0/search", "state", args)
+  return dispatch("soil:search@0.6.0/search", "state", args)
 end
+M.soil.spore = M.soil.spore or {}
+M.soil.spore.catalog = M.soil.spore.catalog or {}
+M.soil.spore.catalog.types = M.soil.spore.catalog.types or {}
+M.soil.spore.catalog.types.Entry = { fields = { { name = "id", type = "string" }, { name = "name", type = "string" }, { name = "version", type = "string" }, { name = "summary", type = "string" }, { name = "workspace", type = "option<string>" }, { name = "default-surface", type = "string" }, { name = "surfaces", type = "list<surface>" } } }
+M.soil.spore.catalog.types.Error = { DENIED = "denied", NOT_FOUND = "not-found", INVALID = "invalid", UNSUPPORTED = "unsupported", IO = "io" }
+M.soil.spore.catalog.types.Launched = { fields = { { name = "id", type = "string" }, { name = "surface", type = "string" }, { name = "target", type = "string" } } }
+M.soil.spore.catalog.types.Surface = { fields = { { name = "name", type = "string" }, { name = "kind", type = "surface-kind" }, { name = "entry", type = "string" }, { name = "requires", type = "option<string>" } } }
+M.soil.spore.catalog.types.SurfaceKind = { CANVAS = "canvas", WEB = "web" }
+-- WIT: entries -> result<list<entry>, error>
+function M.soil.spore.catalog.entries(args)
+  return dispatch("soil:spore@0.1.0/catalog", "entries", args)
+end
+--- Launch `surface` of `id`.
+--- 
+--- Fails with `unsupported` when this host cannot present the surface's kind
+--- — a host without a browser view refuses a `web` surface rather than
+--- opening something it cannot render. A name the package does not declare
+--- is `not-found`.
+-- WIT: launch -> result<launched, error>
+function M.soil.spore.catalog.launch(args)
+  return dispatch("soil:spore@0.1.0/catalog", "launch", args)
+end
+M.soil.spore = M.soil.spore.catalog
 M.soil.storage = M.soil.storage or {}
 M.soil.storage.storage = M.soil.storage.storage or {}
 M.soil.storage.storage.types = M.soil.storage.storage.types or {}
@@ -775,7 +856,7 @@ M.soil.surface_import.surface.types.Frame = { fields = { { name = "id", type = "
 M.soil.surface_import.surface.types.Info = { fields = { { name = "kind", type = "kind" }, { name = "width", type = "u32" }, { name = "height", type = "u32" }, { name = "scale", type = "f32" }, { name = "color-space", type = "string" }, { name = "alpha", type = "string" } } }
 M.soil.surface_import.surface.types.Input = { type = "input" }
 M.soil.surface_import.surface.types.KeyEvent = { type = "key-event" }
-M.soil.surface_import.surface.types.Kind = { NATIVE = "native", REMOTE = "remote", MEDIA = "media", SPORE = "spore", RETAINED = "retained" }
+M.soil.surface_import.surface.types.Kind = { NATIVE = "native", REMOTE = "remote", MEDIA = "media", SPORE = "spore", RETAINED = "retained", BROWSER = "browser" }
 M.soil.surface_import.surface.types.Modifiers = { type = "modifiers" }
 M.soil.surface_import.surface.types.Point = { type = "point" }
 M.soil.surface_import.surface.types.PointerButton = { type = "pointer-button" }
@@ -861,6 +942,26 @@ function M.soil.time.time.tick(args)
   return dispatch("soil:time@1.0.0/time", "tick", args)
 end
 M.soil.time = M.soil.time.time
+M.soil.unibus = M.soil.unibus or {}
+M.soil.unibus.bus = M.soil.unibus.bus or {}
+M.soil.unibus.bus.types = M.soil.unibus.bus.types or {}
+M.soil.unibus.bus.types.Error = { DENIED = "denied", INVALID = "invalid", OVER_BUDGET = "over-budget", STALE = "stale", UNAVAILABLE = "unavailable" }
+M.soil.unibus.bus.types.Frame = { fields = { { name = "kind", type = "string" }, { name = "producer", type = "string" }, { name = "issued-at-ms", type = "u64" }, { name = "body", type = "list<u8>" } } }
+M.soil.unibus.bus.types.Page = { fields = { { name = "frames", type = "list<frame>" }, { name = "next", type = "option<string>" } } }
+M.soil.unibus.bus.types.Receipt = { fields = { { name = "request-id", type = "string" } } }
+--- Poll retained frames for the listed kinds. An empty `kinds` list means
+--- no kinds, never "all"; a Spore must name what it observes.
+-- WIT: poll -> result<page, error>
+function M.soil.unibus.bus.poll(args)
+  return dispatch("soil:unibus@0.1.0/bus", "poll", args)
+end
+--- Publish one frame. Requires `soil:unibus.publish`; destinations and TTL
+--- are bounded by the host. No credentials cross this boundary.
+-- WIT: publish -> result<receipt, error>
+function M.soil.unibus.bus.publish(args)
+  return dispatch("soil:unibus@0.1.0/bus", "publish", args)
+end
+M.soil.unibus = M.soil.unibus.bus
 M.soil.vfs_mut = M.soil.vfs_mut or {}
 M.soil.vfs_mut.vfs_mut = M.soil.vfs_mut.vfs_mut or {}
 M.soil.vfs_mut.vfs_mut.types = M.soil.vfs_mut.vfs_mut.types or {}
