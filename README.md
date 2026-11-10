@@ -80,7 +80,9 @@ through a bounded core-Wasm ABI by the S22 runtime. See
 
 The first host-backed capability is BLE: [`crates/soil-ble-host`](crates/soil-ble-host)
 runs the [COLMI ring Spore](https://github.com/ajmwagar/spores/tree/main/spores/colmi-ring)
-against a real radio on desktop.
+against a real radio on desktop. `SOIL_BLE_SIM=1` swaps the radio for
+[`crates/soil-ble-sim`](crates/soil-ble-sim), a deterministic virtual
+PineTime/Ring/OMI GATT backend with scripted faults and golden replays.
 
 Canvas is the cross-platform owner; Spores never submit UI trees.
 [`crates/soil-runtime`](crates/soil-runtime) is the S22 reference host (wasmtime

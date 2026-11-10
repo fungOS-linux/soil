@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+soil-ble-api = { path = "../soil-ble-api" }
+soil-ble-sim = { path = "../soil-ble-sim" }
 wasmtime = { version = "50", features = ["anyhow"] }
 wasmtime-wasi = "50"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }

@@ -6714,6 +6714,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-ble-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "soil-ble-host"
 version = "0.1.0"
 dependencies = [
@@ -6723,9 +6730,19 @@ dependencies = [
  "libdbus-sys",
  "serde",
  "serde_json",
+ "soil-ble-api",
+ "soil-ble-sim",
  "tokio",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "soil-ble-sim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "soil-ble-api",
 ]
 
 [[package]]
