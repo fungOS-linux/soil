@@ -375,6 +375,128 @@
       "version": "0.1.0"
     },
     {
+      "docs": "Hook administration: the one door the CLI and a console both use.\n\nThis is a product contract, not a runtime one (`fungos:`, not `soil:`): only a\nwebhook product knows what a slug, a provider and a tenant are. The host\nimplements it because the host owns the registry and, later, Geode - a guest\nthat can create a hook is not a guest that should be able to read the secret\nbytes behind one.\n\nThe secret crosses this boundary exactly once, in `created`. There is no\nread, no export and no list-of-secrets: a hook that is lost is revoked and\nmade again, which is cheaper than a capability that hands out credentials.",
+      "id": "fungos:webhooks@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Register a hook and mint its credential.\n\nOne call, not two: a hook without a credential accepts nothing, and a\ncredential without a hook is a secret nobody owns.",
+              "kind": "freestanding",
+              "lua": "create",
+              "member": "create",
+              "name": "create",
+              "params": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "provider",
+                  "type": "string"
+                },
+                {
+                  "name": "tenant",
+                  "type": "string"
+                },
+                {
+                  "name": "slug",
+                  "type": "option<string>"
+                }
+              ],
+              "resource": null,
+              "result": "result<created, error>"
+            },
+            {
+              "docs": "Every hook the caller may see. Never includes secrets.",
+              "kind": "freestanding",
+              "lua": "hooks",
+              "member": "hooks",
+              "name": "hooks",
+              "params": [],
+              "resource": null,
+              "result": "result<list<hook>, error>"
+            },
+            {
+              "docs": "Revoke a hook and its credential. `false` means it was already gone,\nwhich is not an error - the caller wanted it absent and it is absent.",
+              "kind": "freestanding",
+              "lua": "revoke",
+              "member": "revoke",
+              "name": "revoke",
+              "params": [
+                {
+                  "name": "slug",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<bool, error>"
+            }
+          ],
+          "id": "fungos:webhooks@0.1.0/admin",
+          "name": "admin",
+          "types": [
+            {
+              "docs": "The only value that ever carries a secret.",
+              "fields": [
+                {
+                  "name": "hook",
+                  "type": "hook"
+                },
+                {
+                  "name": "secret",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Created",
+              "name": "created"
+            },
+            {
+              "cases": [
+                "invalid",
+                "conflict",
+                "denied",
+                "unavailable"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": "A registered endpoint. The secret is deliberately absent.",
+              "fields": [
+                {
+                  "name": "slug",
+                  "type": "string"
+                },
+                {
+                  "name": "provider",
+                  "type": "string"
+                },
+                {
+                  "name": "tenant",
+                  "type": "string"
+                },
+                {
+                  "name": "created-at-ms",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "Hook",
+              "name": "hook"
+            }
+          ]
+        }
+      ],
+      "name": "webhooks",
+      "namespace": "fungos",
+      "version": "0.1.0"
+    },
+    {
       "docs": "Private app storage.\n\nAppData is scoped to the signed Spore's app identity and the current user.\nThe Spore sees opaque keys and bytes, never a host path, table, app id, or\nanother app's namespace.\n\n`local` is device-only. `synced` is a per-app, per-user private book that\nreplicates through the native records engine. Synced AppData is not indexed\nor shareable; structured/shareable data belongs in `soil:records`.",
       "id": "soil:appdata@1.0.0",
       "interfaces": [
