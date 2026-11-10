@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod admin;
 pub mod spore;
 
 pub const EVENT_KIND: &str = "confluence.webhook.received.v1";
