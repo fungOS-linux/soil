@@ -7,5 +7,16 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+# Packaging is a direct call inside this workspace, never a version pin: the
+# whole point of moving this out of the Lua tool was to stop shelling out to a
+# binary whose version somebody else owns.
+soil-spore = { path = "../soil-spore" }
+serde_json = "1"
+
+[[bin]]
+name = "tend"
+path = "src/bin/tend.rs"
+
 [lints]
 workspace = true
