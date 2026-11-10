@@ -330,7 +330,19 @@ fn run_command(
 ) -> Executed {
     if shell {
         return match crate::shell::run_line_captured(runtime, root, command, control) {
-            Ok((status, output, stderr)) => Executed::done(output, stderr, false, status),
+            Ok((status, output, stderr)) => Executed {
+                output,
+                stderr,
+                exit: false,
+                status,
+                // A caller reading only `state` must see why the command
+                // stopped, not a bare "done".
+                state: match status {
+                    crate::outcome::CANCELLED_STATUS => State::Cancelled,
+                    crate::outcome::TIMEOUT_STATUS => State::Timeout,
+                    _ => State::Done,
+                },
+            },
             Err(error) => Executed::done(String::new(), format!("mush: {error:#}\n"), false, 1),
         };
     }

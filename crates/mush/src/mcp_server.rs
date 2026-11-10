@@ -1,8 +1,11 @@
 //! Minimal MCP (streamable HTTP) server for Operator.
 //!
-//! One tool, `mush_exec`, executes a Mush command against the daemon's fixed
-//! VFS root. Authentication is a bearer token because the endpoint is on
-//! loopback but still grants shell access to the workspace.
+//! `mush_exec` runs a Mush command line against the daemon's fixed VFS root,
+//! with the same surface the local shell has: VFS builtins and the allowlisted
+//! host programs (git, cargo, rg, sed, ...) that run against an overlay.
+//! Authentication is a bearer token because the endpoint is on loopback but
+//! still grants shell access to the workspace — including those host programs,
+//! which run with the daemon's privileges.
 
 use std::io::Read;
 
@@ -15,12 +18,19 @@ use crate::job::{Jobs, Outcome};
 const MAX_REQUEST: u64 = 2 * 1024 * 1024;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 
-pub fn serve(server: Server, token: &str, jobs: &Jobs) -> Result<()> {
+pub fn serve(server: Server, token: &str, jobs: std::sync::Arc<Jobs>) -> Result<()> {
     eprintln!("mush: mcp server http://{}/mcp", server.server_addr());
     for request in server.incoming_requests() {
-        if let Err(error) = handle(request, token, jobs) {
-            eprintln!("mush: mcp: {error:#}");
-        }
+        // A request that runs a command can take minutes; handling requests
+        // one at a time would make `mush_job` and `mush_cancel` unreachable
+        // exactly when they are needed.
+        let token = token.to_string();
+        let jobs = std::sync::Arc::clone(&jobs);
+        std::thread::spawn(move || {
+            if let Err(error) = handle(request, &token, &jobs) {
+                eprintln!("mush: mcp: {error:#}");
+            }
+        });
     }
     Ok(())
 }
@@ -67,7 +77,7 @@ fn handle(mut request: tiny_http::Request, token: &str, jobs: &Jobs) -> Result<(
                 "result": {
                     "tools": [{
                         "name": "mush_exec",
-                        "description": "Execute a Mush command in the daemon's fixed VFS workspace. Use for VFS, records and installed wasm commands; no host process is involved. A command that outlives the daemon deadline is interrupted and returns state=timeout. A command that outlives its background threshold keeps running and returns state=background with a job id.",
+                        "description": "Execute a Mush command line in the daemon's fixed VFS workspace: VFS builtins, records, installed wasm commands, and the allowlisted host programs (git, cargo, rg, sed, make) which run against an overlay of the VFS. A command that outlives the daemon deadline is interrupted and returns state=timeout; `mush_cancel` stops one early. A command that outlives its background threshold keeps running and returns state=background with a job id.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -83,6 +93,16 @@ fn handle(mut request: tiny_http::Request, token: &str, jobs: &Jobs) -> Result<(
                             "properties": {
                                 "job": {"type": "string", "description": "Job id from mush_exec; omit to list"}
                             }
+                        }
+                    }, {
+                        "name": "mush_cancel",
+                        "description": "Stop a Mush job: queued work is dropped, running work is interrupted (guest or host program). Use after mush_exec returns state=background, or to stop a command that is taking too long.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "job": {"type": "string", "description": "Job id from mush_exec or mush_job"}
+                            },
+                            "required": ["job"]
                         }
                     }]
                 }
@@ -120,6 +140,31 @@ fn handle(mut request: tiny_http::Request, token: &str, jobs: &Jobs) -> Result<(
                     }),
                 );
             }
+            if name == "mush_cancel" {
+                let job = params
+                    .get("arguments")
+                    .and_then(|value| value.get("job"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let (body, is_error) = match jobs.cancel(job) {
+                    Ok(response) => (response, false),
+                    Err(error) => (json!({"ok": false, "error": format!("{error:#}")}), true),
+                };
+                let text = serde_json::to_string_pretty(&body)?;
+                return respond_json(
+                    request,
+                    200,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "content": [{"type": "text", "text": text}],
+                            "structuredContent": body,
+                            "isError": is_error
+                        }
+                    }),
+                );
+            }
             if name != "mush_exec" {
                 return respond_json(
                     request,
@@ -139,7 +184,7 @@ fn handle(mut request: tiny_http::Request, token: &str, jobs: &Jobs) -> Result<(
                     &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"command is required"}}),
                 );
             }
-            let outcome = jobs.submit(command, None, false, None)?;
+            let outcome = jobs.submit(command, None, true, None)?;
             let (text, structured, is_error) = match outcome {
                 Outcome::Completed(executed) => {
                     let mut stdout = executed.output;

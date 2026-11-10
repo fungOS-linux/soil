@@ -718,7 +718,7 @@ fn run() -> Result<()> {
             eprintln!("mush: mcp bearer token {mcp_token}");
         }
         let jobs = std::sync::Arc::new(job::Jobs::start(runtime, root.clone(), background_after));
-        return mcp_server::serve(server, &mcp_token, &jobs);
+        return mcp_server::serve(server, &mcp_token, std::sync::Arc::clone(&jobs));
     }
 
     if shell_mode {
