@@ -661,6 +661,8 @@ impl Shell {
             "wc" => self.wc(args).map(|_| 0),
             "stat" => self.stat(args).map(|_| 0),
             "tree" => self.tree(args).map(|_| 0),
+            "find" => self.find(args).map(|_| 0),
+            "sub" => self.sub(args).map(|_| 0),
             "rm" => self.rm(args).map(|_| 0),
             "mv" => self.mv(args).map(|_| 0),
             "cp" => self.cp(args).map(|_| 0),
@@ -1125,6 +1127,45 @@ impl Shell {
         Ok(())
     }
 
+    /// Regex replacement inside a file, in place, without a host `sed`.
+    fn sub(&mut self, args: &[String]) -> Result<(), String> {
+        if args.len() < 3 {
+            return Err("sub PATTERN REPLACEMENT PATH...".into());
+        }
+        let pattern =
+            Regex::new(&args[0]).map_err(|error| format!("sub: bad pattern: {error}"))?;
+        let replacement = args[1].as_str();
+        for arg in &args[2..] {
+            let path = self.resolve(arg)?;
+            let entry = vfs::stat(&path)
+                .map_err(|error| format!("sub {}: {error:?}", self.display(&path)))?;
+            if entry.kind == Kind::Directory {
+                return Err(format!("sub: {} is a directory", self.display(&path)));
+            }
+            let bytes = self.read_file(&path)?;
+            let text = String::from_utf8(bytes)
+                .map_err(|_| format!("sub: {} is not UTF-8 text", self.display(&path)))?;
+            let hits = pattern.find_iter(&text).count();
+            if hits == 0 {
+                self.out.push_str(&format!("{}: unchanged\n", self.display(&path)));
+                continue;
+            }
+            let replaced = pattern.replace_all(&text, replacement).into_owned();
+            // Versioned write: if someone else moved the file first, this fails
+            // instead of silently clobbering their version.
+            vfs_mut::write(
+                &path,
+                replaced.as_bytes(),
+                media_type(&path),
+                Some(entry.version),
+            )
+            .map_err(|error| format!("sub {}: {error:?}", self.display(&path)))?;
+            self.out
+                .push_str(&format!("{}: {hits} replacement(s)\n", self.display(&path)));
+        }
+        Ok(())
+    }
+
     fn rm(&mut self, args: &[String]) -> Result<(), String> {
         let recursive = args
             .iter()
@@ -1266,20 +1307,60 @@ impl Shell {
         Ok(())
     }
 
+    /// Walk the VFS and print matching paths.
+    ///
+    /// Two forms, because both are useful: `find ROOT [PATTERN]` (the original
+    /// positional one, matched against the name or the full path) and the
+    /// POSIX-ish `find ROOT -name GLOB -type f|d -maxdepth N`.
     fn find(&mut self, args: &[String]) -> Result<(), String> {
-        let (root, pattern) = match args {
-            [] => (".", None),
-            [root] => (root.as_str(), None),
-            [root, pattern] => (root.as_str(), Some(pattern.as_str())),
-            _ => return Err("find [ROOT] [PATTERN]".into()),
-        };
-        let root = self.resolve(root)?;
+        let mut root_arg: Option<&str> = None;
+        let mut positional: Option<&str> = None;
+        let mut name: Option<&str> = None;
+        let mut want: Option<Kind> = None;
+        let mut max_depth = 64usize;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "-name" => {
+                    name = Some(args.get(index + 1).ok_or("find -name PATTERN")?);
+                    index += 2;
+                }
+                "-type" => {
+                    let value = args.get(index + 1).ok_or("find -type f|d")?;
+                    want = Some(match value.as_str() {
+                        "f" => Kind::File,
+                        "d" => Kind::Directory,
+                        other => return Err(format!("find -type: {other} is not f or d")),
+                    });
+                    index += 2;
+                }
+                "-maxdepth" => {
+                    max_depth = args
+                        .get(index + 1)
+                        .ok_or("find -maxdepth N")?
+                        .parse()
+                        .map_err(|_| "find -maxdepth N")?;
+                    index += 2;
+                }
+                other => {
+                    if root_arg.is_none() {
+                        root_arg = Some(other);
+                    } else if positional.is_none() {
+                        positional = Some(other);
+                    } else {
+                        return Err(
+                            "find [ROOT] [PATTERN] [-name GLOB] [-type f|d] [-maxdepth N]".into()
+                        );
+                    }
+                    index += 1;
+                }
+            }
+        }
+        let pattern = name.or(positional);
+        let root = self.resolve(root_arg.unwrap_or("."))?;
         let mut stack = vec![(root, 0usize)];
         let mut count = 0usize;
         while let Some((dir, depth)) = stack.pop() {
-            if depth > 64 {
-                return Err("find: maximum depth exceeded".into());
-            }
             let mut offset = 0;
             loop {
                 let page =
@@ -1289,18 +1370,26 @@ impl Shell {
                     if count > 20_000 {
                         return Err("find: too many entries".into());
                     }
+                    // Depth is the entry's own, not its parent's: `-maxdepth 1`
+                    // must not print a grandchild just because it descended.
+                    let entry_depth = depth + 1;
+                    if entry_depth > max_depth {
+                        continue;
+                    }
                     let path = self.display(&entry.path);
-                    if pattern.is_none_or(|pattern| {
+                    let type_matches = want.map(|kind| entry.kind == kind).unwrap_or(true);
+                    let name_matches = pattern.is_none_or(|pattern| {
                         glob_match(pattern, &entry.name) || glob_match(pattern, &path)
-                    }) {
+                    });
+                    if type_matches && name_matches {
                         self.out.push_str(&path);
                         if entry.kind == Kind::Directory {
                             self.out.push('/');
                         }
                         self.out.push('\n');
                     }
-                    if entry.kind == Kind::Directory {
-                        stack.push((entry.path, depth + 1));
+                    if entry.kind == Kind::Directory && entry_depth < max_depth {
+                        stack.push((entry.path, entry_depth));
                     }
                 }
                 match page.next {
@@ -2674,6 +2763,8 @@ mush — a sandboxed VFS shell
   wc [-l|-c] PATH...      line/byte counts
   stat PATH               file metadata
   tree [DIR]              recursive listing
+  find [DIR] [-name GLOB] [-type f|d] [-maxdepth N]  paths matching a glob
+  sub PATTERN REPLACEMENT PATH...  regex replace in place (all matches, $1 groups)
   rm [-r] PATH...         unlink files or recursively remove a directory
   mv FROM TO              rename a file
   cp FROM TO              copy bytes to a new version
