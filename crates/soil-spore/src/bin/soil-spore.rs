@@ -15,6 +15,9 @@ use std::process::ExitCode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// A manifest, plus the files when the source was a packed package.
+type Loaded = (Manifest, Option<BTreeMap<String, Vec<u8>>>);
+
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -165,7 +168,7 @@ fn usage() -> String {
 }
 
 /// Read a Spore from a directory or a packed package.
-fn load(path: &Path) -> Result<(Manifest, Option<BTreeMap<String, Vec<u8>>>), Error> {
+fn load(path: &Path) -> Result<Loaded, Error> {
     if path.is_dir() {
         return Ok((Manifest::load(path)?, None));
     }
