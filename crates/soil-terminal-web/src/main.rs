@@ -30,6 +30,7 @@
 
 mod frame;
 mod http;
+mod daemon;
 mod page;
 mod paste;
 mod pty;
@@ -38,7 +39,7 @@ mod targets;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -48,7 +49,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use soil_vt::{Host, Snapshot};
 
-use http::{query_param, read_request, respond, respond_json};
+use http::{Request, query_param, read_request, respond, respond_json};
 use paste::Paste;
 use pty::Pty;
 use targets::{Kind, Target};
@@ -95,6 +96,8 @@ struct Args {
     targets: Option<PathBuf>,
     ssh_idle: u64,
     mush_idle: u64,
+    /// When set, sessions live in `soil-termd` and this process holds none.
+    daemon: Option<PathBuf>,
 }
 
 /// How long a session may sit untouched before the reaper closes it. Local
@@ -127,6 +130,7 @@ fn main() -> Result<()> {
     };
     let app = Arc::new(App {
         token: args.token,
+        daemon: args.daemon.clone(),
         paste: Paste::open(args.paste_root.clone())?,
         targets,
         sessions: Mutex::new(BTreeMap::new()),
@@ -170,6 +174,9 @@ fn main() -> Result<()> {
 
 struct App {
     token: Option<String>,
+    /// When set, sessions are the daemon's: this process holds none and
+    /// forwards. Restarting the server then costs nothing but a redraw.
+    daemon: Option<PathBuf>,
     paste: Paste,
     targets: Vec<Target>,
     sessions: Mutex<BTreeMap<u64, Arc<Session>>>,
@@ -333,6 +340,11 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
         .map_or(request.target.as_str(), |(path, _)| path);
     let wanted =
         query_param(&request.target, "session").and_then(|value| value.parse::<u64>().ok());
+    if let Some(socket) = &app.daemon
+        && daemon_route(&mut stream, socket, app, &request, path, wanted)?
+    {
+        return Ok(());
+    }
     match (request.method.as_str(), path) {
         ("GET", "/") | ("GET", "/index.html") => respond(
             &mut stream,
@@ -360,7 +372,7 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
             // The picker is part of the terminal, not of the page that shows it:
             // a view that draws its own sidebar needs the fleet and the session
             // table in the same snapshot as the grid.
-            let extra = navigator_lua(app, session.id);
+            let extra = navigator_lua(app, session.id, &navigator_sessions(app));
             respond(
                 &mut stream,
                 "200 OK",
@@ -454,7 +466,7 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
 }
 
 /// The fleet and session table as Lua, for a view that draws a sidebar.
-fn navigator_lua(app: &App, active: u64) -> String {
+fn navigator_lua(app: &App, active: u64, sessions: &[(u64, String, String, bool)]) -> String {
     let mut out = format!("  active = {active},\n");
     out.push_str("  fleet = {\n");
     for target in &app.targets {
@@ -467,16 +479,63 @@ fn navigator_lua(app: &App, active: u64) -> String {
         ));
     }
     out.push_str("  },\n  sessions = {\n");
-    for (id, session) in app.sessions.lock().map(|sessions| sessions.clone()).unwrap_or_default() {
+    for (id, label, target, exited) in sessions {
         out.push_str(&format!(
-            "    {{ id = {id}, label = {}, target = {}, exited = {} }},\n",
-            lua_escape(&session.label),
-            lua_escape(&session.target),
-            session.pty.exited(),
+            "    {{ id = {id}, label = {}, target = {}, exited = {exited} }},\n",
+            lua_escape(label),
+            lua_escape(target),
         ));
     }
     out.push_str("  },\n");
     out
+}
+
+/// The session table as the navigator needs it, whichever process owns it.
+fn navigator_sessions(app: &App) -> Vec<(u64, String, String, bool)> {
+    if let Some(socket) = &app.daemon {
+        let list = daemon::call(socket, &json!({ "op": "list" })).unwrap_or(Value::Null);
+        return list
+            .get("sessions")
+            .and_then(Value::as_array)
+            .map(|sessions| {
+                sessions
+                    .iter()
+                    .map(|item| {
+                        (
+                            item.get("id").and_then(Value::as_u64).unwrap_or(0),
+                            item.get("label").and_then(Value::as_str).unwrap_or("session").to_string(),
+                            item.get("target").and_then(Value::as_str).unwrap_or("").to_string(),
+                            item.get("exited").and_then(Value::as_bool).unwrap_or(false),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    app.sessions
+        .lock()
+        .map(|sessions| {
+            sessions
+                .values()
+                .map(|session| {
+                    (
+                        session.id,
+                        session.label.clone(),
+                        session.target.clone(),
+                        session.pty.exited(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Put the navigator block inside a Lua snapshot the daemon produced.
+fn with_navigator(body: String, extra: &str) -> String {
+    match body.split_once('\n') {
+        Some((first, rest)) => format!("{first}\n{extra}{rest}"),
+        None => format!("return {{\n{extra}}}\n"),
+    }
 }
 
 fn lua_escape(value: &str) -> String {
@@ -494,6 +553,149 @@ fn lua_escape(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Forward the session endpoints to `soil-termd`.
+///
+/// Returns `false` for anything the daemon does not own, so the static page,
+/// `/targets` and the rest still come from here. Every branch is a request and a
+/// reply: the front holds no session state, which is the point.
+fn daemon_route(
+    stream: &mut TcpStream,
+    socket: &Path,
+    app: &App,
+    request: &Request,
+    path: &str,
+    wanted: Option<u64>,
+) -> Result<bool> {
+    let fail = |stream: &mut TcpStream, error: String| -> Result<()> {
+        respond(
+            stream,
+            "502 Bad Gateway",
+            "text/plain; charset=utf-8",
+            format!("{error}\n").as_bytes(),
+        )
+        .map_err(anyhow::Error::msg)
+    };
+    match (request.method.as_str(), path) {
+        ("GET", "/sessions") => match daemon::call(socket, &json!({ "op": "list" })) {
+            Ok(value) => respond_json(stream, "200 OK", &value)?,
+            Err(error) => fail(stream, error)?,
+        },
+        ("POST", "/sessions") => {
+            let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+                respond(stream, "400 Bad Request", "text/plain; charset=utf-8", b"expected {\"target\":\"name\"}\n")?;
+                return Ok(true);
+            };
+            let Some(name) = body.get("target").and_then(Value::as_str) else {
+                respond(stream, "400 Bad Request", "text/plain; charset=utf-8", b"expected {\"target\":\"name\"}\n")?;
+                return Ok(true);
+            };
+            let Some(target) = app.targets.iter().find(|target| target.name == name) else {
+                respond(stream, "404 Not Found", "text/plain; charset=utf-8", format!("no target {name:?}\n").as_bytes())?;
+                return Ok(true);
+            };
+            // One live session per target: opening it again attaches.
+            if let Ok(Some(existing)) = daemon::pick(socket, None) {
+                let live = daemon::call(socket, &json!({ "op": "list" }))
+                    .ok()
+                    .and_then(|value| value.get("sessions").and_then(Value::as_array).cloned())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|item| {
+                        item.get("target").and_then(Value::as_str) == Some(target.name.as_str())
+                            && item.get("exited").and_then(Value::as_bool) != Some(true)
+                    });
+                if let Some(found) = live {
+                    respond_json(stream, "200 OK", &found)?;
+                    return Ok(true);
+                }
+                let _ = existing;
+            }
+            let request = json!({
+                "op": "open",
+                "label": target.label,
+                "target": target.name,
+                "argv": target.command,
+                "cols": app.cols,
+                "rows": app.rows,
+            });
+            match daemon::call(socket, &request) {
+                Ok(value) => respond_json(stream, "200 OK", &value)?,
+                Err(error) => fail(stream, error)?,
+            }
+        }
+        ("DELETE", path) if path.starts_with("/sessions/") => {
+            let id: Option<u64> = path.trim_start_matches("/sessions/").parse().ok();
+            match id {
+                Some(id) => {
+                    let _ = daemon::call(socket, &json!({ "op": "close", "id": id }));
+                    respond(stream, "204 No Content", "text/plain", b"")?;
+                }
+                None => respond(stream, "400 Bad Request", "text/plain; charset=utf-8", b"bad session id\n")?,
+            }
+        }
+        ("POST", "/input") => match daemon::pick(socket, wanted) {
+            Ok(Some(session)) => {
+                let id = session.get("id").and_then(Value::as_u64).unwrap_or(0);
+                let data: Vec<u8> = request.body.clone();
+                match daemon::call(socket, &json!({ "op": "input", "id": id, "data": data })) {
+                    Ok(_) => respond(stream, "204 No Content", "text/plain", b"")?,
+                    Err(error) => fail(stream, error)?,
+                }
+            }
+            Ok(None) => respond(stream, "404 Not Found", "text/plain; charset=utf-8", b"no such session or path\n")?,
+            Err(error) => fail(stream, error)?,
+        },
+        ("POST", "/resize") => match daemon::pick(socket, wanted) {
+            Ok(Some(session)) => {
+                let id = session.get("id").and_then(Value::as_u64).unwrap_or(0);
+                let Some((cols, rows)) = parse_size(&request.body) else {
+                    respond(stream, "400 Bad Request", "text/plain; charset=utf-8", b"expected {\"cols\":N,\"rows\":N}\n")?;
+                    return Ok(true);
+                };
+                match daemon::call(socket, &json!({ "op": "resize", "id": id, "cols": cols, "rows": rows })) {
+                    Ok(_) => respond(stream, "204 No Content", "text/plain", b"")?,
+                    Err(error) => fail(stream, error)?,
+                }
+            }
+            Ok(None) => respond(stream, "404 Not Found", "text/plain; charset=utf-8", b"no such session or path\n")?,
+            Err(error) => fail(stream, error)?,
+        },
+        ("POST", "/scroll") => match daemon::pick(socket, wanted) {
+            Ok(Some(session)) => {
+                let id = session.get("id").and_then(Value::as_u64).unwrap_or(0);
+                let Some(delta) = parse_scroll(&request.body) else {
+                    respond(stream, "400 Bad Request", "text/plain; charset=utf-8", b"expected {\"delta\":N}\n")?;
+                    return Ok(true);
+                };
+                match daemon::call(socket, &json!({ "op": "scroll", "id": id, "delta": delta })) {
+                    Ok(_) => respond(stream, "204 No Content", "text/plain", b"")?,
+                    Err(error) => fail(stream, error)?,
+                }
+            }
+            Ok(None) => respond(stream, "404 Not Found", "text/plain; charset=utf-8", b"no such session or path\n")?,
+            Err(error) => fail(stream, error)?,
+        },
+        ("GET", "/snapshot.lua") => match daemon::pick(socket, wanted) {
+            Ok(Some(session)) => {
+                let id = session.get("id").and_then(Value::as_u64).unwrap_or(0);
+                match daemon::call(socket, &json!({ "op": "snapshot", "id": id })) {
+                    Ok(value) => {
+                        let body = value.get("lua").and_then(Value::as_str).unwrap_or("return {}").to_string();
+                        let extra = navigator_lua(app, id, &navigator_sessions(app));
+                        let body = with_navigator(body, &extra);
+                        respond(stream, "200 OK", "text/x-lua; charset=utf-8", body.as_bytes())?;
+                    }
+                    Err(error) => fail(stream, error)?,
+                }
+            }
+            Ok(None) => respond(stream, "404 Not Found", "text/plain; charset=utf-8", b"no such session or path\n")?,
+            Err(error) => fail(stream, error)?,
+        },
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn not_found(stream: &mut TcpStream) -> Result<()> {
@@ -677,6 +879,7 @@ fn parse_args() -> Result<Option<Args>> {
         targets: None,
         ssh_idle: 1_800,
         mush_idle: 0,
+        daemon: None,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -701,6 +904,9 @@ fn parse_args() -> Result<Option<Args>> {
                     .next()
                     .and_then(|value| value.parse().ok())
                     .context("--mush-idle needs a number of seconds")?
+            }
+            "--daemon" => {
+                args.daemon = Some(expand_home(&iter.next().context("--daemon needs a socket")?))
             }
             "--cols" => {
                 args.cols = iter

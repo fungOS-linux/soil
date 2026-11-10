@@ -7270,6 +7270,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-termd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "soil-vt",
+]
+
+[[package]]
 name = "soil-terminal"
 version = "0.1.0"
 dependencies = [
