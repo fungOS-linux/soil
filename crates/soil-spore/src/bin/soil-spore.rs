@@ -3,13 +3,20 @@
 //! Soil owns make and verify. Publishing is a tar over IPFS; trust roots come
 //! from Mycelium (a bound PGP key) or an external keyring.
 
+use soil_spore::manual::{Manual, read_prose, render_info};
 use soil_spore::publisher::TrustedPublisher;
 use soil_spore::{
-    Error, Manifest, check, identity::Identity, lease, pack, sign, verify, verify_signature,
-    write_lock,
+    Error, Manifest, check, identity::Identity, lease, pack, publish_blockers, read_package, sign,
+    verify, verify_signature, write_lock,
 };
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A manifest, plus the files when the source was a packed package.
+type Loaded = (Manifest, Option<BTreeMap<String, Vec<u8>>>);
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -28,8 +35,19 @@ fn run(args: Vec<String>) -> Result<(), Error> {
     let rest = &args[1..];
 
     match command {
+        "--version" | "-V" | "version" => {
+            println!("soil-spore {VERSION}");
+        }
+        "--help" | "-h" | "help" => {
+            println!("{}", usage());
+        }
         "check" => {
-            let root = one_path(rest)?;
+            let publish = rest.iter().any(|arg| arg == "--publish");
+            let paths: Vec<&String> = rest.iter().filter(|arg| *arg != "--publish").collect();
+            let root = match paths.as_slice() {
+                [path] => PathBuf::from(path.as_str()),
+                _ => return Err(Error::Invalid(usage())),
+            };
             let lock = check(&root)?;
             println!(
                 "ok {} {} {} files {}",
@@ -38,6 +56,20 @@ fn run(args: Vec<String>) -> Result<(), Error> {
                 lock.files.len(),
                 lock.digest
             );
+            if publish {
+                let manifest = Manifest::load(&root)?;
+                let blockers = publish_blockers(&manifest);
+                if !blockers.is_empty() {
+                    for blocker in &blockers {
+                        eprintln!("listing: {blocker}");
+                    }
+                    return Err(Error::Invalid(format!(
+                        "{} listing requirement(s) unmet",
+                        blockers.len()
+                    )));
+                }
+                println!("ok listing requirements met; human review is still required");
+            }
         }
         "lock" => {
             let root = one_path(rest)?;
@@ -49,6 +81,25 @@ fn run(args: Vec<String>) -> Result<(), Error> {
             );
         }
         "announce" => announce(rest)?,
+        "man" => {
+            let (path, width) = man_args(rest)?;
+            let (manifest, files) = load(&path)?;
+            let prose = match &files {
+                Some(files) => manifest
+                    .docs
+                    .as_ref()
+                    .and_then(|docs| docs.man.as_ref())
+                    .and_then(|man| files.get(man))
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                None => read_prose(&path, &manifest)?,
+            };
+            print!("{}", Manual::from_manifest(&manifest, prose).render(width));
+        }
+        "info" => {
+            let root = one_path(rest)?;
+            let (manifest, _) = load(&root)?;
+            print!("{}", render_info(&manifest));
+        }
         "pack" => {
             let (root, output) = pack_args(rest)?;
             let bytes = pack(&root)?;
@@ -113,7 +164,43 @@ fn run(args: Vec<String>) -> Result<(), Error> {
 }
 
 fn usage() -> String {
-    "usage: soil-spore check|lock|digest <dir>\n       soil-spore pack <dir> [-o out.spore]\n       soil-spore verify <package.spore>\n       soil-spore sign <package.spore> [--key ID]\n       soil-spore verify-signature <package.spore> [--keyring FILE] [--key ID]\n       soil-spore announce <dir> --endpoint URI [--home DIR] [--out FILE] [--every SECS] [--once] [--unsigned-dev]\n\nThe node id is read from --home's enrollment (default ~/.mycelium), never typed:\nthat is what makes a restarted node announce as itself.".into()
+    "usage: soil-spore check <dir> [--publish]\n       soil-spore lock <dir>\n       soil-spore digest <dir>\n       soil-spore man <dir|package.spore> [--width N]\n       soil-spore info <dir|package.spore>\n       soil-spore pack <dir> [-o out.spore]\n       soil-spore verify <package.spore>\n       soil-spore sign <package.spore> [--key ID]\n       soil-spore verify-signature <package.spore> [--keyring FILE] [--key ID]\n       soil-spore announce <dir> --endpoint URI [--home DIR] [--out FILE] [--every SECS] [--once] [--unsigned-dev]\n       soil-spore --version\n\nThe node id is read from --home's enrollment (default ~/.mycelium), never typed:\nthat is what makes a restarted node announce as itself.".into()
+}
+
+/// Read a Spore from a directory or a packed package.
+fn load(path: &Path) -> Result<Loaded, Error> {
+    if path.is_dir() {
+        return Ok((Manifest::load(path)?, None));
+    }
+    let bytes =
+        std::fs::read(path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
+    let (manifest, _, files) = read_package(&bytes)?;
+    Ok((manifest, Some(files)))
+}
+
+fn man_args(args: &[String]) -> Result<(PathBuf, usize), Error> {
+    let mut path = None;
+    let mut width = 80;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--width" {
+            let Some(value) = args.get(index + 1) else {
+                return Err(Error::Invalid(usage()));
+            };
+            width = value
+                .parse()
+                .map_err(|_| Error::Invalid(format!("bad width {value:?}")))?;
+            index += 2;
+            continue;
+        }
+        if path.is_some() {
+            return Err(Error::Invalid(usage()));
+        }
+        path = Some(PathBuf::from(&args[index]));
+        index += 1;
+    }
+    path.map(|path| (path, width))
+        .ok_or_else(|| Error::Invalid(usage()))
 }
 
 /// Publish this Spore's `[anycast]` claim as a Mycelium service lease.

@@ -4167,6 +4167,7 @@ dependencies = [
  "soil-inference",
  "soil-records-host",
  "soil-scrub",
+ "soil-spore",
  "soil-vfs-host",
  "tempfile",
  "tiny_http",
@@ -6874,6 +6875,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-home"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "soil-http-host"
 version = "0.1.0"
 dependencies = [
@@ -7221,6 +7230,16 @@ dependencies = [
  "toml 0.8.23",
  "wit-component 0.247.0",
  "wit-parser 0.247.0",
+]
+
+[[package]]
+name = "soil-store"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "soil-spore",
 ]
 
 [[package]]
