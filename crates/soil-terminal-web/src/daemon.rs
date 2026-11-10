@@ -42,7 +42,9 @@ pub fn pick(socket: &Path, wanted: Option<u64>) -> Result<Option<Value>, String>
         .cloned()
         .unwrap_or_default();
     if let Some(id) = wanted
-        && let Some(found) = sessions.iter().find(|item| item.get("id").and_then(Value::as_u64) == Some(id))
+        && let Some(found) = sessions
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_u64) == Some(id))
     {
         return Ok(Some(found.clone()));
     }

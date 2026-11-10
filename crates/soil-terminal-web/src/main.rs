@@ -28,9 +28,9 @@
 //! because this is a remote shell: put it behind an SSH tunnel or a trusted
 //! reverse proxy, and do not expose it to the open internet.
 
+mod daemon;
 mod frame;
 mod http;
-mod daemon;
 mod page;
 mod paste;
 mod pty;
@@ -503,8 +503,14 @@ fn navigator_sessions(app: &App) -> Vec<(u64, String, String, bool)> {
                     .map(|item| {
                         (
                             item.get("id").and_then(Value::as_u64).unwrap_or(0),
-                            item.get("label").and_then(Value::as_str).unwrap_or("session").to_string(),
-                            item.get("target").and_then(Value::as_str).unwrap_or("").to_string(),
+                            item.get("label")
+                                .and_then(Value::as_str)
+                                .unwrap_or("session")
+                                .to_string(),
+                            item.get("target")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
                             item.get("exited").and_then(Value::as_bool).unwrap_or(false),
                         )
                     })
@@ -584,15 +590,30 @@ fn daemon_route(
         },
         ("POST", "/sessions") => {
             let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
-                respond(stream, "400 Bad Request", "text/plain; charset=utf-8", b"expected {\"target\":\"name\"}\n")?;
+                respond(
+                    stream,
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    b"expected {\"target\":\"name\"}\n",
+                )?;
                 return Ok(true);
             };
             let Some(name) = body.get("target").and_then(Value::as_str) else {
-                respond(stream, "400 Bad Request", "text/plain; charset=utf-8", b"expected {\"target\":\"name\"}\n")?;
+                respond(
+                    stream,
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    b"expected {\"target\":\"name\"}\n",
+                )?;
                 return Ok(true);
             };
             let Some(target) = app.targets.iter().find(|target| target.name == name) else {
-                respond(stream, "404 Not Found", "text/plain; charset=utf-8", format!("no target {name:?}\n").as_bytes())?;
+                respond(
+                    stream,
+                    "404 Not Found",
+                    "text/plain; charset=utf-8",
+                    format!("no target {name:?}\n").as_bytes(),
+                )?;
                 return Ok(true);
             };
             // One live session per target: opening it again attaches.
@@ -632,7 +653,12 @@ fn daemon_route(
                     let _ = daemon::call(socket, &json!({ "op": "close", "id": id }));
                     respond(stream, "204 No Content", "text/plain", b"")?;
                 }
-                None => respond(stream, "400 Bad Request", "text/plain; charset=utf-8", b"bad session id\n")?,
+                None => respond(
+                    stream,
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    b"bad session id\n",
+                )?,
             }
         }
         ("POST", "/input") => match daemon::pick(socket, wanted) {
@@ -644,29 +670,52 @@ fn daemon_route(
                     Err(error) => fail(stream, error)?,
                 }
             }
-            Ok(None) => respond(stream, "404 Not Found", "text/plain; charset=utf-8", b"no such session or path\n")?,
+            Ok(None) => respond(
+                stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"no such session or path\n",
+            )?,
             Err(error) => fail(stream, error)?,
         },
         ("POST", "/resize") => match daemon::pick(socket, wanted) {
             Ok(Some(session)) => {
                 let id = session.get("id").and_then(Value::as_u64).unwrap_or(0);
                 let Some((cols, rows)) = parse_size(&request.body) else {
-                    respond(stream, "400 Bad Request", "text/plain; charset=utf-8", b"expected {\"cols\":N,\"rows\":N}\n")?;
+                    respond(
+                        stream,
+                        "400 Bad Request",
+                        "text/plain; charset=utf-8",
+                        b"expected {\"cols\":N,\"rows\":N}\n",
+                    )?;
                     return Ok(true);
                 };
-                match daemon::call(socket, &json!({ "op": "resize", "id": id, "cols": cols, "rows": rows })) {
+                match daemon::call(
+                    socket,
+                    &json!({ "op": "resize", "id": id, "cols": cols, "rows": rows }),
+                ) {
                     Ok(_) => respond(stream, "204 No Content", "text/plain", b"")?,
                     Err(error) => fail(stream, error)?,
                 }
             }
-            Ok(None) => respond(stream, "404 Not Found", "text/plain; charset=utf-8", b"no such session or path\n")?,
+            Ok(None) => respond(
+                stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"no such session or path\n",
+            )?,
             Err(error) => fail(stream, error)?,
         },
         ("POST", "/scroll") => match daemon::pick(socket, wanted) {
             Ok(Some(session)) => {
                 let id = session.get("id").and_then(Value::as_u64).unwrap_or(0);
                 let Some(delta) = parse_scroll(&request.body) else {
-                    respond(stream, "400 Bad Request", "text/plain; charset=utf-8", b"expected {\"delta\":N}\n")?;
+                    respond(
+                        stream,
+                        "400 Bad Request",
+                        "text/plain; charset=utf-8",
+                        b"expected {\"delta\":N}\n",
+                    )?;
                     return Ok(true);
                 };
                 match daemon::call(socket, &json!({ "op": "scroll", "id": id, "delta": delta })) {
@@ -674,7 +723,12 @@ fn daemon_route(
                     Err(error) => fail(stream, error)?,
                 }
             }
-            Ok(None) => respond(stream, "404 Not Found", "text/plain; charset=utf-8", b"no such session or path\n")?,
+            Ok(None) => respond(
+                stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"no such session or path\n",
+            )?,
             Err(error) => fail(stream, error)?,
         },
         ("GET", "/snapshot.lua") => match daemon::pick(socket, wanted) {
@@ -682,15 +736,29 @@ fn daemon_route(
                 let id = session.get("id").and_then(Value::as_u64).unwrap_or(0);
                 match daemon::call(socket, &json!({ "op": "snapshot", "id": id })) {
                     Ok(value) => {
-                        let body = value.get("lua").and_then(Value::as_str).unwrap_or("return {}").to_string();
+                        let body = value
+                            .get("lua")
+                            .and_then(Value::as_str)
+                            .unwrap_or("return {}")
+                            .to_string();
                         let extra = navigator_lua(app, id, &navigator_sessions(app));
                         let body = with_navigator(body, &extra);
-                        respond(stream, "200 OK", "text/x-lua; charset=utf-8", body.as_bytes())?;
+                        respond(
+                            stream,
+                            "200 OK",
+                            "text/x-lua; charset=utf-8",
+                            body.as_bytes(),
+                        )?;
                     }
                     Err(error) => fail(stream, error)?,
                 }
             }
-            Ok(None) => respond(stream, "404 Not Found", "text/plain; charset=utf-8", b"no such session or path\n")?,
+            Ok(None) => respond(
+                stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"no such session or path\n",
+            )?,
             Err(error) => fail(stream, error)?,
         },
         _ => return Ok(false),
@@ -906,7 +974,9 @@ fn parse_args() -> Result<Option<Args>> {
                     .context("--mush-idle needs a number of seconds")?
             }
             "--daemon" => {
-                args.daemon = Some(expand_home(&iter.next().context("--daemon needs a socket")?))
+                args.daemon = Some(expand_home(
+                    &iter.next().context("--daemon needs a socket")?,
+                ))
             }
             "--cols" => {
                 args.cols = iter

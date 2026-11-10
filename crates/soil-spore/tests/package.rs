@@ -420,6 +420,44 @@ fn a_package_ships_only_what_it_declares() {
 }
 
 #[test]
+fn a_web_surface_ships_the_directory_it_names() {
+    let root = fixture();
+    let declared = format!(
+        "{}\n[[surfaces]]\nname = \"workbook\"\nkind = \"web\"\n",
+        MANIFEST.replace("default = \"canvas\"", "default = \"workbook\"")
+    );
+    fs::write(root.join("spore.toml"), &declared).unwrap();
+    fs::create_dir_all(root.join("web/fonts")).unwrap();
+    fs::write(root.join("web/index.html"), b"<!doctype html>\n").unwrap();
+    fs::write(root.join("web/app.js"), b"export {}\n").unwrap();
+    fs::write(root.join("web/fonts/ui.woff2"), b"\0wOF2").unwrap();
+
+    let manifest = Manifest::parse(&declared).unwrap();
+    let paths: Vec<String> = soil_spore::collect_package(&root, &manifest)
+        .unwrap()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    assert!(
+        paths.contains(&"web/index.html".to_owned())
+            && paths.contains(&"web/app.js".to_owned())
+            && paths.contains(&"web/fonts/ui.woff2".to_owned()),
+        "a page is useless without the files beside it: {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|path| path.starts_with("src/")),
+        "and naming a surface does not turn the package into a source archive"
+    );
+
+    // The lock is the identity, so what ships is what is signed.
+    let lock = write_lock(&root).unwrap();
+    assert!(
+        lock.files.iter().any(|file| file.path == "web/app.js"),
+        "the bytes the page loads are covered by the package digest"
+    );
+}
+
+#[test]
 fn a_composition_needs_no_module() {
     let source = MANIFEST.replace("[module]\npath = \"module.wasm\"\n\n", "");
     let manifest = Manifest::parse(&source).expect("a view is still a Spore");

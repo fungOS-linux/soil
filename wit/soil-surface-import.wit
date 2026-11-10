@@ -13,6 +13,10 @@ interface surface {
     media,
     spore,
     retained,
+    /// A web page the host renders in a browser view. Appended rather than
+    /// slotted in beside `media` so the existing variants keep their
+    /// discriminants.
+    browser,
   }
 
   enum error {
