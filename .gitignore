@@ -1,4 +1,7 @@
 target/
+
+# Pinned native toolchains fetched by scripts/bootstrap-toolchain.sh.
+.toolchain/
 *.wasm
 *.component.wasm
 .worktrees/

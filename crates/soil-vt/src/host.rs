@@ -32,6 +32,10 @@ use crate::{Session, Snapshot};
 enum Command {
     Write(Vec<u8>),
     Resize(u16, u16),
+    /// Move the viewport through scrollback; negative is up.
+    Scroll(isize),
+    /// Return the viewport to the active screen.
+    ScrollToBottom,
     /// Ask for the bytes the emulator wants written back to the pty, with a
     /// channel for the answer. A caller cannot read them from outside the thread
     /// because the session that produced them lives only there.
@@ -76,6 +80,7 @@ impl Host {
             cursor: None,
             title: String::new(),
             bells: 0,
+            scroll: None,
         })));
         let generation = Arc::new(AtomicU64::new(0));
         let shared = Arc::clone(&latest);
@@ -107,6 +112,8 @@ impl Host {
                                 continue;
                             }
                         }
+                        Command::Scroll(delta) => session.scroll(delta),
+                        Command::ScrollToBottom => session.scroll_to_bottom(),
                         Command::DrainResponses(reply) => {
                             let _ = reply.send(session.drain_responses());
                             continue;
@@ -149,6 +156,16 @@ impl Host {
         let _ = self.commands.send(Command::Resize(cols, rows));
     }
 
+    /// Move the viewport through scrollback. Negative is up, towards history.
+    pub fn scroll(&self, delta: isize) {
+        let _ = self.commands.send(Command::Scroll(delta));
+    }
+
+    /// Return the viewport to the active screen.
+    pub fn scroll_to_bottom(&self) {
+        let _ = self.commands.send(Command::ScrollToBottom);
+    }
+
     /// The most recent grid, shared rather than copied. Cheap enough to call
     /// every frame, which is the point: a frame that has not changed should cost
     /// an `Arc` clone, not a grid.
@@ -175,15 +192,10 @@ impl Host {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// Stop the thread. Dropping the handle also ends it, because the channel
-    /// closes; this is only for a host that wants to be explicit.
+    /// Stop the thread for every handle. Dropping the last handle also ends it,
+    /// because the command channel closes; this is for a host that wants to be
+    /// explicit while other handles still exist.
     pub fn shutdown(&self) {
-        let _ = self.commands.send(Command::Shutdown);
-    }
-}
-
-impl Drop for Host {
-    fn drop(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
     }
 }
@@ -255,6 +267,15 @@ mod tests {
         host.write(b"x\r\n");
         wait_for(&host, "x");
         assert!(host.generation() > start, "output must publish a frame");
+    }
+
+    #[test]
+    fn dropping_a_clone_does_not_stop_the_emulator() {
+        let host = Host::spawn(20, 3, 10).expect("host");
+        let view = host.clone();
+        drop(view);
+        host.write(b"still alive\r\n");
+        wait_for(&host, "still alive");
     }
 
     #[test]

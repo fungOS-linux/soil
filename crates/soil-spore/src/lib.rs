@@ -20,12 +20,14 @@
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
+pub mod identity;
+pub mod lease;
 pub mod manual;
 pub mod publisher;
 
@@ -93,8 +95,23 @@ pub struct Manifest {
     /// host capability it might want arrives with a module later.
     #[serde(default)]
     pub module: Option<Module>,
-    pub ui: Ui,
+    /// The Lua entrypoint.
+    ///
+    /// Optional, and a first-class entrypoint in its own right: the host JITs
+    /// this file, so a Spore does not need a wasm build to exist. A package
+    /// with neither a module nor a UI nor a chrome region does nothing, and
+    /// validation refuses it.
+    #[serde(default)]
+    pub ui: Option<Ui>,
     pub launch: Launch,
+    /// Build-time dependencies and the exact version each was built against.
+    ///
+    /// A composed artifact pins its imports by construction, so a range would be
+    /// a promise the bytes cannot keep. Recording the exact version is what lets
+    /// a reviewer see which SDK produced the artifact, and lets a builder refuse
+    /// to compose against a different one.
+    #[serde(default)]
+    pub deps: BTreeMap<String, String>,
     #[serde(default)]
     pub grants: BTreeMap<String, String>,
     #[serde(default)]
@@ -106,6 +123,12 @@ pub struct Manifest {
     /// Spore id and signed digest; this flag is not a grant.
     #[serde(default)]
     pub system: Option<System>,
+    /// This Spore's opt-in anycast claim: the name and service kind it asks to
+    /// be reachable under. Absent means the Spore is local-only, which is the
+    /// default; a claim is only honoured when the package's publisher grant
+    /// authorizes it.
+    #[serde(default)]
+    pub anycast: Option<Anycast>,
     /// Chrome regions this Spore draws, when it draws any.
     #[serde(default)]
     pub chrome: Option<Chrome>,
@@ -124,6 +147,11 @@ pub struct Manifest {
     /// place a capability is named, reviewed and routed.
     #[serde(default)]
     pub actions: Vec<Action>,
+    /// Agent skills this Spore ships. Each one is declared by path, so the lock
+    /// and the tar cover it like any other asset: what teaches an agent to use
+    /// the Spore is prose, and the prose has to travel with the package.
+    #[serde(default)]
+    pub skills: Vec<Skill>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +169,16 @@ pub struct Action {
     pub expose: Vec<String>,
     #[serde(default)]
     pub idempotent: bool,
+}
+
+/// One agent skill: a `SKILL.md` whose frontmatter names it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Skill {
+    /// Registry identity; must match the frontmatter and the directory name.
+    pub name: String,
+    /// Path to the `SKILL.md`, relative to the package root.
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -205,10 +243,52 @@ pub struct Screenshot {
 pub struct Chrome {
     /// `top-bar`, `dock`, `control-center`.
     pub regions: Vec<String>,
-    /// Composed Lua for each region, already single-file: the host does not
-    /// compose at runtime, because composition is a build step that produces an
-    /// artifact the lock can cover.
+    /// Composed Lua for a region, when the region's artifact is not the Spore's
+    /// own `[ui] entry`.
+    ///
+    /// The common case is one region and one UI file, so this is usually empty:
+    /// repeating `[ui] entry` under `[chrome.sources]` only creates two places
+    /// that can disagree. It stays for the package that ships a distinct
+    /// composed artifact per region. The host still does not compose at runtime;
+    /// whichever path wins is what the lock covers.
+    #[serde(default)]
     pub sources: BTreeMap<String, String>,
+    /// Logical height this package authors the region at.
+    ///
+    /// Absent means the host's default. The number is declared rather than
+    /// inferred because the host has to reserve the region *before* the package
+    /// runs: it draws the built-in fallback at this height, then hands over. A
+    /// package that disagrees with the fallback is a package that shifts the
+    /// desktop when it loads, which is why the shell reads this instead of
+    /// carrying a constant of its own.
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+impl Chrome {
+    /// The height the host reserves for this package's region.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height.unwrap_or(chrome::DEFAULT_HEIGHT)
+    }
+}
+
+/// Shell metrics that belong to the region contract rather than to a renderer.
+///
+/// These lived in a graphics crate, which made the shell depend on a drawing
+/// library to know how tall its own bar is. A chrome package may narrow them in
+/// its manifest; the host uses the same numbers for the fallback it draws before
+/// any package loads.
+pub mod chrome {
+    /// Logical height of the bar region.
+    pub const DEFAULT_HEIGHT: u32 = 44;
+    /// Outer padding inside the bar.
+    pub const DEFAULT_PADDING: u32 = 8;
+    /// Label size in the bar, in logical pixels.
+    pub const DEFAULT_TEXT_SIZE: u32 = 14;
+    /// Height of an interactive control in the bar; the whole row, so the target
+    /// is the row rather than the glyph.
+    pub const DEFAULT_CONTROL_HEIGHT: u32 = DEFAULT_HEIGHT;
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -314,6 +394,34 @@ pub struct Launch {
     pub canvas_module: Option<String>,
 }
 
+/// A Spore's opt-in claim on an anycast name.
+///
+/// This is the claim only. Whether the claim is allowed to route is decided by
+/// the publisher grant in [`publisher`], never by this table: a manifest can be
+/// edited by anyone, a signature cannot.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Anycast {
+    /// Service name the claim is published under, e.g. `confluence`.
+    pub name: String,
+    /// Service kind the router joins on, matching the gateway's route table.
+    pub kind: String,
+    /// Application protocols this Spore answers on. `soil/http/1` is HTTP.
+    #[serde(default)]
+    pub alpns: Vec<String>,
+    /// Lease lifetime in seconds. Mycelium drops a lease after 300, so a
+    /// longer claim could never be honoured; it is rejected rather than
+    /// silently clamped, because a clamp would hide a broken renewer.
+    #[serde(default = "default_lease_secs")]
+    pub ttl_secs: u64,
+}
+
+pub const MAX_LEASE_SECS: u64 = 300;
+
+const fn default_lease_secs() -> u64 {
+    240
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Asset {
@@ -339,7 +447,48 @@ impl Manifest {
         let path = root.join("spore.toml");
         let source = fs::read_to_string(&path)
             .map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
-        Self::parse(&source)
+        let manifest = Self::parse(&source)?;
+        manifest.check_skills(root)?;
+        Ok(manifest)
+    }
+
+    /// Skills are files, so only `load` can check them: `parse` has no root.
+    /// A declared skill that is missing, unnamed, or misnamed is a packaging
+    /// error, not a runtime surprise.
+    fn check_skills(&self, root: &Path) -> Result<()> {
+        for skill in &self.skills {
+            let file = root.join(&skill.path);
+            let source = fs::read_to_string(&file)
+                .map_err(|error| Error::Io(format!("{}: {error}", file.display())))?;
+            let (name, description) = skill_frontmatter(&source).ok_or_else(|| {
+                Error::Invalid(format!(
+                    "{} needs `---` frontmatter with name and description",
+                    file.display()
+                ))
+            })?;
+            if name != skill.name {
+                return Err(Error::Invalid(format!(
+                    "skill {:?} declares name {name:?} in its frontmatter",
+                    skill.name
+                )));
+            }
+            if description.trim().is_empty() {
+                return Err(Error::Invalid(format!(
+                    "skill {name:?} needs a description"
+                )));
+            }
+            let dirname = file
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if dirname != name {
+                return Err(Error::Invalid(format!(
+                    "skill {name:?} must live in a directory of the same name, not {dirname:?}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -371,20 +520,49 @@ impl Manifest {
                 self.spore.version
             )));
         }
-
-        if let Some(module) = &self.module {
-            safe_relative(&module.path)?;
-            if !module.path.ends_with(".wasm") {
-                return Err(Error::Invalid("module.path must end in .wasm".into()));
+        for skill in &self.skills {
+            if !identifier(&skill.name) {
+                return Err(Error::Invalid(format!(
+                    "skill name {:?} must be lowercase letters, digits, - or _",
+                    skill.name
+                )));
+            }
+            let path = safe_relative(&skill.path)?;
+            if path
+                .file_name()
+                .map(|name| name.to_string_lossy() != "SKILL.md")
+                != Some(true)
+            {
+                return Err(Error::Invalid(format!(
+                    "skill {:?} must point at a SKILL.md, not {:?}",
+                    skill.name, skill.path
+                )));
             }
         }
-        // A composition is still a program. `ui.entry` is required either way,
-        // so a Spore with no module renders something; what it cannot do is
-        // call a host capability, which is exactly what a UI-first Spore
-        // (gallery, storefront) should not be able to do yet.
-        safe_relative(&self.ui.entry)?;
-        if !self.ui.entry.ends_with(".lua") {
-            return Err(Error::Invalid("ui.entry must end in .lua".into()));
+
+        match &self.module {
+            Some(module) => {
+                safe_relative(&module.path)?;
+                if !module.path.ends_with(".wasm") {
+                    return Err(Error::Invalid("module.path must end in .wasm".into()));
+                }
+            }
+            // A Spore without a module still has to do something. Any entrypoint
+            // counts, and Lua is one of them: the host JITs `[ui] entry`, so a
+            // Lua-only Spore is a program, not a second-class attachment to a
+            // wasm build. `chrome` counts because a host draws the region.
+            None if self.ui.is_none() && self.chrome.is_none() => {
+                return Err(Error::Invalid(
+                    "a Spore needs an entrypoint: a module, a Lua UI, or a chrome region".into(),
+                ));
+            }
+            None => {}
+        }
+        if let Some(ui) = &self.ui {
+            safe_relative(&ui.entry)?;
+            if !ui.entry.ends_with(".lua") {
+                return Err(Error::Invalid("ui.entry must end in .lua".into()));
+            }
         }
 
         if self.launch.surfaces.is_empty() {
@@ -411,6 +589,52 @@ impl Manifest {
             )));
         }
 
+        for (name, version) in &self.deps {
+            if !identifier(name) {
+                return Err(Error::Invalid(format!(
+                    "dependency {name:?} must be a lowercase identifier such as `fungos.ui`"
+                )));
+            }
+            if !version_is_exact(version) {
+                return Err(Error::Invalid(format!(
+                    "dependency {name:?} = {version:?} must be one exact version, not a range: a composed artifact cannot float"
+                )));
+            }
+        }
+
+        if let Some(anycast) = &self.anycast {
+            for (label, value) in [
+                ("anycast.name", &anycast.name),
+                ("anycast.kind", &anycast.kind),
+            ] {
+                if !lease_label(value) {
+                    return Err(Error::Invalid(format!(
+                        "{label} {value:?} must be lowercase [a-z0-9-_./:], at most 256 bytes"
+                    )));
+                }
+            }
+            if anycast.alpns.len() > 8 {
+                return Err(Error::Invalid(
+                    "anycast.alpns has more than 8 entries".into(),
+                ));
+            }
+            for alpn in &anycast.alpns {
+                if alpn.is_empty() || alpn.len() > 64 || !alpn.is_ascii() {
+                    return Err(Error::Invalid(format!(
+                        "anycast alpn {alpn:?} must be 1..=64 ascii bytes"
+                    )));
+                }
+            }
+            // Mycelium drops a lease older than 300 s and never renews it, so a
+            // longer claim is a broken renewer, not a longer lease.
+            if anycast.ttl_secs == 0 || anycast.ttl_secs > MAX_LEASE_SECS {
+                return Err(Error::Invalid(format!(
+                    "anycast.ttl_secs {} must be 1..={MAX_LEASE_SECS}",
+                    anycast.ttl_secs
+                )));
+            }
+        }
+
         for capability in self.grants.keys() {
             if !grants(capability) {
                 return Err(Error::Invalid(format!(
@@ -419,10 +643,8 @@ impl Manifest {
             }
         }
         if let Some(chrome) = &self.chrome {
-            if chrome.regions.is_empty() || chrome.sources.is_empty() {
-                return Err(Error::Invalid(
-                    "chrome needs at least one region, and sources to match".into(),
-                ));
+            if chrome.regions.is_empty() {
+                return Err(Error::Invalid("chrome needs at least one region".into()));
             }
             for region in &chrome.regions {
                 if !CHROME_REGIONS.contains(&region.as_str()) {
@@ -430,9 +652,9 @@ impl Manifest {
                         "chrome region {region:?} is not one of {CHROME_REGIONS:?}"
                     )));
                 }
-                let Some(source) = chrome.sources.get(region) else {
+                let Some(source) = self.region_source(region) else {
                     return Err(Error::Invalid(format!(
-                        "chrome region {region:?} has no source"
+                        "chrome region {region:?} has no source: give the Spore a [ui] entry or name one in [chrome.sources]"
                     )));
                 };
                 safe_relative(source)?;
@@ -576,20 +798,31 @@ impl Manifest {
 
     /// Every file the manifest declares explicitly.
     pub fn declared_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.ui.entry.clone()];
+        let mut paths = Vec::new();
+        if let Some(ui) = &self.ui {
+            paths.push(ui.entry.clone());
+        }
         if let Some(module) = &self.module {
             paths.push(module.path.clone());
         }
         if let Some(chrome) = &self.chrome {
-            paths.extend(chrome.sources.values().cloned());
+            for region in &chrome.regions {
+                if let Some(source) = chrome.sources.get(region) {
+                    paths.push(source.clone());
+                }
+            }
         }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
+        paths.extend(self.skills.iter().map(|skill| skill.path.clone()));
         if let Some(man) = self.docs.as_ref().and_then(|docs| docs.man.clone()) {
             paths.push(man);
         }
+        let mut seen = std::collections::BTreeSet::new();
         paths
             .into_iter()
-            .filter_map(|path| safe_relative(&path).ok())
+            .filter(|path| safe_relative(path).is_ok())
+            .map(PathBuf::from)
+            .filter(|path| seen.insert(path.clone()))
             .collect()
     }
 
@@ -607,6 +840,47 @@ impl Manifest {
         paths.dedup();
         paths
     }
+
+    /// The Lua a host loads for a chrome `region`.
+    ///
+    /// An explicit per-region artifact wins; otherwise the Spore's single `[ui]
+    /// entry` is the region's Lua. One region plus one UI file is the common
+    /// shape, and naming the same path twice only creates two places to disagree.
+    #[must_use]
+    pub fn region_source(&self, region: &str) -> Option<&str> {
+        let chrome = self.chrome.as_ref()?;
+        if !chrome.regions.iter().any(|claimed| claimed == region) {
+            return None;
+        }
+        chrome
+            .sources
+            .get(region)
+            .map(String::as_str)
+            .or_else(|| self.ui.as_ref().map(|ui| ui.entry.as_str()))
+    }
+}
+
+/// The two frontmatter fields a skill registry needs. Everything else in a
+/// SKILL.md is prose, so it is not parsed here.
+fn skill_frontmatter(source: &str) -> Option<(String, String)> {
+    let mut lines = source.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let mut name = None;
+    let mut description = None;
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("name:") {
+            name = Some(value.trim().to_string());
+        }
+        if let Some(value) = line.strip_prefix("description:") {
+            description = Some(value.trim().to_string());
+        }
+    }
+    Some((name?, description?))
 }
 
 fn identifier(value: &str) -> bool {
@@ -621,6 +895,11 @@ fn identifier(value: &str) -> bool {
             .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
+/// One exact version: no `^`, `~`, `>=`, `*` or range separators.
+fn version_is_exact(value: &str) -> bool {
+    version(value) && !value.contains(['^', '~', '*', '>', '<', ' ', ','])
+}
+
 fn version(value: &str) -> bool {
     let core = value.split(['-', '+']).next().unwrap_or(value);
     let parts: Vec<&str> = core.split('.').collect();
@@ -628,6 +907,14 @@ fn version(value: &str) -> bool {
         && parts
             .iter()
             .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn lease_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.:/".contains(&b))
 }
 
 fn grants(value: &str) -> bool {
@@ -951,6 +1238,82 @@ fn lock_of(id: &str, version: &str, files: &[(String, Vec<u8>)]) -> Lock {
 }
 
 /// Check a directory: manifest, declared files, and the lock if present.
+/// The WIT packages a component imports, e.g. `wasi:http`, `soil:records`.
+///
+/// A package is the unit a manifest declares, so this is what `[grants]` must
+/// cover: an import nobody declared is a capability the package author did not
+/// write down.
+pub fn imported_packages(bytes: &[u8]) -> Result<BTreeSet<String>> {
+    // `wit_component::decode` also accepts a bare core module and reports an
+    // empty world for it, which would make the manifest rule vacuous. A Spore
+    // module is a component by definition, so check the preamble first: a
+    // component starts `\0asm\x0d\x00`, a core module `\0asm\x01\x00`.
+    if !(bytes.len() >= 8 && &bytes[..4] == b"\0asm" && bytes[4] == 0x0d && bytes[5] == 0x00) {
+        return Err(Error::Invalid(
+            "module is a core wasm module, not a component".into(),
+        ));
+    }
+    let decoded = wit_component::decode(bytes)
+        .map_err(|error| Error::Invalid(format!("module is not a component: {error}")))?;
+    let (resolve, world) = match decoded {
+        wit_component::DecodedWasm::Component(resolve, world) => (resolve, world),
+        wit_component::DecodedWasm::WitPackage(..) => {
+            return Err(Error::Invalid(
+                "module is a WIT package, not a component".into(),
+            ));
+        }
+    };
+    let mut packages = BTreeSet::new();
+    for key in resolve.worlds[world].imports.keys() {
+        let wit_parser::WorldKey::Interface(id) = key else {
+            continue;
+        };
+        let Some(package) = resolve.interfaces[*id].package else {
+            continue;
+        };
+        let name = &resolve.packages[package].name;
+        packages.insert(format!("{}:{}", name.namespace, name.name));
+    }
+    Ok(packages)
+}
+
+fn undeclared_packages(
+    imported: &BTreeSet<String>,
+    grants: &BTreeMap<String, String>,
+) -> Vec<String> {
+    imported
+        .iter()
+        .filter(|package| !grants.contains_key(package.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Run the module's real imports past the manifest.
+///
+/// The manifest is intent; this makes it checkable. A module that imports
+/// `soil:records` while the manifest lists only WASI fails here instead of at
+/// review time.
+fn check_declared_grants(root: &Path, manifest: &Manifest) -> Result<()> {
+    // A chrome-only Spore has no module, so there is nothing to import.
+    let Some(module) = &manifest.module else {
+        return Ok(());
+    };
+    let path = root.join(&module.path);
+    let bytes =
+        fs::read(&path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
+    let imported = imported_packages(&bytes)?;
+    let undeclared = undeclared_packages(&imported, &manifest.grants);
+    if !undeclared.is_empty() {
+        return Err(Error::Invalid(format!(
+            "{} imports {} but [grants] does not declare {}",
+            module.path,
+            undeclared.join(", "),
+            if undeclared.len() == 1 { "it" } else { "them" },
+        )));
+    }
+    Ok(())
+}
+
 pub fn check(root: &Path) -> Result<Lock> {
     let manifest = Manifest::load(root)?;
     for path in manifest.declared_paths() {
@@ -962,6 +1325,7 @@ pub fn check(root: &Path) -> Result<Lock> {
             )));
         }
     }
+    check_declared_grants(root, &manifest)?;
     let lock = compute_lock(root, &manifest)?;
     let path = root.join(LOCK_NAME);
     if path.is_file() {
@@ -1108,6 +1472,60 @@ pub fn pack(root: &Path) -> Result<Vec<u8>> {
 pub fn verify(bytes: &[u8]) -> Result<(Manifest, Lock)> {
     let (manifest, lock, _) = read_package(bytes)?;
     Ok((manifest, lock))
+}
+
+/// Unpack a verified package into `dest`.
+///
+/// The archive is the distribution unit: a machine installs from a `.spore`
+/// file and never needs the Spore's source, its composer, or the SDK it was
+/// built against. Everything is verified before a single byte is written, so a
+/// tampered or partial package cannot leave half a Spore on disk.
+///
+/// # Errors
+/// Fails when the package is unsafe, tampered, or the destination cannot be
+/// written.
+pub fn unpack(bytes: &[u8], dest: &Path) -> Result<Lock> {
+    let (_, lock, files) = read_package(bytes)?;
+    for (path, body) in files {
+        let target = dest.join(&path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        fs::write(&target, body).map_err(io_error)?;
+    }
+    Ok(lock)
+}
+
+/// The CIDv1 of a package's bytes: raw codec over sha2-256.
+///
+/// A `.spore` tar is deterministic, so the same tree yields the same bytes and
+/// therefore the same CID. That is the identity a registry versions on top of;
+/// `spore.lock` stays the human-readable digest.
+#[must_use]
+pub fn cid_v1_raw(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut block = vec![0x01, 0x55, 0x12, 0x20];
+    block.extend_from_slice(&digest);
+    format!("b{}", base32_lower(&block))
+}
+
+fn base32_lower(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    let mut buffer: u32 = 0;
+    let mut bits = 0;
+    for byte in bytes {
+        buffer = (buffer << 8) | u32::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buffer >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buffer << (5 - bits)) & 0x1f) as usize] as char);
+    }
+    out
 }
 
 /// Verify a packed tar and hand back its files.
@@ -1276,29 +1694,52 @@ pub fn hex(bytes: &[u8]) -> String {
     out
 }
 
+/// A valid Spore manifest with `extra` appended, so a test writes only the
+/// table it is about.
 #[cfg(test)]
-mod chrome_tests {
-    use super::*;
+mod fixtures {
+    pub(crate) fn manifest(extra: &str) -> String {
+        with_ui("[ui]\nentry = \"ui/main.lua\"\n", extra)
+    }
 
-    fn manifest(extra: &str) -> String {
+    /// Same manifest with the `[ui]` block chosen by the caller, so a test can
+    /// ask what a package looks like with no Lua entrypoint at all.
+    pub(crate) fn with_ui(ui: &str, extra: &str) -> String {
         format!(
-            "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n[ui]\nentry = \"ui/main.lua\"\n[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
+            "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n{ui}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
         )
     }
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use super::fixtures::{manifest, with_ui};
+    use super::*;
 
     #[test]
     fn a_chrome_spore_must_source_every_region_it_claims() {
-        let ok = Manifest::parse(&manifest(
-            "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"ui/dock.lua\"\n[presentation]\nbadge = \"D\"\ncolor = \"#8bd5ca\"\n",
-        ))
-        .expect("a sourced region parses");
-        assert_eq!(ok.chrome.as_ref().unwrap().regions, vec!["dock"]);
-        assert_eq!(ok.presentation.as_ref().unwrap().badge, "D");
+        // One region, one UI file: the entry already is the region's Lua, so no
+        // `[chrome.sources]` is needed and none can go stale.
+        let implicit = Manifest::parse(&manifest("[chrome]\nregions = [\"dock\"]\n"))
+            .expect("a single-region Spore defaults to its UI entry");
+        assert_eq!(implicit.region_source("dock"), Some("ui/main.lua"));
+        assert_eq!(
+            implicit.region_source("top-bar"),
+            None,
+            "an unclaimed region has no source"
+        );
 
-        let missing = Manifest::parse(&manifest("[chrome]\nregions = [\"dock\"]\n"));
+        let explicit = Manifest::parse(&manifest(
+            "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"dist/dock.lua\"\n[presentation]\nbadge = \"D\"\ncolor = \"#8bd5ca\"\n",
+        ))
+        .expect("an explicit region artifact wins over the UI entry");
+        assert_eq!(explicit.region_source("dock"), Some("dist/dock.lua"));
+        assert_eq!(explicit.presentation.as_ref().unwrap().badge, "D");
+
+        let missing = Manifest::parse(&with_ui("", "[chrome]\nregions = [\"dock\"]\n"));
         assert!(
             missing.is_err(),
-            "a region with no source is a hole in the shell"
+            "a region with no source and no UI entry is a hole in the shell"
         );
 
         let unknown = Manifest::parse(&manifest(
@@ -1314,11 +1755,244 @@ mod chrome_tests {
 
     #[test]
     fn declared_paths_cover_chrome_sources() {
-        let manifest = Manifest::parse(&manifest(
-            "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"ui/dock.lua\"\n",
+        let explicit = Manifest::parse(&manifest(
+            "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"dist/dock.lua\"\n",
         ))
         .expect("manifest");
-        let paths = manifest.declared_paths();
-        assert!(paths.contains(&PathBuf::from("ui/dock.lua")));
+        let paths = explicit.declared_paths();
+        assert!(paths.contains(&PathBuf::from("dist/dock.lua")));
+
+        let implicit =
+            Manifest::parse(&manifest("[chrome]\nregions = [\"dock\"]\n")).expect("manifest");
+        assert_eq!(
+            implicit.declared_paths(),
+            vec![PathBuf::from("ui/main.lua"), PathBuf::from("module.wasm")],
+            "the UI entry is declared once even when a region also resolves to it"
+        );
+    }
+
+    #[test]
+    fn a_dependency_is_one_exact_version() {
+        let ok = Manifest::parse(&manifest("[deps]\n\"fungos.ui\" = \"0.1.0\"\n"));
+        let ok = ok.expect("an exact version parses");
+        assert_eq!(ok.deps.get("fungos.ui").map(String::as_str), Some("0.1.0"));
+
+        for range in ["^0.1.0", "~0.1.0", ">=0.1.0", "0.1.*", "<0.2.0"] {
+            let bad = Manifest::parse(&manifest(&format!("[deps]\n\"fungos.ui\" = \"{range}\"\n")));
+            assert!(
+                bad.is_err(),
+                "{range} is a range, and a composed artifact cannot float"
+            );
+        }
+
+        let bad_name = Manifest::parse(&manifest("[deps]\n\"Fungos.UI\" = \"0.1.0\"\n"));
+        assert!(
+            bad_name.is_err(),
+            "a dependency name is a lowercase identifier"
+        );
+    }
+
+    #[test]
+    fn lua_is_an_entrypoint_of_its_own() {
+        let lua_only = with_ui("[ui]\nentry = \"ui/app.lua\"\n", "")
+            .replace("[module]\npath = \"module.wasm\"\n", "");
+        let parsed = Manifest::parse(&lua_only).expect("a Lua-only Spore is a Spore");
+        assert!(parsed.module.is_none());
+        assert_eq!(
+            parsed.declared_paths(),
+            vec![PathBuf::from("ui/app.lua")],
+            "no wasm means nothing claims a module file"
+        );
+
+        // Chrome with no UI entry still installs, because the host draws it and
+        // the region names its own artifact.
+        let chrome_only = Manifest::parse(
+            &with_ui("", "[chrome]\nregions = [\"dock\"]\n")
+                .replace("[module]\npath = \"module.wasm\"\n", "")
+                .replace(
+                    "[chrome]\nregions = [\"dock\"]\n",
+                    "[chrome]\nregions = [\"dock\"]\n[chrome.sources]\ndock = \"ui/dock.lua\"\n",
+                ),
+        )
+        .expect("a chrome Spore needs no UI entry when it names its artifact");
+        assert_eq!(chrome_only.region_source("dock"), Some("ui/dock.lua"));
+    }
+
+    #[test]
+    fn a_spore_with_no_entrypoint_is_refused() {
+        let empty = with_ui("", "").replace("[module]\npath = \"module.wasm\"\n", "");
+        let error = Manifest::parse(&empty).expect_err("nothing to run, nothing to draw");
+        assert!(
+            error.to_string().contains("entrypoint"),
+            "the error says what is missing: {error}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod anycast_tests {
+    use super::fixtures::manifest;
+    use super::identity::Identity;
+    use super::publisher::TrustedPublisher;
+    use super::{Error, Lock, Manifest, lease};
+
+    const CLAIM: &str =
+        "[anycast]\nname = \"confluence\"\nkind = \"confluence\"\nalpns = [\"soil/http/1\"]\n";
+    const PEM: &str =
+        "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ==\n-----END CERTIFICATE-----\n";
+
+    fn lock() -> Lock {
+        Lock {
+            id: "dev.fungos.confluence".into(),
+            version: "0.1.0".into(),
+            files: Vec::new(),
+            digest: "sha256:abc".into(),
+        }
+    }
+
+    fn publisher() -> TrustedPublisher {
+        TrustedPublisher {
+            principal: "fleet/fpl".into(),
+            grant_id: "grant-7".into(),
+            key_id: "key-1".into(),
+        }
+    }
+
+    fn identity() -> Identity {
+        Identity::derived(PEM, "").expect("the fixture certificate denotes a node")
+    }
+
+    #[test]
+    fn a_claim_renders_a_lease_the_daemon_would_accept() {
+        let parsed = Manifest::parse(&manifest(CLAIM)).expect("claim parses");
+        let identity = identity();
+        let document = lease::document(
+            &parsed,
+            &lock(),
+            &publisher(),
+            &identity,
+            &["http://10.253.0.6:8788".into()],
+            1_000,
+        )
+        .expect("lease renders");
+        let observation = &document["observations"][0];
+        assert_eq!(
+            observation["service_id"],
+            format!("service/{}/application/confluence", identity.node_id)
+        );
+        assert_eq!(observation["value"]["kind"], "confluence");
+        assert_eq!(
+            observation["value"]["endpoints"][0],
+            "http://10.253.0.6:8788"
+        );
+        assert_eq!(observation["value"]["attributes"]["grant_id"], "grant-7");
+        assert_eq!(
+            observation["value"]["attributes"]["package_digest"],
+            "sha256:abc"
+        );
+        assert_eq!(
+            observation["value"]["attributes"]["node_id"],
+            identity.node_id.as_str()
+        );
+        // The lease the daemon accepts expires; a lease it must renew cannot
+        // carry a longer life than it is allowed to honour.
+        assert_eq!(observation["expires_at"], 1_240);
+    }
+
+    #[test]
+    fn a_named_node_is_findable_from_its_lease() {
+        let parsed = Manifest::parse(&manifest(CLAIM)).expect("claim parses");
+        let named = Identity::derived(
+            PEM,
+            "MYCELIUM_SITE=wagar-house\nMYCELIUM_IROH_SERVER_NAME=runner-3.wagar-house.myc\n",
+        )
+        .expect("identity");
+        let document = lease::document(
+            &parsed,
+            &lock(),
+            &publisher(),
+            &named,
+            &["http://10.253.0.6:8788".into()],
+            1_000,
+        )
+        .expect("lease renders");
+        let attributes = &document["observations"][0]["value"]["attributes"];
+        // A digest alone tells an operator nothing about which host answered.
+        assert_eq!(attributes["node_name"], "runner-3.wagar-house.myc");
+        assert_eq!(attributes["site"], "wagar-house");
+    }
+
+    #[test]
+    fn a_lease_never_outlives_what_mycelium_honours() {
+        let too_long = Manifest::parse(&manifest(
+            "[anycast]\nname = \"confluence\"\nkind = \"confluence\"\nttl_secs = 301\n",
+        ));
+        assert!(too_long.is_err(), "301 s is a renewer that will never run");
+
+        let zero = Manifest::parse(&manifest(
+            "[anycast]\nname = \"confluence\"\nkind = \"confluence\"\nttl_secs = 0\n",
+        ));
+        assert!(zero.is_err(), "a lease with no life is not a lease");
+    }
+
+    #[test]
+    fn a_claim_must_be_addressable() {
+        let upper = Manifest::parse(&manifest(
+            "[anycast]\nname = \"Confluence\"\nkind = \"confluence\"\n",
+        ));
+        assert!(upper.is_err(), "a service label is lowercase alphanumeric");
+
+        let empty = Manifest::parse(&manifest("[anycast]\nname = \"confluence\"\nkind = \"\"\n"));
+        assert!(empty.is_err(), "a claim with no kind joins nothing");
+    }
+
+    #[test]
+    fn a_spore_without_a_claim_never_leases() {
+        let parsed = Manifest::parse(&manifest(""));
+        let plain = parsed.expect("a local Spore still parses");
+        assert!(plain.anycast.is_none());
+        let refused = lease::document(
+            &plain,
+            &lock(),
+            &publisher(),
+            &identity(),
+            &["http://10.253.0.6:8788".into()],
+            1_000,
+        );
+        assert!(matches!(refused, Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn endpoints_are_hints_without_credentials() {
+        let parsed = Manifest::parse(&manifest(CLAIM)).expect("claim parses");
+        for bad in [
+            "http://user:pw@10.0.0.1:8788",
+            "http://10.0.0.1:8788/secret",
+            "ftp://10.0.0.1:21",
+            "10.0.0.1:8788",
+        ] {
+            let refused = lease::document(
+                &parsed,
+                &lock(),
+                &publisher(),
+                &identity(),
+                &[bad.into()],
+                1_000,
+            );
+            assert!(refused.is_err(), "{bad} is not a connection hint");
+        }
+        let too_many: Vec<String> = (0..33).map(|i| format!("tcp://10.0.0.{i}:1")).collect();
+        assert!(
+            lease::document(
+                &parsed,
+                &lock(),
+                &publisher(),
+                &identity(),
+                &too_many,
+                1_000
+            )
+            .is_err(),
+            "the daemon drops an observation with more than 32 endpoints"
+        );
     }
 }

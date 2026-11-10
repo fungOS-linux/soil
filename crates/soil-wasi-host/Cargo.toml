@@ -21,6 +21,7 @@ http-body-util = "0.1"
 hyper = { version = "1", default-features = false, features = ["http1", "server"] }
 ipnet = "2"
 sha2 = "0.10"
+soil-records-host = { path = "../soil-records-host" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 url = "2"
 wasmtime = { version = "50", default-features = false, features = [

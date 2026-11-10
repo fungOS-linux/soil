@@ -10,7 +10,10 @@
 use std::{env, fs, path::PathBuf, process::ExitCode, sync::Arc};
 
 use anyhow::{Context, Result, bail};
-use soil_wasi_host::{HttpPolicy, HttpService, NetworkPolicy, WasiHostBuilder, WasiHostPolicy};
+use soil_records_host::RecordsBookHost;
+use soil_wasi_host::{
+    HttpPolicy, HttpService, NetworkPolicy, UnibusBus, WasiHostBuilder, WasiHostPolicy,
+};
 use tokio::net::TcpListener;
 use wasmtime_wasi::FsPerms;
 
@@ -43,6 +46,16 @@ async fn run() -> Result<()> {
     for (host, guest, perms) in options.preopens {
         builder = builder.preopen_dir(host, guest, perms);
     }
+    if let Some((root, book, collection)) = options.records {
+        let records = RecordsBookHost::open(&root, book, collection)
+            .with_context(|| format!("open records book in {}", root.display()))?;
+        builder = builder.records_book(records);
+    }
+    if let Some(path) = &options.unibus {
+        let bus = UnibusBus::from_config_file(path)
+            .with_context(|| format!("connect the Unibus hub for {}", path.display()))?;
+        builder = builder.bus(Arc::new(bus));
+    }
     let service = Arc::new(HttpService::from_bytes(&bytes, builder)?);
     let listener = TcpListener::bind(&options.listen)
         .await
@@ -63,6 +76,8 @@ struct Options {
     inherit_env: bool,
     inherit_stdio: bool,
     preopens: Vec<(PathBuf, String, FsPerms)>,
+    records: Option<(PathBuf, String, String)>,
+    unibus: Option<PathBuf>,
 }
 
 impl Options {
@@ -135,6 +150,14 @@ impl Options {
                     let value = next(&mut args, "--dir")?;
                     options.preopens.push(parse_dir(&value)?);
                 }
+                "--records" => {
+                    let value = next(&mut args, "--records")?;
+                    options.records = Some(parse_records(&value)?);
+                }
+                "--unibus" => {
+                    let value = next(&mut args, "--unibus")?;
+                    options.unibus = Some(PathBuf::from(value));
+                }
                 "--help" | "-h" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -158,6 +181,27 @@ impl Options {
 fn next(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
     args.next()
         .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))
+}
+
+fn parse_records(value: &str) -> Result<(PathBuf, String, String)> {
+    let mut parts = value.splitn(3, ':');
+    let root = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("--records requires DIR:BOOK:COLLECTION"))?;
+    let book = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("--records requires DIR:BOOK:COLLECTION"))?;
+    let collection = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("--records requires DIR:BOOK:COLLECTION"))?;
+    Ok((
+        PathBuf::from(root),
+        book.to_string(),
+        collection.to_string(),
+    ))
 }
 
 fn parse_dir(value: &str) -> Result<(PathBuf, String, FsPerms)> {
@@ -195,4 +239,13 @@ usage: soil-wasi-http [OPTIONS] COMPONENT.wasm
   --env KEY=VALUE             set a guest environment variable (repeatable)
   --inherit-env               inherit the host environment
   --inherit-stdio             inherit stdin/stdout/stderr
-  --dir HOST:GUEST[:ro|rw]    preopen a directory (default ro, repeatable)";
+  --dir HOST:GUEST[:ro|rw]    preopen a directory (default ro, repeatable)
+  --records DIR:BOOK:COLLECTION
+                              link soil:records to one book and collection, so a
+                              Spore that imports it can store run state. Without
+                              this flag the interface is unlinked and such a
+                              component fails to instantiate.
+  --unibus CONFIG.json       connect the Unibus hub named by an unibus-sdk
+                              `ClientConfig` and link soil:unibus, so a Spore
+                              that imports it can poll and publish frames. The
+                              credential stays in the host.";

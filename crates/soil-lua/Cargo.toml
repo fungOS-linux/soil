@@ -1,0 +1,20 @@
+[package]
+name = "soil-lua"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# The same engine and the same feature set Canvas uses: one Luau, one dialect,
+# so a view that runs in one host runs in the other.
+mlua = { version = "0.12", features = ["luau", "serialize"] }
+anyhow = "1"
+serde_json = "1"
+soil-scene = { path = "../soil-scene" }
+soil-spore = { path = "../soil-spore" }
+
+[[bin]]
+name = "soil-lua"
+path = "src/bin/soil-lua.rs"

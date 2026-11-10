@@ -97,7 +97,10 @@ a real component pushes bounded PCM into a cpal host. See
 [`docs/wasi-audio.md`](docs/wasi-audio.md). Guest code uses the umbrella
 [`crates/soil-sdk`](crates/soil-sdk); its first feature, `audio`, provides
 `Output`, `write_all`, `tone` and `play_tone`. See
-[`docs/soil-sdk.md`](docs/soil-sdk.md).
+[`docs/soil-sdk.md`](docs/soil-sdk.md). Lua guests can use the generated
+[`crates/soil-sdk-lua`](crates/soil-sdk-lua) bindings: `soil-sdk-lua` reads the
+canonical WIT and emits `soil.lua` plus a host signature manifest. The host
+installs one `__soil_call` dispatcher; the SDK never reimplements a capability.
 The CRM is a Spore over namespaced records, not a host: [`spores/crm`](spores/crm)
 reads `crm`, `contacts`, `calls` and `messages` namespaces, while the host maps
 those names to books and enforces grants. See [`docs/crm.md`](docs/crm.md).
@@ -108,12 +111,50 @@ The reusable WASI p2 profile is [`crates/soil-wasi-host`](crates/soil-wasi-host)
 random, filesystem preopens and a per-request store. `soil-wasi-http` serves a
 component's `wasi:http/incoming-handler` with a deny-by-default origin/network
 policy. See [`docs/wasi.md`](docs/wasi.md).
+Secrets are host-mediated: a Spore names a credential and gets an opaque handle,
+never the bytes. The backend is Geode; see [`docs/soil-creds.md`](docs/soil-creds.md).
+A Spore can opt into a name that any node running it answers on, by declaring an
+`[anycast]` claim in its manifest and publishing a short-lived lease; see
+[`docs/soil-anycast.md`](docs/soil-anycast.md).
 The portable Linux/Android/macOS input normalizer is
 [`crates/soil-canvas-input`](crates/soil-canvas-input);
 [`docs/soil-canvas.md`](docs/soil-canvas.md) records the decision and host
 obligations, [`docs/soil-canvas-s22.md`](docs/soil-canvas-s22.md) records the S22
 proving run, and [`docs/android.md`](docs/android.md) records the first Android
 JNI proof.
+
+## Terminal in the browser
+
+[`crates/soil-terminal-web`](crates/soil-terminal-web) runs a real pty per
+session, feeds its bytes to `soil-vt`, and streams styled rows to a browser over
+SSE; keystrokes return as POSTs. It is the same emulator as the native terminal
+window, with the browser as a second presenter.
+
+One server hosts many sessions, so the page is a small multiplexer: a picker of
+targets — local shells, ssh hosts, and Mush desktops — plus tabs for the ones
+that are open. The catalog is `~/.config/fungos/terminal/targets.toml`;
+without it, the login shells, the `Host` aliases in `~/.ssh/config`, and the
+desktops under `~/.config/fungos/desktops/` are discovered.
+
+```sh
+# pick a shell, a host, or a desktop
+cargo run -p soil-terminal-web --bin soil-terminal-web
+
+# one target, no picker: a remote shell over ssh (normal host-key prompt)
+cargo run -p soil-terminal-web --bin soil-terminal-web -- --ssh aj@home-pi
+
+# one target, no picker: mush inside soil-vt
+cargo run -p soil-terminal-web --bin soil-terminal-web -- \
+  --command target/debug/mush --wasm spores/mush/module.wasm \
+  --root ~/.local/share/fungos/vfs
+```
+
+The Mycelium gateway serves it at `https://term.myc/` through one
+`routes.json` entry pointing at the server's loopback port.
+
+The listener defaults to loopback; a non-loopback address requires `--token`.
+Prefer an SSH tunnel (`ssh -L 8790:127.0.0.1:8790 host`) over exposing the port.
+See [`crates/soil-terminal-web/README.md`](crates/soil-terminal-web/README.md).
 
 ## Development
 

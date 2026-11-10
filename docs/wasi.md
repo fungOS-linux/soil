@@ -201,10 +201,23 @@ soil-wasi-http \
   --listen 127.0.0.1:8080 \
   --allow-origin https://api.example.com \
   --allow-tcp-connect 10.0.0.0/8 \
-  --allow-dns \
-  --inherit-stdio \
+  --allow-dns
+  --inherit-stdio
   component.wasm
-```
+  ```
+
+  A component that imports `soil:records` needs a book to write to:
+
+  ```sh
+  soil-wasi-http --records "$HOME/.local/share/elmers:team/fpl/elmers:runs" \
+    component.wasm
+  ```
+
+  The flag is `--records DIR:BOOK:COLLECTION`. One book is opened at startup and
+  shared by every request; the guest names only the collection. Without the flag
+  the interface is unlinked, so a component that imports it fails to instantiate
+  and the error names the missing interface. That is deliberate: a host that
+  cannot store state must not run a component that believes it can.
 
 Useful flags:
 

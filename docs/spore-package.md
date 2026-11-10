@@ -12,6 +12,7 @@ markdown/
   module.wasm             logic
   ui/editor.lua           presentation (Canvas JITs it)
   docs/man.md             the authored manual body
+  signatures/<keyid>.asc  detached PGP, excluded from the lock and the tar
   spore.lock              generated, included in the tar
 ```
 
@@ -129,6 +130,36 @@ Validation is strict because a package is executable content:
 - `[[actions]]` declares what the Spore offers to the action bus. Each needs an
   identifier, a title, an input schema, and capabilities that actually parse as
   `soil:`/`wasi:`/`fungos:`.
+- `[[skills]]` declares an agent skill by path; its frontmatter `name` must
+  match the declaration and its directory, and the description must not be
+  empty.
+
+## Skills
+
+A Spore can ship the agent skill that teaches an agent to use it. Declare each
+`SKILL.md` by path, the same way an asset is declared, so the lock and the tar
+cover it:
+
+```toml
+[[skills]]
+name = "bob"
+path = "skills/bob/SKILL.md"
+```
+
+`name` must match the frontmatter and the directory the file lives in:
+
+```markdown
+---
+name: bob
+description: Use when a build must not land on this machine.
+---
+```
+
+`soil-spore` rejects a declared skill that is missing, has no `---` frontmatter,
+carries a `name` different from the declaration, lives in a directory of another
+name, or has an empty description. A man page describes a command to a human; a
+skill is how an agent learns when to reach for it. Both belong to the package,
+and the skill is the one the registry installs.
 
 ## Lock
 
@@ -215,6 +246,13 @@ surfaces and grants are never retyped — and appends `docs.man` as text.
 homepage, a synopsis, a manual, an icon, a category, keywords, at least two
 screenshots, and a written reason for every grant. Passing it means a package is
 ready to be *reviewed*, not approved; see `docs/spore-store.md`.
+
+`check` reads the module's component type and fails when an imported WIT package
+is missing from `[grants]`. A module that imports `soil:records` while the
+manifest lists only WASI is rejected before anyone signs it. The manifest stays
+intent — the host still enforces — but it can no longer be wrong about what the
+module asks for. A core module is rejected outright: a Spore module is a
+component, and a core module has no component type to check.
 
 ## Man pages in Mush
 

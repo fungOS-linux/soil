@@ -22,7 +22,7 @@ soil-records-host = { path = "../soil-records-host" }
 soil-scrub = { path = "../soil-scrub" }
 tiny_http = "0.12"
 ureq = { version = "2", features = ["json"] }
-fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "bcd2bc682662467d1371a2c9f8436e08934132d9" }
+fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "6a12314e673ee6814486f9079a57b11715039e13" }
 soil-vfs-host = { path = "../soil-vfs-host" }
 soil-command = { path = "../soil-command" }
 soil-spore = { path = "../soil-spore" }

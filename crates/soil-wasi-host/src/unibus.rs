@@ -23,11 +23,22 @@
 //! whereas a silent local queue would hide a dead fleet. Confluence callers
 //! map `unavailable` to HTTP 503 so the provider retries the delivery.
 //!
+//! `unavailable` is transient, though, not terminal: [`UnibusBus`] owns a
+//! supervisor thread that rebuilds a dead session with exponential backoff and
+//! ordered hub failover, so a hub restart costs a few failed publishes rather
+//! than a restart of every Spore in the fleet. The contract does not change -
+//! while the session is down, `publish` and `poll` still return `unavailable`.
+//!
 //! Retention is split by backend: [`MemoryBus`] is a bounded retained log
 //! with an index cursor for tests, while [`UnibusBus`] is the live Unibus
 //! tail, so any non-empty cursor is `stale` and the Spore restarts live.
 
 use std::fmt;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use wasmtime::component::{HasSelf, Linker};
@@ -300,6 +311,189 @@ impl Bus for MemoryBus {
     }
 }
 
+/// How a dead hub session is rebuilt.
+///
+/// A hub restart is seconds and a power cut is minutes, so the first retry is
+/// fast and the ceiling is low: a recovered hub must not wait a minute to be
+/// noticed, and a fleet of Spores must not turn one dead hub into a thundering
+/// herd. The jitter below spreads them out further.
+#[derive(Clone, Copy, Debug)]
+struct Retry {
+    first_ms: u64,
+    max_ms: u64,
+    tick_ms: u64,
+}
+
+impl Default for Retry {
+    fn default() -> Self {
+        Self {
+            first_ms: 500,
+            max_ms: 30_000,
+            tick_ms: 200,
+        }
+    }
+}
+
+/// The live session, plus everything needed to build another one.
+///
+/// Shared with the supervisor thread, which is the only place a session is
+/// created or dropped after startup. `publish` and `poll` only ever borrow the
+/// current one, so a caller never waits for a reconnect.
+struct Link {
+    base: unibus::client::ClientConfig,
+    endpoints: Vec<String>,
+    retry: Retry,
+    live: Mutex<Option<unibus_sdk::Session>>,
+    endpoint: Mutex<String>,
+    down_since: Mutex<Option<Instant>>,
+    stopped: AtomicBool,
+}
+
+impl Link {
+    fn connect(&self, endpoint: &str) -> anyhow::Result<unibus_sdk::Session> {
+        let mut config = self.base.clone();
+        config.hub_endpoint = endpoint.to_owned();
+        unibus_sdk::Session::connect(config)
+            .with_context(|| format!("connect unibus hub {endpoint}"))
+    }
+
+    /// Remove a session that has died, and record when that happened.
+    ///
+    /// The SDK's worker thread exits on the first I/O error and flips
+    /// `connected` false, so this is noticed within its read timeout. Dropping
+    /// the session joins that thread, so it happens outside the lock.
+    fn take_dead(&self) -> bool {
+        let dead = self
+            .live
+            .lock()
+            .ok()
+            .and_then(|live| {
+                live.as_ref()
+                    .is_some_and(|session| !session.status().connected)
+                    .then_some(())
+            })
+            .is_some();
+        if !dead {
+            return false;
+        }
+        let session = self.live.lock().ok().and_then(|mut live| live.take());
+        drop(session);
+        if let Ok(mut down) = self.down_since.lock()
+            && down.is_none()
+        {
+            *down = Some(Instant::now());
+        }
+        true
+    }
+
+    fn install(&self, session: unibus_sdk::Session, endpoint: &str) {
+        let downtime = self
+            .down_since
+            .lock()
+            .ok()
+            .and_then(|mut down| down.take())
+            .map(|since| since.elapsed());
+        if let Ok(mut live) = self.live.lock() {
+            *live = Some(session);
+        }
+        if let Ok(mut current) = self.endpoint.lock() {
+            *current = endpoint.to_owned();
+        }
+        match downtime {
+            Some(downtime) => tracing::info!(
+                hub = %endpoint,
+                downtime_ms = downtime.as_millis(),
+                "unibus hub re-registered after an outage"
+            ),
+            None => tracing::info!(hub = %endpoint, "unibus hub registered"),
+        }
+    }
+
+    fn is_live(&self) -> bool {
+        self.live.lock().map(|live| live.is_some()).unwrap_or(false)
+    }
+}
+
+/// Delay before the next attempt: double, capped.
+fn next_delay(current: u64, retry: Retry) -> u64 {
+    current
+        .saturating_mul(2)
+        .clamp(retry.first_ms, retry.max_ms)
+}
+
+/// Spread a delay by +/-20%, deterministically per endpoint.
+///
+/// Every Spore in a fleet watches the same hub, so a plain backoff makes them
+/// all come back in the same millisecond. Seeding from the endpoint keeps the
+/// spread stable across restarts without a random number generator, and keeps
+/// it testable.
+fn jittered(delay_ms: u64, endpoint: &str) -> Duration {
+    let spread = (delay_ms / 5).max(1);
+    let seed = endpoint
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    let offset = seed % (spread * 2 + 1);
+    Duration::from_millis(delay_ms - spread + offset)
+}
+
+/// Sleep in slices, so a stop is noticed promptly rather than after a whole
+/// backoff period.
+fn wait(link: &Link, total: Duration) -> bool {
+    let slice = Duration::from_millis(link.retry.tick_ms.max(1));
+    let mut slept = Duration::ZERO;
+    while slept < total {
+        if link.stopped.load(Ordering::Acquire) {
+            return false;
+        }
+        let step = slice.min(total - slept);
+        std::thread::sleep(step);
+        slept += step;
+    }
+    !link.stopped.load(Ordering::Acquire)
+}
+
+/// Rebuild a dead session, forever, until the bus is dropped.
+///
+/// This is the one place a session is created after startup. The shape mirrors
+/// Mycelium's peer sync loop: a fixed tick, a per-endpoint attempt with a delay
+/// that doubles and caps, a reset on success, and no attempt while the link is
+/// healthy.
+fn supervise(link: Arc<Link>) {
+    let mut index = 0usize;
+    let mut delay = link.retry.first_ms;
+    let mut next_attempt = Instant::now();
+    while !link.stopped.load(Ordering::Acquire) {
+        link.take_dead();
+        if !link.is_live() && Instant::now() >= next_attempt {
+            let endpoint = link.endpoints[index % link.endpoints.len()].clone();
+            match link.connect(&endpoint) {
+                Ok(session) => {
+                    link.install(session, &endpoint);
+                    index = 0;
+                    delay = link.retry.first_ms;
+                    next_attempt = Instant::now();
+                }
+                Err(error) => {
+                    index = index.wrapping_add(1);
+                    delay = next_delay(delay, link.retry);
+                    next_attempt = Instant::now() + jittered(delay, &endpoint);
+                    tracing::warn!(
+                        hub = %endpoint,
+                        retry_in_ms = delay,
+                        hubs_left = link.endpoints.len() - (index % link.endpoints.len()),
+                        "unibus hub unreachable; will retry: {error:#}"
+                    );
+                }
+            }
+        }
+        if !wait(&link, Duration::from_millis(link.retry.tick_ms.max(1))) {
+            return;
+        }
+    }
+}
+
 /// Unibus-backed bus.
 ///
 /// Wraps one [`unibus_sdk::Session`] behind [`Bus`]. The session's worker
@@ -307,27 +501,36 @@ impl Bus for MemoryBus {
 /// a non-blocking enqueue that succeeds when queued, not when the router has
 /// fanned out. `poll` drains the inbound queue without waiting.
 ///
-/// There is no automatic reconnect in this adapter: if the session dies,
-/// `publish` and `poll` fail with `unavailable` until the host rebuilds the
-/// bus. That fail-closed behavior matters for sparse hubs: a Spore must not
-/// believe it published into a dead fleet. Reconnect (with backoff and hub
-/// failover) belongs in the host that owns the lifecycle, so the bus stays a
-/// pure adapter. See [`UnibusBus::connect_any`] for ordered hub failover at
-/// connect time.
+/// A session that dies is rebuilt in the background: the supervisor thread
+/// retries with exponential backoff, walking the endpoint list on each failure
+/// so ordered hub failover is a runtime property rather than only a startup
+/// one. Until a new session registers, `publish` and `poll` return
+/// `unavailable` - the Spore must never believe it published into a dead fleet.
+/// What changes is that the outage ends without restarting the Spore.
 pub struct UnibusBus {
-    session: std::sync::Mutex<unibus_sdk::Session>,
-    hub_endpoint: String,
+    link: Arc<Link>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl UnibusBus {
     /// Connect to the hub named by `config.hub_endpoint`.
     pub fn connect(config: unibus::client::ClientConfig) -> anyhow::Result<Self> {
-        let hub_endpoint = config.hub_endpoint.clone();
-        let session = unibus_sdk::Session::connect(config).context("connect unibus hub")?;
-        Ok(Self {
-            session: std::sync::Mutex::new(session),
-            hub_endpoint,
-        })
+        let endpoint = config.hub_endpoint.clone();
+        Self::connect_any(&config, &[endpoint])
+    }
+
+    /// Connect from a JSON `ClientConfig` file.
+    ///
+    /// `token_file` is resolved relative to the config, so a hub config and its
+    /// token travel together; the token is read here and never enters the
+    /// Spore or the process environment.
+    pub fn from_config_file(path: &Path) -> anyhow::Result<Self> {
+        let mut config: unibus::client::ClientConfig = serde_json::from_slice(
+            &std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
+        )
+        .with_context(|| format!("parse {}", path.display()))?;
+        config.resolve_token_file(path);
+        Self::connect(config)
     }
 
     /// Connect by trying `endpoints` in order, cloning `base` with each
@@ -337,22 +540,49 @@ impl UnibusBus {
     /// the bus. Endpoints are host addresses (for example `"192.168.1.39:18799"`
     /// for pris, a Tailscale address for studio/agora-one, or `"127.0.0.1:18799"`
     /// for a local `unibus-router`). Order is priority: put the nearest hub
-    /// first. If every endpoint fails, the error names the whole list so an
-    /// operator can see the fleet was sparse, not misconfigured.
+    /// first; the background supervisor walks the same list when a hub dies.
+    /// If every endpoint fails, the error names the whole list so an operator
+    /// can see the fleet was sparse, not misconfigured.
     pub fn connect_any(
         base: &unibus::client::ClientConfig,
         endpoints: &[String],
+    ) -> anyhow::Result<Self> {
+        Self::connect_any_with_retry(base, endpoints, Retry::default())
+    }
+
+    fn connect_any_with_retry(
+        base: &unibus::client::ClientConfig,
+        endpoints: &[String],
+        retry: Retry,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !endpoints.is_empty(),
             "at least one hub endpoint is required"
         );
+        let link = Arc::new(Link {
+            base: base.clone(),
+            endpoints: endpoints.to_vec(),
+            retry,
+            live: Mutex::new(None),
+            endpoint: Mutex::new(endpoints[0].clone()),
+            down_since: Mutex::new(None),
+            stopped: AtomicBool::new(false),
+        });
         let mut last_error = None;
         for endpoint in endpoints {
-            let mut config = base.clone();
-            config.hub_endpoint = endpoint.clone();
-            match Self::connect(config) {
-                Ok(bus) => return Ok(bus),
+            match link.connect(endpoint) {
+                Ok(session) => {
+                    link.install(session, endpoint);
+                    let supervised = Arc::clone(&link);
+                    let worker = std::thread::Builder::new()
+                        .name("unibus-reconnect".into())
+                        .spawn(move || supervise(supervised))
+                        .context("spawn the unibus reconnect supervisor")?;
+                    return Ok(Self {
+                        link,
+                        worker: Some(worker),
+                    });
+                }
                 Err(error) => {
                     tracing::warn!(hub = %endpoint, "unibus hub unavailable, trying next: {error:#}");
                     last_error = Some(error);
@@ -369,20 +599,42 @@ impl UnibusBus {
     }
 
     /// The hub endpoint this session registered against.
-    pub fn hub_endpoint(&self) -> &str {
-        &self.hub_endpoint
+    ///
+    /// Not stable for the life of the bus: a reconnect that fails over records
+    /// the hub that actually answered.
+    pub fn hub_endpoint(&self) -> String {
+        self.link
+            .endpoint
+            .lock()
+            .map(|endpoint| endpoint.clone())
+            .unwrap_or_default()
     }
 
-    /// Session health snapshot for logging. Sparse-hub hosts poll this on a
-    /// housekeeping tick and rebuild the bus when `connected` goes false.
+    /// Session health snapshot for logging.
+    ///
+    /// `connected` goes false the moment the session dies and stays false until
+    /// a new session registers; `dropped_events` is the SDK's count of frames
+    /// this Spore refused (overflow, or bytes on the content plane).
     pub fn status(&self) -> unibus_sdk::Status {
-        self.session
+        self.link
+            .live
             .lock()
-            .map(|session| session.status())
+            .ok()
+            .and_then(|live| live.as_ref().map(unibus_sdk::Session::status))
             .unwrap_or(unibus_sdk::Status {
                 connected: false,
                 dropped_events: 0,
             })
+    }
+}
+
+impl Drop for UnibusBus {
+    fn drop(&mut self) {
+        self.link.stopped.store(true, Ordering::Release);
+        // Start no new attempt; the supervisor notices within one tick.
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -396,7 +648,10 @@ impl Bus for UnibusBus {
     ) -> std::result::Result<BusReceipt, BusError> {
         validate_publish(kind, body, destination, ttl_ms)?;
         let body = body_as_json_object(body)?;
-        let session = self.session.lock().map_err(|_| BusError::Unavailable)?;
+        let live = self.link.live.lock().map_err(|_| BusError::Unavailable)?;
+        let Some(session) = live.as_ref() else {
+            return Err(BusError::Unavailable);
+        };
         if !session.status().connected {
             return Err(BusError::Unavailable);
         }
@@ -428,7 +683,10 @@ impl Bus for UnibusBus {
             // cursor from a previous live read must restart from the tail.
             Some(_) => return Err(BusError::Stale),
         }
-        let session = self.session.lock().map_err(|_| BusError::Unavailable)?;
+        let live = self.link.live.lock().map_err(|_| BusError::Unavailable)?;
+        let Some(session) = live.as_ref() else {
+            return Err(BusError::Unavailable);
+        };
         if !session.status().connected {
             return Err(BusError::Unavailable);
         }
@@ -523,7 +781,6 @@ mod tests {
             .to_string()
             .into_bytes()
     }
-
     #[test]
     fn memory_bus_publishes_and_pages_in_order() {
         let bus = MemoryBus::default();
@@ -622,5 +879,209 @@ mod tests {
                 .unwrap_err(),
             BusError::Invalid
         );
+    }
+
+    #[test]
+    fn a_backoff_doubles_then_caps() {
+        let retry = Retry {
+            first_ms: 500,
+            max_ms: 30_000,
+            tick_ms: 10,
+        };
+        assert_eq!(next_delay(500, retry), 1_000);
+        assert_eq!(next_delay(16_000, retry), 30_000);
+        // It never shrinks, and it never waits longer than the ceiling.
+        assert_eq!(next_delay(30_000, retry), 30_000);
+        assert_eq!(next_delay(u64::MAX, retry), 30_000);
+    }
+
+    #[test]
+    fn jitter_spreads_a_fleet_without_leaving_the_delay() {
+        let delay = 1_000;
+        let spread = delay / 5;
+        // Same endpoint, same wait: a restart does not reshuffle the fleet.
+        assert_eq!(
+            jittered(delay, "10.0.0.1:18799"),
+            jittered(delay, "10.0.0.1:18799")
+        );
+        for endpoint in ["pris:18799", "batty:18799", "studio:18799", "127.0.0.1:1"] {
+            let wait = jittered(delay, endpoint).as_millis() as u64;
+            assert!(
+                (delay - spread..=delay + spread).contains(&wait),
+                "{endpoint} waited {wait}ms, outside {delay}±{spread}"
+            );
+        }
+    }
+
+    /// A bound hub listener and a token file the client config can point at.
+    ///
+    /// The listener is handed back rather than rebound on the same port: a
+    /// rebinding race would make this test flaky for reasons that have nothing
+    /// to do with reconnecting.
+    fn fake_hub() -> (std::net::TcpListener, String, std::path::PathBuf) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let token =
+            std::env::temp_dir().join(format!("soil-unibus-token-{}-{stamp}", std::process::id()));
+        std::fs::write(&token, b"transport-token").expect("write token");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a hub");
+        let endpoint = listener.local_addr().expect("addr").to_string();
+        (listener, endpoint, token)
+    }
+
+    fn client_config(endpoint: &str, token: &std::path::Path) -> unibus::client::ClientConfig {
+        serde_json::from_value(serde_json::json!({
+            "installation_id": "soil-test",
+            "producer_id": "confluence",
+            "hub_endpoint": endpoint,
+            "token_file": token,
+            "zones": ["test"],
+            "schema_version": 2
+        }))
+        .expect("client config")
+    }
+
+    fn accept_and_register(
+        listener: &std::net::TcpListener,
+        producer: &str,
+    ) -> std::net::TcpStream {
+        let (mut socket, _) = listener.accept().expect("accept a client");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let (registration, _) =
+            unibus::framing::read_frame(&mut socket).expect("read the registration frame");
+        let reply = unibus::Envelope::new(
+            "soil-test",
+            "router",
+            Some(producer),
+            "transport-token",
+            unibus::Message::new(
+                unibus::kinds::V1_REPLY,
+                serde_json::json!({
+                    "request_id": registration.request_id,
+                    "success": true
+                }),
+            ),
+        );
+        unibus::framing::write_frame(&mut socket, &reply, &[])
+            .expect("write the registration reply");
+        socket
+    }
+
+    fn wait_until(what: &str, deadline: Duration, mut check: impl FnMut() -> bool) {
+        let until = Instant::now() + deadline;
+        while Instant::now() < until {
+            if check() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    #[test]
+    fn a_lost_session_is_rebuilt_and_re_registers() {
+        use std::sync::mpsc;
+
+        let (listener, endpoint, token) = fake_hub();
+        // Handshakes are driven by the test, not by sleeps: a hub that dies and
+        // returns on a timer would make a slow machine look like a bug.
+        let (kill_first, when_to_die) = mpsc::channel::<()>();
+        let (re_registered, second_registration) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let first = accept_and_register(&listener, "confluence");
+            when_to_die
+                .recv()
+                .expect("the test decides when the hub dies");
+            drop(first);
+            // A reconnect must re-register, not resume a dead socket. A retry
+            // that gave up mid-handshake is expected, so keep accepting until
+            // one completes.
+            loop {
+                match std::panic::catch_unwind(|| accept_and_register(&listener, "confluence")) {
+                    Ok(second) => {
+                        re_registered.send(()).expect("report the re-registration");
+                        // Stay up until the test is finished with the bus.
+                        let (_keep_open, until_done) = mpsc::channel::<()>();
+                        let _ = until_done.recv();
+                        drop(second);
+                        return;
+                    }
+                    Err(_) => continue,
+                }
+            }
+        });
+
+        let bus = UnibusBus::connect_any_with_retry(
+            &client_config(&endpoint, &token),
+            std::slice::from_ref(&endpoint),
+            Retry {
+                first_ms: 20,
+                max_ms: 40,
+                tick_ms: 5,
+            },
+        )
+        .expect("the first registration succeeds");
+        assert!(
+            bus.status().connected,
+            "the hub registered the first session"
+        );
+
+        kill_first.send(()).expect("kill the hub connection");
+        // A write is what discovers a dead socket: the session reports itself
+        // down when a send fails, not when the peer closes, so keep publishing
+        // while waiting. This is the contract the Spore actually lives with.
+        wait_until(
+            "the session to report itself down",
+            Duration::from_secs(10),
+            || {
+                let _ = bus.publish("test.v1", &frame("test.v1", "{}"), None, 0);
+                !bus.status().connected
+            },
+        );
+        // Fail closed while down: the Spore must not think it published.
+        assert_eq!(
+            bus.publish("test.v1", &frame("test.v1", "{}"), None, 0)
+                .unwrap_err(),
+            BusError::Unavailable
+        );
+
+        second_registration
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the supervisor must dial the hub again and re-register");
+        wait_until(
+            "the rebuilt session to report itself up",
+            Duration::from_secs(10),
+            || bus.status().connected,
+        );
+        assert!(
+            bus.publish("test.v1", &frame("test.v1", "{}"), None, 0)
+                .is_ok(),
+            "publishing resumes once the hub is back"
+        );
+        assert_eq!(
+            bus.hub_endpoint(),
+            endpoint,
+            "a single-endpoint fleet stays on its hub"
+        );
+        let _ = std::fs::remove_file(token);
+    }
+
+    #[test]
+    fn a_hub_that_never_answers_never_blocks_a_caller() {
+        let (listener, endpoint, token) = fake_hub();
+        // Nothing is listening by the time we dial: connect must fail at
+        // startup rather than spin or guess.
+        drop(listener);
+        let refused = UnibusBus::connect_any(
+            &client_config(&endpoint, &token),
+            &[endpoint.clone(), "127.0.0.1:1".to_string()],
+        );
+        let message = format!("{:#}", refused.err().expect("no hub, no bus"));
+        assert!(message.contains("all unibus hubs unreachable"), "{message}");
+        let _ = std::fs::remove_file(token);
     }
 }

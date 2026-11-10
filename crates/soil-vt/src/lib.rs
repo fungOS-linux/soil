@@ -3,7 +3,7 @@
 //! Emulation is the part of a terminal that is actually hard — escape
 //! sequences, wide characters, reflow on resize, scrollback, the alternate
 //! screen. None of it is Soil's to invent, so this crate wraps
-//! [`libghostty_vt`], the emulator extracted from Ghostty, and exposes the only
+//! [`ghostty_vt`], the emulator extracted from Ghostty, and exposes the only
 //! thing a renderer needs: a snapshot of the grid.
 //!
 //! ```text
@@ -13,13 +13,29 @@
 //! Deliberately no rendering, no fonts, no colour policy. Soil owns the
 //! process and its output; Canvas owns pixels. A `Snapshot` is plain data so it
 //! can cross a WIT boundary unchanged.
+//!
+//! # Building
+//!
+//! `ghostty-vt-sys` compiles libghostty-vt with Zig, and Ghostty requires an
+//! exact Zig minor version. The toolchain is pinned in `.cargo/config.toml`
+//! (`ZIG`) and fetched by `scripts/bootstrap-toolchain.sh`, so `cargo build`
+//! does not depend on whatever `zig` happens to be on `PATH`.
+//!
+//! ```sh
+//! scripts/bootstrap-toolchain.sh
+//! cargo test -p soil-vt
+//! ```
+//!
+//! If the build fails inside Ghostty's `libsystem_override.sh` with
+//! `ar: temporary file: No such file or directory`, the process `TMPDIR` points
+//! at a directory that no longer exists. Re-run with `TMPDIR=/tmp`.
 
 pub mod host;
 
 pub use host::Host;
 
-use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
-use libghostty_vt::terminal::{Options, Terminal};
+use ghostty_vt::render::{CellIterator, RenderState, RowIterator};
+use ghostty_vt::terminal::{Event, Options, ScrollViewport, Terminal};
 
 /// A colour as it arrives from the terminal, before any theme is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +45,8 @@ pub struct Rgb {
     pub b: u8,
 }
 
-impl From<libghostty_vt::style::RgbColor> for Rgb {
-    fn from(value: libghostty_vt::style::RgbColor) -> Self {
+impl From<ghostty_vt::style::RgbColor> for Rgb {
+    fn from(value: ghostty_vt::style::RgbColor) -> Self {
         Self {
             r: value.r,
             g: value.g,
@@ -77,6 +93,21 @@ pub struct Snapshot {
     /// Bells rung so far, cumulative. A renderer compares this with the value it
     /// last acted on; a counter survives a dropped frame where a flag would not.
     pub bells: u64,
+    /// Where the viewport sits in the scrollback, when the emulator reports it.
+    /// A renderer uses this for a scrollbar and to tell history from the active
+    /// screen; `None` means the emulator did not answer.
+    pub scroll: Option<Scroll>,
+}
+
+/// The viewport's position in the scrollable area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scroll {
+    /// First visible row, counted from the top of the scrollback.
+    pub offset: u64,
+    /// Total rows in the scrollable area.
+    pub total: u64,
+    /// Rows visible at once.
+    pub len: u64,
 }
 
 impl Snapshot {
@@ -118,24 +149,24 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<libghostty_vt::error::Error> for Error {
-    fn from(value: libghostty_vt::error::Error) -> Self {
+impl From<ghostty_vt::error::Error> for Error {
+    fn from(value: ghostty_vt::error::Error) -> Self {
         Self(value.to_string())
     }
 }
 
 /// A live terminal: the state a running program writes into.
 pub struct Session {
-    terminal: Terminal<'static, 'static>,
-    /// Shared with the emulator's callbacks: libghostty-vt reports events as it
-    /// parses, so the counters must outlive the borrow that `write` holds.
-    bells: std::rc::Rc<std::cell::Cell<u64>>,
+    terminal: Terminal,
+    /// Bells rung so far. The emulator reports each bell as an event while it
+    /// parses; a counter survives a dropped frame where a flag would not.
+    bells: u64,
     /// Bytes the emulator wants written back to the pty (device status reports,
     /// and the kitty keyboard negotiation that a full-screen program expects).
-    responses: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
-    render: RenderState<'static>,
-    rows: RowIterator<'static>,
-    cells: CellIterator<'static>,
+    responses: Vec<u8>,
+    render: RenderState,
+    rows: RowIterator,
+    cells: CellIterator,
 }
 
 impl std::fmt::Debug for Session {
@@ -154,30 +185,21 @@ impl Session {
         if cols == 0 || rows == 0 {
             return Err(Error("a terminal needs at least one cell".into()));
         }
-        let bells = std::rc::Rc::new(std::cell::Cell::new(0u64));
-        let responses = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut terminal = Terminal::new(Options {
-            cols,
-            rows,
-            max_scrollback: scrollback,
-        })?;
-        {
-            let counter = std::rc::Rc::clone(&bells);
-            let _ = terminal.on_bell(move |_| counter.set(counter.get() + 1));
-        }
-        {
-            let outbox = std::rc::Rc::clone(&responses);
-            let _ =
-                terminal.on_pty_write(move |_, data| outbox.borrow_mut().extend_from_slice(data));
-        }
-        Ok(Self {
-            terminal,
-            bells,
-            responses,
+        let mut session = Self {
+            terminal: Terminal::new(Options {
+                cols,
+                rows,
+                max_scrollback: scrollback_bytes(scrollback, cols),
+            })?,
+            bells: 0,
+            responses: Vec::new(),
             render: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
-        })
+        };
+        // Creating a terminal already queues its device-attribute answer.
+        session.pump_events();
+        Ok(session)
     }
 
     pub fn cols(&self) -> u16 {
@@ -190,18 +212,29 @@ impl Session {
 
     /// Bells rung since the session started.
     pub fn bells(&self) -> u64 {
-        self.bells.get()
+        self.bells
+    }
+
+    /// Move the viewport through history. Negative is up, towards older rows.
+    pub fn scroll(&mut self, delta: isize) {
+        self.terminal.scroll_viewport(ScrollViewport::Delta(delta));
+    }
+
+    /// Return the viewport to the active screen.
+    pub fn scroll_to_bottom(&mut self) {
+        self.terminal.scroll_viewport(ScrollViewport::Bottom);
     }
 
     /// Take the bytes the emulator wants sent back to the program, if any.
-    pub fn drain_responses(&self) -> Vec<u8> {
-        std::mem::take(&mut *self.responses.borrow_mut())
+    pub fn drain_responses(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.responses)
     }
 
     /// Feed a program's output. Partial sequences are held by the emulator, so
     /// a caller may hand over any chunk size, including single bytes.
     pub fn write(&mut self, bytes: &[u8]) {
         self.terminal.vt_write(bytes);
+        self.pump_events();
     }
 
     /// Resize the grid. Content reflows; scrollback is preserved.
@@ -210,7 +243,22 @@ impl Session {
             return Err(Error("a terminal needs at least one cell".into()));
         }
         self.terminal.resize(cols, rows, 1, 1)?;
+        // A resize can emit a size report for a program that asked for one.
+        self.pump_events();
         Ok(())
+    }
+
+    /// Collect what the emulator queued while parsing: bells, and bytes a
+    /// program is waiting on. Events are drained after every write so the
+    /// outbox never grows with output nobody asked for.
+    fn pump_events(&mut self) {
+        for event in self.terminal.events() {
+            match event {
+                Event::Bell => self.bells = self.bells.saturating_add(1),
+                Event::PtyWrite(bytes) => self.responses.extend_from_slice(&bytes),
+                _ => {}
+            }
+        }
     }
 
     /// Read the grid as it should be drawn now.
@@ -218,11 +266,20 @@ impl Session {
         let cols = self.cols();
         let rows = self.rows();
         let title = self.terminal.title().unwrap_or_default().to_owned();
-        let cursor = self.terminal.is_cursor_visible().unwrap_or(false).then(|| {
-            (
-                self.terminal.cursor_x().unwrap_or(0),
-                self.terminal.cursor_y().unwrap_or(0),
-            )
+        // A cursor in history would point at a row that is not the program's
+        // cursor, so it is only meaningful while the viewport is active.
+        let viewport_active = self.terminal.is_viewport_active().unwrap_or(true);
+        let cursor =
+            (viewport_active && self.terminal.is_cursor_visible().unwrap_or(false)).then(|| {
+                (
+                    self.terminal.cursor_x().unwrap_or(0),
+                    self.terminal.cursor_y().unwrap_or(0),
+                )
+            });
+        let scroll = self.terminal.scrollbar().ok().map(|bar| Scroll {
+            offset: bar.offset,
+            total: bar.total,
+            len: bar.len,
         });
 
         let mut cells = vec![Cell::default(); usize::from(cols) * usize::from(rows)];
@@ -250,12 +307,13 @@ impl Session {
             cells,
             cursor,
             title,
-            bells: self.bells(),
+            bells: self.bells,
+            scroll,
         })
     }
 }
 
-fn read_cell(cell: &libghostty_vt::render::CellIteration<'_, '_>) -> Result<Cell, Error> {
+fn read_cell(cell: &ghostty_vt::render::CellIteration<'_>) -> Result<Cell, Error> {
     let mut text = String::new();
     cell.graphemes_utf8(&mut text)?;
     let style = cell.style()?;
@@ -265,12 +323,23 @@ fn read_cell(cell: &libghostty_vt::render::CellIteration<'_, '_>) -> Result<Cell
         bg: cell.bg_color()?.map(Rgb::from),
         bold: style.bold,
         italic: style.italic,
-        underline: style.underline != libghostty_vt::style::Underline::None,
+        underline: style.underline != ghostty_vt::style::Underline::None,
         faint: style.faint,
         inverse: style.inverse,
-        wide_tail: cell.raw_cell()?.wide()? != libghostty_vt::screen::CellWide::Narrow,
+        // Only the *tail* of a wide cluster is a tail. The leading cell owns
+        // the glyph and advances the renderer by two; marking it here too
+        // would make a renderer skip the glyph it is supposed to draw.
+        wide_tail: cell.raw_cell()?.wide()? == ghostty_vt::screen::CellWide::SpacerTail,
         selected: cell.is_selected()?,
     })
+}
+
+/// Ghostty bounds scrollback in bytes, pruned at page granularity; callers of
+/// this crate think in lines. Sixteen bytes per cell approximates one styled
+/// grapheme, which keeps the bound proportional to the requested line count
+/// without claiming to be exact.
+fn scrollback_bytes(lines: usize, cols: u16) -> usize {
+    lines.saturating_mul(usize::from(cols)).saturating_mul(16)
 }
 
 #[cfg(test)]
@@ -375,6 +444,96 @@ mod tests {
         // Nothing is selected until a gesture says so; a renderer must be able
         // to rely on the flag being meaningful rather than always true.
         assert!(!snapshot.cell(0, 0).unwrap().selected);
+    }
+
+    #[test]
+    fn only_the_trailing_cell_of_a_wide_cluster_is_a_tail() {
+        let mut session = Session::new(4, 1, 10).expect("terminal");
+        session.write("界".as_bytes());
+        let snapshot = session.snapshot().unwrap();
+        let head = snapshot.cell(0, 0).unwrap();
+        assert_eq!(head.text, "界");
+        assert!(
+            !head.wide_tail,
+            "the leading cell owns the glyph and must be drawn"
+        );
+        assert!(
+            snapshot.cell(1, 0).unwrap().wide_tail,
+            "the spacer to the right is the tail"
+        );
+    }
+
+    #[test]
+    fn a_ratatui_frame_lands_in_the_grid() {
+        // Produced by `spores/tui` (`App::preview(60, 16, 0)`) — the TUI Spore
+        // renders ANSI, and this is the host half of the contract.
+        let frame = include_bytes!("../tests/fixtures/ratatui-frame.ansi");
+        let mut session = Session::new(60, 16, 1000).expect("terminal");
+        session.write(frame);
+        let snapshot = session.snapshot().unwrap();
+        assert_eq!(snapshot.cols, 60);
+        assert_eq!(snapshot.rows, 16);
+        assert!(
+            snapshot.row_text(0).starts_with("┌ soil tui ─"),
+            "{}",
+            snapshot.row_text(0)
+        );
+        assert!(
+            snapshot.row_text(1).contains("Overview"),
+            "{}",
+            snapshot.row_text(1)
+        );
+        assert!(
+            snapshot.row_text(4).contains("> Ingest"),
+            "{}",
+            snapshot.row_text(4)
+        );
+        assert!(
+            snapshot.row_text(14).contains("tab switch"),
+            "{}",
+            snapshot.row_text(14)
+        );
+        // The frame hides the cursor at the end, so the snapshot carries none.
+        assert_eq!(snapshot.cursor, None);
+    }
+
+    #[test]
+    fn scrolling_up_shows_earlier_rows_and_hides_the_cursor() {
+        let mut session = Session::new(20, 3, 100).expect("terminal");
+        session.write(b"l0\r\nl1\r\nl2\r\nl3\r\nl4\r\nl5");
+        let active = session.snapshot().unwrap();
+        assert_eq!(active.row_text(0), "l3");
+        assert_eq!(active.row_text(2), "l5");
+        assert!(active.cursor.is_some(), "the active screen shows a cursor");
+        let active_scroll = active.scroll.expect("a scrollbar state");
+        assert_eq!(active_scroll.len, 3);
+
+        session.scroll(-2);
+        let history = session.snapshot().unwrap();
+        assert_eq!(history.row_text(0), "l1");
+        assert_eq!(history.row_text(2), "l3");
+        assert_eq!(history.cursor, None, "no cursor while reading history");
+        assert!(
+            history.scroll.expect("scrollbar").offset < active_scroll.offset,
+            "the viewport moved up"
+        );
+
+        session.scroll_to_bottom();
+        let back = session.snapshot().unwrap();
+        assert_eq!(back.row_text(0), "l3");
+        assert!(back.cursor.is_some());
+    }
+
+    #[test]
+    fn scrolling_past_the_ends_is_clamped() {
+        let mut session = Session::new(20, 3, 100).expect("terminal");
+        session.write(b"a\r\nb\r\nc\r\nd");
+        session.scroll(-10_000);
+        let top = session.snapshot().unwrap();
+        assert_eq!(top.row_text(0), "a");
+        session.scroll(10_000);
+        let bottom = session.snapshot().unwrap();
+        assert_eq!(bottom.row_text(0), "b");
     }
 
     #[test]

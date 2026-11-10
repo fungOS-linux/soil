@@ -60,16 +60,30 @@ fn run() -> anyhow::Result<()> {
         }
     }
     let scene_path = scene_path.ok_or_else(|| anyhow::anyhow!("missing --scene"))?;
-    let socket = socket.ok_or_else(|| anyhow::anyhow!("missing --canvas-socket"))?;
-    let source_id = source_id.ok_or_else(|| anyhow::anyhow!("missing --source-id"))?;
 
     let mut last_modified = modified(&scene_path);
     let mut revision = 1u64;
     let mut scene = read_scene(&scene_path)?;
     let mut frame = soil_scene_gpu::render(&scene, size.0, size.1, Theme::default())?;
-    if let Some(path) = rgba_path {
+    if let Some(path) = &rgba_path {
         std::fs::write(path, &frame.rgba)?;
     }
+    // A document can be rasterized with no compositor on the machine. Requiring
+    // a socket to write a file made the one command that shows what a Spore drew
+    // depend on the thing it was meant to replace.
+    let Some(socket) = socket else {
+        if rgba_path.is_none() {
+            anyhow::bail!("give --canvas-socket to present, or --rgba to write a frame");
+        }
+        println!(
+            "soil-scene-gpu: rasterized {}x{} nodes={}",
+            size.0,
+            size.1,
+            scene.nodes.len()
+        );
+        return Ok(());
+    };
+    let source_id = source_id.ok_or_else(|| anyhow::anyhow!("missing --source-id"))?;
 
     let mut stream = UnixStream::connect(&socket)?;
     if let Some(path) = input_out {
