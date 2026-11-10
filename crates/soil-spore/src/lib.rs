@@ -152,6 +152,15 @@ pub struct Manifest {
     /// the Spore is prose, and the prose has to travel with the package.
     #[serde(default)]
     pub skills: Vec<Skill>,
+    /// Views this package ships, declared so a host can refuse one it cannot
+    /// present before it opens anything.
+    ///
+    /// Empty is the default and the pre-declaration behaviour: the host renders
+    /// the package's `[ui]`/`[module]` in whatever kind `[launch] surfaces`
+    /// allows. Absent means every manifest written before surfaces existed
+    /// keeps working untouched.
+    #[serde(default)]
+    pub surfaces: Vec<Surface>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -385,7 +394,21 @@ pub struct Ui {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Launch {
+    /// The surface a bare launch opens.
+    ///
+    /// A kind from `surfaces` (`canvas`, `native`, `web`) while the Spore
+    /// declares no `[[surfaces]]`, and the name of a declared surface when it
+    /// does. One field because it is one fact: what the host opens when the
+    /// caller names nothing. This is `default-surface` on the wire.
     pub default: String,
+    /// Kinds this package can be rendered as.
+    ///
+    /// Required while the Spore declares no `[[surfaces]]`, because the kind
+    /// list is then the whole statement of what it can be launched as. Once
+    /// surfaces carry their own kind this is only an outer bound: every
+    /// declared kind must appear here, and a package whose one artifact renders
+    /// on more engines than it names surfaces for may list more.
+    #[serde(default)]
     pub surfaces: Vec<String>,
     /// The composed Lua module Canvas opens, when the launcher starts a view
     /// rather than the module. Composition writes it into the runtime modules
@@ -433,7 +456,201 @@ const fn default_true() -> bool {
     true
 }
 
+/// The kind names a `[launch] surfaces` list is drawn from. `native` is here
+/// because it has always been launchable, not because a surface can declare it:
+/// see [`SurfaceKind`].
 pub const SURFACES: [&str; 3] = ["web", "native", "canvas"];
+
+/// The page a `web` surface opens when its manifest does not say otherwise.
+pub const DEFAULT_WEB_ENTRY: &str = "web/index.html";
+
+/// A view a package ships, declared in `[[surfaces]]`.
+///
+/// A Spore declares a surface when the host could not guess it: a bundled web
+/// page, or a Canvas artifact that is not the package's own `[ui] entry`. The
+/// declaration is what lets a host answer "this Spore needs a browser and I
+/// have none" before it opens anything.
+///
+/// The entry point is a path, not a content id. The package is the unit of
+/// identity and provenance — `spore.lock` and the package digest already cover
+/// every byte the package ships — so a per-asset content id would be a second
+/// version of the same fact, kept in a second place, drifting against the
+/// first. Do not add one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Surface {
+    /// The name `launch(id, surface)` takes and [`Launch::default`] may name.
+    pub name: String,
+    pub kind: SurfaceKind,
+    /// Entry point relative to the package root, and the whole of the default:
+    /// `web/index.html` for a [`SurfaceKind::Web`] surface, the package's own
+    /// `[ui] entry` for a canvas one.
+    ///
+    /// Written down only when the artifact is not the conventional one, so a
+    /// Spore that ships `web/index.html` says `kind = "web"` and nothing else.
+    #[serde(default)]
+    pub entry: Option<String>,
+    /// Engine or host capability this surface needs, if any.
+    ///
+    /// The kind is already a requirement, so most surfaces need nothing here.
+    /// It exists for the case where one host can present a kind and another
+    /// cannot — a specific browser engine, a particular decoder.
+    #[serde(default)]
+    pub requires: Option<String>,
+}
+
+impl Surface {
+    /// The artifact this surface opens, relative to the package root.
+    ///
+    /// A declared `entry` wins; otherwise the kind's convention, which is
+    /// `web/index.html` for a web page and the package's own [`Ui`] entry for a
+    /// Canvas one. Resolved here rather than in each host so there is one
+    /// answer.
+    #[must_use]
+    pub fn entry<'a>(&'a self, ui: Option<&'a Ui>) -> Option<&'a str> {
+        match (&self.entry, self.kind) {
+            (Some(entry), _) => Some(entry),
+            (None, SurfaceKind::Web) => Some(DEFAULT_WEB_ENTRY),
+            (None, SurfaceKind::Canvas) => ui.map(|ui| ui.entry.as_str()),
+        }
+    }
+}
+
+/// How a host presents a surface.
+///
+/// `canvas` is the host's own Lua renderer. `web` needs a browser view — the
+/// `browser` kind in `soil:surface-import` — which a host is allowed not to
+/// have. Native rendering has no variant: it is the default, it is what
+/// `[module]` and `[ui]` already are, and a package that needs nothing extra
+/// should not have to say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SurfaceKind {
+    Canvas,
+    Web,
+}
+
+impl SurfaceKind {
+    /// Every kind, in the order a host lists them when it refuses a request.
+    pub const ALL: [Self; 2] = [Self::Canvas, Self::Web];
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Canvas => "canvas",
+            Self::Web => "web",
+        }
+    }
+
+    /// The kind a surface declaration may carry.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+
+    /// The kind a `[launch] surfaces` entry names.
+    ///
+    /// `native` is `None` on purpose: it is the host rendering the package's own
+    /// artifacts, so there is no capability a host could be missing.
+    fn from_launch_kind(value: &str) -> Option<Option<Self>> {
+        match value {
+            "native" => Some(None),
+            other => Self::parse(other).map(Some),
+        }
+    }
+
+    #[must_use]
+    pub fn names() -> String {
+        Self::ALL.map(Self::as_str).join(", ")
+    }
+}
+
+impl fmt::Display for SurfaceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SurfaceKind {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown surface kind {raw:?}; a surface kind is one of {}",
+                Self::names()
+            ))
+        })
+    }
+}
+
+/// What a host opens for one `launch(id, surface)` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchTarget<'a> {
+    /// The name the host asked for; what `launched.surface` echoes back.
+    pub surface: &'a str,
+    /// The renderer that presents it. `None` for a legacy `native` launch, where
+    /// the host draws the package itself.
+    pub kind: Option<SurfaceKind>,
+    /// Package-relative entry point. `None` when the host renders the package's
+    /// own `[ui]` artifact, which is what a Spore that declares no surfaces
+    /// means.
+    pub entry: Option<&'a str>,
+}
+
+/// Why a launch request cannot be honoured.
+///
+/// These are the two `soil:spore/catalog.error` members a host needs here;
+/// [`LaunchError::code`] is that mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchError {
+    /// The package declares no surface by that name.
+    NotFound {
+        requested: String,
+        declared: Vec<String>,
+    },
+    /// The surface exists, but this host cannot present its kind.
+    Unsupported {
+        surface: String,
+        kind: SurfaceKind,
+        host: Vec<SurfaceKind>,
+    },
+}
+
+impl LaunchError {
+    /// The `soil:spore/catalog.error` member this maps to.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound { .. } => "not-found",
+            Self::Unsupported { .. } => "unsupported",
+        }
+    }
+}
+
+impl fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound {
+                requested,
+                declared,
+            } => write!(
+                f,
+                "surface {requested:?} is not declared; this Spore declares {declared:?}"
+            ),
+            Self::Unsupported {
+                surface,
+                kind,
+                host,
+            } => write!(
+                f,
+                "surface {surface:?} needs a {kind} view, and this host presents only {host:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LaunchError {}
 
 impl Manifest {
     pub fn parse(source: &str) -> Result<Self> {
@@ -565,19 +782,87 @@ impl Manifest {
             }
         }
 
-        if self.launch.surfaces.is_empty() {
-            return Err(Error::Invalid("launch.surfaces must not be empty".into()));
-        }
-        for surface in &self.launch.surfaces {
-            if !SURFACES.contains(&surface.as_str()) {
-                return Err(Error::Invalid(format!("unknown surface {surface:?}")));
+        if self.surfaces.is_empty() {
+            // No declarations: the kind list is the whole statement of what
+            // this package can be launched as, exactly as before.
+            if self.launch.surfaces.is_empty() {
+                return Err(Error::Invalid("launch.surfaces must not be empty".into()));
             }
-        }
-        if !self.launch.surfaces.contains(&self.launch.default) {
-            return Err(Error::Invalid(format!(
-                "launch.default {:?} is not in launch.surfaces",
-                self.launch.default
-            )));
+            for surface in &self.launch.surfaces {
+                if !SURFACES.contains(&surface.as_str()) {
+                    return Err(Error::Invalid(format!(
+                        "unknown surface {surface:?}: launch.surfaces is drawn from {SURFACES:?}"
+                    )));
+                }
+            }
+            if !self.launch.surfaces.contains(&self.launch.default) {
+                return Err(Error::Invalid(format!(
+                    "launch.default {:?} is not in launch.surfaces {:?}",
+                    self.launch.default, self.launch.surfaces
+                )));
+            }
+        } else {
+            let mut seen = BTreeSet::new();
+            for surface in &self.surfaces {
+                if !identifier(&surface.name) {
+                    return Err(Error::Invalid(format!(
+                        "surface name {:?} must be lowercase letters, digits, - or _",
+                        surface.name
+                    )));
+                }
+                if !seen.insert(surface.name.as_str()) {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} is declared twice",
+                        surface.name
+                    )));
+                }
+                let Some(entry) = surface.entry(self.ui.as_ref()) else {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} is {} but this Spore has no [ui] entry to present; name one with `entry`",
+                        surface.name, surface.kind
+                    )));
+                };
+                safe_relative(entry)?;
+                let expected = match surface.kind {
+                    SurfaceKind::Canvas => ".lua",
+                    SurfaceKind::Web => ".html",
+                };
+                if !entry.ends_with(expected) {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} is {}, so its entry {entry:?} must end in {expected}",
+                        surface.name, surface.kind
+                    )));
+                }
+                if let Some(requires) = &surface.requires {
+                    if !identifier(requires) {
+                        return Err(Error::Invalid(format!(
+                            "surface {:?} requires {requires:?}, which must be lowercase letters, digits, - or _",
+                            surface.name
+                        )));
+                    }
+                }
+                // A kind list, when given, is an outer bound: one artifact can
+                // render on more engines than the package names surfaces for,
+                // never fewer.
+                let kind = surface.kind.as_str();
+                if !self.launch.surfaces.is_empty()
+                    && !self.launch.surfaces.iter().any(|listed| listed == kind)
+                {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} is {kind}, which launch.surfaces {:?} does not list",
+                        surface.name, self.launch.surfaces
+                    )));
+                }
+            }
+            // Declared surfaces are the authority for what opens, so the
+            // default has to name one of them.
+            let declared = self.surface_names();
+            if !declared.contains(&self.launch.default.as_str()) {
+                return Err(Error::Invalid(format!(
+                    "launch.default {:?} names no declared surface; [[surfaces]] declares {declared:?}",
+                    self.launch.default
+                )));
+            }
         }
 
         if let Some(system) = &self.system
@@ -817,6 +1102,11 @@ impl Manifest {
         if let Some(man) = self.docs.as_ref().and_then(|docs| docs.man.clone()) {
             paths.push(man);
         }
+        for surface in &self.surfaces {
+            if let Some(entry) = surface.entry(self.ui.as_ref()) {
+                paths.push(entry.to_owned());
+            }
+        }
         let mut seen = std::collections::BTreeSet::new();
         paths
             .into_iter()
@@ -839,6 +1129,85 @@ impl Manifest {
         paths.sort();
         paths.dedup();
         paths
+    }
+
+    /// The declared surface `name`, if this Spore declares one.
+    #[must_use]
+    pub fn surface(&self, name: &str) -> Option<&Surface> {
+        self.surfaces.iter().find(|surface| surface.name == name)
+    }
+
+    /// The names a launch may ask for: declared surfaces when there are any,
+    /// the `[launch] surfaces` kinds when there are none.
+    #[must_use]
+    pub fn surface_names(&self) -> Vec<&str> {
+        if self.surfaces.is_empty() {
+            self.launch.surfaces.iter().map(String::as_str).collect()
+        } else {
+            self.surfaces
+                .iter()
+                .map(|surface| surface.name.as_str())
+                .collect()
+        }
+    }
+
+    /// What a host opens for `requested`, given the kinds it can present.
+    ///
+    /// This is the decision `soil:spore/catalog.launch` makes before it launches
+    /// anything. `host` is what this host can actually render, so a request for
+    /// a [`SurfaceKind::Web`] surface on a host with no browser view is
+    /// [`LaunchError::Unsupported`] — and never a launch that cannot present.
+    ///
+    /// A Spore that declares no surfaces keeps the old behaviour: the kinds in
+    /// `[launch] surfaces` are the names, so this changes nothing about how an
+    /// existing package launches.
+    pub fn resolve_launch<'a>(
+        &'a self,
+        requested: &'a str,
+        host: &[SurfaceKind],
+    ) -> std::result::Result<LaunchTarget<'a>, LaunchError> {
+        let Some(surface) = self.surface(requested) else {
+            let launchable = self.surfaces.is_empty()
+                && self.launch.surfaces.iter().any(|kind| kind == requested);
+            if !launchable {
+                return Err(LaunchError::NotFound {
+                    requested: requested.to_owned(),
+                    declared: self
+                        .surface_names()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                });
+            }
+            let kind = SurfaceKind::from_launch_kind(requested).flatten();
+            if let Some(kind) = kind
+                && !host.contains(&kind)
+            {
+                return Err(LaunchError::Unsupported {
+                    surface: requested.to_owned(),
+                    kind,
+                    host: host.to_vec(),
+                });
+            }
+            return Ok(LaunchTarget {
+                surface: requested,
+                kind,
+                entry: None,
+            });
+        };
+
+        if !host.contains(&surface.kind) {
+            return Err(LaunchError::Unsupported {
+                surface: surface.name.clone(),
+                kind: surface.kind,
+                host: host.to_vec(),
+            });
+        }
+        Ok(LaunchTarget {
+            surface: &surface.name,
+            kind: Some(surface.kind),
+            entry: surface.entry(self.ui.as_ref()),
+        })
     }
 
     /// The Lua a host loads for a chrome `region`.
@@ -1135,12 +1504,41 @@ pub fn collect_package(root: &Path, manifest: &Manifest) -> Result<Vec<(String, 
     }
     let ui = root.join("ui");
     if ui.is_dir() {
-        walk_lua(root, &ui, &mut files)?;
+        walk_dir(root, &ui, Some("lua"), &mut files)?;
+    }
+    // A declared surface is a directory artifact for the same reason the Lua UI
+    // is: how an author splits a web page across modules, styles and fonts is
+    // not something the manifest should have to enumerate. The package carries
+    // the files; the surface names the entry point into them.
+    for surface in &manifest.surfaces {
+        let Some(entry) = surface.entry(manifest.ui.as_ref()) else {
+            continue;
+        };
+        let Some(dir) = Path::new(entry).parent() else {
+            continue;
+        };
+        // An entry at the package root names no directory of its own, and
+        // walking the root here would ship the build inputs this function
+        // exists to leave out.
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let full = root.join(dir);
+        if full.is_dir() {
+            walk_dir(root, &full, None, &mut files)?;
+        }
     }
     Ok(files.into_iter().collect())
 }
 
-fn walk_lua(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
+/// Add every regular file under `dir`, when `extension` is `None`, or only the
+/// files with that extension.
+fn walk_dir(
+    root: &Path,
+    dir: &Path,
+    extension: Option<&str>,
+    out: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
     for entry in
         fs::read_dir(dir).map_err(|error| Error::Io(format!("{}: {error}", dir.display())))?
     {
@@ -1155,10 +1553,12 @@ fn walk_lua(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Res
             )));
         }
         if metadata.is_dir() {
-            walk_lua(root, &path, out)?;
+            walk_dir(root, &path, extension, out)?;
             continue;
         }
-        if !metadata.is_file() || path.extension().is_none_or(|extension| extension != "lua") {
+        let wanted =
+            extension.is_none_or(|wanted| path.extension().is_some_and(|found| found == wanted));
+        if !metadata.is_file() || !wanted {
             continue;
         }
         let relative = path
@@ -1708,6 +2108,169 @@ mod fixtures {
         format!(
             "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n{ui}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
         )
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::fixtures::manifest;
+    use super::*;
+
+    /// A Spore that ships one web page and one Canvas view, launched on the
+    /// page by default.
+    const DECLARED: &str = "[launch]\ndefault = \"workbook\"\nsurfaces = [\"canvas\", \"web\"]\n\
+[[surfaces]]\nname = \"workbook\"\nkind = \"web\"\nentry = \"web/index.html\"\n\
+[[surfaces]]\nname = \"preview\"\nkind = \"canvas\"\nentry = \"ui/sheet.lua\"\n";
+
+    /// The fixture's own `[launch]`, so a test writes only the tables it is
+    /// about. `with_ui` already emits one, and TOML cannot repeat a table.
+    fn declared() -> String {
+        manifest("").replace(
+            "[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n",
+            DECLARED,
+        )
+    }
+
+    #[test]
+    fn an_absent_surface_block_parses_exactly_as_before() {
+        let parsed = Manifest::parse(&manifest("")).expect("a Spore with no surfaces is a Spore");
+        assert!(parsed.surfaces.is_empty());
+        assert_eq!(parsed.launch.surfaces, vec!["canvas".to_owned()]);
+        assert_eq!(parsed.surface_names(), vec!["canvas"]);
+        // The kind list is still the authority, so the old launch path is what
+        // a host that never heard of surfaces keeps getting.
+        let target = parsed
+            .resolve_launch("canvas", &SurfaceKind::ALL)
+            .expect("canvas is what it declares");
+        assert_eq!(target.kind, Some(SurfaceKind::Canvas));
+        assert_eq!(
+            target.entry, None,
+            "no declaration means the host renders the package's own UI"
+        );
+        assert_eq!(
+            parsed.declared_paths(),
+            vec![PathBuf::from("ui/main.lua"), PathBuf::from("module.wasm")],
+            "declaring nothing adds nothing to the package"
+        );
+    }
+
+    #[test]
+    fn a_declared_web_surface_and_a_canvas_one_both_resolve() {
+        let parsed = Manifest::parse(&declared()).expect("canvas and web together are a Spore");
+        assert_eq!(parsed.surface_names(), vec!["workbook", "preview"]);
+
+        let web = parsed
+            .resolve_launch("workbook", &SurfaceKind::ALL)
+            .expect("a host with a browser opens the page");
+        assert_eq!(web.kind, Some(SurfaceKind::Web));
+        assert_eq!(web.entry, Some("web/index.html"));
+        assert_eq!(web.surface, "workbook");
+
+        let canvas = parsed
+            .resolve_launch("preview", &SurfaceKind::ALL)
+            .expect("a host with Canvas opens the view");
+        assert_eq!(canvas.kind, Some(SurfaceKind::Canvas));
+        assert_eq!(canvas.entry, Some("ui/sheet.lua"));
+
+        // The default is a surface name once surfaces exist, and it is one of
+        // them rather than a fourth thing.
+        assert_eq!(parsed.launch.default, "workbook");
+        assert!(parsed.surface(&parsed.launch.default).is_some());
+    }
+
+    #[test]
+    fn a_web_surface_may_leave_the_conventional_entry_out() {
+        let parsed = Manifest::parse(&manifest("").replace(
+            "[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n",
+            "[launch]\ndefault = \"workbook\"\nsurfaces = [\"web\"]\n\
+[[surfaces]]\nname = \"workbook\"\nkind = \"web\"\n",
+        ))
+        .expect("a Spore that ships the conventional page says so once");
+        assert_eq!(
+            parsed
+                .resolve_launch("workbook", &SurfaceKind::ALL)
+                .expect("resolves")
+                .entry,
+            Some(DEFAULT_WEB_ENTRY),
+            "the page is named by the kind, not repeated in every manifest"
+        );
+    }
+
+    #[test]
+    fn a_default_that_names_no_surface_lists_both_sets() {
+        let bad = declared().replace("default = \"workbook\"", "default = \"spreadsheet\"");
+        let error = Manifest::parse(&bad).expect_err("a default has to name something");
+        let message = error.to_string();
+        assert!(
+            message.contains("spreadsheet"),
+            "the error names what was asked for: {message}"
+        );
+        assert!(
+            message.contains("workbook") && message.contains("preview"),
+            "and everything it could have named: {message}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_surface_kind_lists_the_valid_ones() {
+        let bad = declared().replace("kind = \"canvas\"", "kind = \"desktop\"");
+        let error = Manifest::parse(&bad).expect_err("the host only has the kinds it has");
+        let message = error.to_string();
+        assert!(
+            message.contains("desktop"),
+            "the error names the bad kind: {message}"
+        );
+        for valid in SurfaceKind::ALL {
+            assert!(
+                message.contains(valid.as_str()),
+                "and every kind that would have parsed: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_web_surface_on_a_host_without_a_browser_is_unsupported() {
+        let parsed = Manifest::parse(&declared()).expect("manifest");
+        let refused = parsed
+            .resolve_launch("workbook", &[SurfaceKind::Canvas])
+            .expect_err("a host with no browser view cannot render a page");
+        assert_eq!(refused.code(), "unsupported");
+        assert!(matches!(
+            refused,
+            LaunchError::Unsupported {
+                kind: SurfaceKind::Web,
+                ..
+            }
+        ));
+
+        // The same host still opens the Canvas surface, so the refusal is about
+        // the kind and not about the package.
+        assert!(
+            parsed
+                .resolve_launch("preview", &[SurfaceKind::Canvas])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_unknown_surface_name_is_not_found() {
+        let parsed = Manifest::parse(&declared()).expect("manifest");
+        let refused = parsed
+            .resolve_launch("spreadsheet", &SurfaceKind::ALL)
+            .expect_err("the package declares no such view");
+        assert_eq!(refused.code(), "not-found");
+    }
+
+    #[test]
+    fn a_declared_surface_kind_must_be_launchable() {
+        let bad = declared().replace(
+            "surfaces = [\"canvas\", \"web\"]",
+            "surfaces = [\"canvas\"]",
+        );
+        assert!(
+            Manifest::parse(&bad).is_err(),
+            "a web surface the kind list forbids is a contradiction"
+        );
     }
 }
 

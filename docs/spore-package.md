@@ -118,7 +118,9 @@ Validation is strict because a package is executable content:
 - a Spore may omit `[module]`. What remains is a view: `ui.entry` is required,
   and without a module there is nothing that can call a grant.
 - `launch.surfaces` is a subset of `web`, `native`, `canvas`; the default is one
-  of them.
+  of them — unless the Spore declares `[[surfaces]]`, in which case the default
+  names one of those and the kind list is only an outer bound. See
+  [Spore surfaces](./spore-surfaces.md).
 - Grant keys are `soil:`, `wasi:`, or `fungos:` capabilities with a written
   reason. A grant is reviewed with the pull request.
 - Asset media types must be real `type/subtype` strings.
@@ -133,6 +135,10 @@ Validation is strict because a package is executable content:
 - `[[skills]]` declares an agent skill by path; its frontmatter `name` must
   match the declaration and its directory, and the description must not be
   empty.
+- `[[surfaces]]` declares a view the package ships: a `web` or `canvas` kind, an
+  optional entry point that defaults to `web/index.html` or the package's own
+  `[ui] entry`, and an optional engine requirement. Declaring none is the
+  behaviour every manifest had before surfaces existed.
 
 ## Skills
 

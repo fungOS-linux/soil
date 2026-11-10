@@ -38,6 +38,9 @@ pub enum Kind {
     Media,
     Spore,
     Retained,
+    /// A web page in a host-owned browser view. The adapter owns the engine;
+    /// the Spore still sees only a handle.
+    Browser,
 }
 
 #[derive(Debug, Clone)]
@@ -226,6 +229,7 @@ fn api_info(info: Info) -> api::Info {
             Kind::Media => api::Kind::Media,
             Kind::Spore => api::Kind::Spore,
             Kind::Retained => api::Kind::Retained,
+            Kind::Browser => api::Kind::Browser,
         },
         width: info.width,
         height: info.height,
