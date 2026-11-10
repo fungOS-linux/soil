@@ -357,11 +357,15 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
             };
             session.touch();
             let snapshot = session.host.snapshot();
+            // The picker is part of the terminal, not of the page that shows it:
+            // a view that draws its own sidebar needs the fleet and the session
+            // table in the same snapshot as the grid.
+            let extra = navigator_lua(app, session.id);
             respond(
                 &mut stream,
                 "200 OK",
                 "text/x-lua; charset=utf-8",
-                frame::lua(&snapshot).as_bytes(),
+                frame::lua(&snapshot, &extra).as_bytes(),
             )?;
         }
         ("GET", "/events") => {
@@ -447,6 +451,49 @@ fn handle(mut stream: TcpStream, app: &App) -> Result<()> {
         )?,
     }
     Ok(())
+}
+
+/// The fleet and session table as Lua, for a view that draws a sidebar.
+fn navigator_lua(app: &App, active: u64) -> String {
+    let mut out = format!("  active = {active},\n");
+    out.push_str("  fleet = {\n");
+    for target in &app.targets {
+        out.push_str(&format!(
+            "    {{ name = {}, label = {}, kind = {}, detail = {} }},\n",
+            lua_escape(&target.name),
+            lua_escape(&target.label),
+            lua_escape(target.kind.as_str()),
+            lua_escape(&target.detail),
+        ));
+    }
+    out.push_str("  },\n  sessions = {\n");
+    for (id, session) in app.sessions.lock().map(|sessions| sessions.clone()).unwrap_or_default() {
+        out.push_str(&format!(
+            "    {{ id = {id}, label = {}, target = {}, exited = {} }},\n",
+            lua_escape(&session.label),
+            lua_escape(&session.target),
+            session.pty.exited(),
+        ));
+    }
+    out.push_str("  },\n");
+    out
+}
+
+fn lua_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn not_found(stream: &mut TcpStream) -> Result<()> {

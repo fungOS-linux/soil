@@ -88,8 +88,9 @@ struct Run {
 /// A scene renderer takes a snapshot, not a diff: it repaints the whole grid for
 /// every frame, so there is nothing to merge and no previous frame to hold. The
 /// shape is the frame's, with `runs` as `{ text, fg, bg, flags }` arrays.
-pub fn lua(snapshot: &Snapshot) -> String {
+pub fn lua(snapshot: &Snapshot, extra: &str) -> String {
     let mut out = String::from("return {\n");
+    out.push_str(extra);
     out.push_str(&format!(
         "  cols = {}, rows = {},\n  title = {},\n",
         snapshot.cols,
@@ -209,7 +210,7 @@ mod tests {
     fn the_lua_snapshot_is_a_loadable_table() {
         let mut session = soil_vt::Session::new(12, 2, 10).unwrap();
         session.write(b"\x1b[1;31mred\x1b[0m plain");
-        let text = lua(&session.snapshot().unwrap());
+        let text = lua(&session.snapshot().unwrap(), "");
         assert!(text.starts_with("return {"));
         assert!(text.contains("cols = 12"));
         assert!(text.contains("{ \"red\", \"#"));
