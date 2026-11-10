@@ -7123,9 +7123,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fungos-vfs 0.1.0 (git+https://github.com/fungOS-linux/fungos-vfs.git?rev=bcd2bc682662467d1371a2c9f8436e08934132d9)",
+ "http",
  "serde_json",
+ "soil-spore",
  "soil-vfs-host",
+ "soil-wasi-host",
  "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "unibus",
 ]
 
 [[package]]
