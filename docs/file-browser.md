@@ -6,6 +6,10 @@ Status: **design, 2026-11-04.** Contracts: [`soil:vfs`](soil-vfs-index.md) and
 The browser is one Spore with one authoritative state machine. The GUI, CLI,
 Lua, and agents are clients of that state, not separate automation paths.
 
+Its job is a path search across the workspace filesystem: one query over every
+root the host has granted, answered from the index rather than by walking the
+tree.
+
 ## One state, many clients
 
 ```text
