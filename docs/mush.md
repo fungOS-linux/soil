@@ -431,6 +431,36 @@ a literal trigram postings implementation. It supports `-i`, `-s`, `-F`, `-w`, `
 `cat`, `grep`, `head`, `tail` and `wc` read piped stdin when no path is given.
 `printf` supports `%s`, `%d`, `%i`, `%b`, `%%`, and the usual backslash escapes.
 
+## Diff and JSON
+
+`diff LEFT RIGHT` is a line-level unified diff computed inside the Spore: no
+overlay, no host process, and both buffers are read through `soil:vfs`. It
+exits 0 when the files match, 1 when they differ, and 2 when a side cannot be
+read — so errors go to stderr and never look like a difference. `-U N` sets
+the context (default 3), `-q` prints only whether they differ, a NUL near the
+start of either side reports a binary difference, and a missing final newline
+prints `\ No newline at end of file` because it is content. Diffs larger than
+1,000,000 line pairs (the LCS table is bounded) degrade to "every line
+replaced" instead of allocating without limit.
+
+`json` reads and edits documents with dot/bracket paths: `a.b[0]`, a bare
+numeric segment as an index, and `["a.b"]` for a key that contains a dot.
+`get` prints strings raw (`-j` keeps the JSON encoding) and everything else as
+compact JSON. `set`, `del` and `merge` read the file version, mutate, and write
+back through the same versioned `vfs::write` path as `write` and `sub`, so a
+concurrent edit fails the write instead of being clobbered.
+
+Editing rules, so a rewrite stays reviewable:
+
+- `set` replaces a value and creates only the final segment; a missing parent
+  path is an error. An array index equal to the length appends.
+- `merge` is deep for objects and replaces everything else, arrays included.
+- Key order is preserved, and the file keeps its own indentation (2, 4, tabs,
+  or compact) and whether it ended with a newline. Everything else is
+  normalized by `serde_json`.
+- `json pretty` never writes; `json set FILE PATH -` reads the value from
+  stdin, so `json get a.json x | json set b.json y -` works without escapes.
+
 ## Commands
 
 ```text
@@ -451,6 +481,14 @@ tgrep [OPTIONS] PATTERN [PATH...]
 wc [-l|-c] [PATH...]
 stat PATH
 tree [DIR]
+find [ROOT] [PATTERN] [-name GLOB] [-type f|d] [-maxdepth N]
+sub PATTERN REPLACEMENT PATH...
+diff [-q] [-U N] LEFT RIGHT
+json get [-j] FILE [PATH]
+json set FILE PATH JSON|-
+json del FILE PATH
+json merge TARGET SOURCE...
+json pretty [--indent N] [FILE|-]
 rm [-r] PATH...
 mv FROM TO
 cp [-r] FROM TO

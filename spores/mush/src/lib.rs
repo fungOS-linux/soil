@@ -12,6 +12,7 @@ use std::{
 };
 
 use regex::{Regex, RegexBuilder};
+use serde_json::Value;
 
 use soil::command::command as command_abi;
 use soil::index::index::{self, Mode, Query};
@@ -661,8 +662,9 @@ impl Shell {
             "wc" => self.wc(args).map(|_| 0),
             "stat" => self.stat(args).map(|_| 0),
             "tree" => self.tree(args).map(|_| 0),
-            "find" => self.find(args).map(|_| 0),
             "sub" => self.sub(args).map(|_| 0),
+            "diff" => self.diff(args),
+            "json" => self.json(args).map(|_| 0),
             "rm" => self.rm(args).map(|_| 0),
             "mv" => self.mv(args).map(|_| 0),
             "cp" => self.cp(args).map(|_| 0),
@@ -1163,6 +1165,291 @@ impl Shell {
             self.out
                 .push_str(&format!("{}: {hits} replacement(s)\n", self.display(&path)));
         }
+        Ok(())
+    }
+
+    /// `diff [-q] [-U N] LEFT RIGHT` — unified line diff between two VFS files.
+    ///
+    /// The status follows the diff convention: 0 identical, 1 different, 2 could
+    /// not be read. That is also why failures go to stderr instead of through
+    /// `Err`, which the shell would report as status 1 and read as "differ".
+    fn diff(&mut self, args: &[String]) -> Result<i32, String> {
+        let mut quiet = false;
+        let mut context = 3usize;
+        let mut paths: Vec<&str> = Vec::new();
+        let mut literal = false;
+        let mut index = 0;
+        while index < args.len() {
+            let arg = args[index].as_str();
+            if literal || arg == "-" || !arg.starts_with('-') {
+                paths.push(arg);
+            } else {
+                match arg {
+                    "--" => literal = true,
+                    "-q" | "--brief" => quiet = true,
+                    "-u" | "--unified" => {}
+                    "-U" => {
+                        let value = args.get(index + 1).ok_or("diff -U N")?;
+                        context = diff_context(value)?;
+                        index += 1;
+                    }
+                    other => match other.strip_prefix("-U") {
+                        Some(value) => context = diff_context(value)?,
+                        None => return Err(format!("diff: unsupported option {other}")),
+                    },
+                }
+            }
+            index += 1;
+        }
+        if paths.len() != 2 {
+            return Err("diff [-q] [-U N] LEFT RIGHT".into());
+        }
+        let left = self.resolve(paths[0])?;
+        let right = self.resolve(paths[1])?;
+        let Some(left_bytes) = self.diff_read(&left) else {
+            return Ok(2);
+        };
+        let Some(right_bytes) = self.diff_read(&right) else {
+            return Ok(2);
+        };
+        let left_name = self.display(&left);
+        let right_name = self.display(&right);
+        let same = left_bytes == right_bytes;
+        if quiet {
+            if !same {
+                self.out
+                    .push_str(&format!("Files {left_name} and {right_name} differ\n"));
+            }
+            return Ok(if same { 0 } else { 1 });
+        }
+        if same {
+            return Ok(0);
+        }
+        if is_binary(&left_bytes) || is_binary(&right_bytes) {
+            self.out
+                .push_str(&format!("Binary files {left_name} and {right_name} differ\n"));
+            return Ok(1);
+        }
+        let left_lines = split_lines(&left_bytes);
+        let right_lines = split_lines(&right_bytes);
+        let ops = diff_ops(&left_lines, &right_lines);
+        self.out.push_str(&format!("--- {left_name}\n+++ {right_name}\n"));
+        let (old_at, new_at) = line_numbers(&ops);
+        for (start, stop) in hunk_ranges(&ops, context) {
+            self.out
+                .push_str(&diff_hunk_header(&ops, &old_at, &new_at, start, stop));
+            for op in &ops[start..stop] {
+                match op {
+                    LineOp::Equal(line) => push_diff_line(&mut self.out, ' ', left_lines[*line]),
+                    LineOp::Delete(line) => push_diff_line(&mut self.out, '-', left_lines[*line]),
+                    LineOp::Insert(line) => push_diff_line(&mut self.out, '+', right_lines[*line]),
+                }
+            }
+        }
+        Ok(1)
+    }
+
+    /// One side of a diff, with directories and unreadable paths reported on
+    /// stderr so that status 1 keeps meaning "the files differ".
+    fn diff_read(&mut self, path: &str) -> Option<Vec<u8>> {
+        let problem = match vfs::stat(path) {
+            Ok(entry) if entry.kind == Kind::Directory => {
+                format!("{} is a directory", self.display(path))
+            }
+            Ok(_) => match self.read_file(path) {
+                Ok(bytes) => return Some(bytes),
+                Err(error) => error,
+            },
+            Err(error) => format!("{}: {error:?}", self.display(path)),
+        };
+        self.err.push_str(&format!("mush: diff: {problem}\n"));
+        None
+    }
+
+    /// `json` — read and edit JSON documents in the VFS.
+    ///
+    /// Every mutation reads the version it started from and passes it to
+    /// `vfs::write`, so a concurrent edit fails the write instead of being
+    /// clobbered — the same contract `sub` uses.
+    fn json(&mut self, args: &[String]) -> Result<(), String> {
+        let Some(verb) = args.first() else {
+            return Err("json get|set|del|merge|pretty".into());
+        };
+        let rest = &args[1..];
+        match verb.as_str() {
+            "get" => self.json_get(rest),
+            "set" => self.json_set(rest),
+            "del" | "rm" => self.json_del(rest),
+            "merge" => self.json_merge(rest),
+            "pretty" | "fmt" => self.json_pretty(rest),
+            other => Err(format!(
+                "json: unknown verb {other:?}; use get, set, del, merge, or pretty"
+            )),
+        }
+    }
+
+    /// `json get [-j] FILE [PATH]` — PATH defaults to the whole document.
+    ///
+    /// A string value prints raw, because the result is usually fed to another
+    /// command; `-j` prints the JSON encoding instead so `"null"` and `null`
+    /// stay distinguishable.
+    fn json_get(&mut self, args: &[String]) -> Result<(), String> {
+        let mut as_json = false;
+        let mut positional: Vec<&str> = Vec::new();
+        for arg in args {
+            match arg.as_str() {
+                "-j" | "--json" => as_json = true,
+                other => positional.push(other),
+            }
+        }
+        if positional.is_empty() || positional.len() > 2 {
+            return Err("json get [-j] FILE [PATH]".into());
+        }
+        let path = self.resolve(positional[0])?;
+        let query = positional.get(1).copied().unwrap_or("$");
+        let segments = parse_json_path(query)?;
+        let (_, _, document) = self.json_read(&path)?;
+        let Some(found) = json_lookup(&document, &segments) else {
+            return Err(format!(
+                "json get {}: no value at {query:?}",
+                self.display(&path)
+            ));
+        };
+        match (as_json, found) {
+            (false, Value::String(text)) => {
+                self.out.push_str(text);
+                self.out.push('\n');
+            }
+            (_, value) => {
+                self.out.push_str(&value.to_string());
+                self.out.push('\n');
+            }
+        }
+        Ok(())
+    }
+
+    /// `json set FILE PATH JSON|-` — VALUE must be a JSON literal, and `-` reads
+    /// the document fragment from stdin.
+    ///
+    /// Only the final path segment is created: a missing parent is an error, so
+    /// a typo in a key name says so instead of growing a second copy of the tree.
+    fn json_set(&mut self, args: &[String]) -> Result<(), String> {
+        if args.len() != 3 {
+            return Err("json set FILE PATH JSON|-".into());
+        }
+        let path = self.resolve(&args[0])?;
+        let segments = parse_json_path(&args[1])?;
+        let literal = if args[2] == "-" {
+            let stdin = std::mem::take(&mut self.stdin);
+            String::from_utf8(stdin).map_err(|_| "json set: stdin is not UTF-8".to_string())?
+        } else {
+            args[2].clone()
+        };
+        let value: Value = serde_json::from_str(&literal).map_err(|error| {
+            format!("json set: VALUE must be JSON ({error}); a string needs its JSON quotes: '\"text\"'")
+        })?;
+        let (original, version, mut document) = self.json_read(&path)?;
+        json_assign(&mut document, &segments, value)
+            .map_err(|error| format!("json set {}: {error}", self.display(&path)))?;
+        self.json_write(&path, &document, &original, version, "set")
+    }
+
+    /// `json del FILE PATH` — remove an object key or an array element.
+    fn json_del(&mut self, args: &[String]) -> Result<(), String> {
+        if args.len() != 2 {
+            return Err("json del FILE PATH".into());
+        }
+        let path = self.resolve(&args[0])?;
+        let segments = parse_json_path(&args[1])?;
+        let (original, version, mut document) = self.json_read(&path)?;
+        json_remove(&mut document, &segments)
+            .map_err(|error| format!("json del {}: {error}", self.display(&path)))?;
+        self.json_write(&path, &document, &original, version, "del")
+    }
+
+    /// `json merge TARGET SOURCE...` — deep-merge each source into TARGET.
+    fn json_merge(&mut self, args: &[String]) -> Result<(), String> {
+        if args.len() < 2 {
+            return Err("json merge TARGET SOURCE...".into());
+        }
+        let target = self.resolve(&args[0])?;
+        let (original, version, mut document) = self.json_read(&target)?;
+        for source in &args[1..] {
+            let source = self.resolve(source)?;
+            let (_, _, patch) = self.json_read(&source)?;
+            json_merge_into(&mut document, patch);
+        }
+        self.json_write(&target, &document, &original, version, "merge")
+    }
+
+    /// `json pretty [--indent N] [FILE|-]` — reformat without writing.
+    fn json_pretty(&mut self, args: &[String]) -> Result<(), String> {
+        let mut width = 2usize;
+        let mut positional: Vec<&str> = Vec::new();
+        let mut index = 0;
+        while index < args.len() {
+            let arg = args[index].as_str();
+            match arg {
+                "--indent" | "-i" => {
+                    let value = args.get(index + 1).ok_or("json pretty --indent N")?;
+                    width = value
+                        .parse()
+                        .map_err(|_| format!("json pretty: {value:?} is not a number"))?;
+                    index += 1;
+                }
+                other => positional.push(other),
+            }
+            index += 1;
+        }
+        if positional.len() > 1 {
+            return Err("json pretty [--indent N] [FILE|-]".into());
+        }
+        let document = match positional.first() {
+            None | Some(&"-") => {
+                let stdin = std::mem::take(&mut self.stdin);
+                let text = String::from_utf8(stdin)
+                    .map_err(|_| "json pretty: stdin is not UTF-8".to_string())?;
+                serde_json::from_str(&text).map_err(|error| format!("json pretty: {error}"))?
+            }
+            Some(file) => {
+                let path = self.resolve(file)?;
+                let (_, _, document) = self.json_read(&path)?;
+                document
+            }
+        };
+        self.out.push_str(&json_pretty_text(&document, width));
+        self.out.push('\n');
+        Ok(())
+    }
+
+    /// Read a document together with the version it was read at, so the write
+    /// that follows can fail instead of clobbering a concurrent edit.
+    fn json_read(&mut self, path: &str) -> Result<(String, u64, Value), String> {
+        let entry = vfs::stat(path).map_err(|error| format!("json {}: {error:?}", self.display(path)))?;
+        if entry.kind == Kind::Directory {
+            return Err(format!("json: {} is a directory", self.display(path)));
+        }
+        let bytes = self.read_file(path)?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| format!("json {}: not UTF-8 text", self.display(path)))?;
+        let value = serde_json::from_str(&text)
+            .map_err(|error| format!("json {}: {error}", self.display(path)))?;
+        Ok((text, entry.version, value))
+    }
+
+    fn json_write(
+        &mut self,
+        path: &str,
+        document: &Value,
+        original: &str,
+        version: u64,
+        action: &str,
+    ) -> Result<(), String> {
+        let rendered = json_render(document, original);
+        let result = vfs_mut::write(path, rendered.as_bytes(), media_type(path), Some(version))
+            .map_err(|error| format!("json {action} {}: {error:?}", self.display(path)))?;
+        self.out
+            .push_str(&format!("{}: {action} (v{})\n", self.display(path), result.version));
         Ok(())
     }
 
@@ -2280,6 +2567,484 @@ fn media_type(path: &str) -> &'static str {
     }
 }
 
+/// One step of a line-level edit script. The payload is a line index into the
+/// left list (`Equal`, `Delete`) or the right list (`Insert`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineOp {
+    Equal(usize),
+    Delete(usize),
+    Insert(usize),
+}
+
+/// Split a buffer into lines that keep their terminator, so a missing final
+/// newline is content a diff can report rather than a detail it ignores.
+fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes.split_inclusive(|byte| *byte == b'\n').collect()
+}
+
+/// A NUL near the start means "not text"; that is how GNU diff decides too, and
+/// it keeps a binary file from being printed as mojibake.
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8000).any(|byte| *byte == 0)
+}
+
+/// Both sides of a diff already live in Spore memory, so the table is bounded.
+/// Past the cap the script degrades to "every line replaced": still correct
+/// output, just less readable.
+const MAX_DIFF_CELLS: usize = 1_000_000;
+
+/// Longest-common-subsequence edit script over two line lists.
+fn diff_ops(left: &[&[u8]], right: &[&[u8]]) -> Vec<LineOp> {
+    let (rows, columns) = (left.len(), right.len());
+    let mut ops = Vec::with_capacity(rows + columns);
+    if rows.saturating_mul(columns) > MAX_DIFF_CELLS {
+        ops.extend((0..rows).map(LineOp::Delete));
+        ops.extend((0..columns).map(LineOp::Insert));
+        return ops;
+    }
+    // lcs[i][j] is the LCS length of left[i..] and right[j..]; a suffix table
+    // lets the walk below emit the script in reading order.
+    let width = columns + 1;
+    let mut lcs = vec![0u32; (rows + 1) * width];
+    for row in (0..rows).rev() {
+        for column in (0..columns).rev() {
+            lcs[row * width + column] = if left[row] == right[column] {
+                lcs[(row + 1) * width + column + 1] + 1
+            } else {
+                lcs[(row + 1) * width + column].max(lcs[row * width + column + 1])
+            };
+        }
+    }
+    let (mut row, mut column) = (0, 0);
+    while row < rows && column < columns {
+        if left[row] == right[column] {
+            ops.push(LineOp::Equal(row));
+            row += 1;
+            column += 1;
+        } else if lcs[(row + 1) * width + column] >= lcs[row * width + column + 1] {
+            ops.push(LineOp::Delete(row));
+            row += 1;
+        } else {
+            ops.push(LineOp::Insert(column));
+            column += 1;
+        }
+    }
+    ops.extend((row..rows).map(LineOp::Delete));
+    ops.extend((column..columns).map(LineOp::Insert));
+    ops
+}
+
+/// Group an edit script into unified-diff hunks: each change run plus up to
+/// `context` unchanged lines, merging runs whose gap also fits that window.
+fn hunk_ranges(ops: &[LineOp], context: usize) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut index = 0;
+    while index < ops.len() {
+        if matches!(ops[index], LineOp::Equal(_)) {
+            index += 1;
+            continue;
+        }
+        let start = index.saturating_sub(context);
+        let mut end = index;
+        loop {
+            while end < ops.len() && !matches!(ops[end], LineOp::Equal(_)) {
+                end += 1;
+            }
+            let mut next = end;
+            while next < ops.len() && matches!(ops[next], LineOp::Equal(_)) {
+                next += 1;
+            }
+            if next < ops.len() && next - end <= context * 2 {
+                end = next;
+            } else {
+                break;
+            }
+        }
+        let stop = (end + context).min(ops.len());
+        ranges.push((start, stop));
+        index = stop;
+    }
+    ranges
+}
+
+/// The 1-based line number each op starts at on either side, so a hunk header
+/// can name both ranges without walking the script twice.
+fn line_numbers(ops: &[LineOp]) -> (Vec<usize>, Vec<usize>) {
+    let mut old = Vec::with_capacity(ops.len());
+    let mut new = Vec::with_capacity(ops.len());
+    let (mut old_line, mut new_line) = (1, 1);
+    for op in ops {
+        old.push(old_line);
+        new.push(new_line);
+        match op {
+            LineOp::Equal(_) => {
+                old_line += 1;
+                new_line += 1;
+            }
+            LineOp::Delete(_) => old_line += 1,
+            LineOp::Insert(_) => new_line += 1,
+        }
+    }
+    (old, new)
+}
+
+fn diff_hunk_header(
+    ops: &[LineOp],
+    old_at: &[usize],
+    new_at: &[usize],
+    start: usize,
+    stop: usize,
+) -> String {
+    let hunk = &ops[start..stop];
+    let old_count = hunk
+        .iter()
+        .filter(|op| !matches!(op, LineOp::Insert(_)))
+        .count();
+    let new_count = hunk
+        .iter()
+        .filter(|op| !matches!(op, LineOp::Delete(_)))
+        .count();
+    // A zero-length range names the line *before* the insertion point, which is
+    // how unified diff spells "insert at the top": `@@ -0,0 +1,3 @@`.
+    let old_from = if old_count == 0 {
+        old_at[start].saturating_sub(1)
+    } else {
+        old_at[start]
+    };
+    let new_from = if new_count == 0 {
+        new_at[start].saturating_sub(1)
+    } else {
+        new_at[start]
+    };
+    format!(
+        "@@ -{} +{} @@\n",
+        diff_range(old_from, old_count),
+        diff_range(new_from, new_count)
+    )
+}
+
+fn diff_range(from: usize, count: usize) -> String {
+    if count == 1 {
+        from.to_string()
+    } else {
+        format!("{from},{count}")
+    }
+}
+
+/// Emit one diff line, including the marker that makes a missing final newline
+/// visible; without it two files that differ only there would print as equal.
+fn push_diff_line(out: &mut String, prefix: char, raw: &[u8]) {
+    out.push(prefix);
+    let body = raw.strip_suffix(b"\n").unwrap_or(raw);
+    out.push_str(&String::from_utf8_lossy(body));
+    out.push('\n');
+    if !raw.ends_with(b"\n") {
+        out.push_str("\\ No newline at end of file\n");
+    }
+}
+
+fn diff_context(value: &str) -> Result<usize, String> {
+    value
+        .parse()
+        .map_err(|_| format!("diff -U: {value:?} is not a line count"))
+}
+
+/// One step of a document path: `a.b[0]` is `Key("a")`, `Key("b")`, `Index(0)`.
+#[derive(Debug, PartialEq, Eq)]
+enum JsonPath {
+    Key(String),
+    Index(usize),
+}
+
+/// Parse a dot/bracket path. `$` or an empty path is the document root, a bare
+/// numeric segment counts as an index, and `["a.b"]` addresses a key that
+/// contains a dot.
+fn parse_json_path(path: &str) -> Result<Vec<JsonPath>, String> {
+    let chars: Vec<char> = path.trim().chars().collect();
+    let mut segments = Vec::new();
+    let mut index = 0;
+    if chars.first() == Some(&'$') {
+        index = 1;
+    }
+    if chars.get(index) == Some(&'.') {
+        index += 1;
+    }
+    while index < chars.len() {
+        match chars[index] {
+            '[' => {
+                index += 1;
+                match chars.get(index) {
+                    Some('"') | Some('\'') => {
+                        let quote = chars[index];
+                        index += 1;
+                        let mut key = String::new();
+                        loop {
+                            match chars.get(index) {
+                                None => return Err("json path: unterminated quoted key".into()),
+                                Some('\\') => {
+                                    let Some(next) = chars.get(index + 1) else {
+                                        return Err("json path: trailing escape".into());
+                                    };
+                                    key.push(*next);
+                                    index += 2;
+                                }
+                                Some(found) if *found == quote => {
+                                    index += 1;
+                                    break;
+                                }
+                                Some(found) => {
+                                    key.push(*found);
+                                    index += 1;
+                                }
+                            }
+                        }
+                        if chars.get(index) != Some(&']') {
+                            return Err("json path: expected ] after quoted key".into());
+                        }
+                        index += 1;
+                        segments.push(JsonPath::Key(key));
+                    }
+                    _ => {
+                        let start = index;
+                        while index < chars.len() && chars[index].is_ascii_digit() {
+                            index += 1;
+                        }
+                        if start == index || chars.get(index) != Some(&']') {
+                            return Err(format!(
+                                "json path: expected [index] or [\"key\"] in {path:?}"
+                            ));
+                        }
+                        let digits: String = chars[start..index].iter().collect();
+                        index += 1;
+                        segments.push(JsonPath::Index(
+                            digits
+                                .parse()
+                                .map_err(|_| format!("json path: bad index {digits:?}"))?,
+                        ));
+                    }
+                }
+            }
+            _ => {
+                let mut key = String::new();
+                while index < chars.len() && !matches!(chars[index], '.' | '[') {
+                    key.push(chars[index]);
+                    index += 1;
+                }
+                if key.is_empty() {
+                    return Err(format!("json path: {path:?} has an empty key"));
+                }
+                segments.push(JsonPath::Key(key));
+            }
+        }
+        match chars.get(index) {
+            None => break,
+            Some('.') => {
+                index += 1;
+                if index == chars.len() {
+                    return Err(format!("json path: {path:?} ends with a dot"));
+                }
+            }
+            Some('[') => {}
+            Some(_) => return Err(format!("json path: {path:?} is not a dot/bracket path")),
+        }
+    }
+    Ok(segments)
+}
+
+fn json_lookup<'a>(document: &'a Value, path: &[JsonPath]) -> Option<&'a Value> {
+    let mut current = document;
+    for segment in path {
+        current = match (segment, current) {
+            (JsonPath::Key(key), Value::Object(map)) => map.get(key)?,
+            (JsonPath::Key(key), Value::Array(items)) => items.get(key.parse::<usize>().ok()?)?,
+            (JsonPath::Index(index), Value::Array(items)) => items.get(*index)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+/// Recursive so the borrow of each level outlives the loop that produced it;
+/// a mutable walk of `Value` cannot be written as an iterator chain.
+fn json_lookup_mut<'a>(document: &'a mut Value, path: &[JsonPath]) -> Option<&'a mut Value> {
+    let Some((segment, rest)) = path.split_first() else {
+        return Some(document);
+    };
+    let next = match segment {
+        JsonPath::Key(key) => match document {
+            Value::Object(map) => map.get_mut(key),
+            Value::Array(items) => items.get_mut(key.parse::<usize>().ok()?),
+            _ => None,
+        },
+        JsonPath::Index(index) => match document {
+            Value::Array(items) => items.get_mut(*index),
+            _ => None,
+        },
+    }?;
+    json_lookup_mut(next, rest)
+}
+
+fn json_assign(document: &mut Value, path: &[JsonPath], value: Value) -> Result<(), String> {
+    let Some((last, parents)) = path.split_last() else {
+        *document = value;
+        return Ok(());
+    };
+    let parent = json_lookup_mut(document, parents).ok_or("no such parent path")?;
+    match (last, parent) {
+        (JsonPath::Key(key), Value::Object(map)) => {
+            map.insert(key.clone(), value);
+            Ok(())
+        }
+        (JsonPath::Key(key), Value::Array(items)) => match key.parse::<usize>() {
+            Ok(index) => json_assign_index(items, index, value),
+            Err(_) => Err(format!("{key:?} is not an array index")),
+        },
+        (JsonPath::Index(index), Value::Array(items)) => json_assign_index(items, *index, value),
+        (JsonPath::Index(_), _) => Err("array index used on a non-array".into()),
+        (JsonPath::Key(_), _) => Err("key used on a non-object".into()),
+    }
+}
+
+/// Index `len` appends, which is what `json set f.json list[2] x` should mean
+/// for a two-element list; anything further is a typo, not a sparse array.
+fn json_assign_index(items: &mut Vec<Value>, index: usize, value: Value) -> Result<(), String> {
+    match items.len().cmp(&index) {
+        std::cmp::Ordering::Greater => {
+            items[index] = value;
+            Ok(())
+        }
+        std::cmp::Ordering::Equal => {
+            items.push(value);
+            Ok(())
+        }
+        std::cmp::Ordering::Less => Err(format!(
+            "array index {index} is past the end ({} elements)",
+            items.len()
+        )),
+    }
+}
+
+fn json_remove(document: &mut Value, path: &[JsonPath]) -> Result<(), String> {
+    let Some((last, parents)) = path.split_last() else {
+        return Err("cannot remove the document root".into());
+    };
+    let parent = json_lookup_mut(document, parents).ok_or("no such parent path")?;
+    match (last, parent) {
+        (JsonPath::Key(key), Value::Object(map)) => {
+            map.remove(key).map(|_| ()).ok_or_else(|| format!("no {key:?} key"))
+        }
+        (JsonPath::Key(key), Value::Array(items)) => match key.parse::<usize>() {
+            Ok(index) => json_remove_index(items, index),
+            Err(_) => Err(format!("{key:?} is not an array index")),
+        },
+        (JsonPath::Index(index), Value::Array(items)) => json_remove_index(items, *index),
+        (JsonPath::Index(_), _) => Err("array index used on a non-array".into()),
+        (JsonPath::Key(_), _) => Err("key used on a non-object".into()),
+    }
+}
+
+fn json_remove_index(items: &mut Vec<Value>, index: usize) -> Result<(), String> {
+    if index >= items.len() {
+        return Err(format!(
+            "array index {index} is past the end ({} elements)",
+            items.len()
+        ));
+    }
+    items.remove(index);
+    Ok(())
+}
+
+/// Deep merge: object keys merge recursively, everything else — arrays
+/// included — is replaced by the source. Arrays are values, not append targets.
+fn json_merge_into(target: &mut Value, source: Value) {
+    match (target, source) {
+        (Value::Object(target), Value::Object(source)) => {
+            for (key, value) in source {
+                match target.get_mut(&key) {
+                    Some(existing) => json_merge_into(existing, value),
+                    None => {
+                        target.insert(key, value);
+                    }
+                }
+            }
+        }
+        (target, source) => *target = source,
+    }
+}
+
+/// The indentation a document was already written with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JsonIndent {
+    /// Single line: the file had no line breaks of its own.
+    Compact,
+    Spaces(usize),
+    Tab,
+}
+
+/// Read the file's own indentation so an edit produces a minimal diff instead
+/// of reflowing every line. No indented line at all means the file was compact.
+fn detect_json_indent(text: &str) -> JsonIndent {
+    for line in text.lines().skip(1) {
+        if line.starts_with('\t') {
+            return JsonIndent::Tab;
+        }
+        if line.starts_with(' ') {
+            let width = line.len() - line.trim_start_matches(' ').len();
+            return JsonIndent::Spaces(width.clamp(1, 8));
+        }
+    }
+    JsonIndent::Compact
+}
+
+/// Render a document the way the file already looks: same indentation, same
+/// trailing-newline habit. Everything else is normalized by `serde_json`, which
+/// preserves key order and number values but not their original spelling.
+fn json_render(document: &Value, original: &str) -> String {
+    let mut text = match detect_json_indent(original) {
+        JsonIndent::Compact => document.to_string(),
+        JsonIndent::Spaces(width) => json_pretty_text(document, width),
+        JsonIndent::Tab => json_reindent(&json_pretty_source(document), "\t"),
+    };
+    if original.ends_with('\n') && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+fn json_pretty_text(document: &Value, width: usize) -> String {
+    if width == 0 {
+        return document.to_string();
+    }
+    let pretty = json_pretty_source(document);
+    if width == 2 {
+        pretty
+    } else {
+        json_reindent(&pretty, &" ".repeat(width))
+    }
+}
+
+/// `Value` has no non-string map keys, so pretty-printing cannot fail; the
+/// fallback keeps this total without an `unwrap` in the shell.
+fn json_pretty_source(document: &Value) -> String {
+    serde_json::to_string_pretty(document).unwrap_or_else(|_| document.to_string())
+}
+
+/// Re-indent pretty output by rewriting each line's leading two-space step as
+/// `unit`. JSON escapes newlines inside strings, so every newline here is a
+/// formatting newline and no line counts as anything else.
+fn json_reindent(text: &str, unit: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_start_matches(' ');
+        let depth = (line.len() - body.len()) / 2;
+        for _ in 0..depth {
+            out.push_str(unit);
+        }
+        out.push_str(body);
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Word {
     text: String,
@@ -2765,6 +3530,12 @@ mush — a sandboxed VFS shell
   tree [DIR]              recursive listing
   find [DIR] [-name GLOB] [-type f|d] [-maxdepth N]  paths matching a glob
   sub PATTERN REPLACEMENT PATH...  regex replace in place (all matches, $1 groups)
+  diff [-q] [-U N] LEFT RIGHT      unified line diff; 0 same, 1 different, 2 unreadable
+  json get [-j] FILE [PATH]        print a JSON value; strings print raw unless -j
+  json set FILE PATH JSON|-        replace a value (JSON literal, or - for stdin)
+  json del FILE PATH               remove an object key or array element
+  json merge TARGET SOURCE...      deep-merge objects into TARGET
+  json pretty [--indent N] [FILE]  reformat to stdout (stdin when FILE is - or absent)
   rm [-r] PATH...         unlink files or recursively remove a directory
   mv FROM TO              rename a file
   cp FROM TO              copy bytes to a new version

@@ -1698,13 +1698,6 @@ enum Connector {
     Or,
 }
 
-/// Commands the Spore owns. Anything else has to be an allowlisted host program.
-const VFS_COMMANDS: &[&str] = &[
-    "help", "pwd", "cd", "ls", "mkdir", "rmdir", "cat", "write", "append", "touch", "head", "tail",
-    "grep", "wc", "stat", "tree", "find", "rm", "mv", "cp", "search", "source", "echo", "export",
-    "unset", "env", "set", "exit",
-];
-
 #[derive(Debug, Default)]
 struct ShellArgs {
     /// The `-c` command line. None means read stdin.
@@ -2026,12 +2019,6 @@ fn execute_one(runtime: &mut Runtime, root: &Path, session: &Session, line: &str
     let Some(program) = words.first().cloned() else {
         return Ok(0);
     };
-    if VFS_COMMANDS.contains(&program.as_str()) {
-        let response = runtime.execute(line)?;
-        print!("{}", response.output);
-        io::stdout().flush()?;
-        return Ok(0);
-    }
     if host_allowed(&program) {
         if line.contains('>') {
             anyhow::bail!("mush: {program}: redirection is only supported for VFS commands");
@@ -2044,8 +2031,16 @@ fn execute_one(runtime: &mut Runtime, root: &Path, session: &Session, line: &str
         args.extend(words);
         return run_host_status(root, args);
     }
-    eprintln!("mush: {program}: not a VFS command and not an allowlisted host program");
-    Ok(127)
+    // Everything else belongs to the Spore: it owns the VFS and knows which
+    // names are builtins, installed wasm commands, or genuinely unknown. A
+    // hardcoded list of builtins here used to drift — `sub`, `tgrep`, and `diff`
+    // worked through the daemon but not from `mush sh`.
+    let response = runtime.execute(line)?;
+    print!("{}", response.output);
+    eprint!("{}", response.stderr);
+    io::stdout().flush()?;
+    io::stderr().flush()?;
+    Ok(response.status)
 }
 
 fn execute_line(runtime: &mut Runtime, root: &Path, session: &Session, line: &str) -> Result<i32> {

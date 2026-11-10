@@ -216,7 +216,7 @@ fn run_one(
     if command.contains('|') || command.contains('>') || command.contains('<') {
         return run_in_spore(output, runtime, command);
     }
-    if host_allowed(&words[0]) {
+    if !spore_owned(&words[0]) && host_allowed(&words[0]) {
         return run_host(output, root, &words[0], &words[1..], control);
     }
     run_in_spore(output, runtime, command)
@@ -369,6 +369,21 @@ fn host_allowed(program: &str) -> bool {
     !program.contains('/') && HOST_ALLOWLIST.contains(&program)
 }
 
+/// Names the Spore must win even though the host allowlist also has them.
+///
+/// The allowlist exists for work the Spore cannot do — a compiler, git over the
+/// network. It also carries older conveniences (`jq`, `sed`, `awk`, `rg`) that
+/// the Spore has no equivalent for yet, so those keep running as host programs.
+/// `diff` and `json` are different: the Spore answers both from the VFS, and the
+/// overlay copy would shadow that with a second, unindexed answer that leaves
+/// the sandbox to run. A name missing here still runs the host program, so
+/// forgetting one costs an overlay, not correctness.
+const SPORE_OWNED: &[&str] = &["diff", "json"];
+
+fn spore_owned(program: &str) -> bool {
+    SPORE_OWNED.contains(&program)
+}
+
 fn split_commands(line: &str) -> Vec<(Connector, String)> {
     let mut out = Vec::new();
     let mut buffer = String::new();
@@ -479,5 +494,17 @@ mod tests {
         assert!(host_allowed("gh"));
         // A random binary is still refused.
         assert!(!host_allowed("python3"));
+    }
+
+    #[test]
+    fn diff_and_json_are_spore_owned() {
+        // Both are on the host allowlist, so the routing test is that the Spore
+        // still wins: the overlay copy would be a second, unindexed answer.
+        assert!(host_allowed("diff"));
+        assert!(spore_owned("diff"));
+        assert!(spore_owned("json"));
+        // Everything else keeps running as the host program.
+        assert!(!spore_owned("git"));
+        assert!(!spore_owned("sed"));
     }
 }

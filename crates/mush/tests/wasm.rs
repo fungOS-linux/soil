@@ -1,4 +1,7 @@
-use std::{path::PathBuf, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use fungos_vfs::Vfs;
 
@@ -14,6 +17,24 @@ fn mush_command() -> Command {
 
 fn module() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spores/mush/module.wasm")
+}
+
+/// One `--command` line, with the exit status the shell reported.
+fn run(dir: &Path, command: &str) -> (i32, String, String) {
+    let output = mush_command()
+        .arg("--root")
+        .arg(dir)
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg(command)
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
 }
 
 #[test]
@@ -387,6 +408,199 @@ fn wasm_spore_supports_tgrep_over_vfs() {
     assert!(stdout.contains("/docs/a.txt\n/docs/b.md"), "{stdout}");
     assert!(stdout.contains("/docs/b.md:1:ALPHA markdown"), "{stdout}");
     assert!(stdout.contains("status=1"), "{stdout}");
+}
+
+#[test]
+fn wasm_spore_diff_reports_lines_and_status() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut vfs = Vfs::open(dir.path()).unwrap();
+        vfs.put(
+            "old.txt",
+            b"one\ntwo\nthree\n",
+            "text/plain",
+            fungos_vfs::Expect::Any,
+        )
+        .unwrap();
+        vfs.put(
+            "same.txt",
+            b"one\ntwo\nthree\n",
+            "text/plain",
+            fungos_vfs::Expect::Any,
+        )
+        .unwrap();
+        vfs.put(
+            "new.txt",
+            b"one\nTWO\nthree\nfour\n",
+            "text/plain",
+            fungos_vfs::Expect::Any,
+        )
+        .unwrap();
+        // Same lines, no final newline: content a diff must not hide.
+        vfs.put(
+            "nonl.txt",
+            b"one\ntwo\nthree",
+            "text/plain",
+            fungos_vfs::Expect::Any,
+        )
+        .unwrap();
+    }
+
+    let (status, stdout, _) = run(dir.path(), "diff old.txt new.txt");
+    assert_eq!(status, 1, "{stdout}");
+    assert!(
+        stdout.starts_with("--- /old.txt\n+++ /new.txt\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("@@ -1,3 +1,4 @@"), "{stdout}");
+    assert!(
+        stdout.contains(" one\n-two\n+TWO\n three\n+four\n"),
+        "{stdout}"
+    );
+
+    let (status, stdout, _) = run(dir.path(), "diff old.txt same.txt");
+    assert_eq!(status, 0, "{stdout}");
+    assert!(stdout.is_empty(), "{stdout}");
+
+    let (status, stdout, _) = run(dir.path(), "diff -q old.txt new.txt");
+    assert_eq!(status, 1);
+    assert_eq!(stdout, "Files /old.txt and /new.txt differ\n");
+
+    // Zero context gives one hunk per change, with ranges that match diff(1).
+    let (status, stdout, _) = run(dir.path(), "diff -U 0 old.txt new.txt");
+    assert_eq!(status, 1);
+    assert!(stdout.contains("@@ -2 +2 @@"), "{stdout}");
+    assert!(stdout.contains("@@ -3,0 +4 @@"), "{stdout}");
+
+    let (status, stdout, _) = run(dir.path(), "diff old.txt nonl.txt");
+    assert_eq!(status, 1);
+    assert!(
+        stdout.contains("\\ No newline at end of file"),
+        "{stdout}"
+    );
+
+    // Unreadable is status 2, which keeps it distinguishable from "differ".
+    let (status, stdout, stderr) = run(dir.path(), "diff old.txt missing.txt");
+    assert_eq!(status, 2, "{stdout}{stderr}");
+    assert!(stderr.contains("missing.txt"), "{stderr}");
+}
+
+#[test]
+fn wasm_spore_json_reads_and_edits_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = concat!(
+        "{\n",
+        "  \"name\": \"mush\",\n",
+        "  \"nested\": {\n",
+        "    \"count\": 1\n",
+        "  },\n",
+        "  \"list\": [\n",
+        "    1,\n",
+        "    2\n",
+        "  ]\n",
+        "}\n",
+    );
+    {
+        let mut vfs = Vfs::open(dir.path()).unwrap();
+        vfs.put(
+            "config.json",
+            config.as_bytes(),
+            "application/json",
+            fungos_vfs::Expect::Any,
+        )
+        .unwrap();
+        vfs.put(
+            "patch.json",
+            b"{\"nested\":{\"count\":2,\"extra\":true}}\n",
+            "application/json",
+            fungos_vfs::Expect::Any,
+        )
+        .unwrap();
+        // Compact and without a final newline: an edit must keep both.
+        vfs.put(
+            "tiny.json",
+            b"{\"a\":1}",
+            "application/json",
+            fungos_vfs::Expect::Any,
+        )
+        .unwrap();
+    }
+
+    // A string prints raw so it can be used as a shell word; -j keeps the JSON.
+    let (status, stdout, _) = run(
+        dir.path(),
+        "json get config.json name\n\
+         json get -j config.json name\n\
+         json get config.json nested.count\n\
+         json get config.json list[1]\n\
+         json get config.json nested",
+    );
+    assert_eq!(status, 0, "{stdout}");
+    assert_eq!(stdout, "mush\n\"mush\"\n1\n2\n{\"count\":1}\n", "{stdout}");
+
+    let (status, _, stderr) = run(dir.path(), "json get config.json nope");
+    assert_eq!(status, 1);
+    assert!(stderr.contains("no value at \"nope\""), "{stderr}");
+
+    // set keeps unrelated fields, key order, and the file's own indentation.
+    let (status, stdout, _) = run(dir.path(), "json set config.json nested.count 7");
+    assert_eq!(status, 0, "{stdout}");
+    let mut vfs = Vfs::open(dir.path()).unwrap();
+    assert_eq!(
+        String::from_utf8(vfs.get("config.json").unwrap()).unwrap(),
+        config.replace("\"count\": 1", "\"count\": 7")
+    );
+
+    // A new key is appended at the end; a compact file stays compact.
+    run(dir.path(), "json set tiny.json b true");
+    let mut vfs = Vfs::open(dir.path()).unwrap();
+    assert_eq!(vfs.get("tiny.json").unwrap(), b"{\"a\":1,\"b\":true}");
+
+    // del removes a key or an array element (shifting the rest down).
+    run(dir.path(), "json del config.json list[0]");
+    let mut vfs = Vfs::open(dir.path()).unwrap();
+    let text = String::from_utf8(vfs.get("config.json").unwrap()).unwrap();
+    assert!(text.contains("\"list\": [\n    2\n  ]"), "{text}");
+
+    // merge is deep: nested keys merge, scalars are replaced.
+    let (status, _, stderr) = run(dir.path(), "json merge config.json patch.json");
+    assert_eq!(status, 0, "{stderr}");
+    let mut vfs = Vfs::open(dir.path()).unwrap();
+    let text = String::from_utf8(vfs.get("config.json").unwrap()).unwrap();
+    assert!(text.contains("\"count\": 2"), "{text}");
+    assert!(text.contains("\"extra\": true"), "{text}");
+    assert!(text.contains("\"name\": \"mush\""), "{text}");
+
+    // pretty prints; it never writes, and it reads stdin without a file.
+    assert_eq!(
+        run(dir.path(), "json pretty --indent 0 tiny.json").1,
+        "{\"a\":1,\"b\":true}\n"
+    );
+    assert_eq!(
+        run(dir.path(), "echo '{\"k\":[1,2]}' | json pretty").1,
+        "{\n  \"k\": [\n    1,\n    2\n  ]\n}\n"
+    );
+
+    // `-` takes the new value from stdin, so a pipeline can feed `set` too.
+    let (status, _, stderr) = run(
+        dir.path(),
+        "echo '{\"from\":\"stdin\"}' | json set config.json added -",
+    );
+    assert_eq!(status, 0, "{stderr}");
+    let mut vfs = Vfs::open(dir.path()).unwrap();
+    let text = String::from_utf8(vfs.get("config.json").unwrap()).unwrap();
+    assert!(
+        text.contains("\"added\": {\n    \"from\": \"stdin\"\n  }"),
+        "{text}"
+    );
+
+    // Invalid documents and unquoted strings fail loudly instead of guessing.
+    let (status, _, stderr) = run(dir.path(), "json set config.json name bob");
+    assert_eq!(status, 1);
+    assert!(stderr.contains("VALUE must be JSON"), "{stderr}");
+    let (status, _, stderr) = run(dir.path(), "json get patch.json nested.count.deep");
+    assert_eq!(status, 1);
+    assert!(stderr.contains("no value at"), "{stderr}");
 }
 
 #[test]
