@@ -104,8 +104,15 @@ interface cursor {
   set: func(style: cursor-style) -> result<_, string>;
 }
 
+/// The system clipboard. A Spore selects text; the presenter owns the
+/// pasteboard, so selection stays a Spore concern and the transfer is one call.
+interface clipboard {
+  set-text: func(text: string) -> result<_, string>;
+}
+
 world imports {
   import surface;
   import input;
   import cursor;
+  import clipboard;
 }

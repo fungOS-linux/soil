@@ -271,6 +271,12 @@ pub enum CursorStyle {
     Help,
 }
 
+/// The system clipboard, when the presenter has one. A host without a pasteboard
+/// leaves it unset and `soil:present/clipboard` refuses loudly.
+pub trait ClipboardHost: Send {
+    fn set_text(&mut self, text: String) -> Result<(), String>;
+}
+
 /// The window's pointer shape. Presenters that own a window implement it;
 /// a capture or headless host leaves it unset and `set` succeeds doing nothing.
 pub trait CursorHost: Send {
@@ -335,6 +341,7 @@ pub struct WebGpuHost {
     catalog: Box<dyn CatalogHost>,
     terminal: Box<dyn TerminalHost>,
     cursor: Option<Box<dyn CursorHost>>,
+    clipboard: Option<Box<dyn ClipboardHost>>,
 }
 
 /// Everything one Spore run is allowed to talk to. A presenter fills in the
@@ -349,6 +356,8 @@ pub struct HostSetup {
     pub terminal: Box<dyn TerminalHost>,
     /// `None` on hosts without a window; `soil:present/cursor` still succeeds.
     pub cursor: Option<Box<dyn CursorHost>>,
+    /// `None` on hosts without a pasteboard.
+    pub clipboard: Option<Box<dyn ClipboardHost>>,
 }
 
 impl HostSetup {
@@ -361,6 +370,7 @@ impl HostSetup {
             catalog: Box::new(NoCatalog),
             terminal: Box::new(NoTerminal),
             cursor: None,
+            clipboard: None,
         }
     }
 }
@@ -386,6 +396,7 @@ impl WebGpuHost {
             catalog: setup.catalog,
             terminal: setup.terminal,
             cursor: setup.cursor,
+            clipboard: setup.clipboard,
         })
     }
 }
@@ -599,6 +610,15 @@ impl soil::terminal_screen::screen::Host for WebGpuHost {
     }
 }
 
+impl soil::present::clipboard::Host for WebGpuHost {
+    fn set_text(&mut self, text: String) -> std::result::Result<(), String> {
+        match self.clipboard.as_mut() {
+            Some(clipboard) => clipboard.set_text(text),
+            None => Err("this host has no clipboard".to_owned()),
+        }
+    }
+}
+
 impl soil::present::cursor::Host for WebGpuHost {
     fn set(
         &mut self,
@@ -668,6 +688,9 @@ impl WebGpuRuntime {
         soil::present::cursor::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:present cursor")?;
+        soil::present::clipboard::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+            .map_err(anyhow::Error::from)
+            .context("link soil:present clipboard")?;
         soil::spore::catalog::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:spore catalog")?;

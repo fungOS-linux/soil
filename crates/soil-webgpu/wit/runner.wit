@@ -7,6 +7,7 @@ world runner {
   import soil:present/surface@0.1.0;
   import soil:present/input@0.1.0;
   import soil:present/cursor@0.1.0;
+  import soil:present/clipboard@0.1.0;
   import soil:spore/catalog@0.1.0;
   import soil:terminal-screen/screen@0.1.0;
 

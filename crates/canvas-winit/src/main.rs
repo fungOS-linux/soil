@@ -20,8 +20,8 @@ mod terminal;
 
 use soil_webgpu::{
     CanvasFrame, CanvasGpuPresenter, CatalogEntry, CatalogError, CatalogHost, CatalogLaunched,
-    CatalogSurface, CatalogSurfaceKind, CursorHost, CursorStyle, HostSetup, InputEvent, InputKey,
-    PointerButton, WebGpuRuntime,
+    CatalogSurface, CatalogSurfaceKind, ClipboardHost, CursorHost, CursorStyle, HostSetup,
+    InputEvent, InputKey, PointerButton, WebGpuRuntime,
 };
 use terminal::Terminals;
 use winit::{
@@ -151,8 +151,18 @@ impl CatalogHost for SporeCatalog {
 /// parent's terminal inherits the wrong tty along with it.
 fn launch_command(executable: &std::path::Path, module: &std::path::Path) -> std::process::Command {
     if let Some(bundle) = bundle_root(executable) {
+        // Every Spore opens as its own app: its own bundle identity, its own
+        // icon in the Dock, and therefore its own tile to come back to. Sharing
+        // the launcher's identity would give every window one Dock entry.
         let mut command = std::process::Command::new("/usr/bin/open");
-        command.arg("-n").arg(bundle).arg("--args").arg(module);
+        match spore_bundle(bundle, module) {
+            Some(target) => {
+                command.arg("-n").arg(target);
+            }
+            None => {
+                command.arg("-n").arg(bundle).arg("--args").arg(module);
+            }
+        }
         return command;
     }
     let mut command = std::process::Command::new(executable);
@@ -162,6 +172,94 @@ fn launch_command(executable: &std::path::Path, module: &std::path::Path) -> std
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     command
+}
+
+/// Build (or refresh) a `.app` that stands for one Spore, and answer its path.
+///
+/// The bundle carries its own copy of the binary and the module. A symlink would
+/// be cheaper, but macOS names a Dock tile by the executable a process actually
+/// runs: through a symlink that resolves back to the launcher, so every Spore
+/// showed up as "fungOS". Copies are refreshed when the source changes.
+fn spore_bundle(app: &std::path::Path, module: &std::path::Path) -> Option<std::path::PathBuf> {
+    let slug = module
+        .parent()
+        .and_then(|package| package.file_name())
+        .and_then(|name| name.to_str())?
+        .to_owned();
+    let title = manifest_title(module).unwrap_or_else(|| title_case(&slug));
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let bundle = home
+        .join("Library/Application Support/fungOS/apps")
+        .join(format!("{slug}.app"));
+    let contents = bundle.join("Contents");
+    let macos = contents.join("MacOS");
+    let resources = contents.join("Resources");
+    std::fs::create_dir_all(&macos).ok()?;
+    std::fs::create_dir_all(&resources).ok()?;
+
+    let executable = std::env::current_exe().ok()?;
+    refresh_copy(&executable, &macos.join("canvas-winit"))?;
+    refresh_copy(module, &resources.join("spore.wasm"))?;
+    // The icon comes from the launcher bundle so every Spore is a fungOS app.
+    if let Some(parent) = app.parent() {
+        let icon = parent.join("Resources/fungos.icns");
+        if icon.is_file() {
+            let _ = std::fs::copy(&icon, resources.join("fungos.icns"));
+        }
+    }
+    // The bundle says what it is called; the module beside it is just
+    // `spore.wasm`, so the title travels with the bundle.
+    let _ = std::fs::write(resources.join("title.txt"), &title);
+    let identifier = format!("dev.fungos.spore.{slug}");
+    let plist = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+<plist version=\"1.0\"><dict>\n\
+  <key>CFBundleExecutable</key><string>canvas-winit</string>\n\
+  <key>CFBundleIdentifier</key><string>{identifier}</string>\n\
+  <key>CFBundleName</key><string>{title}</string>\n\
+  <key>CFBundleDisplayName</key><string>{title}</string>\n\
+  <key>CFBundleIconFile</key><string>fungos</string>\n\
+  <key>CFBundlePackageType</key><string>APPL</string>\n\
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>\n\
+  <key>CFBundleVersion</key><string>0.1.0</string>\n\
+  <key>LSMinimumSystemVersion</key><string>13.0</string>\n\
+  <key>NSHighResolutionCapable</key><true/>\n\
+</dict></plist>\n"
+    );
+    std::fs::write(contents.join("Info.plist"), plist).ok()?;
+    Some(bundle)
+}
+
+/// Copy `source` over `destination` when the destination is missing, older, or a
+/// different size. A stale copy would run yesterday's binary.
+fn refresh_copy(source: &std::path::Path, destination: &std::path::Path) -> Option<()> {
+    let fresh = match (
+        std::fs::metadata(source).ok(),
+        std::fs::metadata(destination).ok(),
+    ) {
+        (Some(source), Some(destination)) => {
+            destination.len() == source.len()
+                && destination.modified().ok() >= source.modified().ok()
+        }
+        _ => false,
+    };
+    if fresh {
+        return Some(());
+    }
+    std::fs::copy(source, destination).ok().map(|_| ())
+}
+
+/// The display name a module's package gives itself, if it has a manifest.
+fn manifest_title(module: &std::path::Path) -> Option<String> {
+    let package = module.parent()?;
+    let manifest = Manifest::load(package).ok()?;
+    manifest
+        .spore
+        .title
+        .clone()
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| Some(title_case(&manifest.spore.name)))
 }
 
 /// The `.app` an executable lives in, if it lives in one.
@@ -223,6 +321,10 @@ struct App {
     scale: f32,
     /// Surface extent shared with the presenter; the window owns it.
     extent: Arc<Mutex<(u32, u32)>>,
+    /// The size the window last reported, and when. A resize is applied once
+    /// the drag goes quiet: reflowing the emulator and re-rendering the grid on
+    /// every mouse-move is what makes a drag feel broken.
+    pending_resize: Option<(std::time::Instant, (u32, u32))>,
     /// When the window opened, so the splash animation has a clock.
     opened: std::time::Instant,
     /// When the splash last painted, so it runs at a steady rate instead of
@@ -247,7 +349,33 @@ impl App {
         }
     }
 
-    /// Re-derive the surface extent after the window changed size.
+    /// Bring up another launcher. It is a separate app instance, so it gets its
+    /// own window without disturbing the Spore in this one.
+    fn open_launcher(&mut self) {
+        let Ok(executable) = std::env::current_exe() else {
+            return;
+        };
+        let mut command = match bundle_root(&executable) {
+            // The launcher is the app bundle itself: no module argument means
+            // "show me the Spores".
+            Some(bundle) => {
+                let mut command = std::process::Command::new("/usr/bin/open");
+                command.arg("-n").arg(bundle);
+                command
+            }
+            // A bare binary has no launcher bundle to open; the shortcut is
+            // only meaningful for the app.
+            None => return,
+        };
+        if let Ok(mut child) = command.spawn() {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+
+    /// Note the window's new size. The extent itself is committed once the drag
+    /// has been still for a moment.
     fn resized(&mut self) {
         let Some(window) = &self.window else {
             return;
@@ -258,10 +386,25 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
-        if let Ok(mut extent) = self.extent.lock() {
-            *extent = (width, height);
+        self.pending_resize = Some((std::time::Instant::now(), (width, height)));
+    }
+
+    /// Apply a pending resize when the window has stopped moving.
+    fn settle_resize(&mut self) {
+        let Some((at, size)) = self.pending_resize else {
+            return;
+        };
+        let momentarily = std::time::Duration::from_millis(120);
+        if at.elapsed() < momentarily {
+            return;
         }
-        window.request_redraw();
+        self.pending_resize = None;
+        if let Ok(mut extent) = self.extent.lock() {
+            *extent = size;
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     fn start_component(&mut self, window: Arc<Window>) {
@@ -299,6 +442,7 @@ impl App {
                         catalog: Box::new(catalog),
                         terminal: Box::new(Terminals::new(80, 24, command)),
                         cursor: Some(Box::new(WindowCursor(window))),
+                        clipboard: Some(Box::new(SystemClipboard)),
                     },
                 ))?;
                 eprintln!("canvas-winit: guest returned {status}");
@@ -537,6 +681,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
+                self.settle_resize();
                 self.take_frames(event_loop);
                 if self.frame.is_some() {
                     self.paint();
@@ -555,6 +700,15 @@ impl ApplicationHandler for App {
                 self.modifiers = modifiers.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed
+                    && (self.modifiers.super_key() || self.modifiers.control_key())
+                    && matches!(
+                        event.logical_key,
+                        WinitKey::Character(ref text) if matches!(text.as_str(), "o" | "l")
+                    )
+                {
+                    self.open_launcher();
+                }
                 if event.state == ElementState::Pressed {
                     let key = key_name(&event.logical_key);
                     let text = event.text.as_ref().map(|text| text.to_string());
@@ -620,6 +774,15 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.settle_resize();
+        // While a drag is in flight, come back soon enough to notice it stopped.
+        if self.pending_resize.is_some() {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(50),
+            ));
+        } else {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+        }
         let before = self.frames_seen;
         self.take_frames(event_loop);
         if let Some(window) = &self.window
@@ -653,6 +816,16 @@ fn component_cache(module: &std::path::Path) -> std::path::PathBuf {
 /// launcher lists it from; a bare module falls back to its file name. Either way
 /// the user sees "Launcher" or "Term", never "canvas-winit — launcher.wasm".
 fn window_title(module: &std::path::Path) -> String {
+    // A Spore bundle names itself beside its module.
+    if let Some(title) = module
+        .parent()
+        .map(|resources| resources.join("title.txt"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|title| title.trim().to_owned())
+        .filter(|title| !title.is_empty())
+    {
+        return title;
+    }
     let manifest = module
         .ancestors()
         .skip(1)
@@ -767,12 +940,50 @@ fn squircle_coverage(x: u32, y: u32, side: u32) -> f32 {
     (0.5 - distance).clamp(0.0, 1.0)
 }
 
+fn drag_point(value: String) -> Result<((f32, f32), (f32, f32))> {
+    let mut parts = value.split(',');
+    let mut next = || -> Result<f32> {
+        parts
+            .next()
+            .context("expected four numbers")?
+            .trim()
+            .parse()
+            .context("not a number")
+    };
+    Ok(((next()?, next()?), (next()?, next()?)))
+}
+
 fn pointer_button(button: MouseButton) -> Option<PointerButton> {
     match button {
         MouseButton::Left => Some(PointerButton::Left),
         MouseButton::Right => Some(PointerButton::Right),
         MouseButton::Middle => Some(PointerButton::Middle),
         _ => None,
+    }
+}
+
+/// The system pasteboard. `pbcopy` is the whole of it: the host is the only
+/// thing that touches the system, and a Spore cannot see what it wrote.
+struct SystemClipboard;
+
+impl ClipboardHost for SystemClipboard {
+    fn set_text(&mut self, text: String) -> Result<(), String> {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("/usr/bin/pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("pbcopy: {error}"))?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|error| format!("pbcopy stdin: {error}"))?;
+        }
+        child
+            .wait()
+            .map(|status| status.success())
+            .map_err(|error| format!("pbcopy: {error}"))?
+            .then_some(())
+            .ok_or_else(|| "pbcopy reported failure".to_owned())
     }
 }
 
@@ -826,6 +1037,8 @@ fn main() -> Result<()> {
     let mut command = None;
     let mut pointer = None;
     let mut click = None;
+    let mut drag = None;
+    let mut after: Option<u64> = None;
     let mut spores = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -845,11 +1058,22 @@ fn main() -> Result<()> {
             }
             "--key" => key = Some(args.next().context("--key needs a key name")?),
             "--keys" => keys = Some(args.next().context("--keys needs text")?),
-            "--command" => {
-                command = Some(args.next().context("--command needs a command line")?)
-            }
+            "--command" => command = Some(args.next().context("--command needs a command line")?),
             "--pointer" => pointer = Some(point(args.next().context("--pointer needs X,Y")?)?),
             "--click" => click = Some(point(args.next().context("--click needs X,Y")?)?),
+            "--drag" => {
+                drag = Some(drag_point(
+                    args.next().context("--drag needs X1,Y1,X2,Y2")?,
+                )?)
+            }
+            "--after" => {
+                after = Some(
+                    args.next()
+                        .context("--after needs milliseconds")?
+                        .parse()
+                        .context("--after needs a number")?,
+                )
+            }
             "--spores" => {
                 spores = Some(PathBuf::from(
                     args.next().context("--spores needs a directory")?,
@@ -857,7 +1081,7 @@ fn main() -> Result<()> {
             }
             value if module.is_none() => module = Some(PathBuf::from(value)),
             _ => anyhow::bail!(
-                "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--spores DIR]"
+                "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--drag X1,Y1,X2,Y2] [--after MS] [--spores DIR]"
             ),
         }
     }
@@ -867,14 +1091,24 @@ fn main() -> Result<()> {
             // A .app bundle runs this binary directly; the launcher module sits
             // in Contents/Resources next to Contents/MacOS.
             let executable = std::env::current_exe().context("locate the executable")?;
-            let candidate = executable
+            let resources = executable
                 .parent()
                 .and_then(|macos| macos.parent())
-                .map(|contents| contents.join("Resources/launcher.wasm"))
+                .map(|contents| contents.join("Resources"))
                 .context("locate the bundle Resources directory")?;
+            // A per-Spore bundle carries its module as `spore.wasm`; the
+            // launcher's own bundle carries `launcher.wasm`.
+            let candidate = {
+                let spore = resources.join("spore.wasm");
+                if spore.is_file() {
+                    spore
+                } else {
+                    resources.join("launcher.wasm")
+                }
+            };
             if !candidate.is_file() {
                 anyhow::bail!(
-                    "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--spores DIR]"
+                    "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--drag X1,Y1,X2,Y2] [--after MS] [--spores DIR]"
                 );
             }
             candidate
@@ -896,43 +1130,83 @@ fn main() -> Result<()> {
                 meta: false,
             }));
     }
-    if let Some(text) = keys {
-        let mut queue = input.lock().expect("input queue poisoned");
-        for character in text.chars() {
-            let character = character.to_string();
-            queue.push_back(InputEvent::Key(InputKey {
-                key: character.clone(),
-                text: Some(character),
-                pressed: true,
-                shift: false,
-                control: false,
-                alt: false,
-                meta: false,
-            }));
+    // Input seeded before the window exists is delivered the moment the guest
+    // starts, which is before the shell has painted anything. `--after` waits
+    // for the app to be worth typing into.
+    let seed_queue = input.clone();
+    let seed = move || {
+        let input = seed_queue;
+        if let Some(text) = keys {
+            let mut queue = input.lock().expect("input queue poisoned");
+            for character in text.chars() {
+                let character = character.to_string();
+                queue.push_back(InputEvent::Key(InputKey {
+                    key: character.clone(),
+                    text: Some(character),
+                    pressed: true,
+                    shift: false,
+                    control: false,
+                    alt: false,
+                    meta: false,
+                }));
+            }
         }
-    }
-    if let Some((x, y)) = pointer {
-        input
-            .lock()
-            .expect("input queue poisoned")
-            .push_back(InputEvent::Moved { x, y });
-    }
-    if let Some((x, y)) = click {
-        input.lock().expect("input queue poisoned").extend([
-            InputEvent::Moved { x, y },
-            InputEvent::Button {
-                x,
-                y,
+        if let Some(((x1, y1), (x2, y2))) = drag {
+            let steps = 8;
+            let mut queue = input.lock().expect("input queue poisoned");
+            queue.push_back(InputEvent::Moved { x: x1, y: y1 });
+            queue.push_back(InputEvent::Button {
+                x: x1,
+                y: y1,
                 button: PointerButton::Left,
                 pressed: true,
-            },
-            InputEvent::Button {
-                x,
-                y,
+            });
+            for step in 1..=steps {
+                let t = step as f32 / steps as f32;
+                queue.push_back(InputEvent::Moved {
+                    x: x1 + (x2 - x1) * t,
+                    y: y1 + (y2 - y1) * t,
+                });
+            }
+            queue.push_back(InputEvent::Button {
+                x: x2,
+                y: y2,
                 button: PointerButton::Left,
                 pressed: false,
-            },
-        ]);
+            });
+        }
+        if let Some((x, y)) = pointer {
+            input
+                .lock()
+                .expect("input queue poisoned")
+                .push_back(InputEvent::Moved { x, y });
+        }
+        if let Some((x, y)) = click {
+            input.lock().expect("input queue poisoned").extend([
+                InputEvent::Moved { x, y },
+                InputEvent::Button {
+                    x,
+                    y,
+                    button: PointerButton::Left,
+                    pressed: true,
+                },
+                InputEvent::Button {
+                    x,
+                    y,
+                    button: PointerButton::Left,
+                    pressed: false,
+                },
+            ]);
+        }
+    };
+    match after {
+        Some(milliseconds) => {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(milliseconds));
+                seed();
+            });
+        }
+        None => seed(),
     }
     let frames = frames.unwrap_or(if capture.is_some() { 1 } else { usize::MAX });
     let (tx, rx) = mpsc::channel();
@@ -951,6 +1225,7 @@ fn main() -> Result<()> {
         pointer: (0.0, 0.0),
         scale: 1.0,
         extent: Arc::new(Mutex::new((LOGICAL_SIZE.0 as u32, LOGICAL_SIZE.1 as u32))),
+        pending_resize: None,
         opened: std::time::Instant::now(),
         splashed: std::time::Instant::now(),
         modifiers: ModifiersState::default(),

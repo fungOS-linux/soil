@@ -132,7 +132,6 @@ impl State {
     }
 }
 
-
 /// One process: a pty, a shell on it, and the emulator that parses what the
 /// shell writes.
 struct Session {
@@ -200,7 +199,14 @@ impl TerminalHost for Terminals {
     }
 
     fn open_session(&mut self, command: Option<String>) -> Result<u32, String> {
-        let command = command.or_else(|| self.default_command.clone());
+        // The command line the app was started with is the *first* shell; a
+        // second tab is the user asking for another terminal, which is a login
+        // shell unless they say otherwise.
+        let command = match (command, self.sessions.is_empty()) {
+            (Some(command), _) => Some(command),
+            (None, true) => self.default_command.clone(),
+            (None, false) => None,
+        };
         let label = command
             .as_deref()
             .and_then(|line| line.split_whitespace().next())
