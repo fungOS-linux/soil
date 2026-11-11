@@ -629,6 +629,50 @@ fn info_json_is_the_authoring_projection() {
     assert_eq!(info["module"]["path"], "module.wasm");
 }
 
+/// A manifest with one declared skill, so the two cases below differ only in
+/// the path they name.
+fn with_skill(path: &str) -> String {
+    format!("{MANIFEST}\n[[skills]]\nname = \"hello\"\npath = {path:?}\n")
+}
+
+#[test]
+fn a_declared_skill_ships_with_the_package() {
+    let root = fixture();
+    fs::write(root.join("spore.toml"), with_skill("skills/hello/SKILL.md")).unwrap();
+    fs::create_dir_all(root.join("skills/hello")).unwrap();
+    fs::write(
+        root.join("skills/hello/SKILL.md"),
+        b"---\nname: hello\ndescription: greet someone\n---\n",
+    )
+    .unwrap();
+
+    let manifest = Manifest::load(&root).unwrap();
+    assert_eq!(
+        manifest.skills.len(),
+        1,
+        "the skill is declared, not guessed"
+    );
+    assert!(
+        manifest
+            .declared_paths()
+            .contains(&PathBuf::from("skills/hello/SKILL.md")),
+        "the lock and the tar have to cover what teaches an agent to use it"
+    );
+}
+
+#[test]
+fn a_skill_that_is_not_a_skill_file_is_refused() {
+    // `SKILL.md` is the name the registry installs. A path to anything else is
+    // a file the package ships and nobody reads.
+    let root = fixture();
+    fs::write(
+        root.join("spore.toml"),
+        with_skill("skills/hello/README.md"),
+    )
+    .unwrap();
+    let error = Manifest::load(&root).unwrap_err();
+    assert!(matches!(error, Error::Invalid(_)), "{error}");
+}
 #[test]
 fn display_title_reads_a_slug_as_words() {
     assert_eq!(soil_spore::display_title("vitals-view"), "Vitals View");
