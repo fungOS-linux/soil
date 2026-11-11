@@ -2,15 +2,64 @@ use std::{path::PathBuf, process::Command};
 
 use fungos_vfs::Vfs;
 
+/// A root and a content store that belong to this test alone.
+///
+/// Content is shared across every root on a host by default; a test that does
+/// not name its own store writes into the machine's, and then fails only when
+/// another test happens to run beside it.
+struct Owned {
+    dir: tempfile::TempDir,
+    root: PathBuf,
+    store: PathBuf,
+}
+
+impl Owned {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&root).unwrap();
+        Self { dir, root, store }
+    }
+
+    fn open(&self) -> Vfs {
+        Vfs::open_with(
+            &self.root,
+            fungos_vfs::NodeRole::Full,
+            Some(self.store.as_path()),
+        )
+        .unwrap()
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mush"));
+        command
+            .arg("--root")
+            .arg(&self.root)
+            .arg("--store")
+            .arg(&self.store);
+        command
+    }
+}
+
+/// The spore under test.
+///
+/// `spores/` is a symlink to the public spores submodule, which a remote build
+/// session does not have: bob records a symlink and never follows it. A caller
+/// that has built the module elsewhere (a builder, CI) names it here rather than
+/// rewriting the tree under the sync.
 fn module() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spores/mush/module.wasm")
+    match std::env::var_os("MUSH_TEST_WASM") {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spores/mush/module.wasm"),
+    }
 }
 
 #[test]
 fn wasm_spore_loads_mushrc_and_keeps_shell_state() {
-    let dir = tempfile::tempdir().unwrap();
+    let owned = Owned::new();
     {
-        let mut vfs = Vfs::open(dir.path()).unwrap();
+        let mut vfs = owned.open();
         vfs.put(
             ".mushrc",
             b"export TERM=mush-test\nexport PS1=\"rc:\\w> \"\nmkdir notes\n",
@@ -20,9 +69,8 @@ fn wasm_spore_loads_mushrc_and_keeps_shell_state() {
         .unwrap();
     }
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
-        .arg("--root")
-        .arg(dir.path())
+    let output = owned
+        .command()
         .arg("--wasm")
         .arg(module())
         .arg("--command")
@@ -43,10 +91,9 @@ fn wasm_spore_loads_mushrc_and_keeps_shell_state() {
 
 #[test]
 fn wasm_spore_supports_mkdir_rmdir_and_files() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
-        .arg("--root")
-        .arg(dir.path())
+    let owned = Owned::new();
+    let output = owned
+        .command()
         .arg("--wasm")
         .arg(module())
         .arg("--command")
@@ -66,10 +113,9 @@ fn wasm_spore_supports_mkdir_rmdir_and_files() {
 
 #[test]
 fn wasm_spore_supports_append_grep_wc_tree_and_recursive_rm() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
-        .arg("--root")
-        .arg(dir.path())
+    let owned = Owned::new();
+    let output = owned
+        .command()
         .arg("--wasm")
         .arg(module())
         .arg("--command")
@@ -87,7 +133,7 @@ fn wasm_spore_supports_append_grep_wc_tree_and_recursive_rm() {
     assert!(stdout.contains("docs/a.md:2:beta"), "{stdout}");
     assert!(stdout.contains("2\t/docs/a.md"), "{stdout}");
     assert!(stdout.contains("docs/"), "{stdout}");
-    let vfs = Vfs::open(dir.path()).unwrap();
+    let vfs = owned.open();
     assert!(
         vfs.file("docs").unwrap().is_none(),
         "recursive rm left docs"
@@ -96,10 +142,9 @@ fn wasm_spore_supports_append_grep_wc_tree_and_recursive_rm() {
 
 #[test]
 fn wasm_spore_supports_redirection_recursive_mkdir_cp_and_find() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
-        .arg("--root")
-        .arg(dir.path())
+    let owned = Owned::new();
+    let output = owned
+        .command()
         .arg("--wasm")
         .arg(module())
         .arg("--command")
@@ -115,7 +160,7 @@ fn wasm_spore_supports_redirection_recursive_mkdir_cp_and_find() {
     assert!(stdout.contains("hello"), "{stdout}");
     assert!(stdout.contains("world"), "{stdout}");
     assert!(stdout.contains("note.txt"), "{stdout}");
-    let mut vfs = Vfs::open(dir.path()).unwrap();
+    let mut vfs = owned.open();
     assert_eq!(vfs.get("copied/c/note.txt").unwrap(), b"hello\nworld\n");
 }
 
@@ -124,9 +169,9 @@ fn wasm_spore_supports_redirection_recursive_mkdir_cp_and_find() {
 fn run_op_applies_overlay_and_respects_gitignore() {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = tempfile::tempdir().unwrap();
+    let owned = Owned::new();
     {
-        let mut vfs = Vfs::open(dir.path()).unwrap();
+        let mut vfs = owned.open();
         vfs.put(
             ".gitignore",
             b"target/\n",
@@ -142,7 +187,7 @@ fn run_op_applies_overlay_and_respects_gitignore() {
         )
         .unwrap();
     }
-    let script = dir.path().join("fake-operator.sh");
+    let script = owned.dir.path().join("fake-operator.sh");
     std::fs::write(
         &script,
         "#!/bin/sh\n\
@@ -161,7 +206,9 @@ fn run_op_applies_overlay_and_respects_gitignore() {
         .arg("run")
         .arg("op")
         .arg("--root")
-        .arg(dir.path())
+        .arg(&owned.root)
+        .arg("--store")
+        .arg(&owned.store)
         .arg("--operator-bin")
         .arg(&script)
         .arg("--prompt")
@@ -173,7 +220,7 @@ fn run_op_applies_overlay_and_respects_gitignore() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mut vfs = Vfs::open(dir.path()).unwrap();
+    let mut vfs = owned.open();
     assert_eq!(vfs.get("src/main.rs").unwrap(), b"new");
     assert!(vfs.file("target/debug/app").unwrap().is_none());
 }

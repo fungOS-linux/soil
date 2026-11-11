@@ -14,7 +14,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use fungos_vfs::{Expect, Vfs};
+use fungos_vfs::{Expect, NodeRole, Vfs};
 use ignore::WalkBuilder;
 use tempfile::TempDir;
 
@@ -55,9 +55,10 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    pub fn materialize(vfs_root: impl AsRef<Path>) -> Result<Self> {
+    pub fn materialize(vfs_root: impl AsRef<Path>, store: Option<&Path>) -> Result<Self> {
         let dir = tempfile::tempdir().context("create overlay directory")?;
-        let mut vfs = Vfs::open(vfs_root).context("open VFS for overlay")?;
+        let mut vfs =
+            Vfs::open_with(vfs_root, NodeRole::Full, store).context("open VFS for overlay")?;
         for entry in vfs.list("")? {
             let bytes = vfs.get(&entry.path)?;
             let target = safe_join(dir.path(), &entry.path)?;
@@ -117,8 +118,9 @@ impl Overlay {
         Ok(changes)
     }
 
-    pub fn apply(&self, vfs_root: impl AsRef<Path>) -> Result<ApplyReport> {
-        let mut vfs = Vfs::open(vfs_root).context("open VFS to apply overlay")?;
+    pub fn apply(&self, vfs_root: impl AsRef<Path>, store: Option<&Path>) -> Result<ApplyReport> {
+        let mut vfs =
+            Vfs::open_with(vfs_root, NodeRole::Full, store).context("open VFS to apply overlay")?;
         let changes = self.diff()?;
         let current = self.current_files()?;
         let mut written = 0;
@@ -280,11 +282,18 @@ fn media_type(path: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    /// The store this test owns. Inside `.fungos`, so it is the VFS's own state
+    /// directory rather than workspace content, and it dies with the tempdir.
+    fn owned(root: &Path) -> std::path::PathBuf {
+        root.join(".fungos/store")
+    }
+
     #[test]
     fn overlay_applies_add_modify_delete_and_empty_dirs() {
         let vfs = tempfile::tempdir().unwrap();
         {
-            let mut store = Vfs::open(vfs.path()).unwrap();
+            let mut store =
+                Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
             store
                 .put("notes/a.txt", b"old", "text/plain", Expect::Any)
                 .unwrap();
@@ -294,17 +303,18 @@ mod tests {
             store.mkdir("empty").unwrap();
         }
 
-        let overlay = Overlay::materialize(vfs.path()).unwrap();
+        let overlay = Overlay::materialize(vfs.path(), Some(&owned(vfs.path()))).unwrap();
         fs::write(overlay.path().join("notes/a.txt"), b"new").unwrap();
         fs::remove_file(overlay.path().join("notes/b.txt")).unwrap();
         fs::write(overlay.path().join("new.txt"), b"fresh").unwrap();
         fs::create_dir_all(overlay.path().join("empty/nested")).unwrap();
 
-        let report = overlay.apply(vfs.path()).unwrap();
+        let report = overlay.apply(vfs.path(), Some(&owned(vfs.path()))).unwrap();
         assert_eq!(report.written, 2);
         assert_eq!(report.deleted, 1);
         assert!(report.directories >= 1);
-        let mut store = Vfs::open(vfs.path()).unwrap();
+        let mut store =
+            Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
         assert_eq!(store.get("notes/a.txt").unwrap(), b"new");
         assert!(store.file("notes/b.txt").unwrap().is_none());
         assert_eq!(store.get("new.txt").unwrap(), b"fresh");
@@ -315,21 +325,23 @@ mod tests {
     fn overlay_tracks_git_metadata() {
         let vfs = tempfile::tempdir().unwrap();
         {
-            let mut store = Vfs::open(vfs.path()).unwrap();
+            let mut store =
+                Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
             store
                 .put(".git/config", b"[core]\n", "text/plain", Expect::Any)
                 .unwrap();
         }
-        let overlay = Overlay::materialize(vfs.path()).unwrap();
+        let overlay = Overlay::materialize(vfs.path(), Some(&owned(vfs.path()))).unwrap();
         assert!(overlay.path().join(".git/config").is_file());
         fs::write(
             overlay.path().join(".git/config"),
             b"[core]\n\tbranch = main\n",
         )
         .unwrap();
-        let report = overlay.apply(vfs.path()).unwrap();
+        let report = overlay.apply(vfs.path(), Some(&owned(vfs.path()))).unwrap();
         assert_eq!(report.written, 1);
-        let mut store = Vfs::open(vfs.path()).unwrap();
+        let mut store =
+            Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
         assert_eq!(
             store.get(".git/config").unwrap(),
             b"[core]\n\tbranch = main\n"
@@ -340,7 +352,8 @@ mod tests {
     fn overlay_respects_gitignore_for_build_outputs() {
         let vfs = tempfile::tempdir().unwrap();
         {
-            let mut store = Vfs::open(vfs.path()).unwrap();
+            let mut store =
+                Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
             store
                 .put(".gitignore", b"target/\n*.bin\n", "text/plain", Expect::Any)
                 .unwrap();
@@ -356,7 +369,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let overlay = Overlay::materialize(vfs.path()).unwrap();
+        let overlay = Overlay::materialize(vfs.path(), Some(&owned(vfs.path()))).unwrap();
         fs::write(overlay.path().join("src/lib.rs"), b"new").unwrap();
         fs::create_dir_all(overlay.path().join("target/release")).unwrap();
         fs::write(overlay.path().join("target/release/app"), b"new binary").unwrap();
@@ -371,8 +384,9 @@ mod tests {
                 .any(|change| change.path.starts_with("target/"))
         );
 
-        overlay.apply(vfs.path()).unwrap();
-        let mut store = Vfs::open(vfs.path()).unwrap();
+        overlay.apply(vfs.path(), Some(&owned(vfs.path()))).unwrap();
+        let mut store =
+            Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
         assert_eq!(store.get("src/lib.rs").unwrap(), b"new");
         assert!(store.file("artifact.bin").unwrap().is_none());
         assert_eq!(
