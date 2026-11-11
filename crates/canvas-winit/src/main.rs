@@ -442,6 +442,7 @@ impl App {
                         input,
                         interactive: true,
                         catalog: Box::new(catalog),
+                        store_origin: Some(soil_webgpu::LOCAL_STORE_ORIGIN.to_string()),
                         terminal: Box::new(Terminals::new(80, 24, command)),
                         cursor: Some(Box::new(WindowCursor(window))),
                         clipboard: Some(Box::new(SystemClipboard)),

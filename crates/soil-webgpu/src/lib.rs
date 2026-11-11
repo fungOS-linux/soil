@@ -440,6 +440,11 @@ pub struct WebGpuHost {
     clipboard: Option<Box<dyn ClipboardHost>>,
 }
 
+/// Where a local `soil-store serve` listens. A desktop shell that runs the
+/// storefront has to allow this origin; a capture host that needs no network
+/// leaves it out.
+pub const LOCAL_STORE_ORIGIN: &str = "http://127.0.0.1:8800";
+
 /// Everything one Spore run is allowed to talk to. A presenter fills in the
 /// parts it owns; anything left as the denying default refuses the guest loudly
 /// instead of quietly doing nothing.
