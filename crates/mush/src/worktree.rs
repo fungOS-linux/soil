@@ -170,8 +170,19 @@ struct State {
 }
 
 impl State {
-    fn open(root: &Path, state_root: &Path, book: &str, collection: &str) -> Result<Self> {
-        let vfs = Vfs::open(root).with_context(|| format!("open VFS {}", root.display()))?;
+    fn open(
+        root: &Path,
+        state_root: &Path,
+        book: &str,
+        collection: &str,
+        store: Option<&Path>,
+    ) -> Result<Self> {
+        // Content lives in a store that is shared by every root on this host
+        // unless one is named. A caller that names its own (a test, a sandbox, a
+        // service with its own data directory) cannot be affected by, or leak
+        // into, anybody else's writes.
+        let vfs = Vfs::open_with(root, fungos_vfs::NodeRole::Full, store)
+            .with_context(|| format!("open VFS {}", root.display()))?;
         let records = RecordsBookHost::open(state_root, book, collection)
             .with_context(|| format!("open records {book}/{collection}"))?;
         // A separate book, not merely a separate collection: the book host
@@ -559,8 +570,9 @@ pub(crate) fn run(
     state_root: PathBuf,
     book: String,
     collection: String,
+    store: Option<&Path>,
 ) -> Result<()> {
-    let mut state = State::open(root, &state_root, &book, &collection)?;
+    let mut state = State::open(root, &state_root, &book, &collection, store)?;
     match command {
         "worktree" => run_worktree(&mut state, &mut args),
         "tree" => run_tree(&mut state, &mut args),
@@ -1026,11 +1038,13 @@ mod tests {
 
     fn state() -> (tempfile::TempDir, State) {
         let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
         let state = State::open(
             &dir.path().join("vfs"),
             &dir.path().join("records"),
             "mush-test",
             "worktree",
+            Some(&store),
         )
         .unwrap();
         (dir, state)
@@ -1042,8 +1056,16 @@ mod tests {
     fn the_migration_splits_a_pre_split_worktree_record() {
         let dir = tempfile::tempdir().unwrap();
         let (vfs_root, records_root) = (dir.path().join("vfs"), dir.path().join("records"));
+        let store = dir.path().join("store");
         {
-            let mut state = State::open(&vfs_root, &records_root, "mush-test", "worktree").unwrap();
+            let mut state = State::open(
+                &vfs_root,
+                &records_root,
+                "mush-test",
+                "worktree",
+                Some(&store),
+            )
+            .unwrap();
             // The shape written before the split: portable identity and device
             // state in one record.
             let legacy = serde_json::json!({
@@ -1062,7 +1084,14 @@ mod tests {
         }
 
         // Reopening migrates.
-        let mut state = State::open(&vfs_root, &records_root, "mush-test", "worktree").unwrap();
+        let mut state = State::open(
+            &vfs_root,
+            &records_root,
+            "mush-test",
+            "worktree",
+            Some(&store),
+        )
+        .unwrap();
         let local = state.load_worktree_state("wt_old").unwrap();
         assert_eq!(local.path, "projects/old");
         assert_eq!(local.head_tree, "tree-head");
@@ -1075,7 +1104,14 @@ mod tests {
         assert!(!body.contains("projects/old"), "{body}");
 
         // Idempotent: a second open does not duplicate or lose anything.
-        let mut again = State::open(&vfs_root, &records_root, "mush-test", "worktree").unwrap();
+        let mut again = State::open(
+            &vfs_root,
+            &records_root,
+            "mush-test",
+            "worktree",
+            Some(&store),
+        )
+        .unwrap();
         assert_eq!(
             again
                 .scan_local::<WorktreeState>("worktree-state/")

@@ -308,6 +308,32 @@ This is a policy boundary, not a sandbox: an allowed program runs as the user
 and can read their home. It exists so a host toolchain can operate on the VFS
 view without handing the agent's secrets to it.
 
+## Builds that leave the machine
+
+A Spore has no sockets — the WASI context is built with stdio only — so a Spore
+cannot reach a builder even if it wanted to, and it must never hold the
+transport's credentials. `mush build` is the narrow seam: the worktree view goes
+out, source mutations come back through the overlay, and the exit status is the
+build's.
+
+```sh
+mush build -- cargo test -p mush
+mush build --cwd crates/app -- cargo test
+mush build --pool bob -- cargo build --release
+mush build --detach -- cargo test        # bob prints a job id; nothing is applied
+```
+
+It runs `fpl-bob remote` on the host with a session name derived from the
+worktree, not from the overlay, so a warm remote target survives across runs.
+`--back` is empty: build output never travels back, and bob decides per host
+whether a `target/` is usable at all. `--detach` skips the apply step, because
+the overlay is gone before the build finishes — wait with `bob job wait <id>`
+and fetch with `bob job fetch <id>`.
+
+The host forwards only what a build needs: the Rust and sccache variables,
+`BOB_AGENT_KEY`, `BOB_SSH`/`BOB_POOL`, and `SSH_AUTH_SOCK`. Everything else is
+still `--allow-env` opt-in.
+
 ## Host boundary
 
 `mush` opens the VFS root, links the three grants, and calls the Spore one line

@@ -14,7 +14,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use fungos_vfs::Vfs;
+use fungos_vfs::{Expect, Vfs};
 
 mod spore;
 
@@ -176,8 +176,11 @@ fn history(root: &Path, args: Vec<String>) -> Result<()> {
         bail!("usage: soil history PATH");
     };
     let vfs = Vfs::open(root)?;
-    for (version, content_id, size, created) in vfs.history(path)? {
-        println!("{version}\t{size}\t{created}\t{content_id}");
+    for entry in vfs.history(path)? {
+        println!(
+            "{}\t{}\t{}\t{}",
+            entry.version, entry.size, entry.created_at_ms, entry.content_id
+        );
     }
     Ok(())
 }
@@ -277,17 +280,28 @@ fn expand_home(value: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A store inside the root's own state directory: it dies with the tempdir,
+    /// and no other test (or the operator's real store) can see it.
+    fn open_owned(root: &std::path::Path) -> Vfs {
+        Vfs::open_with(
+            root,
+            fungos_vfs::NodeRole::Full,
+            Some(&root.join(".fungos/store")),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn rm_unlinks_namespace_and_keeps_history() {
         let dir = tempfile::tempdir().unwrap();
-        let mut vfs = Vfs::open(dir.path()).unwrap();
+        let mut vfs = open_owned(dir.path());
         let entry = vfs
-            .put("notes.txt", b"keep this blob", "text/plain", None)
+            .put("notes.txt", b"keep this blob", "text/plain", Expect::Any)
             .unwrap();
         remove(dir.path(), vec!["notes.txt".into()]).unwrap();
         assert!(vfs.file("notes.txt").unwrap().is_none());
         let history = vfs.history("notes.txt").unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].1, entry.content_id);
+        assert_eq!(history[0].content_id, entry.content_id);
     }
 }
