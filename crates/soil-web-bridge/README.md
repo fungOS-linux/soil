@@ -67,10 +67,22 @@ Three rules that are easy to get wrong later:
 
 ## Sessions and calls
 
-- `POST /v1/call` — one request, one response. The server closes the connection.
-- `GET /v1/session` — upgrade to WebSocket. The server sends `ready`, then
-  answers calls and pushes events on the same socket.
-- `GET /` — the demo page. `GET /healthz` — liveness.
+Two transports carry the same frames. The page uses the second one, because a
+proxy that strips hop-by-hop headers — the mycelium gateway does — will not
+forward a WebSocket upgrade.
+
+| Route | Transport | Carries |
+|---|---|---|
+| `POST /v1/call` | HTTP | one call, one result |
+| `GET /v1/session` | WebSocket | `ready`, calls, events, host calls, cancels |
+| `GET /v1/events` | server-sent events | the same server-to-client frames, one JSON object per `data:` line |
+| `POST /v1/frame?session=` | HTTP | anything the page sends: `call`, `provide`, `result` |
+| `GET /` | HTTP | the demo page |
+| `GET /healthz` | HTTP | liveness |
+
+`ready` carries `session` on the SSE transport, because an event stream has no
+socket identity to quote; the page echoes it on every `POST /v1/frame`. A
+WebSocket session omits it — the connection already is the session.
 
 A session is bound to one Spore and its grant set for its whole life. There is no
 call that changes what a connection may do, and no per-call identity to spoof.

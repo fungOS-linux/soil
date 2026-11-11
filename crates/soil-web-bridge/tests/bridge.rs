@@ -5,7 +5,7 @@
 //! the store is touched, and the duplex session carries both a call's result and
 //! the change another session caused.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
@@ -671,6 +671,160 @@ fn a_spore_fetch_goes_through_the_session_when_one_is_offered() {
             .unwrap_err(),
         TransportError::Unsupported
     );
+}
+
+/// Open an SSE session and return its reader plus the id from `ready`.
+///
+/// The stream stays open; every frame is one `data:` line, which is exactly what
+/// a proxy that drops `Upgrade` will still forward.
+fn sse(addr: SocketAddr, token: Option<&str>) -> (BufReader<TcpStream>, String) {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut request =
+        format!("GET /v1/events HTTP/1.1\r\nHost: {addr}\r\nAccept: text/event-stream\r\n");
+    if let Some(token) = token {
+        request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).unwrap() > 0, "no response head");
+        if line == "\r\n" {
+            break;
+        }
+    }
+    let ready = next_sse(&mut reader);
+    assert_eq!(ready["event"]["kind"], "ready", "{ready}");
+    let session = ready["event"]["session"]
+        .as_str()
+        .unwrap_or_else(|| panic!("ready carries no session: {ready}"))
+        .to_owned();
+    (reader, session)
+}
+
+fn next_sse(reader: &mut BufReader<TcpStream>) -> Value {
+    loop {
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).unwrap() > 0, "stream closed");
+        let line = line.trim_end();
+        if let Some(data) = line.strip_prefix("data: ") {
+            return serde_json::from_str(data).unwrap();
+        }
+    }
+}
+
+#[test]
+fn an_sse_session_carries_a_provider_call_and_its_answer() {
+    let (_dir, _bridge, server) =
+        start_with(&[("soil:http", "outbound fetch")], Auth::loopback_only());
+    let addr = server.addr();
+    let (mut reader, session) = sse(addr, None);
+
+    let (status, body) = post_to(
+        addr,
+        &format!("/v1/frame?session={session}"),
+        &json!({ "v": 1, "provide": { "id": "p1", "packages": ["soil:http"] } }),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["ok"]["packages"][0], "soil:http", "{body}");
+
+    let caller = std::thread::spawn(move || {
+        post_to(
+            addr,
+            "/v1/provider/call",
+            &json!({
+                "package": "soil:http",
+                "function": "fetch",
+                "params": { "url": "https://example.com" },
+                "timeoutMs": 5000,
+            }),
+            None,
+        )
+    });
+
+    let call = next_sse(&mut reader);
+    assert_eq!(call["call"]["interface"], "soil:http", "{call}");
+    let id = call["call"]["id"].as_str().unwrap().to_owned();
+    assert!(id.starts_with('~'), "{call}");
+
+    let (status, ack) = post_to(
+        addr,
+        &format!("/v1/frame?session={session}"),
+        &json!({
+            "v": 1,
+            "id": id,
+            "result": { "ok": {
+                "status": 204,
+                "finalUrl": "https://example.com/",
+                "headers": [],
+                "body": BASE64.encode("over sse"),
+            } },
+        }),
+        None,
+    );
+    assert_eq!(status, 200, "{ack}");
+
+    let (status, response) = caller.join().unwrap();
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["result"]["ok"]["status"], 204, "{response}");
+}
+
+#[test]
+fn an_sse_provider_that_never_answers_is_told_to_cancel() {
+    let (_dir, _bridge, server) =
+        start_with(&[("soil:http", "outbound fetch")], Auth::loopback_only());
+    let addr = server.addr();
+    let (mut reader, session) = sse(addr, None);
+
+    let (status, _) = post_to(
+        addr,
+        &format!("/v1/frame?session={session}"),
+        &json!({ "v": 1, "provide": { "id": "p1", "packages": ["soil:http"] } }),
+        None,
+    );
+    assert_eq!(status, 200);
+
+    let caller = std::thread::spawn(move || {
+        post_to(
+            addr,
+            "/v1/provider/call",
+            &json!({
+                "package": "soil:http",
+                "function": "fetch",
+                "params": { "url": "https://example.com" },
+                "timeoutMs": 200,
+            }),
+            None,
+        )
+    });
+
+    let call = next_sse(&mut reader);
+    let called = call["call"]["id"].as_str().unwrap().to_owned();
+    let cancel = next_sse(&mut reader);
+    assert_eq!(cancel["cancel"]["id"], called, "{cancel}");
+
+    let (status, response) = caller.join().unwrap();
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["result"]["err"]["code"], "timeout", "{response}");
+}
+
+#[test]
+fn a_frame_for_an_unknown_session_is_refused() {
+    let (_dir, server) = start(&[("soil:http", "outbound fetch")]);
+    let (status, body) = post_to(
+        server.addr(),
+        "/v1/frame?session=nope",
+        &json!({ "v": 1, "provide": { "id": "p1", "packages": ["soil:http"] } }),
+        None,
+    );
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["result"]["err"]["code"], "unavailable", "{body}");
 }
 
 #[test]

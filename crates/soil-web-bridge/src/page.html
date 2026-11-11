@@ -97,9 +97,11 @@ const token = new URLSearchParams(location.search).get('token');
 // The server owns the collection name; the page learns it from the session's
 // `ready` event instead of hard-coding a second copy of host configuration.
 let collection = null;
+let session = null;
 
 const $ = (id) => document.getElementById(id);
 const rows = $('rows');
+const pendingFetches = new Map();
 
 function showError(error) {
   $('error').textContent = error ? `${error.code}: ${error.message}` : '';
@@ -120,6 +122,23 @@ async function call(fn, params) {
   const frame = await response.json();
   if (frame.result.err) throw frame.result.err;
   return frame.result.ok;
+}
+
+// Everything the page says on the session goes through one POST. The events
+// themselves arrive over EventSource, which every HTTP proxy forwards — a
+// WebSocket upgrade does not survive the ones that strip hop-by-hop headers.
+async function postFrame(frame) {
+  if (!session) throw { code: 'unavailable', message: 'no session yet' };
+  const query = `session=${encodeURIComponent(session)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+  const response = await fetch(`/v1/frame?${query}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(frame),
+  });
+  return response.json();
 }
 
 function decodeBody(base64) {
@@ -202,10 +221,7 @@ $('upsert').onsubmit = (event) => {
   );
 };
 
-let socket = null;
-let backoff = 500;
-const offers = new Set();
-const pendingFetches = new Map();
+// --- provider side ---------------------------------------------------------
 
 function base64ToBytes(base64) {
   const binary = atob(base64);
@@ -220,9 +236,12 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
-function reply(id, result) {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify({ v: 1, id, result }));
+async function reply(id, result) {
+  try {
+    await postFrame({ v: 1, id, result });
+  } catch (error) {
+    console.error(error);
+  }
 }
 
 // Answer an inbound `soil:http.fetch` with the page's own network. The host
@@ -240,7 +259,7 @@ async function answerHttp(call) {
       signal: controller.signal,
     });
     const bytes = new Uint8Array(await response.arrayBuffer());
-    reply(call.id, {
+    await reply(call.id, {
       ok: {
         status: response.status,
         finalUrl: response.url || params.url,
@@ -249,7 +268,7 @@ async function answerHttp(call) {
       },
     });
   } catch (error) {
-    reply(call.id, {
+    await reply(call.id, {
       err: {
         code: error.name === "AbortError" ? "timeout" : "unavailable",
         message: String(error.message ?? error),
@@ -265,7 +284,7 @@ function handleCall(call) {
     void answerHttp(call);
     return;
   }
-  reply(call.id, {
+  void reply(call.id, {
     err: {
       code: "unsupported",
       message: `this page does not provide ${call.interface}.${call.function}`,
@@ -273,68 +292,54 @@ function handleCall(call) {
   });
 }
 
-$("provide").onclick = () => {
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    showError({ code: "unavailable", message: "no session to offer on" });
-    return;
+$("provide").onclick = async () => {
+  try {
+    const frame = await postFrame({
+      v: 1,
+      provide: { id: crypto.randomUUID(), packages: ["soil:http"] },
+    });
+    const refusal = frame.result.err;
+    $("provider").textContent = refusal
+      ? `refused: ${refusal.code} ${refusal.message}`
+      : `offering ${frame.result.ok.packages.join(", ")}`;
+    $("provider").dataset.live = refusal ? "false" : "true";
+  } catch (error) {
+    showError(error);
   }
-  const id = crypto.randomUUID();
-  offers.add(id);
-  socket.send(JSON.stringify({ v: 1, provide: { id, packages: ["soil:http"] } }));
 };
 
 function connect() {
-  const url = new URL('/v1/session', location.href);
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  if (token) url.searchParams.set('token', token);
-  socket = new WebSocket(url);
-
-  socket.onopen = () => {
-    backoff = 500;
-    $('status').textContent = 'live';
-    $('status').dataset.live = 'true';
+  const url = new URL("/v1/events", location.href);
+  if (token) url.searchParams.set("token", token);
+  const source = new EventSource(url);
+  source.onopen = () => {
+    $("status").textContent = "live";
+    $("status").dataset.live = "true";
   };
-
-  socket.onmessage = (message) => {
+  source.onerror = () => {
+    // EventSource reconnects on its own; the next `ready` names a new session.
+    $("status").textContent = "reconnecting";
+    $("status").dataset.live = "false";
+  };
+  source.onmessage = (message) => {
     const frame = JSON.parse(message.data);
     if (frame.v !== 1) return;
     if (frame.event) {
       if (frame.event.kind === 'ready') {
+        session = frame.event.session ?? null;
         $('identity').textContent = frame.event.spore;
-        const grants = frame.event.grants;
-        if (grants.length) $('identity').title = grants.join('\n');
+        if (frame.event.grants.length) $('identity').title = frame.event.grants.join('\n');
         collection = frame.event.interfaces?.['soil:records']?.collection ?? null;
         refresh();
       }
-      if (frame.event.kind === 'changed') {
-        // One notification, one re-read: the event names what moved so a client
-        // that missed any of them is still correct after a reconnect.
-        refresh();
-      }
+      if (frame.event.kind === 'changed') refresh();
       return;
     }
     if (frame.call) {
       handleCall(frame.call);
       return;
     }
-    if (frame.cancel) {
-      pendingFetches.get(frame.cancel.id)?.abort();
-      return;
-    }
-    if (frame.result && offers.delete(frame.id)) {
-      const refusal = frame.result.err;
-      $('provider').textContent = refusal
-        ? `refused: ${refusal.code} ${refusal.message}`
-        : `offering ${frame.result.ok.packages.join(', ')}`;
-      $('provider').dataset.live = refusal ? 'false' : 'true';
-    }
-  };
-
-  socket.onclose = () => {
-    $('status').textContent = 'reconnecting';
-    $('status').dataset.live = 'false';
-    setTimeout(connect, backoff);
-    backoff = Math.min(backoff * 2, 10_000);
+    if (frame.cancel) pendingFetches.get(frame.cancel.id)?.abort();
   };
 }
 
