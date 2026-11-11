@@ -96,9 +96,22 @@ fn run(args: Vec<String>) -> Result<(), Error> {
             print!("{}", Manual::from_manifest(&manifest, prose).render(width));
         }
         "info" => {
-            let root = one_path(rest)?;
+            let json = rest.iter().any(|arg| arg == "--json");
+            let paths: Vec<&String> = rest.iter().filter(|arg| *arg != "--json").collect();
+            let root = match paths.as_slice() {
+                [path] => PathBuf::from(path.as_str()),
+                _ => return Err(Error::Invalid(usage())),
+            };
             let (manifest, _) = load(&root)?;
-            print!("{}", render_info(&manifest));
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&manifest.info_json())
+                        .map_err(|error| Error::Invalid(error.to_string()))?
+                );
+            } else {
+                print!("{}", render_info(&manifest));
+            }
         }
         "pack" => {
             let (root, output) = pack_args(rest)?;
@@ -182,7 +195,7 @@ fn run(args: Vec<String>) -> Result<(), Error> {
 }
 
 fn usage() -> String {
-    "usage: soil-spore check <dir> [--publish]\n       soil-spore lock <dir>\n       soil-spore digest <dir>\n       soil-spore man <dir|package.spore> [--width N]\n       soil-spore info <dir|package.spore>\n       soil-spore pack <dir> [-o out.spore]\n       soil-spore verify <package.spore>\n       soil-spore sign <package.spore> [--key ID | --principal LABEL [--socket PATH] [--fingerprint FP]]\n       soil-spore verify-signature <package.spore> [--keyring FILE] [--key ID]\n       soil-spore announce <dir> --endpoint URI [--home DIR] [--out FILE] [--every SECS] [--once] [--unsigned-dev]\n       soil-spore --version\n\nThe node id is read from --home's enrollment (default ~/.mycelium), never typed:\nthat is what makes a restarted node announce as itself.".into()
+    "usage: soil-spore check <dir> [--publish]\n       soil-spore lock <dir>\n       soil-spore digest <dir>\n       soil-spore man <dir|package.spore> [--width N]\n       soil-spore info <dir|package.spore> [--json]\n       soil-spore pack <dir> [-o out.spore]\n       soil-spore verify <package.spore>\n       soil-spore sign <package.spore> [--key ID | --principal LABEL [--socket PATH] [--fingerprint FP]]\n       soil-spore verify-signature <package.spore> [--keyring FILE] [--key ID]\n       soil-spore announce <dir> --endpoint URI [--home DIR] [--out FILE] [--every SECS] [--once] [--unsigned-dev]\n       soil-spore --version\n\nThe node id is read from --home's enrollment (default ~/.mycelium), never typed:\nthat is what makes a restarted node announce as itself.".into()
 }
 
 /// Read a Spore from a directory or a packed package.

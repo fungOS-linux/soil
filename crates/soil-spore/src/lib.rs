@@ -788,6 +788,69 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /// A stable, non-secret projection for authoring tools.
+    ///
+    /// `tend dev`/`tend publish` need the id, view entry, declared surfaces and
+    /// listing fields without implementing a second TOML parser. This is the
+    /// JSON shape they consume; it contains no package bytes and no keys.
+    #[must_use]
+    pub fn info_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.spore.id,
+            "name": self.spore.name,
+            "version": self.spore.version,
+            "license": self.spore.license,
+            "summary": self.spore.summary,
+            "description": self.spore.description,
+            "homepage": self.spore.homepage,
+            "engine": {
+                "soil": self.engine.soil,
+                "target": self.engine.target,
+                "abi": self.engine.abi,
+            },
+            "module": self.module.as_ref().map(|module| serde_json::json!({
+                "path": module.path,
+                "sha256": module.sha256,
+            })),
+            "ui": self.ui.as_ref().map(|ui| serde_json::json!({
+                "entry": ui.entry,
+                "jit": ui.jit,
+                "hot_reload": ui.hot_reload,
+            })),
+            "launch": {
+                "default": self.launch.default,
+                "surfaces": self.launch.surfaces,
+                "canvas_module": self.launch.canvas_module,
+            },
+            "surfaces": self.surfaces.iter().map(|surface| serde_json::json!({
+                "name": surface.name,
+                "kind": surface.kind.as_str(),
+                "entry": surface.entry,
+                "requires": surface.requires,
+            })).collect::<Vec<_>>(),
+            "grants": self.grants,
+            "docs": self.docs.as_ref().map(|docs| serde_json::json!({
+                "usage": docs.usage,
+                "man": docs.man,
+            })),
+            "presentation": self.presentation.as_ref().map(|presentation| serde_json::json!({
+                "badge": presentation.badge,
+                "color": presentation.color,
+                "icon": presentation.icon,
+            })),
+            "catalog": self.catalog.as_ref().map(|catalog| serde_json::json!({
+                "categories": catalog.categories,
+                "keywords": catalog.keywords,
+                "screenshots": catalog.screenshots.iter().map(|screenshot| serde_json::json!({
+                    "cid": screenshot.cid,
+                    "caption": screenshot.caption,
+                })).collect::<Vec<_>>(),
+                "record": catalog.record,
+            })),
+            "system": self.system.as_ref().map(|system| system.role.clone()),
+        })
+    }
+
     /// Skills are files, so only `load` can check them: `parse` has no root.
     /// A declared skill that is missing, unnamed, or misnamed is a packaging
     /// error, not a runtime surprise.
