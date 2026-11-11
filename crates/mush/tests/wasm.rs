@@ -435,6 +435,41 @@ fn wasm_spore_keeps_quoted_empty_arguments() {
 }
 
 #[test]
+fn wasm_spore_resolves_and_probes_through_the_host() {
+    use std::net::TcpListener;
+
+    // A port something is actually listening on, so `ping` proves a connection
+    // rather than merely a resolution.
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let dir = tempfile::tempdir().unwrap();
+
+    let (status, stdout, _) = run(dir.path(), "dig localhost");
+    assert_eq!(status, 0, "{stdout}");
+    assert!(
+        stdout.contains("127.0.0.1") || stdout.contains("::1"),
+        "{stdout}"
+    );
+
+    let (status, stdout, _) = run(dir.path(), &format!("ping localhost --port {port}"));
+    assert_eq!(status, 0, "{stdout}");
+    assert!(stdout.contains(" up ("), "{stdout}");
+
+    // Nothing listens on port 9; that is a "down", not a shell error.
+    let (status, stdout, _) = run(dir.path(), "ping localhost --port 9");
+    assert_eq!(status, 1, "{stdout}");
+    assert!(stdout.contains("no answer"), "{stdout}");
+
+    // `.invalid` is reserved, so this never resolves and never leaves the host.
+    let (status, stdout, stderr) = run(dir.path(), "dig does-not-exist.invalid");
+    assert_eq!(status, 1);
+    assert!(
+        stdout.contains("does not resolve") || stderr.contains("does not resolve"),
+        "{stdout}{stderr}"
+    );
+}
+
+#[test]
 fn wasm_spore_diff_reports_lines_and_status() {
     let dir = tempfile::tempdir().unwrap();
     {

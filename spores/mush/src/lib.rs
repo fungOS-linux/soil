@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use soil::command::command as command_abi;
 use soil::index::index::{self, Mode, Query};
+use soil::net::net::{self as net_abi, Family};
 use soil::vfs::vfs::{self, Kind};
 use soil::vfs_mut::vfs_mut;
 
@@ -23,6 +24,8 @@ const MAX_SCRIPT_DEPTH: u8 = 8;
 const READ_CHUNK: u32 = 64 * 1024;
 const MAX_TGREP_FILES: usize = 20_000;
 const MAX_TGREP_MATCHES: usize = 20_000;
+/// Budget for one resolution or probe; the host bounds the call with it too.
+const NET_TIMEOUT_MS: u32 = 2_000;
 
 static SHELL: Mutex<Option<Shell>> = Mutex::new(None);
 
@@ -665,6 +668,8 @@ impl Shell {
             "sub" => self.sub(args).map(|_| 0),
             "diff" => self.diff(args),
             "json" => self.json(args).map(|_| 0),
+            "dig" => self.dig(args).map(|_| 0),
+            "ping" => self.ping(args),
             "rm" => self.rm(args).map(|_| 0),
             "mv" => self.mv(args).map(|_| 0),
             "cp" => self.cp(args).map(|_| 0),
@@ -1457,6 +1462,97 @@ impl Shell {
         self.out
             .push_str(&format!("{}: {action} (v{})\n", self.display(path), result.version));
         Ok(())
+    }
+
+    /// `dig NAME [A|AAAA]` — resolve a name through the host's resolver.
+    ///
+    /// `<node>.<site>.myc` is answered by the mesh resolver, which is the only
+    /// reason this exists in the shell: an agent that can address a fleet node
+    /// can check what it is about to talk to.
+    fn dig(&mut self, args: &[String]) -> Result<(), String> {
+        let mut name: Option<&str> = None;
+        let mut want: Option<Family> = None;
+        for arg in args {
+            match arg.as_str() {
+                "A" => want = Some(Family::Ipv4),
+                "AAAA" => want = Some(Family::Ipv6),
+                other => {
+                    if name.is_some() {
+                        return Err("dig NAME [A|AAAA]".into());
+                    }
+                    name = Some(other);
+                }
+            }
+        }
+        let name = name.ok_or("dig NAME [A|AAAA]")?;
+        let resolution = net_abi::resolve(name, NET_TIMEOUT_MS)
+            .map_err(|error| format!("dig: {name}: {}", net_error(&error)))?;
+        self.out.push_str(&format!(
+            "{} ({}ms)\n",
+            resolution.name, resolution.elapsed_ms
+        ));
+        let mut printed = 0usize;
+        for address in &resolution.addresses {
+            if want.is_some_and(|family| family != address.family) {
+                continue;
+            }
+            let label = match address.family {
+                Family::Ipv4 => "A",
+                Family::Ipv6 => "AAAA",
+            };
+            self.out.push_str(&format!("{label} {}\n", address.addr));
+            printed += 1;
+        }
+        if printed == 0 {
+            return Err(format!("dig: {name}: no matching records"));
+        }
+        Ok(())
+    }
+
+    /// `ping NAME [--port N]` — resolve, then open and close a TCP session.
+    ///
+    /// ICMP needs raw sockets and a privilege the host does not hand a guest, so
+    /// this answers the question an agent actually has: is the service there,
+    /// at which address, and how long did it take. Exit 0 when something
+    /// answered, 1 when nothing did.
+    fn ping(&mut self, args: &[String]) -> Result<i32, String> {
+        let mut name: Option<&str> = None;
+        let mut port = 443u16;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "-p" | "--port" => {
+                    let value = args.get(index + 1).ok_or("ping NAME [--port N]")?;
+                    port = value
+                        .parse()
+                        .map_err(|_| format!("ping: bad port {value:?}"))?;
+                    index += 1;
+                }
+                other => {
+                    if name.is_some() {
+                        return Err("ping NAME [--port N]".into());
+                    }
+                    name = Some(other);
+                }
+            }
+            index += 1;
+        }
+        let name = name.ok_or("ping NAME [--port N]")?;
+        match net_abi::probe(name, port, NET_TIMEOUT_MS) {
+            Ok(probe) => {
+                self.out.push_str(&format!(
+                    "{} [{}]:{} up ({}ms)\n",
+                    probe.name, probe.addr, probe.port, probe.rtt_ms
+                ));
+                Ok(0)
+            }
+            Err(net_abi::Error::Unreachable) => {
+                self.out
+                    .push_str(&format!("{name}: no answer on port {port}\n"));
+                Ok(1)
+            }
+            Err(error) => Err(format!("ping: {name}: {}", net_error(&error))),
+        }
     }
 
     fn rm(&mut self, args: &[String]) -> Result<(), String> {
@@ -2561,6 +2657,15 @@ impl Shell {
     }
 }
 
+fn net_error(error: &net_abi::Error) -> &'static str {
+    match error {
+        net_abi::Error::NotFound => "does not resolve",
+        net_abi::Error::Timeout => "resolver timed out",
+        net_abi::Error::Invalid => "invalid name",
+        net_abi::Error::Unreachable => "nothing accepted the connection",
+    }
+}
+
 fn media_type(path: &str) -> &'static str {
     match path.rsplit_once('.').map(|(_, ext)| ext) {
         Some("rs") => "text/x-rust",
@@ -3556,6 +3661,8 @@ mush — a sandboxed VFS shell
   json del FILE PATH               remove an object key or array element
   json merge TARGET SOURCE...      deep-merge objects into TARGET
   json pretty [--indent N] [FILE]  reformat to stdout (stdin when FILE is - or absent)
+  dig NAME [A|AAAA]                resolve a name, `*.myc` through the mesh resolver
+  ping NAME [--port N]             resolve and open a TCP session (default 443)
   rm [-r] PATH...         unlink files or recursively remove a directory
   mv FROM TO              rename a file
   cp FROM TO              copy bytes to a new version

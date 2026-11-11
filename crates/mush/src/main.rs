@@ -12,6 +12,7 @@ mod gateway;
 mod job;
 mod mcp_gateway;
 mod mcp_server;
+mod net;
 mod origin;
 mod outcome;
 mod overlay;
@@ -398,6 +399,7 @@ impl Runtime {
         soil_vfs_host::add_to_linker::<Host>(&mut linker)?;
         soil_vfs_host::add_mutation_to_linker::<Host>(&mut linker)?;
         command_abi::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
+        soil::net::net::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         let component = Component::new(&engine, wasm)?;
         let host = Host::new(root, command_root, records)?;
         let mut store = Store::new(&engine, host);

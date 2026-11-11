@@ -29,3 +29,4 @@ surfaces = ["native", "canvas", "web"]
 "soil:index" = "search the workspace and browse directories"
 "soil:vfs-mut" = "write, rename, unlink, mkdir, and rmdir in the workspace"
 "soil:command" = "run installed wasm commands with explicit args and no host PATH"
+"soil:net" = "resolve names and probe TCP ports through the host"

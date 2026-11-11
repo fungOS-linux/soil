@@ -1,0 +1,53 @@
+// Bounded host-mediated name resolution and TCP reachability.
+//
+// The guest names a host or a mesh node (`<node>.<site>.myc`), never a socket,
+// resolver address, or packet. The host resolves through its own resolver (the
+// mesh one for `.myc`), bounds every lookup and connect by the caller's
+// deadline, and returns data. Raw ICMP, arbitrary ports sweeps and resolver
+// configuration never cross this boundary.
+package soil:net@0.1.0;
+
+interface net {
+  enum family {
+    ipv4,
+    ipv6,
+  }
+
+  record address {
+    family: family,
+    /// Text form, as the resolver reported it.
+    addr: string,
+  }
+
+  record resolution {
+    name: string,
+    addresses: list<address>,
+    /// Wall-clock milliseconds the resolver took.
+    elapsed-ms: u64,
+  }
+
+  record reachability {
+    name: string,
+    /// The address that accepted the connection.
+    addr: string,
+    port: u16,
+    rtt-ms: u64,
+  }
+
+  enum error {
+    /// The name does not resolve.
+    not-found,
+    /// The caller's deadline expired first.
+    timeout,
+    /// The name or port is malformed.
+    invalid,
+    /// The name resolves, but nothing accepted the connection.
+    unreachable,
+  }
+
+  /// Resolve a name. `<node>.<site>.myc` is answered by the mesh resolver.
+  resolve: func(name: string, timeout-ms: u32) -> result<resolution, error>;
+
+  /// Resolve, then connect and close a TCP session to prove the service is up.
+  probe: func(name: string, port: u16, timeout-ms: u32) -> result<reachability, error>;
+}

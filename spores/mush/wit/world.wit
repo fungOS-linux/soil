@@ -10,6 +10,7 @@ world mush {
   import soil:index/index@1.1.0;
   import soil:vfs-mut/vfs-mut@0.1.0;
   import soil:command/command@0.1.0;
+  import soil:net/net@0.1.0;
 
   record response {
     output: string,

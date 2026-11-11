@@ -489,6 +489,8 @@ json set FILE PATH JSON|-
 json del FILE PATH
 json merge TARGET SOURCE...
 json pretty [--indent N] [FILE|-]
+dig NAME [A|AAAA]
+ping NAME [--port N]
 rm [-r] PATH...
 mv FROM TO
 cp [-r] FROM TO
@@ -521,6 +523,15 @@ Spore packages are read from `~/.local/share/fungos/spores` (a sibling of the
 command root), or `MUSH_SPORE_ROOT` when set. `man` works with no display and no
 network: the page is generated from the installed manifest and the body ships
 inside the package.
+
+## Names and reachability
+
+`dig NAME [A|AAAA]` and `ping NAME [--port N]` go through `soil:net`, a host
+capability with two verbs: resolve a name, and open and close a TCP session to
+prove a service is up. The guest never holds a socket, and `<node>.<site>.myc`
+is answered by the mesh resolver, so an agent can check what it is about to talk
+to. `ping` exits 0 when something answered and 1 when nothing did; it is a
+connect, not ICMP, because raw sockets are a privilege a guest should not have.
 
 ## Editing and inspection
 
