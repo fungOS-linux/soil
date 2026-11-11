@@ -411,6 +411,30 @@ fn wasm_spore_supports_tgrep_over_vfs() {
 }
 
 #[test]
+fn wasm_spore_keeps_quoted_empty_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut vfs = Vfs::open(dir.path()).unwrap();
+        vfs.put(
+            "indented.txt",
+            b"  one\n    two\nplain\n",
+            "text/plain",
+            fungos_vfs::Expect::Any,
+        )
+        .unwrap();
+    }
+    // `''` is an argument, not nothing: `echo` shows it as the empty word it is.
+    let (status, stdout, _) = run(dir.path(), "echo '' end");
+    assert_eq!(status, 0);
+    assert_eq!(stdout, " end\n");
+    // And `sub` can delete a match, which needs a reachable empty replacement.
+    let (status, stdout, stderr) = run(dir.path(), "sub '^  ' '' indented.txt; cat indented.txt");
+    assert_eq!(status, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("2 replacement(s)"), "{stdout}");
+    assert!(stdout.contains("one\n  two\nplain\n"), "{stdout}");
+}
+
+#[test]
 fn wasm_spore_diff_reports_lines_and_status() {
     let dir = tempfile::tempdir().unwrap();
     {

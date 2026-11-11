@@ -532,6 +532,14 @@ path. `mkdir -p`, `cp -r` and `find` are implemented over `soil:vfs` /
 `grep`, `wc`, `stat`, `tree` and recursive `rm -r` are implemented entirely over
 `soil:vfs` / `soil:vfs-mut`. There is still no host `$EDITOR` or process spawn.
 
+`sed -i 's/pat/rep/g' FILE...` is answered by `sub` when the script is one where
+sed and the Spore's regex agree: `g` present, no backslashes, none of
+`+ ? | ( ) { }` in either half, and no `&` or `$` in the replacement. Everything
+else — `-i.bak`, a second script, a form without `g` — runs the real `sed`
+against the overlay, so a form the bridge does not recognise is never silently
+approximated. `sub` compiles its pattern in multi-line mode, so `^` and `$` mean
+the start and end of a line, as they do in sed.
+
 ## Git
 
 Mush does **not** run `git` inside the Spore. The Spore has no process, PATH or

@@ -2019,23 +2019,35 @@ fn execute_one(runtime: &mut Runtime, root: &Path, session: &Session, line: &str
     let Some(program) = words.first().cloned() else {
         return Ok(0);
     };
-    if host_allowed(&program) {
-        if line.contains('>') {
-            anyhow::bail!("mush: {program}: redirection is only supported for VFS commands");
+    // Same routing rules as the daemon (`shell::run_one`): a command the Spore
+    // answers exactly wins over the host allowlist, so `diff`, `json` and
+    // `sed -i 's/…/…/g'` behave the same at a prompt as they do over MCP.
+    let line = match shell::spore_line(line, &words) {
+        Some(line) => line,
+        None => {
+            if shell::host_allowed(&program) {
+                if line.contains('>') {
+                    anyhow::bail!(
+                        "mush: {program}: redirection is only supported for VFS commands"
+                    );
+                }
+                let mut args = vec![
+                    "--cwd".to_string(),
+                    session.pwd.trim_start_matches('/').to_string(),
+                ];
+                args.push("--".into());
+                args.extend(words);
+                return run_host_status(root, args);
+            }
+            // Everything else belongs to the Spore: it owns the VFS and knows
+            // which names are builtins, installed wasm commands, or genuinely
+            // unknown. A hardcoded list of builtins here used to drift — `sub`,
+            // `tgrep`, and `diff` worked through the daemon but not from
+            // `mush sh`.
+            line.to_string()
         }
-        let mut args = vec![
-            "--cwd".to_string(),
-            session.pwd.trim_start_matches('/').to_string(),
-        ];
-        args.push("--".into());
-        args.extend(words);
-        return run_host_status(root, args);
-    }
-    // Everything else belongs to the Spore: it owns the VFS and knows which
-    // names are builtins, installed wasm commands, or genuinely unknown. A
-    // hardcoded list of builtins here used to drift — `sub`, `tgrep`, and `diff`
-    // worked through the daemon but not from `mush sh`.
-    let response = runtime.execute(line)?;
+    };
+    let response = runtime.execute(&line)?;
     print!("{}", response.output);
     eprint!("{}", response.stderr);
     io::stdout().flush()?;
@@ -2094,28 +2106,10 @@ fn run_shell(
     Ok(())
 }
 
-/// Host commands allowed to run against a materialized VFS overlay. This is a
-/// policy boundary, not a sandbox: an allowed program still runs as the user
-/// and can read their home. Keep it to build tools, and never add a shell.
-const HOST_ALLOWLIST: &[&str] = &[
-    "cargo",
-    "rustc",
-    "cc",
-    "clang",
-    "clang++",
-    "c++",
-    "git",
-    "make",
-    "cmake",
-    "ninja",
-    "pkg-config",
-];
-
-/// A bare program name only. A path like `./cargo` would run code from the
-/// overlay itself, which is exactly what the allowlist is meant to prevent.
-fn host_allowed(program: &str) -> bool {
-    !program.contains('/') && HOST_ALLOWLIST.contains(&program)
-}
+/// Host commands allowed to run against a materialized VFS overlay are declared
+/// once, in `shell::HOST_ALLOWLIST`. A second list here is how the interactive
+/// shell and the daemon drifted apart: `rg`, `sed` and `gh` were reachable over
+/// MCP and refused at a prompt.
 
 fn run_host(root: &Path, args: Vec<String>) -> Result<()> {
     let status = run_host_status(root, args)?;
@@ -2147,11 +2141,11 @@ fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
     if cmd.is_empty() {
         anyhow::bail!("mush run host: no command (use `mush run host -- cargo build`)");
     }
-    if !host_allowed(&cmd[0]) {
+    if !shell::host_allowed(&cmd[0]) {
         anyhow::bail!(
             "mush run host: `{}` is not allowlisted (allowed: {})",
             cmd[0],
-            HOST_ALLOWLIST.join(", ")
+            shell::HOST_ALLOWLIST.join(", ")
         );
     }
 
@@ -2391,17 +2385,6 @@ fn expand_home(value: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn host_allowlist_is_a_bare_program_name() {
-        assert!(host_allowed("cargo"));
-        assert!(host_allowed("clang++"));
-        assert!(host_allowed("pkg-config"));
-        assert!(!host_allowed("sh"));
-        assert!(!host_allowed("/bin/sh"));
-        assert!(!host_allowed("./cargo"));
-        assert!(!host_allowed("cargo/../cargo"));
-    }
 
     #[test]
     fn shell_splits_commands_without_breaking_quotes() {

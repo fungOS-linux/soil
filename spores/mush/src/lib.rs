@@ -1130,12 +1130,18 @@ impl Shell {
     }
 
     /// Regex replacement inside a file, in place, without a host `sed`.
+    ///
+    /// Multi-line mode, so `^` and `$` mean the start and end of a line the way
+    /// they do in `sed`; that is also what makes this a faithful target for a
+    /// `sed -i 's/…/…/g'` the host would otherwise run over an overlay.
     fn sub(&mut self, args: &[String]) -> Result<(), String> {
         if args.len() < 3 {
             return Err("sub PATTERN REPLACEMENT PATH...".into());
         }
-        let pattern =
-            Regex::new(&args[0]).map_err(|error| format!("sub: bad pattern: {error}"))?;
+        let pattern = RegexBuilder::new(&args[0])
+            .multi_line(true)
+            .build()
+            .map_err(|error| format!("sub: bad pattern: {error}"))?;
         let replacement = args[1].as_str();
         for arg in &args[2..] {
             let path = self.resolve(arg)?;
@@ -3092,6 +3098,9 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
     let mut expand = true;
     let mut quote = None;
     let mut escape = false;
+    // A quoted word counts even when it is empty: `sub 'a' '' f` has three
+    // arguments, and `printf '%s' ''` prints an empty string.
+    let mut quoted = false;
     let mut sub_depth = 0usize;
     let mut chars = line.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -3134,15 +3143,19 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
             '\'' => {
                 expand = false;
                 quote = Some(ch);
+                quoted = true;
             }
-            '"' => quote = Some(ch),
+            '"' => {
+                quote = Some(ch);
+                quoted = true;
+            }
             '$' if chars.peek() == Some(&'(') => {
                 chars.next();
                 word.push_str("$(");
                 sub_depth += 1;
             }
             '|' => {
-                push_word(&mut tokens, &mut word, &mut glob, &mut expand);
+                push_word(&mut tokens, &mut word, &mut glob, &mut expand, &mut quoted);
                 if chars.peek() == Some(&'|') {
                     chars.next();
                     tokens.push(Token::Op(Op::Or));
@@ -3153,18 +3166,18 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
             '&' => {
                 if chars.peek() == Some(&'&') {
                     chars.next();
-                    push_word(&mut tokens, &mut word, &mut glob, &mut expand);
+                    push_word(&mut tokens, &mut word, &mut glob, &mut expand, &mut quoted);
                     tokens.push(Token::Op(Op::And));
                 } else {
                     return Err("background jobs are not supported".into());
                 }
             }
             ';' => {
-                push_word(&mut tokens, &mut word, &mut glob, &mut expand);
+                push_word(&mut tokens, &mut word, &mut glob, &mut expand, &mut quoted);
                 tokens.push(Token::Op(Op::Semi));
             }
             '<' => {
-                push_word(&mut tokens, &mut word, &mut glob, &mut expand);
+                push_word(&mut tokens, &mut word, &mut glob, &mut expand, &mut quoted);
                 tokens.push(Token::Op(Op::In));
             }
             '2' if word.is_empty() && chars.peek() == Some(&'>') => {
@@ -3186,7 +3199,7 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
                 }
             }
             '>' => {
-                push_word(&mut tokens, &mut word, &mut glob, &mut expand);
+                push_word(&mut tokens, &mut word, &mut glob, &mut expand, &mut quoted);
                 if chars.peek() == Some(&'>') {
                     chars.next();
                     tokens.push(Token::Op(Op::Append));
@@ -3198,7 +3211,7 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
                 glob = true;
                 word.push(ch);
             }
-            ch if ch.is_whitespace() => push_word(&mut tokens, &mut word, &mut glob, &mut expand),
+            ch if ch.is_whitespace() => push_word(&mut tokens, &mut word, &mut glob, &mut expand, &mut quoted),
             _ => word.push(ch),
         }
     }
@@ -3211,12 +3224,18 @@ fn tokenize(line: &str) -> Result<Vec<Token>, String> {
     if escape {
         word.push('\\');
     }
-    push_word(&mut tokens, &mut word, &mut glob, &mut expand);
+    push_word(&mut tokens, &mut word, &mut glob, &mut expand, &mut quoted);
     Ok(tokens)
 }
 
-fn push_word(tokens: &mut Vec<Token>, word: &mut String, glob: &mut bool, expand: &mut bool) {
-    if !word.is_empty() {
+fn push_word(
+    tokens: &mut Vec<Token>,
+    word: &mut String,
+    glob: &mut bool,
+    expand: &mut bool,
+    quoted: &mut bool,
+) {
+    if !word.is_empty() || *quoted {
         let text = std::mem::take(word);
         let has_glob = std::mem::take(glob);
         let has_expand = *expand;
@@ -3230,6 +3249,7 @@ fn push_word(tokens: &mut Vec<Token>, word: &mut String, glob: &mut bool, expand
         *glob = false;
         *expand = true;
     }
+    *quoted = false;
 }
 
 fn parse_chains(tokens: &[Token]) -> Result<Vec<(ChainOp, Vec<Token>)>, String> {

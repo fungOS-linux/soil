@@ -25,7 +25,10 @@ use crate::{Runtime, overlay::Overlay};
 /// PR. It cannot merge: `fab` owns checks and the landing decision, and an
 /// allowlisted `gh` is the shortest path from a prompt to something reviewable
 /// without putting a merge button behind a tool call.
-const HOST_ALLOWLIST: &[&str] = &[
+///
+/// This is the only copy of the policy: the daemon, the interactive shell and
+/// `mush run host` all read it from here.
+pub const HOST_ALLOWLIST: &[&str] = &[
     "cargo",
     "rustc",
     "cc",
@@ -216,7 +219,12 @@ fn run_one(
     if command.contains('|') || command.contains('>') || command.contains('<') {
         return run_in_spore(output, runtime, command);
     }
-    if !spore_owned(&words[0]) && host_allowed(&words[0]) {
+    // A command the Spore can answer exactly (or a host form it covers) never
+    // pays for an overlay.
+    if let Some(line) = spore_line(command, &words) {
+        return run_in_spore(output, runtime, &line);
+    }
+    if host_allowed(&words[0]) {
         return run_host(output, root, &words[0], &words[1..], control);
     }
     run_in_spore(output, runtime, command)
@@ -365,7 +373,7 @@ fn identity(root: &Path) -> Vec<(String, String)> {
 
 /// A bare program name only. `./cargo` would run code from the overlay itself,
 /// which is exactly what the allowlist exists to prevent.
-fn host_allowed(program: &str) -> bool {
+pub fn host_allowed(program: &str) -> bool {
     !program.contains('/') && HOST_ALLOWLIST.contains(&program)
 }
 
@@ -376,12 +384,133 @@ fn host_allowed(program: &str) -> bool {
 /// the Spore has no equivalent for yet, so those keep running as host programs.
 /// `diff` and `json` are different: the Spore answers both from the VFS, and the
 /// overlay copy would shadow that with a second, unindexed answer that leaves
-/// the sandbox to run. A name missing here still runs the host program, so
-/// forgetting one costs an overlay, not correctness.
-const SPORE_OWNED: &[&str] = &["diff", "json"];
+/// the sandbox to run. `true`, `false` and `test` are shell builtins the host
+/// list only ever covered by accident — running `/usr/bin/test` against a
+/// materialized copy of the VFS is both slower and asking the wrong filesystem.
+/// A name missing here still runs the host program, so forgetting one costs an
+/// overlay, not correctness.
+const SPORE_OWNED: &[&str] = &["diff", "json", "true", "false", "test"];
 
 fn spore_owned(program: &str) -> bool {
     SPORE_OWNED.contains(&program)
+}
+
+/// The Spore command line that answers a host invocation exactly, if there is
+/// one.
+///
+/// Two cases, both about a name the host allowlist also owns: a Spore-owned
+/// command, which runs as written, and a `sed -i` substitution the Spore's `sub`
+/// already implements, which is rewritten into the equivalent `sub` line.
+/// Returning `None` means "run the host program", and that fallback is what
+/// keeps a half-supported form from being silently approximated.
+pub fn spore_line(line: &str, words: &[String]) -> Option<String> {
+    let program = words.first()?;
+    if spore_owned(program) {
+        return Some(line.to_string());
+    }
+    if program == "sed" {
+        return sed_as_sub(words);
+    }
+    None
+}
+
+/// Translate `sed -i 's/pat/rep/g' FILE...` into `sub pat rep FILE...`.
+///
+/// Only the subset where the two regex dialects and the two replacement rules
+/// agree, because a translation that is subtly wrong is worse than an overlay:
+///
+/// - `g` is required. Without it sed replaces the first match per line and `sub`
+///   replaces every match.
+/// - No `\`, `+?|(){}` in either half; sed reads those literally (or as BRE
+///   groups) and the Spore's regex reads them as operators. `.`, `*` and
+///   bracket classes mean the same in both, and `sub` runs multi-line, so `^`
+///   and `$` anchor per line as they do in sed.
+/// - No `&` or `$` in the replacement: sed expands `&` to the whole match and
+///   `$n` is literal, while `sub` uses `$n` for groups.
+/// - No `-i.bak` (we would not write the backup) and no second script.
+fn sed_as_sub(words: &[String]) -> Option<String> {
+    let mut in_place = false;
+    let mut script: Option<&str> = None;
+    let mut paths: Vec<&str> = Vec::new();
+    let mut index = 1;
+    while index < words.len() {
+        let arg = words[index].as_str();
+        if arg == "-i" {
+            in_place = true;
+            // BSD sed takes the backup suffix as the next word: `-i ''`.
+            if words.get(index + 1).is_some_and(|next| next.is_empty()) {
+                index += 1;
+            }
+        } else if arg == "-e" {
+            let value = words.get(index + 1)?;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(value);
+            index += 1;
+        } else if arg != "-" && arg.starts_with('-') {
+            return None;
+        } else if script.is_none() {
+            script = Some(arg);
+        } else {
+            paths.push(arg);
+        }
+        index += 1;
+    }
+    if !in_place || paths.is_empty() {
+        return None;
+    }
+    let (pattern, replacement) = sed_substitution(script?)?;
+    let mut line = format!("sub {} {}", quote_word(&pattern)?, quote_word(&replacement)?);
+    for path in paths {
+        line.push(' ');
+        line.push_str(&quote_word(path)?);
+    }
+    Some(line)
+}
+
+/// Split an `s/pat/rep/g` script, or refuse it when the two engines would read
+/// it differently.
+fn sed_substitution(script: &str) -> Option<(String, String)> {
+    let mut chars = script.chars();
+    if chars.next()? != 's' {
+        return None;
+    }
+    let delimiter = chars.next()?;
+    if delimiter.is_alphanumeric() || delimiter.is_whitespace() || delimiter == '\\' {
+        return None;
+    }
+    let rest: String = chars.collect();
+    let mut parts = rest.split(delimiter);
+    let pattern = parts.next()?;
+    let replacement = parts.next()?;
+    if parts.next()? != "g" || parts.next().is_some() {
+        return None;
+    }
+    // An empty pattern reuses sed's previous regex; the Spore would match the
+    // empty string everywhere and rewrite the file into nonsense.
+    if pattern.is_empty() {
+        return None;
+    }
+    const DIFFERS: &[char] = &['\\', '+', '?', '|', '(', ')', '{', '}'];
+    if pattern.chars().any(|ch| DIFFERS.contains(&ch))
+        || replacement.chars().any(|ch| DIFFERS.contains(&ch))
+    {
+        return None;
+    }
+    if replacement.contains(['&', '$']) {
+        return None;
+    }
+    Some((pattern.to_string(), replacement.to_string()))
+}
+
+/// Single-quote a word for the Spore's tokenizer, or refuse when it holds a
+/// quote the translation would have to escape.
+fn quote_word(word: &str) -> Option<String> {
+    if word.contains(['\'', '\n']) {
+        return None;
+    }
+    Some(format!("'{word}'"))
 }
 
 fn split_commands(line: &str) -> Vec<(Connector, String)> {
@@ -503,8 +632,82 @@ mod tests {
         assert!(host_allowed("diff"));
         assert!(spore_owned("diff"));
         assert!(spore_owned("json"));
+        // Shell builtins that only reached the host list by accident.
+        assert!(host_allowed("test"));
+        assert!(spore_owned("test"));
         // Everything else keeps running as the host program.
         assert!(!spore_owned("git"));
-        assert!(!spore_owned("sed"));
+        assert!(!spore_owned("rg"));
+    }
+
+    #[test]
+    fn a_plain_sed_substitution_becomes_sub() {
+        let route = |line: &str| {
+            let words = split_words(line);
+            spore_line(line, &words)
+        };
+        assert_eq!(
+            route("sed -i 's/old name/new name/g' src/main.rs").as_deref(),
+            Some("sub 'old name' 'new name' 'src/main.rs'")
+        );
+        // `-e` and the BSD empty backup suffix mean the same thing.
+        assert_eq!(
+            route("sed -i -e 's/^  //g' a.txt").as_deref(),
+            Some("sub '^  ' '' 'a.txt'")
+        );
+        assert_eq!(
+            route("sed -i '' 's/#/--/g' a.txt b.txt").as_deref(),
+            Some("sub '#' '--' 'a.txt' 'b.txt'")
+        );
+        // Another delimiter, because patterns with slashes need one anyway.
+        assert_eq!(
+            route("sed -i 's|a/b|c|g' f").as_deref(),
+            Some("sub 'a/b' 'c' 'f'")
+        );
+    }
+
+    #[test]
+    fn sed_forms_that_would_differ_stay_on_the_host() {
+        let route = |line: &str| {
+            let words = split_words(line);
+            spore_line(line, &words)
+        };
+        // No `g`: sed replaces the first match per line, `sub` replaces all.
+        assert_eq!(route("sed -i 's/a/b/' f"), None);
+        // BRE groups and ERE operators read differently in the two engines.
+        assert_eq!(route(r"sed -i 's/\(a\)/[\1]/g' f"), None);
+        assert_eq!(route("sed -i 's/a+/b/g' f"), None);
+        assert_eq!(route("sed -i 's/a|b/c/g' f"), None);
+        assert_eq!(route(r"sed -i 's/\d/0/g' f"), None);
+        // sed's `&` and `$n` are not the Spore's `$n`.
+        assert_eq!(route("sed -i 's/a/[&]/g' f"), None);
+        assert_eq!(route("sed -i 's/(a)/$1/g' f"), None);
+        // A backup suffix writes a file we would not.
+        assert_eq!(route("sed -i.bak 's/a/b/g' f"), None);
+        // Two scripts, or no script at all.
+        assert_eq!(route("sed -i -e 's/a/b/g' -e 's/c/d/g' f"), None);
+        assert_eq!(route("sed -i f"), None);
+        // Not in place: `sed 's/a/b/g' f` prints, it does not write.
+        assert_eq!(route("sed 's/a/b/g' f"), None);
+        // A quote the translation would have to escape.
+        assert_eq!(route("sed -i \"s/a/it's/g\" f"), None);
+    }
+
+    #[test]
+    fn sed_substitution_keeps_only_the_shared_subset() {
+        let sub = sed_substitution;
+        assert_eq!(sub("s/a/b/g"), Some(("a".into(), "b".into())));
+        assert_eq!(sub("s/^  //g"), Some(("^  ".into(), "".into())));
+        assert_eq!(sub("s/a$/b/g"), Some(("a$".into(), "b".into())));
+        assert_eq!(sub("s/a.b/c/g"), Some(("a.b".into(), "c".into())));
+        // Character classes and `*` mean the same thing in both engines.
+        assert_eq!(sub("s/a[0-9]*/N/g"), Some(("a[0-9]*".into(), "N".into())));
+        // `+` is literal in a BRE and an operator in the Spore's regex.
+        assert_eq!(sub("s/[0-9]+/N/g"), None);
+        assert_eq!(sub("s/a/b/gg"), None);
+        // Empty pattern reuses sed's last regex; the Spore would match
+        // everywhere.
+        assert_eq!(sub("s//x/g"), None);
+        assert_eq!(sub("y/a/b/g"), None);
     }
 }
