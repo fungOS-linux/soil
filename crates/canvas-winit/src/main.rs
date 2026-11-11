@@ -325,6 +325,8 @@ struct App {
     /// the drag goes quiet: reflowing the emulator and re-rendering the grid on
     /// every mouse-move is what makes a drag feel broken.
     pending_resize: Option<(std::time::Instant, (u32, u32))>,
+    /// Which splash to draw.
+    splash: Splash,
     /// When the window opened, so the splash animation has a clock.
     opened: std::time::Instant,
     /// When the splash last painted, so it runs at a steady rate instead of
@@ -491,34 +493,82 @@ impl App {
             return;
         };
         let (width_px, height_px) = (width.get(), height.get());
+        let opened = self.opened;
         buffer.fill(BACKGROUND);
-        draw_lissajous(
-            &mut buffer,
-            width_px,
-            height_px,
-            phase,
-            SplashCurve {
-                a: 3.0,
-                b: 2.0,
-                delta: std::f32::consts::FRAC_PI_2,
-                radius: 0.42,
-                color: ACCENT_CURVE,
-            },
-        );
-        draw_lissajous(
-            &mut buffer,
-            width_px,
-            height_px,
-            phase,
-            SplashCurve {
-                a: 5.0,
-                b: 4.0,
-                delta: 0.0,
-                radius: 0.30,
-                color: ACCENT_GLOW,
-            },
-        );
-        if let Some(logo) = logo_mark() {
+        match self.splash {
+            // A small, slow figure, drawn thick enough to read as a mark rather
+            // than a wireframe: no logo, nothing to wait for but motion.
+            Splash::Flow => {
+                // One figure that morphs: each Lissajous ratio and phase is a
+                // symbol, and the mark eases from one to the next instead of
+                // cutting between them.
+                let symbols = [
+                    (3.0f32, 2.0f32, 0.0f32),
+                    (5.0, 4.0, std::f32::consts::FRAC_PI_4),
+                    (2.0, 3.0, std::f32::consts::FRAC_PI_2),
+                    (5.0, 2.0, std::f32::consts::FRAC_PI_3),
+                    (4.0, 3.0, std::f32::consts::FRAC_PI_6),
+                ];
+                let hold = 1.6f32;
+                let travel = opened.elapsed().as_secs_f32() / hold;
+                let index = travel.floor() as usize;
+                let t = travel.fract();
+                let ease = t * t * (3.0 - 2.0 * t);
+                let (a0, b0, d0) = symbols[index % symbols.len()];
+                let (a1, b1, d1) = symbols[(index + 1) % symbols.len()];
+                let lerp = |from: f32, to: f32| from + (to - from) * ease;
+                draw_lissajous(
+                    &mut buffer,
+                    width_px,
+                    height_px,
+                    0.0,
+                    SplashCurve {
+                        a: lerp(a0, a1),
+                        b: lerp(b0, b1),
+                        delta: lerp(d0, d1),
+                        radius: 0.24,
+                        color: ACCENT_CURVE,
+                        weight: 0.85,
+                        spin: 0.0,
+                    },
+                );
+            }
+            Splash::Logo => {
+                draw_lissajous(
+                    &mut buffer,
+                    width_px,
+                    height_px,
+                    phase,
+                    SplashCurve {
+                        a: 3.0,
+                        b: 2.0,
+                        delta: std::f32::consts::FRAC_PI_2,
+                        radius: 0.42,
+                        color: ACCENT_CURVE,
+                        weight: 1.0,
+                        spin: 0.0,
+                    },
+                );
+                draw_lissajous(
+                    &mut buffer,
+                    width_px,
+                    height_px,
+                    phase,
+                    SplashCurve {
+                        a: 5.0,
+                        b: 4.0,
+                        delta: 0.0,
+                        radius: 0.30,
+                        color: ACCENT_GLOW,
+                        weight: 1.0,
+                        spin: 0.0,
+                    },
+                );
+            }
+        }
+        if self.splash == Splash::Logo
+            && let Some(logo) = logo_mark()
+        {
             let side = 220.min(width_px).min(height_px);
             let scaled =
                 image::imageops::resize(logo, side, side, image::imageops::FilterType::Lanczos3);
@@ -670,6 +720,7 @@ impl ApplicationHandler for App {
         self.surface = Some(surface);
         self.paint_splash((physical.width, physical.height), 0.0);
         self.start_component(self.window.as_ref().unwrap().clone());
+        warm_installed(&self.spores, &self.module);
     }
 
     fn window_event(
@@ -686,9 +737,9 @@ impl ApplicationHandler for App {
                 if self.frame.is_some() {
                     self.paint();
                 } else if let Some(window) = &self.window {
-                    // Thirty frames a second is enough for a slow curve and
-                    // leaves the machine to compile the Spore.
-                    if self.splashed.elapsed() >= std::time::Duration::from_millis(33) {
+                    // Sixty frames a second: the sweep is the only thing
+                    // moving, and a stepping animation reads as a stutter.
+                    if self.splashed.elapsed() >= std::time::Duration::from_millis(16) {
                         self.splashed = std::time::Instant::now();
                         let size = window.inner_size();
                         let phase = self.opened.elapsed().as_secs_f32();
@@ -775,13 +826,21 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.settle_resize();
-        // While a drag is in flight, come back soon enough to notice it stopped.
-        if self.pending_resize.is_some() {
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                std::time::Instant::now() + std::time::Duration::from_millis(50),
-            ));
+        // Come back on a clock while there is something to animate: the splash
+        // before the first frame, and a resize settling. With a frame on screen
+        // and nothing moving, wait for an event instead of spinning.
+        let wake = if self.frame.is_none() {
+            Some(std::time::Duration::from_millis(16))
+        } else if self.pending_resize.is_some() {
+            Some(std::time::Duration::from_millis(50))
         } else {
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+            None
+        };
+        match wake {
+            Some(after) => event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + after,
+            )),
+            None => event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait),
         }
         let before = self.frames_seen;
         self.take_frames(event_loop);
@@ -793,6 +852,43 @@ impl ApplicationHandler for App {
             window.request_redraw();
         }
     }
+}
+
+/// Compile the Spores this machine has, in the background, so opening one from
+/// the launcher does not pay for it. The module already running is skipped; a
+/// Spore whose cache is warm costs a file read and a deserialize to check.
+fn warm_installed(spores: &std::path::Path, running: &std::path::Path) {
+    let Ok(directory) = std::fs::read_dir(spores) else {
+        return;
+    };
+    let modules: Vec<std::path::PathBuf> = directory
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|package| package.join("spore.toml").is_file())
+        .filter_map(|package| {
+            let manifest = Manifest::load(&package).ok()?;
+            let module = manifest.module?;
+            Some(package.join(module.path))
+        })
+        .filter(|module| module != running)
+        .collect();
+    if modules.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for module in modules {
+            let Ok(bytes) = std::fs::read(&module) else {
+                continue;
+            };
+            let Ok(runtime) = WebGpuRuntime::new() else {
+                continue;
+            };
+            let runtime = runtime.with_component_cache(component_cache(&module));
+            if let Err(error) = runtime.prewarm(&bytes) {
+                eprintln!("canvas-winit: warm {}: {error:#}", module.display());
+            }
+        }
+    });
 }
 
 /// Where compiled Spores are kept. Outside the bundle, because a cache is not
@@ -869,6 +965,15 @@ fn point(value: String) -> Result<(f32, f32)> {
 
 /// The colour a window sits on before its Spore draws anything.
 const BACKGROUND: u32 = 0x0c10_15;
+
+/// What the window shows while a Spore starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Splash {
+    /// The mark, masked like the Dock icon, over two thin curves.
+    Logo,
+    /// No mark: a small, thick lissajous figure that moves.
+    Flow,
+}
 /// The two hues the mark draws itself with: the fungal line and its glow.
 const ACCENT_CURVE: (f32, f32, f32) = (0.60, 0.80, 0.52);
 const ACCENT_GLOW: (f32, f32, f32) = (0.36, 0.55, 0.46);
@@ -881,34 +986,85 @@ struct SplashCurve {
     /// Fraction of the short side the figure spans.
     radius: f32,
     color: (f32, f32, f32),
+    /// Line weight: 1 draws a hairline, 3 draws a stroke.
+    weight: f32,
+    /// Rotation of the whole figure, in radians. Changing the phase morphs a
+    /// Lissajous; rotating it is what reads as spinning.
+    spin: f32,
 }
 
 fn draw_lissajous(buffer: &mut [u32], width: u32, height: u32, phase: f32, curve: SplashCurve) {
     let (half_w, half_h) = (width as f32 / 2.0, height as f32 / 2.0);
     let radius = curve.radius * width.min(height) as f32;
-    let steps = 2400;
-    for step in 0..steps {
+    // A stroke, not a hairline: the figure is the only thing on screen.
+    let stroke = 1.2 + curve.weight.max(0.2) * 4.0;
+    let (sin, cos) = (curve.spin.sin(), curve.spin.cos());
+    let point = |t: f32| {
+        let x = radius * (curve.a * t + curve.delta).sin();
+        let y = radius * (curve.b * t).sin();
+        (half_w + x * cos - y * sin, half_h + x * sin + y * cos)
+    };
+    // Dense samples, each drawn as an antialiased capsule: a splat of pixels
+    // would show stair-steps at this angle, and the figure is the only thing on
+    // screen while a Spore starts. Enough samples for a smooth curve, few
+    // enough to hold 60 fps on one core.
+    let steps = 1200;
+    let mut previous = point(phase);
+    for step in 1..=steps {
         let t = step as f32 / steps as f32 * std::f32::consts::TAU + phase;
-        let x = half_w + radius * (curve.a * t + curve.delta).sin();
-        let y = half_h + radius * (curve.b * t).sin();
-        // A 2x2 splat with a soft centre reads as a thin glowing line without a
-        // rasteriser; the splash only has to hold a window for a few seconds.
-        for (dx, dy, weight) in [(0i32, 0i32, 1.0f32), (1, 0, 0.5), (0, 1, 0.5), (1, 1, 0.25)] {
-            let px = x as i32 + dx;
-            let py = y as i32 + dy;
-            if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+        let current = point(t);
+        draw_capsule(
+            buffer,
+            width,
+            height,
+            previous,
+            current,
+            stroke,
+            curve.color,
+        );
+        previous = current;
+    }
+}
+
+/// One antialiased segment: every pixel near the line gets coverage from its
+/// distance to it, and the colour is added so crossings glow.
+fn draw_capsule(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    from: (f32, f32),
+    to: (f32, f32),
+    half_width: f32,
+    color: (f32, f32, f32),
+) {
+    let reach = half_width + 1.0;
+    let min_x = (from.0.min(to.0) - reach).floor().max(0.0) as i32;
+    let max_x = (from.0.max(to.0) + reach).ceil().min(width as f32 - 1.0) as i32;
+    let min_y = (from.1.min(to.1) - reach).floor().max(0.0) as i32;
+    let max_y = (from.1.max(to.1) + reach).ceil().min(height as f32 - 1.0) as i32;
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let length_squared = (dx * dx + dy * dy).max(f32::EPSILON);
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            // Distance from the pixel centre to the segment.
+            let t = (((px - from.0) * dx + (py - from.1) * dy) / length_squared).clamp(0.0, 1.0);
+            let (cx, cy) = (from.0 + t * dx, from.1 + t * dy);
+            let distance = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+            let coverage = (half_width + 0.5 - distance).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
                 continue;
             }
-            let Some(pixel) = buffer.get_mut((py as u32 * width + px as u32) as usize) else {
+            let Some(pixel) = buffer.get_mut((y as u32 * width + x as u32) as usize) else {
                 continue;
             };
             let add = |channel: u32, value: f32| {
                 let current = channel as f32 / 255.0;
-                ((current + value * weight * 0.12).min(1.0) * 255.0) as u32
+                ((current + value * coverage * 0.16).min(1.0) * 255.0).round() as u32
             };
-            let r = add((*pixel >> 16) & 0xff, curve.color.0);
-            let g = add((*pixel >> 8) & 0xff, curve.color.1);
-            let b = add(*pixel & 0xff, curve.color.2);
+            let r = add((*pixel >> 16) & 0xff, color.0);
+            let g = add((*pixel >> 8) & 0xff, color.1);
+            let b = add(*pixel & 0xff, color.2);
             *pixel = (r << 16) | (g << 8) | b;
         }
     }
@@ -1039,6 +1195,8 @@ fn main() -> Result<()> {
     let mut click = None;
     let mut drag = None;
     let mut after: Option<u64> = None;
+    let mut splash = Splash::Flow;
+    let mut prewarm = false;
     let mut spores = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -1065,6 +1223,14 @@ fn main() -> Result<()> {
                 drag = Some(drag_point(
                     args.next().context("--drag needs X1,Y1,X2,Y2")?,
                 )?)
+            }
+            "--prewarm" => prewarm = true,
+            "--splash" => {
+                splash = match args.next().context("--splash needs logo or flow")?.as_str() {
+                    "logo" => Splash::Logo,
+                    "flow" => Splash::Flow,
+                    other => anyhow::bail!("--splash takes logo or flow, not {other}"),
+                }
             }
             "--after" => {
                 after = Some(
@@ -1114,6 +1280,14 @@ fn main() -> Result<()> {
             candidate
         }
     };
+    // Compile and cache, then exit: no window, no device, no Spore.
+    if prewarm {
+        let bytes = std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
+        let runtime = WebGpuRuntime::new()?.with_component_cache(component_cache(&module));
+        runtime.prewarm(&bytes)?;
+        println!("canvas-winit: warmed {}", module.display());
+        return Ok(());
+    }
     let input = Arc::new(Mutex::new(VecDeque::new()));
     if let Some(key) = key {
         let text = (key.chars().count() == 1).then(|| key.clone());
@@ -1226,6 +1400,7 @@ fn main() -> Result<()> {
         scale: 1.0,
         extent: Arc::new(Mutex::new((LOGICAL_SIZE.0 as u32, LOGICAL_SIZE.1 as u32))),
         pending_resize: None,
+        splash,
         opened: std::time::Instant::now(),
         splashed: std::time::Instant::now(),
         modifiers: ModifiersState::default(),

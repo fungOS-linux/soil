@@ -712,6 +712,12 @@ impl WebGpuRuntime {
         self
     }
 
+    /// Compile a component into the cache without running it. A Spore someone
+    /// will open later costs nothing to start if it was paid for earlier.
+    pub fn prewarm(&self, bytes: &[u8]) -> Result<()> {
+        self.component(bytes).map(|_| ())
+    }
+
     /// Compile a component, or reuse the cached compilation of the same bytes.
     fn component(&self, bytes: &[u8]) -> Result<Component> {
         let cache_path = self.component_cache.as_ref().map(|directory| {
