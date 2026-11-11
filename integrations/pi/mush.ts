@@ -99,6 +99,17 @@ function tryAutoEnable(pi: ExtensionAPI): boolean {
         const active = pi.getActiveTools();
         // `/mush off` already handed the host shell back; do not reclaim it.
         if (active.some((name) => HOST_TOOLS.includes(name))) return false;
+        // A headless run has no prompt to type `/mush <desktop>` at, so
+        // MUSH_ROOT pins the VFS root directly. It is also how the agent test
+        // points a session at a throwaway workspace.
+        const pinned = process.env.MUSH_ROOT;
+        if (pinned) {
+                shell.enabled = true;
+                shell.desktop = null;
+                shell.root = pinned;
+                giveShellToMush(pi);
+                return true;
+        }
         const resolved = originDesktop();
         const desktop = resolved.desktop ?? DEFAULT_DESKTOP;
         const show = desktop ? mush(["desktop", "show", desktop]) : null;

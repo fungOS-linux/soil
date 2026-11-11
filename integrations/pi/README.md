@@ -24,7 +24,9 @@ ln -sf "$PWD/integrations/pi/mush.ts" ~/.pi/agent/extensions/mush.ts
 Then `/mush <desktop>` in a session, or `/mush off` to put the host shell back.
 `MUSH_BIN` overrides the binary, `MUSH_TIMEOUT` the per-command deadline (900s),
 `MUSH_DESKTOP` the Desktop used when `mush origin` cannot tell which one owns
-the working directory.
+the working directory, and `MUSH_ROOT` a VFS root to use instead of a Desktop —
+that is what lets a headless run (`pi -p`) attach without a tty to type `/mush`
+at.
 
 `/mush` state is per session: a reload re-attaches by looking at the active tool
 set, which is why `tryAutoEnable` runs on use rather than at load.
@@ -56,4 +58,20 @@ tests clean.
 
 What it does not cover: the Pi runtime itself (tool activation, `/mush` state
 machine, the system-prompt hook), a real Desktop, and anything about how the
-model chooses tools. Those are the reasons to run a real session.
+model chooses tools. Those are the reasons for the agent test.
+
+## Agent test
+
+```sh
+scripts/mush-agent-test.sh          # add --keep to inspect the workspace
+```
+
+Runs one real headless Pi session — `pi -p`, no builtin tools, no extensions
+except this one, only the `mush`/`vfs_*` tools — against a throwaway VFS root
+pinned with `MUSH_ROOT`. The task edits a JSON document, appends to a file and
+creates a new one, and the script checks the resulting VFS state rather than the
+model's prose, so a run that "succeeded" outside the sandbox fails.
+
+Knobs: `AGENT_MODEL` (passed as `--model`), `PI_BIN`, `MUSH_BIN`,
+`MUSH_TIMEOUT`. It costs a model call per run; that is the point — it is the
+only check that exercises the runtime, the tool swap and the daemon together.
