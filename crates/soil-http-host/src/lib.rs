@@ -171,7 +171,7 @@ impl GeodeCredentials {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .context("set Geode read timeout")?;
         stream
-            .write_all(request.to_string().as_bytes())
+            .write_all(format!("{}\n", request).as_bytes())
             .context("write Geode lease")?;
         let mut response = String::new();
         stream
@@ -650,6 +650,39 @@ mod tests {
                 .starts_with("GET /api/path-secret/groups/0"),
         );
         handle.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn geode_path_credentials_lease_over_the_socket() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("geode.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("geode://home/hue/bridge"), "{request}");
+            assert!(request.contains("hue.control"), "{request}");
+            stream
+                .write_all(b"{\"ok\":true,\"secret_b64\":\"c2VjcmV0\"}\n")
+                .unwrap();
+        });
+
+        let credentials = GeodeCredentials::new(&socket, "hue.control");
+        assert_eq!(
+            credentials
+                .resolve_path("geode://home/hue/bridge")
+                .unwrap()
+                .as_deref(),
+            Some("secret")
+        );
+        server.join().unwrap();
     }
 
     #[test]
