@@ -33,7 +33,10 @@ use capabilities::soil::unibus::bus;
 
 const EVENT_KIND: &str = "confluence.webhook.received.v1";
 const CREDENTIAL: &str = "confluence.webhook";
-const MAX_BODY: usize = 64 * 1024;
+// The guest's ceiling matches the host constant in `soil-confluence`: a
+// security advisory is a legitimate delivery at 146 KB, so the cap is about
+// refusing abuse, not about the size of a real message.
+const MAX_BODY: usize = 1024 * 1024;
 const MAX_SKEW_SECONDS: i64 = 300;
 
 struct Confluence;
