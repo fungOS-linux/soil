@@ -112,10 +112,24 @@ impl Store {
             .reviews
             .as_ref()
             .map(|reviews| reviews.aggregate(&entry.digest, &entry.spore_id));
+        // Whether this host already runs it, and whether the offering is newer
+        // than what it runs. The page, a Spore view and an agent all need the
+        // same answer, so it is computed here and not in a client.
+        let installed = self
+            .installed
+            .iter()
+            .find(|app| app.id() == entry.spore_id);
+        let state = match installed {
+            None => "available",
+            Some(app) if app.digest == entry.digest => "installed",
+            Some(_) => "update",
+        };
         serde_json::json!({
             "id": entry.spore_id,
             "version": entry.version,
             "digest": entry.digest,
+            "state": state,
+            "installed_version": installed.map(|app| app.manifest.spore.version.clone()),
             "package": entry.package,
             "signature": format!("/signature/{}", entry.digest),
             "publisher": entry.publisher,
