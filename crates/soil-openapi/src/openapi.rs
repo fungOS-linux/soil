@@ -103,6 +103,43 @@ pub fn document(api: &Api) -> Value {
                     },
                 },
             },
+            "/v1/events": {
+                "get": {
+                    "operationId": "events",
+                    "summary": "Server-sent events",
+                    "description": "The session as an event stream: `ready` (which names the session id), `changed`, host `call` frames and `cancel` frames, one JSON object per `data:` line. Use it where a WebSocket upgrade does not survive a proxy.",
+                    "responses": {
+                        "200": {
+                            "description": "text/event-stream of the same frames the socket carries",
+                            "content": { "text/event-stream": { "schema": { "type": "string" } } },
+                        },
+                        "401": { "description": "No token, or a token that does not match" },
+                        "403": { "description": "Origin is not in the allowlist" },
+                    },
+                },
+            },
+            "/v1/frame": {
+                "post": {
+                    "operationId": "frame",
+                    "summary": "Send one client frame on an SSE session",
+                    "description": "`?session=` comes from the `ready` frame. A `call` or `provide` gets its result in the response body; a `result` answers a host call that arrived on the event stream.",
+                    "parameters": [
+                        { "name": "session", "in": "query", "required": true, "schema": { "type": "string" } },
+                    ],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "type": "object" } } },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "The correlated result, or an acknowledgement for a delivered answer",
+                            "content": { "application/json": { "schema": { "type": "object" } } },
+                        },
+                        "400": { "description": "Malformed frame or missing session" },
+                        "404": { "description": "No such session, or no call in flight with that id" },
+                    },
+                },
+            },
             "/v1/session": {
                 "get": {
                     "operationId": "session",

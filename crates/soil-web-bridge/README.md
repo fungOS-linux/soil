@@ -67,10 +67,22 @@ Three rules that are easy to get wrong later:
 
 ## Sessions and calls
 
-- `POST /v1/call` — one request, one response. The server closes the connection.
-- `GET /v1/session` — upgrade to WebSocket. The server sends `ready`, then
-  answers calls and pushes events on the same socket.
-- `GET /` — the demo page. `GET /healthz` — liveness.
+Two transports carry the same frames. The page uses the second one, because a
+proxy that strips hop-by-hop headers — the mycelium gateway does — will not
+forward a WebSocket upgrade.
+
+| Route | Transport | Carries |
+|---|---|---|
+| `POST /v1/call` | HTTP | one call, one result |
+| `GET /v1/session` | WebSocket | `ready`, calls, events, host calls, cancels |
+| `GET /v1/events` | server-sent events | the same server-to-client frames, one JSON object per `data:` line |
+| `POST /v1/frame?session=` | HTTP | anything the page sends: `call`, `provide`, `result` |
+| `GET /` | HTTP | the demo page |
+| `GET /healthz` | HTTP | liveness |
+
+`ready` carries `session` on the SSE transport, because an event stream has no
+socket identity to quote; the page echoes it on every `POST /v1/frame`. A
+WebSocket session omits it — the connection already is the session.
 
 A session is bound to one Spore and its grant set for its whole life. There is no
 call that changes what a connection may do, and no per-call identity to spoof.
@@ -176,31 +188,35 @@ origin allowlist, its CORS — without the node opening a socket.
 
 ### Wiring it into a host
 
-The bridge does not run Spores; it is the session side. A process that does both
-composes the two pieces, and `SessionTransport` is the adapter:
+The launcher is `soil spore run`; a browser is an option on it:
+
+```sh
+soil spore run spores/worklog --bridge 127.0.0.1:8795 --bridge-wait 30 \
+  --allow-origin https://example.com
+```
+
+`soil` starts the bridge, waits for a page to offer `soil:http`, and runs the
+Spore with the provider-first transport. When no page offers the interface, the
+Spore falls back to the node's own network.
+
+For a host that composes its own process, the pieces are the same:
 
 ```rust
 use std::sync::Arc;
-use soil_http_host::{DirectTransport, HttpHost, HttpPolicy, PreferProvider};
-use soil_web_bridge::{Bridge, SessionTransport};
+use soil_http_host::{DirectTransport, PreferProvider};
+use soil_web_bridge::SessionTransport;
 
-let bridge = Arc::new(bridge);
 let transport = Arc::new(PreferProvider::new(
     Arc::new(SessionTransport::new(bridge.clone())),
-    Arc::new(DirectTransport),          // the node's own network, when nobody offers
+    Arc::new(DirectTransport),
 ));
-let host = HttpHost::new(policy).with_transport(transport);
+let builder = builder.with_http(HttpCapability::new(policy, transport));
 ```
 
 `PreferProvider` falls back **only** on `TransportError::Unsupported`, which is
 the transport's way of saying "not me". A provider that declines a URL returns
 `denied` and nobody routes around it: a fallback on failure would quietly
 overrule the page's own policy.
-
-That composition is tested here (`a_spore_fetch_goes_through_the_session…`) and
-in [`soil-http-host`](../soil-http-host/src/lib.rs); what does not exist yet is a
-binary that both serves the bridge and runs a Spore. Today that is two commands
-in two processes — which is exactly why the seam is a trait rather than a call.
 
 ## What is not here yet
 

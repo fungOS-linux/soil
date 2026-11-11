@@ -31,7 +31,7 @@ pub use creds::{
 pub use gateway::{
     GatewayRoute, GatewayVhost, HttpGateway, HttpGatewayBuilder, IngressError, OriginAuth,
 };
-pub use host::{Preopen, WasiHost, WasiHostBuilder};
+pub use host::{HttpCapability, Preopen, WasiHost, WasiHostBuilder};
 pub use policy::{HttpPolicy, NetworkPolicy, WasiHostPolicy};
 pub use service::HttpService;
 pub use unibus::{

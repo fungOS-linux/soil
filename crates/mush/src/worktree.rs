@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use fungos_vfs::{ApplyOutcome, ContentId, Expect, Vfs, pull_over_ssh};
 use rand::Rng;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use soil_records_host::{RecordsBookHost, records};
+use soil_host::records_host::{RecordsBookHost, records};
 
 const THREAD_SCHEMA: &str = "fungos.thread/v1";
 const TURN_SCHEMA: &str = "fungos.turn/v1";
@@ -346,6 +346,7 @@ impl State {
         Ok(values)
     }
 
+    #[cfg(test)]
     fn scan_local<T: DeserializeOwned>(&mut self, prefix: &str) -> Result<Vec<T>> {
         let entries = self.local.scan_all(10_000)?;
         let mut values = Vec::new();
@@ -541,16 +542,12 @@ impl State {
 
     /// Read an immutable blob from the VFS content store.
     ///
-    /// `fungos-vfs` currently exposes lookup by path, not by content id. The
-    /// blob path is the documented `.fungos/objects/<shard>/<hex>` layout, and
-    /// the bytes are verified against the content id before use.
+    /// The bytes live in whichever store the VFS was opened against: the
+    /// machine's shared store by default, a per-root `.fungos/objects`
+    /// directory on a root an older build wrote. Asking the store is the only
+    /// layout-independent answer — reading the old path directly is how this
+    /// broke when the default moved.
     fn read_content(&self, id: &ContentId) -> Result<Vec<u8>> {
-        // Ask the VFS where the bytes are; do not work it out from the layout.
-        // This used to reconstruct `<root>/.fungos/objects/<xx>/<hex>` by hand,
-        // which was correct until content moved to the machine-wide store -- at
-        // which point the path named a directory that no longer holds anything,
-        // and every checkout failed with "No such file". A consumer that knows
-        // the storage layout is a consumer that breaks when storage changes.
         let bytes = self
             .vfs
             .content(id)
@@ -703,25 +700,18 @@ fn run_worktree(state: &mut State, args: &mut Vec<String>) -> Result<()> {
             // Fail before moving bytes if this device has never mounted the
             // worktree: there would be nothing to reconcile against.
             state.load_worktree_state(&args[0])?;
-            // The carrier reports what it moved alongside the outcomes: a
-            // streamed snapshot carries bytes and entries the outcome list does
-            // not describe, so dropping it would hide the one number that says
-            // whether a resume actually resumed.
-            let (outcomes, transfer) =
+            let (outcomes, _transfer) =
                 pull_over_ssh(&mut state.vfs, &from, &remote_root, &remote_bin, 500)?;
             let mut applied = 0;
             let mut duplicate = 0;
             let mut diverged = 0;
-            let mut snapshot = false;
             for outcome in &outcomes {
                 match outcome {
-                    ApplyOutcome::Applied => applied += 1,
+                    // A whole-state replacement landed, which is as much an
+                    // applied transfer as a delta is.
+                    ApplyOutcome::Applied | ApplyOutcome::Snapshot => applied += 1,
                     ApplyOutcome::Duplicate => duplicate += 1,
                     ApplyOutcome::Diverged => diverged += 1,
-                    // This store had fallen behind a compaction horizon, so the
-                    // peer answered with the live namespace rather than a delta
-                    // it could not recognise as short.
-                    ApplyOutcome::Snapshot => snapshot = true,
                 }
             }
             println!(
@@ -730,10 +720,6 @@ fn run_worktree(state: &mut State, args: &mut Vec<String>) -> Result<()> {
                     "applied": applied,
                     "duplicate": duplicate,
                     "diverged": diverged,
-                    "snapshot": snapshot,
-                    "bytes": transfer.bytes,
-                    "content_bytes": transfer.content_bytes,
-                    "resumed_from": transfer.resumed_from,
                 })
             );
             if diverged > 0 {
@@ -1058,14 +1044,7 @@ mod tests {
         let (vfs_root, records_root) = (dir.path().join("vfs"), dir.path().join("records"));
         let store = dir.path().join("store");
         {
-            let mut state = State::open(
-                &vfs_root,
-                &records_root,
-                "mush-test",
-                "worktree",
-                Some(&store),
-            )
-            .unwrap();
+            let mut state = State::open(&vfs_root, &records_root, "mush-test", "worktree", Some(&store)).unwrap();
             // The shape written before the split: portable identity and device
             // state in one record.
             let legacy = serde_json::json!({
@@ -1084,14 +1063,7 @@ mod tests {
         }
 
         // Reopening migrates.
-        let mut state = State::open(
-            &vfs_root,
-            &records_root,
-            "mush-test",
-            "worktree",
-            Some(&store),
-        )
-        .unwrap();
+        let mut state = State::open(&vfs_root, &records_root, "mush-test", "worktree", Some(&store)).unwrap();
         let local = state.load_worktree_state("wt_old").unwrap();
         assert_eq!(local.path, "projects/old");
         assert_eq!(local.head_tree, "tree-head");
@@ -1104,14 +1076,7 @@ mod tests {
         assert!(!body.contains("projects/old"), "{body}");
 
         // Idempotent: a second open does not duplicate or lose anything.
-        let mut again = State::open(
-            &vfs_root,
-            &records_root,
-            "mush-test",
-            "worktree",
-            Some(&store),
-        )
-        .unwrap();
+        let mut again = State::open(&vfs_root, &records_root, "mush-test", "worktree", Some(&store)).unwrap();
         assert_eq!(
             again
                 .scan_local::<WorktreeState>("worktree-state/")

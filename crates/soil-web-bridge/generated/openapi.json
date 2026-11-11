@@ -1039,6 +1039,76 @@
         "summary": "One WIT call"
       }
     },
+    "/v1/events": {
+      "get": {
+        "description": "The session as an event stream: `ready` (which names the session id), `changed`, host `call` frames and `cancel` frames, one JSON object per `data:` line. Use it where a WebSocket upgrade does not survive a proxy.",
+        "operationId": "events",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "text/event-stream of the same frames the socket carries"
+          },
+          "401": {
+            "description": "No token, or a token that does not match"
+          },
+          "403": {
+            "description": "Origin is not in the allowlist"
+          }
+        },
+        "summary": "Server-sent events"
+      }
+    },
+    "/v1/frame": {
+      "post": {
+        "description": "`?session=` comes from the `ready` frame. A `call` or `provide` gets its result in the response body; a `result` answers a host call that arrived on the event stream.",
+        "operationId": "frame",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The correlated result, or an acknowledgement for a delivered answer"
+          },
+          "400": {
+            "description": "Malformed frame or missing session"
+          },
+          "404": {
+            "description": "No such session, or no call in flight with that id"
+          }
+        },
+        "summary": "Send one client frame on an SSE session"
+      }
+    },
     "/v1/provider/call": {
       "post": {
         "description": "Node-side door. The host asks a session that volunteered an interface — `soil:http` answered with the page's own `fetch` — to do the work, with a deadline. Not for pages: a page uses the session frames.",

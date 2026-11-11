@@ -8,7 +8,8 @@ use std::{
 
 use anyhow::Result;
 use http_body_util::BodyExt;
-use soil_records_host::{RecordsBookHost, records};
+use soil_host::http_host::HttpTransport;
+use soil_host::records_host::{RecordsBookHost, records};
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
@@ -22,6 +23,23 @@ use crate::{
     policy::{HttpPolicy, WasiHostPolicy},
     unibus::Bus,
 };
+
+/// A `soil:http` installation for a Spore that serves `wasi:http`.
+///
+/// The policy is the same one the `runner`-world host uses — the allowlist, the
+/// header rules and the budgets live in one place — and only the transport
+/// differs. That is what lets a Spore reach the network through a browser
+/// instead of this process's socket.
+pub struct HttpCapability {
+    pub(crate) policy: soil_host::http_host::HttpPolicy,
+    pub(crate) transport: Arc<dyn HttpTransport>,
+}
+
+impl HttpCapability {
+    pub fn new(policy: soil_host::http_host::HttpPolicy, transport: Arc<dyn HttpTransport>) -> Self {
+        Self { policy, transport }
+    }
+}
 
 /// One preopened host directory.
 #[derive(Clone, Debug)]
@@ -45,6 +63,8 @@ pub struct WasiHostBuilder {
     /// Shared across requests on purpose: one SQLite store per process, not one
     /// per invocation.
     records: Option<Arc<Mutex<RecordsBookHost>>>,
+    /// `soil:http` policy and route. Absent means the interface is not linked.
+    http: Option<Arc<HttpCapability>>,
 }
 
 impl WasiHostBuilder {
@@ -128,6 +148,20 @@ impl WasiHostBuilder {
         self.records.is_some()
     }
 
+    /// Link `soil:http` for this host.
+    ///
+    /// The capability decides what may be reached and how; without it the
+    /// interface is not linked at all, so a component that imports it fails at
+    /// instantiation instead of answering `unsupported` on the first fetch.
+    pub fn with_http(mut self, capability: HttpCapability) -> Self {
+        self.http = Some(Arc::new(capability));
+        self
+    }
+
+    pub fn has_http(&self) -> bool {
+        self.http.is_some()
+    }
+
     /// Create fresh WASI state for one component invocation.
     pub fn build(&self) -> Result<WasiHost> {
         let mut wasi = WasiCtxBuilder::new();
@@ -156,6 +190,7 @@ impl WasiHostBuilder {
             credentials: self.credentials.clone(),
             bus: self.bus.clone(),
             records: self.records.clone(),
+            soil_http: self.http.clone(),
         })
     }
 
@@ -175,6 +210,24 @@ pub struct WasiHost {
     credentials: Option<Arc<dyn CredentialProvider>>,
     bus: Option<Arc<dyn Bus>>,
     records: Option<Arc<Mutex<RecordsBookHost>>>,
+    soil_http: Option<Arc<HttpCapability>>,
+}
+
+impl soil_host::http_host::api::Host for WasiHost {
+    fn fetch(
+        &mut self,
+        request: soil_host::http_host::api::Request,
+    ) -> Result<soil_host::http_host::api::Response, soil_host::http_host::api::Error> {
+        let Some(capability) = self.soil_http.as_ref() else {
+            return Err(soil_host::http_host::api::Error::Unsupported);
+        };
+        soil_host::http_host::fetch(
+            &capability.policy,
+            &soil_host::http_host::NoCredentials,
+            capability.transport.as_ref(),
+            request,
+        )
+    }
 }
 
 impl WasiHost {

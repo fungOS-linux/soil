@@ -1668,6 +1668,28 @@ pub fn reference(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// The title a slug reads as: `vitals-view` -> `Vitals View`.
+///
+/// A manifest's `name` is an identity, and every surface that shows one to a
+/// person — a launcher row, a window title, a store shelf — has to turn it into
+/// words the same way, or the same package goes by three different names.
+/// An explicit `title` still wins wherever one is declared; this is only the
+/// fallback.
+pub fn display_title(name: &str) -> String {
+    let mut title = String::with_capacity(name.len());
+    for (index, word) in name.split(['-', '_']).enumerate() {
+        if index > 0 {
+            title.push(' ');
+        }
+        let mut characters = word.chars();
+        if let Some(first) = characters.next() {
+            title.extend(first.to_uppercase());
+            title.push_str(characters.as_str());
+        }
+    }
+    title
+}
+
 /// Resolve a manifest path without letting it leave the package.
 pub fn safe_relative(path: &str) -> Result<PathBuf> {
     if path.is_empty() || path.len() > 255 || path.starts_with('/') || path.contains('\\') {

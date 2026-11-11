@@ -30,7 +30,7 @@ collection name, schema, body encoding, and domain meaning.
 
 ## Contacts host
 
-`crates/soil-records-host` adapts one `fungos-records` book as one
+`crates/soil-host` adapts one `fungos-records` book as one
 `soil:records` collection.
 
 Generic:
@@ -117,7 +117,7 @@ engines. It is not a CRM API; it accepts schema-tagged records for an allowed
 book.
 
 ```sh
-cargo run -p soil-records-host --bin soil-records-ingest -- \
+cargo run -p soil-host --bin soil-records-ingest -- \
   --root ~/.local/share/fungos/records \
   --book personal/avery/crm \
   --schema-prefix fungos.crm/ \
@@ -185,7 +185,7 @@ it exercises the `soil:records` path a Spore uses rather than querying SQLite
 directly.
 
 ```sh
-cargo run -p soil-records-host --bin soil-records-web -- \
+cargo run -p soil-host --bin soil-records-web -- \
   --book personal/avery/contacts \
   --collection contact \
   --listen 127.0.0.1:8787
@@ -198,7 +198,7 @@ revision/origin metadata, and a `.vcf` export.
 The same inspector renders calendar books when given the event schema:
 
 ```sh
-cargo run -p soil-records-host --bin soil-records-web -- \
+cargo run -p soil-host --bin soil-records-web -- \
   --book personal/avery/calendar \
   --collection event \
   --schema fungos.calendar/event \

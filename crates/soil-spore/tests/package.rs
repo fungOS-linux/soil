@@ -673,3 +673,10 @@ fn a_skill_that_is_not_a_skill_file_is_refused() {
     let error = Manifest::load(&root).unwrap_err();
     assert!(matches!(error, Error::Invalid(_)), "{error}");
 }
+#[test]
+fn display_title_reads_a_slug_as_words() {
+    assert_eq!(soil_spore::display_title("vitals-view"), "Vitals View");
+    assert_eq!(soil_spore::display_title("dfm_report"), "Dfm Report");
+    assert_eq!(soil_spore::display_title("store"), "Store");
+    assert_eq!(soil_spore::display_title(""), "");
+}

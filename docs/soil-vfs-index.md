@@ -76,7 +76,7 @@ A host adapter maps `list/stat/read` onto `fungos-vfs`, and
 
 ## Persistent host index
 
-`crates/soil-vfs-host` implements the first backend:
+`crates/soil-host` implements the first backend:
 
 ```text
 <vfs-root>/.fungos/soil-index.sqlite3
@@ -167,7 +167,7 @@ host. It lists the namespace, searches the derived index, and previews bounded
 ranges without exposing a host filesystem path to the browser.
 
 ```sh
-cargo run -p soil-vfs-host --bin soil-vfs-web -- \
+cargo run -p soil-host --bin soil-vfs-web -- \
   --root ~/.local/share/fungos/vfs \
   --listen 127.0.0.1:8788
 ```

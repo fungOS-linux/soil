@@ -175,6 +175,9 @@ pub struct Bridge {
     /// package -> (session id, call queue). One provider per package.
     providers: Providers,
     session_seq: AtomicU64,
+    /// Sessions that talk HTTP instead of WebSocket (see `handle_events`).
+    sse: SseRegistry,
+    sse_seq: AtomicU64,
     /// Outbound call ids are `~n`; `~` is outside the client id alphabet, so a
     /// page can never mint an id that collides with the host's.
     server_calls: AtomicU64,
@@ -191,6 +194,8 @@ impl Bridge {
             sessions: AtomicUsize::new(0),
             providers: Providers::default(),
             session_seq: AtomicU64::new(1),
+            sse: Arc::new(Mutex::new(BTreeMap::new())),
+            sse_seq: AtomicU64::new(1),
             server_calls: AtomicU64::new(1),
         }
     }
@@ -436,7 +441,9 @@ fn handle_connection(bridge: Arc<Bridge>, mut stream: TcpStream, peer: SocketAdd
         ("OPTIONS", _) => respond(&mut stream, 204, "No Content", "text/plain", b"", cors),
         ("POST", "/v1/call") => handle_call(&bridge, &mut stream, &body, cors),
         ("POST", "/v1/provider/call") => handle_provider_call(&bridge, &mut stream, &body, cors),
-        ("GET", "/v1/session") => handle_session(&bridge, stream, buffer, &head),
+        ("POST", "/v1/frame") => handle_frame(&bridge, &mut stream, &head, &body, cors),
+        ("GET", "/v1/events") => handle_events(bridge.clone(), stream, &head, cors),
+        ("GET", "/v1/session") => handle_session(bridge.clone(), stream, buffer, &head),
         _ => respond(
             &mut stream,
             404,
@@ -541,7 +548,295 @@ fn handle_provider_call(
     );
 }
 
-fn handle_session(bridge: &Bridge, stream: TcpStream, buffer: Vec<u8>, head: &Head) {
+/// Sessions that talk HTTP instead of WebSocket.
+///
+/// A proxy that strips hop-by-hop headers — the mycelium gateway does — cannot
+/// carry an upgrade, and a page behind one would sit at "connecting" forever.
+/// The same frames travel as server-sent events out and POSTs in, which every
+/// HTTP/1.1 proxy forwards. The WebSocket stays for clients that can open one.
+type SseRegistry = Arc<Mutex<BTreeMap<String, Arc<SseSession>>>>;
+
+/// Server calls the page has been given but not answered, by id.
+type PendingCalls = Mutex<BTreeMap<String, (Instant, mpsc::SyncSender<Result<Value, CallError>>)>>;
+
+struct SseSession {
+    provider_tx: mpsc::SyncSender<ProviderCall>,
+    /// Calls the host made: when to give up, and where the answer goes.
+    pending: PendingCalls,
+    registration: Mutex<Registration>,
+}
+
+fn handle_events(bridge: Arc<Bridge>, mut stream: TcpStream, _head: &Head, cors: Option<String>) {
+    let id = format!("s{}", bridge.sse_seq.fetch_add(1, Ordering::Relaxed));
+    let (event_tx, events) = mpsc::sync_channel(EVENT_CHANNEL);
+    let subscription = bridge.bus.subscribe(event_tx);
+    let (provider_tx, provider_rx) = mpsc::sync_channel(PROVIDER_QUEUE);
+    let session = Arc::new(SseSession {
+        provider_tx: provider_tx.clone(),
+        pending: Mutex::new(BTreeMap::new()),
+        registration: Mutex::new(Registration {
+            bridge: bridge.clone(),
+            session: id.clone(),
+            packages: Vec::new(),
+        }),
+    });
+    if let Ok(mut sessions) = bridge.sse.lock() {
+        sessions.insert(id.clone(), session.clone());
+    }
+
+    let mut headers = String::from(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
+         X-Accel-Buffering: no\r\nConnection: close\r\n",
+    );
+    if let Some(origin) = cors {
+        headers.push_str(&format!(
+            "Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n"
+        ));
+    }
+    headers.push_str("\r\n");
+    if stream.write_all(headers.as_bytes()).is_err() {
+        return;
+    }
+
+    // The client has no socket identity to echo, so the first frame names the
+    // session it must quote on `POST /v1/frame`.
+    let ready = EventFrame {
+        v: VERSION,
+        event: Event::Ready {
+            spore: bridge.spore.clone(),
+            grants: bridge.grants.declared(),
+            interfaces: bridge.registry.describe(),
+            session: Some(id.clone()),
+        },
+    };
+    if send_sse(&mut stream, &ready).is_err() {
+        drop(subscription);
+        if let Ok(mut sessions) = bridge.sse.lock() {
+            sessions.remove(&id);
+        }
+        return;
+    }
+
+    let mut ticks: u32 = 0;
+    'stream: loop {
+        while let Ok(event) = events.try_recv() {
+            if send_sse(&mut stream, &EventFrame { v: VERSION, event }).is_err() {
+                break 'stream;
+            }
+        }
+
+        // A provider call is a server-to-client frame; the answer arrives on a
+        // different request, so it is tracked here by id until it does.
+        while let Ok(call) = provider_rx.try_recv() {
+            let frame = Request {
+                v: VERSION,
+                call: Call {
+                    id: call.id.clone(),
+                    interface: call.package.clone(),
+                    function: call.function.clone(),
+                    params: call.params,
+                },
+            };
+            let Ok(text) = serde_json::to_string(&frame) else {
+                continue;
+            };
+            if write_sse_data(&mut stream, &text).is_err() {
+                break 'stream;
+            }
+            if let Ok(mut pending) = session.pending.lock() {
+                pending.insert(call.id, (call.deadline, call.reply));
+            }
+        }
+
+        for (id, reply) in expire_pending(&session) {
+            if write_sse_data(&mut stream, &protocol::cancel_frame(&id)).is_err() {
+                break 'stream;
+            }
+            let _ = reply.send(Err(CallError::timeout("the page did not answer in time")));
+        }
+
+        ticks += 1;
+        // A comment frame keeps the connection observably open, and a failed
+        // write is how this loop notices the page went away.
+        if ticks.is_multiple_of(50) && stream.write_all(b": ping\n\n").is_err() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    drop(subscription);
+    if let Ok(mut sessions) = bridge.sse.lock() {
+        sessions.remove(&id);
+    }
+}
+
+fn expire_pending(
+    session: &SseSession,
+) -> Vec<(String, mpsc::SyncSender<Result<Value, CallError>>)> {
+    let Ok(mut pending) = session.pending.lock() else {
+        return Vec::new();
+    };
+    let now = Instant::now();
+    let expired: Vec<String> = pending
+        .iter()
+        .filter(|(_, (deadline, _))| *deadline <= now)
+        .map(|(id, _)| id.clone())
+        .collect();
+    expired
+        .into_iter()
+        .filter_map(|id| pending.remove(&id).map(|(_, reply)| (id, reply)))
+        .collect()
+}
+
+fn send_sse(stream: &mut TcpStream, frame: &EventFrame) -> io::Result<()> {
+    let text = serde_json::to_string(frame)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "encode"))?;
+    write_sse_data(stream, &text)
+}
+
+fn write_sse_data(stream: &mut TcpStream, text: &str) -> io::Result<()> {
+    stream.write_all(format!("data: {text}\n\n").as_bytes())?;
+    stream.flush()
+}
+
+/// Anything a page sends while its events arrive over SSE.
+fn handle_frame(
+    bridge: &Bridge,
+    stream: &mut TcpStream,
+    head: &Head,
+    body: &[u8],
+    cors: Option<String>,
+) {
+    let Some(id) = head.query.get("session").cloned() else {
+        respond_json(
+            stream,
+            400,
+            "Bad Request",
+            "",
+            &Outcome::Err(CallError::invalid("POST /v1/frame needs ?session=")),
+            cors,
+        );
+        return;
+    };
+    let session = bridge
+        .sse
+        .lock()
+        .ok()
+        .and_then(|sessions| sessions.get(&id).cloned());
+    let Some(session) = session else {
+        respond_json(
+            stream,
+            404,
+            "Not Found",
+            "",
+            &Outcome::Err(CallError::unavailable(format!("no such session: {id}"))),
+            cors,
+        );
+        return;
+    };
+
+    let frame: Inbound = match serde_json::from_slice(body) {
+        Ok(frame) => frame,
+        Err(error) => {
+            respond_json(
+                stream,
+                400,
+                "Bad Request",
+                "",
+                &Outcome::Err(CallError::invalid(format!("not a bridge frame: {error}"))),
+                cors,
+            );
+            return;
+        }
+    };
+
+    match frame {
+        Inbound::Frame(Frame::Call(request)) => {
+            let result = match request.validate() {
+                Ok(()) => {
+                    let (response, events) = bridge.dispatch(&request);
+                    for event in events {
+                        bridge.bus.publish(event);
+                    }
+                    response.result
+                }
+                Err(error) => Outcome::Err(error),
+            };
+            respond_json(stream, 200, "OK", &request.call.id, &result, cors);
+        }
+        Inbound::Frame(Frame::Provide(request)) => {
+            let result = match request.validate() {
+                Ok(()) => {
+                    let mut registration = match session.registration.lock() {
+                        Ok(registration) => registration,
+                        Err(_) => {
+                            respond_json(
+                                stream,
+                                500,
+                                "Internal Server Error",
+                                &request.provide.id,
+                                &Outcome::Err(CallError::io("session state is poisoned")),
+                                cors,
+                            );
+                            return;
+                        }
+                    };
+                    registration
+                        .register(request.provide.packages, &session.provider_tx)
+                        .map(|packages| serde_json::json!({ "packages": packages }))
+                }
+                Err(error) => Err(error),
+            };
+            respond_json(
+                stream,
+                200,
+                "OK",
+                &request.provide.id,
+                &match result {
+                    Ok(value) => Outcome::Ok(value),
+                    Err(error) => Outcome::Err(error),
+                },
+                cors,
+            );
+        }
+        Inbound::Response(response) => {
+            let reply = session
+                .pending
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&response.id));
+            match reply {
+                Some((_, reply)) => {
+                    let _ = reply.send(match response.result {
+                        Outcome::Ok(value) => Ok(value),
+                        Outcome::Err(error) => Err(error),
+                    });
+                    respond_json(
+                        stream,
+                        200,
+                        "OK",
+                        &response.id,
+                        &Outcome::Ok(serde_json::json!({ "delivered": true })),
+                        cors,
+                    );
+                }
+                None => respond_json(
+                    stream,
+                    404,
+                    "Not Found",
+                    &response.id,
+                    &Outcome::Err(CallError::not_found(format!(
+                        "no call in flight with id {}",
+                        response.id
+                    ))),
+                    cors,
+                ),
+            }
+        }
+    }
+}
+
+fn handle_session(bridge: Arc<Bridge>, stream: TcpStream, buffer: Vec<u8>, head: &Head) {
     let upgrading = head
         .headers
         .get("upgrade")
@@ -611,19 +906,19 @@ fn handle_session(bridge: &Bridge, stream: TcpStream, buffer: Vec<u8>, head: &He
     bridge.sessions.fetch_add(1, Ordering::Relaxed);
     let _guard = SessionGuard(&bridge.sessions);
 
-    let session_id = bridge.session_seq.fetch_add(1, Ordering::Relaxed);
+    let session_id = format!("w{}", bridge.session_seq.fetch_add(1, Ordering::Relaxed));
     let (event_tx, events) = mpsc::sync_channel(EVENT_CHANNEL);
     let subscription = bridge.bus.subscribe(event_tx);
     let (provider_tx, provider_rx) = mpsc::sync_channel(PROVIDER_QUEUE);
 
     Session {
-        bridge,
+        bridge: bridge.clone(),
         socket,
         events,
         provider_rx,
         provider_tx,
         registration: Registration {
-            bridge,
+            bridge: bridge.clone(),
             session: session_id,
             packages: Vec::new(),
         },
@@ -646,16 +941,19 @@ struct ProviderCall {
     reply: mpsc::SyncSender<Result<Value, CallError>>,
 }
 
-type Providers = Arc<Mutex<BTreeMap<String, (u64, mpsc::SyncSender<ProviderCall>)>>>;
+type Providers = Arc<Mutex<BTreeMap<String, (String, mpsc::SyncSender<ProviderCall>)>>>;
 
 /// What a session has registered, removed when the session ends.
-struct Registration<'a> {
-    bridge: &'a Bridge,
-    session: u64,
+///
+/// Owns the bridge rather than borrowing it: an SSE session is created by one
+/// request, used by a later one, and dropped by a third.
+struct Registration {
+    bridge: Arc<Bridge>,
+    session: String,
     packages: Vec<String>,
 }
 
-impl Registration<'_> {
+impl Registration {
     /// Register packages this session will answer for.
     ///
     /// Two rules, both from the manifest: the Spore must have asked for the
@@ -687,7 +985,7 @@ impl Registration<'_> {
                         "{package} is already provided by another session"
                     )));
                 }
-                providers.insert(package.clone(), (self.session, sender.clone()));
+                providers.insert(package.clone(), (self.session.clone(), sender.clone()));
                 self.packages.push(package.clone());
             }
             accepted.push(package);
@@ -696,7 +994,7 @@ impl Registration<'_> {
     }
 }
 
-impl Drop for Registration<'_> {
+impl Drop for Registration {
     fn drop(&mut self) {
         let Ok(mut providers) = self.bridge.providers.lock() else {
             return;
@@ -712,16 +1010,16 @@ impl Drop for Registration<'_> {
     }
 }
 
-struct Session<'a> {
-    bridge: &'a Bridge,
+struct Session {
+    bridge: Arc<Bridge>,
     socket: tungstenite::WebSocket<PrefixedStream>,
     events: mpsc::Receiver<Event>,
     provider_rx: mpsc::Receiver<ProviderCall>,
     provider_tx: mpsc::SyncSender<ProviderCall>,
-    registration: Registration<'a>,
+    registration: Registration,
 }
 
-impl Session<'_> {
+impl Session {
     fn serve(mut self) {
         let ready = EventFrame {
             v: VERSION,
@@ -729,6 +1027,7 @@ impl Session<'_> {
                 spore: self.bridge.spore.clone(),
                 grants: self.bridge.grants.declared(),
                 interfaces: self.bridge.registry.describe(),
+                session: None,
             },
         };
         if self.send_event(&ready).is_err() {

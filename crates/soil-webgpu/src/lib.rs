@@ -167,6 +167,100 @@ impl CatalogHost for NoCatalog {
     }
 }
 
+/// The host's installed-Spore catalogue, read from a directory tree.
+///
+/// The host decides where Spores live and this answers with what is there. A
+/// tree whose manifest does not parse is skipped rather than fatal: one broken
+/// Spore must not empty a launcher or a storefront. `launch` is deliberately
+/// unfinished — starting a window is the host's business, and a capture host
+/// has nowhere to put one.
+pub struct InstallCatalog {
+    root: std::path::PathBuf,
+}
+
+impl InstallCatalog {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
+impl CatalogHost for InstallCatalog {
+    fn entries(&mut self) -> Result<Vec<CatalogEntry>, CatalogError> {
+        let read = std::fs::read_dir(&self.root).map_err(|_| CatalogError::Io)?;
+        let mut found = Vec::new();
+        for entry in read.flatten() {
+            let dir = entry.path();
+            if !dir.join("spore.toml").is_file() {
+                continue;
+            }
+            let Ok(manifest) = soil_spore::Manifest::load(&dir) else {
+                continue;
+            };
+            let surfaces = if manifest.surfaces.is_empty() {
+                manifest
+                    .launch
+                    .surfaces
+                    .iter()
+                    .filter_map(|kind| surface_kind(kind))
+                    .map(|kind| CatalogSurface {
+                        name: kind_name(kind).to_owned(),
+                        kind,
+                        entry: String::new(),
+                        requires: None,
+                    })
+                    .collect()
+            } else {
+                manifest
+                    .surfaces
+                    .iter()
+                    .filter_map(|surface| {
+                        Some(CatalogSurface {
+                            name: surface.name.clone(),
+                            kind: surface_kind(surface.kind.as_str())?,
+                            entry: surface
+                                .entry(manifest.ui.as_ref())
+                                .unwrap_or_default()
+                                .to_owned(),
+                            requires: surface.requires.clone(),
+                        })
+                    })
+                    .collect()
+            };
+            found.push(CatalogEntry {
+                id: manifest.spore.id.clone(),
+                title: soil_spore::display_title(&manifest.spore.name),
+                name: manifest.spore.name.clone(),
+                version: manifest.spore.version.clone(),
+                summary: manifest.spore.summary.clone(),
+                workspace: manifest.launch.canvas_module.clone(),
+                default_surface: manifest.launch.default.clone(),
+                surfaces,
+            });
+        }
+        found.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+        Ok(found)
+    }
+
+    fn launch(&mut self, _id: &str, _surface: &str) -> Result<CatalogLaunched, CatalogError> {
+        Err(CatalogError::Unsupported)
+    }
+}
+
+fn surface_kind(value: &str) -> Option<CatalogSurfaceKind> {
+    match value {
+        "canvas" => Some(CatalogSurfaceKind::Canvas),
+        "web" => Some(CatalogSurfaceKind::Web),
+        _ => None,
+    }
+}
+
+fn kind_name(kind: CatalogSurfaceKind) -> &'static str {
+    match kind {
+        CatalogSurfaceKind::Canvas => "canvas",
+        CatalogSurfaceKind::Web => "web",
+    }
+}
+
 /// One terminal cell, in the plain shape the host's emulator publishes.
 #[derive(Clone, Debug, Default)]
 pub struct TerminalCell {
@@ -339,10 +433,17 @@ pub struct WebGpuHost {
     input: Arc<Mutex<VecDeque<InputEvent>>>,
     interactive: bool,
     catalog: Box<dyn CatalogHost>,
+    /// The one origin a guest may reach with `soil:http`, if any.
+    store_origin: Option<String>,
     terminal: Box<dyn TerminalHost>,
     cursor: Option<Box<dyn CursorHost>>,
     clipboard: Option<Box<dyn ClipboardHost>>,
 }
+
+/// Where a local `soil-store serve` listens. A desktop shell that runs the
+/// storefront has to allow this origin; a capture host that needs no network
+/// leaves it out.
+pub const LOCAL_STORE_ORIGIN: &str = "http://127.0.0.1:8800";
 
 /// Everything one Spore run is allowed to talk to. A presenter fills in the
 /// parts it owns; anything left as the denying default refuses the guest loudly
@@ -353,6 +454,9 @@ pub struct HostSetup {
     /// Tells the guest to keep polling after the first frame.
     pub interactive: bool,
     pub catalog: Box<dyn CatalogHost>,
+    /// The one origin a guest may reach with `soil:http`. `None` denies every
+    /// request: a capture host that does not need the network has none.
+    pub store_origin: Option<String>,
     pub terminal: Box<dyn TerminalHost>,
     /// `None` on hosts without a window; `soil:present/cursor` still succeeds.
     pub cursor: Option<Box<dyn CursorHost>>,
@@ -368,6 +472,7 @@ impl HostSetup {
             input: Arc::new(Mutex::new(VecDeque::new())),
             interactive: false,
             catalog: Box::new(NoCatalog),
+            store_origin: None,
             terminal: Box::new(NoTerminal),
             cursor: None,
             clipboard: None,
@@ -394,6 +499,7 @@ impl WebGpuHost {
             input: setup.input,
             interactive: setup.interactive,
             catalog: setup.catalog,
+            store_origin: setup.store_origin,
             terminal: setup.terminal,
             cursor: setup.cursor,
             clipboard: setup.clipboard,
@@ -479,6 +585,56 @@ impl soil::present::surface::Host for WebGpuHost {
             rgba: image.rgba,
         };
         self.presenter.present(frame).map_err(|e| e.to_string())
+    }
+}
+
+impl soil::http::http::Host for WebGpuHost {
+    /// One origin, one method, one bounded body.
+    ///
+    /// The guest names a URL; this refuses anything outside the single origin
+    /// the run was given, refuses a body over the caller's own budget, and
+    /// reports a transport failure as `unavailable` rather than pretending the
+    /// upstream answered.
+    fn fetch(
+        &mut self,
+        request: soil::http::http::Request,
+    ) -> std::result::Result<soil::http::http::Response, soil::http::http::Error> {
+        let Some(origin) = self.store_origin.as_deref() else {
+            return Err(soil::http::http::Error::Denied);
+        };
+        if !request.url.starts_with(origin) {
+            return Err(soil::http::http::Error::Denied);
+        }
+        if !matches!(request.method, soil::http::http::Method::Get) {
+            return Err(soil::http::http::Error::Unsupported);
+        }
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_millis(
+                request.timeout_ms.max(1) as u64
+            ))
+            .build();
+        let response = match agent.get(&request.url).call() {
+            Ok(response) => response,
+            Err(ureq::Error::Status(_, response)) => response,
+            Err(_) => return Err(soil::http::http::Error::Unavailable),
+        };
+        let status = response.status();
+        let mut body = Vec::new();
+        use std::io::Read as _;
+        if response
+            .into_reader()
+            .take(request.max_bytes.max(1) as u64)
+            .read_to_end(&mut body)
+            .is_err()
+        {
+            return Err(soil::http::http::Error::Io);
+        }
+        Ok(soil::http::http::Response {
+            status,
+            final_url: request.url,
+            headers: Vec::new(),
+            body,
+        })
     }
 }
 
@@ -691,6 +847,9 @@ impl WebGpuRuntime {
         soil::present::clipboard::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:present clipboard")?;
+        soil::http::http::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+            .map_err(anyhow::Error::from)
+            .context("link soil:http")?;
         soil::spore::catalog::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:spore catalog")?;
@@ -821,10 +980,25 @@ pub fn run_component_capture(
     width: u32,
     height: u32,
 ) -> Result<(u32, Option<CanvasFrame>)> {
+    run_component_capture_with(bytes, width, height, None, None)
+}
+
+/// Capture one frame with a host that can answer `soil:spore/catalog`.
+pub fn run_component_capture_with(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    catalog: Option<Box<dyn CatalogHost>>,
+    store_origin: Option<String>,
+) -> Result<(u32, Option<CanvasFrame>)> {
     let runtime = WebGpuRuntime::new()?;
     let capture = FrameCapture::new(width, height);
-    let status =
-        pollster::block_on(runtime.run_component_with_presenter(bytes, Box::new(capture.clone())))?;
+    let mut setup = HostSetup::capture(Box::new(capture.clone()));
+    if let Some(catalog) = catalog {
+        setup.catalog = catalog;
+    }
+    setup.store_origin = store_origin;
+    let status = pollster::block_on(runtime.run_component_with(bytes, setup))?;
     Ok((status, capture.take()))
 }
 

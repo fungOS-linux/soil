@@ -184,6 +184,11 @@ pub enum Event {
         spore: String,
         grants: Vec<String>,
         interfaces: BTreeMap<String, Value>,
+        /// Present on an SSE session, which has no socket to identify itself by.
+        /// The page echoes it on `POST /v1/frame`; a WebSocket session omits it
+        /// because the connection already is the session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
     Changed {
         collection: String,

@@ -14,7 +14,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use fungos_vfs::{Expect, Vfs};
+use fungos_vfs::Vfs;
 
 mod spore;
 
@@ -28,8 +28,8 @@ fn main() {
 fn usage() -> &'static str {
     "usage: soil --root ROOT <command>\n\
      commands:\n\
-       spore run <dir|package.spore> [--listen ADDR] [--hub ADDR]... [--unibus-config FILE]
-\
+       spore run <dir|package.spore> [--listen ADDR] [--hub ADDR]... [--unibus-config FILE]\n\
+                                    [--bridge ADDR] [--bridge-wait SECS] [--allow-origin URL]...\n\
        shell [--mount DIR] [--fuse-binary PATH] [--shell PATH] [--no-mount] [-- command...]\n\
        ls [PREFIX]\n\
        stat PATH\n\
@@ -190,11 +190,11 @@ fn search(root: &Path, args: Vec<String>) -> Result<()> {
     if query.trim().is_empty() {
         bail!("usage: soil search QUERY");
     }
-    let mut host = soil_vfs_host::VfsHost::open(root)?;
-    use soil_vfs_host::index::Host as _;
-    let page = host.search(soil_vfs_host::index::Query {
+    let mut host = soil_host::vfs_host::VfsHost::open(root)?;
+    use soil_host::vfs_host::index::Host as _;
+    let page = host.search(soil_host::vfs_host::index::Query {
         text: query,
-        mode: Some(soil_vfs_host::index::Mode::Fuzzy),
+        mode: Some(soil_host::vfs_host::index::Mode::Fuzzy),
         parent: None,
         media_type_prefix: None,
         offset: 0,
@@ -296,7 +296,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut vfs = open_owned(dir.path());
         let entry = vfs
-            .put("notes.txt", b"keep this blob", "text/plain", Expect::Any)
+            .put(
+                "notes.txt",
+                b"keep this blob",
+                "text/plain",
+                fungos_vfs::Expect::Any,
+            )
             .unwrap();
         remove(dir.path(), vec!["notes.txt".into()]).unwrap();
         assert!(vfs.file("notes.txt").unwrap().is_none());

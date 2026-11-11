@@ -210,23 +210,42 @@ fn write_only_alias(api: &Api) -> Option<(String, String, String)> {
 
 const EVENTS: &str = r#"/** One frame on a session. `ready` carries the host's grants and bindings. */
 export type BridgeEvent =
-  | { kind: "ready"; spore: string; grants: string[]; interfaces: Record<string, unknown> }
+  | { kind: "ready"; spore: string; grants: string[]; interfaces: Record<string, unknown>; session?: string }
   | { kind: "changed"; collection: string; id: string; revision: number };
 
 "#;
 
-const CLIENT_HEAD: &str = r#"export type SessionHandlers = {
-  onEvent: (event: BridgeEvent) => void;
+const CLIENT_HEAD: &str = r#"export interface BridgeCall {
+  id: string;
+  interface: string;
+  function: string;
+  params: unknown;
+}
+
+/** One frame either way. `call` is the host asking the page to do something. */
+export type BridgeFrame =
+  | { v: 1; event: BridgeEvent }
+  | { v: 1; call: BridgeCall }
+  | { v: 1; cancel: { id: string } };
+
+export type SessionHandlers = {
+  onEvent?: (event: BridgeEvent) => void;
+  /** Raw frames, including a host call a providing page may answer. */
+  onFrame?: (frame: BridgeFrame) => void;
   onOpen?: () => void;
-  onClose?: (event: CloseEvent) => void;
+  onClose?: () => void;
 };
 
 /**
  * A browser client for one Spore's bridge.
  *
  * `base` is the bridge origin ("" for same-origin). `token` is only needed when
- * the bridge was started with `--token`; a session passes it as a query
- * parameter because a WebSocket cannot carry an Authorization header.
+ * the bridge was started with `--token`.
+ *
+ * `events()` is the one that always works: server-sent events and POSTs travel
+ * through any HTTP proxy, while a WebSocket upgrade is dropped by the ones that
+ * strip hop-by-hop headers. `session()` is the same protocol over a socket,
+ * where one is available.
  */
 export class BridgeClient {
   constructor(
@@ -239,6 +258,13 @@ export class BridgeClient {
     return typeof location === "undefined" ? "http://127.0.0.1:8795" : location.href;
   }
 
+  private headers(): Record<string, string> {
+    return {
+      "content-type": "application/json",
+      ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
+    };
+  }
+
   async call<K extends keyof Operations>(
     operation: K,
     params: Operations[K]["params"],
@@ -248,10 +274,7 @@ export class BridgeClient {
     const fn = String(operation).slice(split + 1);
     const response = await fetch(new URL("/v1/call", this.origin()), {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
-      },
+      headers: this.headers(),
       body: JSON.stringify({
         v: 1,
         call: { id: crypto.randomUUID(), interface: iface, function: fn, params },
@@ -267,17 +290,51 @@ export class BridgeClient {
     return frame.result.ok;
   }
 
-  /** Open a session. Returns a disposer; the caller owns reconnection. */
+  /** Events over SSE. Returns a disposer; EventSource reconnects on its own. */
+  events(handlers: SessionHandlers): () => void {
+    const url = new URL("/v1/events", this.origin());
+    if (this.token) url.searchParams.set("token", this.token);
+    const source = new EventSource(url);
+    source.onopen = () => handlers.onOpen?.();
+    source.onerror = () => handlers.onClose?.();
+    source.onmessage = (message) => {
+      const frame = JSON.parse(String(message.data)) as BridgeFrame;
+      if (frame.v !== 1) return;
+      handlers.onFrame?.(frame);
+      if ("event" in frame) handlers.onEvent?.(frame.event);
+    };
+    return () => source.close();
+  }
+
+  /** Send one client frame on an SSE session. */
+  async frame(session: string, frame: unknown): Promise<unknown> {
+    const url = new URL("/v1/frame", this.origin());
+    url.searchParams.set("session", session);
+    if (this.token) url.searchParams.set("token", this.token);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(frame),
+    });
+    if (!response.ok) {
+      throw new Error(`bridge: ${response.status} ${await response.text()}`);
+    }
+    return response.json();
+  }
+
+  /** Events over a WebSocket. Returns a disposer; the caller owns reconnection. */
   session(handlers: SessionHandlers): () => void {
     const url = new URL("/v1/session", this.origin());
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     if (this.token) url.searchParams.set("token", this.token);
     const socket = new WebSocket(url);
     socket.onopen = () => handlers.onOpen?.();
-    socket.onclose = (event) => handlers.onClose?.(event);
+    socket.onclose = () => handlers.onClose?.();
     socket.onmessage = (message) => {
-      const frame = JSON.parse(String(message.data));
-      if (frame.v === 1 && frame.event) handlers.onEvent(frame.event as BridgeEvent);
+      const frame = JSON.parse(String(message.data)) as BridgeFrame;
+      if (frame.v !== 1) return;
+      handlers.onFrame?.(frame);
+      if ("event" in frame) handlers.onEvent?.(frame.event);
     };
     return () => socket.close();
   }
