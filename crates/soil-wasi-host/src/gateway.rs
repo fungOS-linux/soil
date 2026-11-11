@@ -388,11 +388,27 @@ impl HttpGateway {
             assertion.tls_peer,
         );
         let service = Arc::clone(&vhost.service);
+        let answered_path = path.to_owned();
         let request = request.map(|body| CappedBody::new(body, limit));
-        match tokio::time::timeout(self.request_timeout, service.handle(request, context)).await {
+        // The status is the one fact an operator needs and the Spore cannot be
+        // trusted to log: a 401 and a 202 look identical in an access line that
+        // stops at "accepted".
+        let response = match tokio::time::timeout(
+            self.request_timeout,
+            service.handle(request, context),
+        )
+        .await
+        {
             Ok(response) => response,
             Err(_) => text_response(StatusCode::GATEWAY_TIMEOUT, "guest exceeded its deadline"),
-        }
+        };
+        tracing::info!(
+            spore = %vhost.spore,
+            path = %answered_path,
+            status = response.status().as_u16(),
+            "spore answered"
+        );
+        response
     }
 }
 
