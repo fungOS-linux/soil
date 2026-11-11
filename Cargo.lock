@@ -667,6 +667,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-winit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pollster",
+ "softbuffer",
+ "soil-webgpu",
+ "winit",
+]
+
+[[package]]
 name = "canvas-workspace-ui"
 version = "0.1.0"
 source = "git+https://github.com/FuturePresentLabs/dock.git?rev=6e3ba644388196224f2588b4fc78fdfddb866bed#6e3ba644388196224f2588b4fc78fdfddb866bed"
