@@ -628,3 +628,11 @@ fn info_json_is_the_authoring_projection() {
     assert_eq!(info["launch"]["default"], "canvas");
     assert_eq!(info["module"]["path"], "module.wasm");
 }
+
+#[test]
+fn display_title_reads_a_slug_as_words() {
+    assert_eq!(soil_spore::display_title("vitals-view"), "Vitals View");
+    assert_eq!(soil_spore::display_title("dfm_report"), "Dfm Report");
+    assert_eq!(soil_spore::display_title("store"), "Store");
+    assert_eq!(soil_spore::display_title(""), "");
+}

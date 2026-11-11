@@ -87,7 +87,7 @@ impl CatalogHost for SporeCatalog {
                         .title
                         .clone()
                         .filter(|title| !title.trim().is_empty())
-                        .unwrap_or_else(|| title_case(&manifest.spore.name)),
+                        .unwrap_or_else(|| soil_spore::display_title(&manifest.spore.name)),
                     version: manifest.spore.version.clone(),
                     summary: manifest.spore.summary.clone(),
                     workspace: None,
@@ -186,7 +186,7 @@ fn spore_bundle(app: &std::path::Path, module: &std::path::Path) -> Option<std::
         .and_then(|package| package.file_name())
         .and_then(|name| name.to_str())?
         .to_owned();
-    let title = manifest_title(module).unwrap_or_else(|| title_case(&slug));
+    let title = manifest_title(module).unwrap_or_else(|| soil_spore::display_title(&slug));
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
     let bundle = home
         .join("Library/Application Support/fungOS/apps")
@@ -259,7 +259,7 @@ fn manifest_title(module: &std::path::Path) -> Option<String> {
         .title
         .clone()
         .filter(|title| !title.trim().is_empty())
-        .or_else(|| Some(title_case(&manifest.spore.name)))
+        .or_else(|| Some(soil_spore::display_title(&manifest.spore.name)))
 }
 
 /// The `.app` an executable lives in, if it lives in one.
@@ -936,21 +936,13 @@ fn window_title(module: &std::path::Path) -> String {
         {
             return title;
         }
-        return title_case(&manifest.spore.name);
+        return soil_spore::display_title(&manifest.spore.name);
     }
     let stem = module
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("spore");
-    title_case(stem)
-}
-
-fn title_case(name: &str) -> String {
-    let mut characters = name.chars();
-    match characters.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
-        None => "Spore".to_owned(),
-    }
+    soil_spore::display_title(stem)
 }
 
 fn point(value: String) -> Result<(f32, f32)> {

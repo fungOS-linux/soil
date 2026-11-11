@@ -228,7 +228,7 @@ impl CatalogHost for InstallCatalog {
             };
             found.push(CatalogEntry {
                 id: manifest.spore.id.clone(),
-                title: title_case(&manifest.spore.name),
+                title: soil_spore::display_title(&manifest.spore.name),
                 name: manifest.spore.name.clone(),
                 version: manifest.spore.version.clone(),
                 summary: manifest.spore.summary.clone(),
@@ -258,15 +258,6 @@ fn kind_name(kind: CatalogSurfaceKind) -> &'static str {
     match kind {
         CatalogSurfaceKind::Canvas => "canvas",
         CatalogSurfaceKind::Web => "web",
-    }
-}
-
-/// `markdown` -> `Markdown`; anything already capitalised is left alone.
-fn title_case(name: &str) -> String {
-    let mut characters = name.chars();
-    match characters.next() {
-        Some(first) => first.to_uppercase().chain(characters).collect(),
-        None => String::new(),
     }
 }
 
