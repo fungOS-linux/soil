@@ -32,6 +32,8 @@ pub struct Store {
     pub media: Option<std::path::PathBuf>,
     /// The operator's review file, read once at startup.
     pub reviews: Option<crate::Reviews>,
+    /// A Spore's own storefront page, served instead of the built-in one.
+    pub page_html: Option<String>,
 }
 
 impl Store {
@@ -48,6 +50,7 @@ impl Store {
             packages: None,
             media: None,
             reviews: None,
+            page_html: None,
         }
     }
 
@@ -67,6 +70,23 @@ impl Store {
     /// Serve the operator's reviews.
     pub fn with_reviews(mut self, reviews: crate::Reviews) -> Self {
         self.reviews = Some(reviews);
+        self
+    }
+
+    /// Serve a Spore's own storefront page at `/` instead of the built-in one.
+    ///
+    /// The page is the package's `web` surface: a store is a Spore, so the page
+    /// it ships is the storefront, and this presenter is only the origin that
+    /// hands it out. `dir` is the surface's directory, `web/` in the package.
+    pub fn with_page(mut self, dir: impl AsRef<std::path::Path>) -> Self {
+        let index = dir.as_ref().join("index.html");
+        self.page_html = std::fs::read_to_string(&index).ok();
+        if self.page_html.is_none() {
+            eprintln!(
+                "soil-store: no page at {}, serving the built-in storefront",
+                index.display()
+            );
+        }
         self
     }
 
@@ -187,6 +207,9 @@ impl Store {
     }
 
     pub fn page(&self) -> String {
+        if let Some(page) = &self.page_html {
+            return page.clone();
+        }
         format!(
             r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Spore Store</title><style>{css}</style></head><body>{header}<main><section class="grid">{cards}</section><section><h2>Updates</h2><ul class="updates">{updates}</ul></section></main>{footer}</body></html>"#,
             css = CSS,
@@ -599,14 +622,21 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
             }
         }
         ("GET", other) if other.starts_with("/spore/") || other.starts_with("/s/") => {
-            let id = if let Some(id) = other.strip_prefix("/spore/") {
-                id
+            // A shareable link opens the Spore's own storefront when it ships
+            // one: the page reads the path and routes itself. The built-in page
+            // stays for a store with no Spore.
+            if other.starts_with("/s/") && store.page_html.is_some() {
+                ("200 OK", store.page().into_bytes(), HTML)
             } else {
-                &other[3..]
-            };
-            match store.spore_page(id) {
-                Some(page) => ("200 OK", page.into_bytes(), HTML),
-                None => ("404 Not Found", b"no such Spore\n".to_vec(), TEXT),
+                let id = if let Some(id) = other.strip_prefix("/spore/") {
+                    id
+                } else {
+                    &other[3..]
+                };
+                match store.spore_page(id) {
+                    Some(page) => ("200 OK", page.into_bytes(), HTML),
+                    None => ("404 Not Found", b"no such Spore\n".to_vec(), TEXT),
+                }
             }
         }
         ("GET", other) if other.starts_with("/package/") => {

@@ -550,6 +550,12 @@ withdraws one key without rewriting the delegation that admitted it: the record
 is append-only and operator-signed, so a mirror cannot revoke a rival and a lost
 device does not revoke the publisher.
 
+`publish` is the loop a publisher actually runs: pack every tree, sign each tar,
+build the index, merge the delegation, sign the entries and write it. It reports
+what it skipped — a stale lock, a missing module — instead of stopping at the
+first tree that is not ready, and it writes nothing until every package the index
+names has its tar and its signature.
+
 Verification order is checkpoint root, then delegations, then entries, then — at
 install — the package tar and its PGP sidecar. A revoked key's entries stay in
 the log for history but are skipped by `verify` and dropped from `catalog()`: one

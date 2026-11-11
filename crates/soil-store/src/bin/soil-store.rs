@@ -57,6 +57,9 @@ fn run(args: Vec<String>) -> Result<()> {
     if matches!(command, "review") {
         return review(rest);
     }
+    if matches!(command, "publish") {
+        return publish_all(rest);
+    }
     if matches!(command, "add") {
         return add_media(rest);
     }
@@ -160,6 +163,9 @@ fn run(args: Vec<String>) -> Result<()> {
             if let Some(reviews) = named(rest, "--reviews") {
                 store = store.with_reviews(soil_store::Reviews::read(Path::new(&reviews))?);
             }
+            if let Some(page) = named(rest, "--page") {
+                store = store.with_page(&page);
+            }
             let listener = soil_store::serve::bind(&addr)?;
             match listener.local_addr() {
                 Ok(address) => eprintln!("soil-store: http://{address}/ on {addr}"),
@@ -259,6 +265,108 @@ fn entry_for(dir: &Path) -> Result<Entry> {
         publisher_key: None,
         signature: String::new(),
     })
+}
+
+/// `publish`: pack, sign, index and countersign a whole shelf in one pass.
+///
+/// The per-package commands are the primitive; this is the loop a publisher
+/// actually runs, and it reports what it skipped instead of stopping at the
+/// first tree that is not ready. Nothing is written until every package that
+/// made it into the index has its tar and its signature.
+fn publish_all(rest: &[String]) -> Result<()> {
+    let root = named(rest, "--spores-root").ok_or_else(|| Error::Invalid(usage()))?;
+    let packages_dir = named(rest, "--packages").ok_or_else(|| Error::Invalid(usage()))?;
+    let publisher = named(rest, "--publisher").ok_or_else(|| Error::Invalid(usage()))?;
+    let key = named(rest, "--key").ok_or_else(|| Error::Invalid(usage()))?;
+    let delegation_path = named(rest, "--delegation").ok_or_else(|| Error::Invalid(usage()))?;
+    let operator = named(rest, "--operator-key");
+    let operator_public = named(rest, "--operator-public");
+    let home = named(rest, "--gnupg-home").map(PathBuf::from);
+    let source_name = named(rest, "--source").unwrap_or_else(|| "fungos".into());
+
+    let mut shelf = Vec::new();
+    let mut skipped = Vec::new();
+    for dir in packages(Path::new(&root))? {
+        match entry_for(&dir) {
+            Ok(entry) => shelf.push((dir, entry)),
+            Err(error) => skipped.push(format!("{error}")),
+        }
+    }
+    shelf.sort_by(|a, b| a.1.spore_id.cmp(&b.1.spore_id));
+    let mut index = Index::seal(
+        &source_name,
+        shelf.iter().map(|(_, entry)| entry.clone()).collect(),
+    );
+
+    // Tars first: an index that names a package nobody can fetch is a promise
+    // the store cannot keep.
+    let packages_path = Path::new(&packages_dir);
+    std::fs::create_dir_all(packages_path)
+        .map_err(|error| Error::Io(format!("{packages_dir}: {error}")))?;
+    let mut packed = 0;
+    for (dir, entry) in &shelf {
+        let bytes = soil_spore::pack_locked(dir)?;
+        let tar = packages_path.join(format!("{}.spore", entry.digest));
+        let signature = packages_path.join(format!("{}.spore.asc", entry.digest));
+        if !tar.is_file() {
+            std::fs::write(&tar, &bytes)
+                .map_err(|error| Error::Io(format!("{}: {error}", tar.display())))?;
+            packed += 1;
+        }
+        if !signature.is_file() {
+            // Sign the bytes we just wrote, through the same GnuPG home the
+            // entries are signed in, so one `--gnupg-home` covers the package.
+            let detached = soil_spore::sign_detached(home.as_deref(), &key, &bytes)?;
+            std::fs::write(&signature, detached)
+                .map_err(|error| Error::Io(format!("{}: {error}", signature.display())))?;
+        }
+    }
+
+    let source = std::fs::read_to_string(&delegation_path)
+        .map_err(|error| Error::Io(format!("{delegation_path}: {error}")))?;
+    let delegation: soil_store::Delegation = serde_json::from_str(&source)
+        .map_err(|error| Error::Invalid(format!("{delegation_path}: {error}")))?;
+    publish::merge_delegations(&mut index, vec![delegation]);
+
+    let signed = publish::sign(
+        &mut index,
+        SignRequest {
+            publisher: &publisher,
+            key: &key,
+            home: home.as_deref(),
+            countersign: operator.as_deref(),
+        },
+    )?;
+    index.validate()?;
+    if let Some(public) = &operator_public {
+        let bytes =
+            std::fs::read(public).map_err(|error| Error::Io(format!("{public}: {error}")))?;
+        index.verify(&bytes)?;
+    }
+
+    eprintln!(
+        "soil-store: {} entries, {packed} packed, {} skipped",
+        signed,
+        skipped.len()
+    );
+    for line in &skipped {
+        eprintln!("  skipped {line}");
+    }
+    match named(rest, "--index") {
+        Some(path) => {
+            if !flag(rest, "--write") {
+                return emit(rest, &index);
+            }
+            let json = serde_json::to_string_pretty(&index)
+                .map_err(|error| Error::Json(error.to_string()))?;
+            let temporary = Path::new(&path).with_extension("json.tmp");
+            std::fs::write(&temporary, format!("{json}\n"))
+                .map_err(|error| Error::Io(format!("{}: {error}", temporary.display())))?;
+            std::fs::rename(&temporary, &path)
+                .map_err(|error| Error::Io(format!("{path}: {error}")))
+        }
+        None => emit(rest, &index),
+    }
 }
 
 /// `review`: the operator's review file.
@@ -571,6 +679,9 @@ fn usage() -> String {
        soil-store search   QUERY --index FILE --spores-root DIR [--media DIR] [--packages DIR] [--category NAME] [--json]
        soil-store review   add|hide|list --reviews FILE [--spore ID] [--version V] [--digest D] [--principal P]
                            [--rating 1-5] [--body TEXT] [--reason TEXT] [--write] [--json]
+       soil-store publish  --spores-root DIR --packages DIR --publisher PRINCIPAL --key KEY
+                           --delegation FILE [--operator-key KEY] [--operator-public FILE]
+                           [--source NAME] [--gnupg-home DIR] [--index FILE] [--write]
        soil-store add      --media DIR FILE...
        soil-store delegate --publisher PRINCIPAL --operator-key KEY (--public-key FILE | --fingerprint KEY)
                            [--scope spore|*] [--days N] [--gnupg-home DIR] [-o FILE]
@@ -581,7 +692,7 @@ fn usage() -> String {
        soil-store verify   --index FILE --operator-key FILE
        soil-store plan     --index FILE --spores-root DIR [--json] [--pin ID=LABEL]
        soil-store snapshot --index FILE --spores-root DIR [-o FILE] [--source-name NAME] [--source-index CID]
-       soil-store serve    --index FILE --spores-root DIR [--packages DIR] [--media DIR] [--reviews FILE] [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]
+       soil-store serve    --index FILE --spores-root DIR [--packages DIR] [--media DIR] [--page DIR] [--reviews FILE] [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]
        soil-store --version"
         .into()
 }
