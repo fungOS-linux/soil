@@ -489,12 +489,13 @@ its id and category until listings are fetched by CID.
 
 The host installer is `soil-install`. It verifies a local tar, keeps it at
 `.packages/<digest>.spore`, unpacks into a staging directory, and only then swaps
-`<root>/<id>`. `.install/<id>.json` records the current and previous digest.
-`rollback` reinstalls the previous digest; `apply` reads the index, uses the same
-`soil-store plan`, and applies only `live` and `restart`. `consent`, `system` and
-`hold` are reported and never applied. Fetching by CID and granting the store
-Spore `soil:spore.install` are still separate steps; the page remains a report
-until that capability is wired.
+`<root>/<id>`. `.install/<id>.json` is the host's crash-safe state; it records the current and
+previous digest. Projecting that state into `fungos.store.installed@1` is the
+next step. `rollback` reinstalls the previous digest; `apply` reads the index,
+uses the same `soil-store plan`, and applies only `live` and `restart`.
+`consent`, `system` and `hold` are reported and never applied. Fetching by CID
+and granting the store Spore `soil:spore.install` are still separate steps; the
+page remains a report until that capability is wired.
 
 Fetched artifacts (icons, screenshots, the rich record) are content-addressed,
 so a browser cache and an IPFS gateway agree about what a listing showed.
