@@ -5,6 +5,7 @@
 //! line-oriented terminal.
 
 mod access;
+mod build;
 mod complete;
 mod config;
 mod deadline;
@@ -1476,6 +1477,7 @@ fn doctor_report(
     // What this session may reach, resolved the same way the capabilities are:
     // the answer to "why was my fetch denied" without reading the policy twice.
     println!("access: {}", access::from_env().describe());
+    println!("build: {}", build::describe(&session_key(None, root)));
     match budget {
         Some(budget) => println!("command deadline: {}s [enabled]", budget.as_secs_f64()),
         None => println!("command deadline: disabled [interactive]"),
@@ -1799,49 +1801,6 @@ fn session_key(explicit: Option<String>, root: &Path) -> String {
         })
 }
 
-/// The cargo home for this worktree set, provisioned by bob.
-///
-/// `~/.cargo` carries a single `.package-cache` flock, so every build that
-/// shares it serializes against every other build on the machine. bob clones
-/// the registry copy-on-write per key and drops the shared lock file. The key
-/// here is the one that names the mush session, so a set of worktrees built
-/// together shares one lock and nothing outside it does.
-///
-/// Fail-open by design: a host without bob loses parallelism, not correctness.
-fn bob_cargo_home(root: &Path) -> Result<PathBuf> {
-    let key = session_key(None, root);
-    let attempts: [&[&str]; 2] = [
-        &["fpl", "bob", "cargo-home", "--key", key.as_str()],
-        &["fpl-bob", "cargo-home", "--key", key.as_str()],
-    ];
-    let mut last = String::from("no bob on PATH");
-    for argv in attempts {
-        let out = match Command::new(argv[0]).args(&argv[1..]).output() {
-            Ok(out) => out,
-            Err(err) => {
-                last = format!("{}: {err}", argv[0]);
-                continue;
-            }
-        };
-        if !out.status.success() {
-            last = format!(
-                "{} exited {}: {}",
-                argv[0],
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            continue;
-        }
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if path.is_empty() {
-            last = format!("{} printed no path", argv[0]);
-            continue;
-        }
-        return Ok(PathBuf::from(path));
-    }
-    anyhow::bail!("{last}")
-}
-
 /// Quote for the Spore's line parser. Values it cannot round-trip are dropped
 /// by `plain_word` rather than written back corrupted.
 fn quote_word(value: &str) -> String {
@@ -2116,6 +2075,8 @@ fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
 
     let overlay = overlay::Overlay::materialize(root)?;
     let workspace = overlay.path().to_path_buf();
+    let build = build::Build::prepare(&cmd[0], &session_key(None, root));
+    let build_program = build.as_ref().map(|build| build.program(&cmd[0]));
     let dir = if cwd.is_empty() {
         workspace.clone()
     } else {
@@ -2128,7 +2089,11 @@ fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
         anyhow::bail!("mush run host: --cwd {} is not a directory", cwd);
     }
 
-    let mut command = Command::new(&cmd[0]);
+    let mut command = Command::new(
+        build_program
+            .as_deref()
+            .unwrap_or_else(|| Path::new(&cmd[0])),
+    );
     command.args(&cmd[1..]).current_dir(&dir);
     // Start empty: a host build needs its toolchain, not the agent's tokens.
     // Anything beyond this list is opt-in via --allow-env.
@@ -2141,12 +2106,6 @@ fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
         "TERM",
         "TMPDIR",
         "RUSTUP_HOME",
-        "CARGO_HOME",
-        "CARGO_TARGET_DIR",
-        "SCCACHE_CONF",
-        "RUSTC_WRAPPER",
-        "SCCACHE_SKIP_CACHE_CHECK",
-        "BOB_AGENT_KEY",
     ] {
         if let Ok(value) = std::env::var(var) {
             command.env(var, value);
@@ -2157,18 +2116,12 @@ fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
             command.env(var, value);
         }
     }
-    // The host build must not inherit the agent's shell state, but it also must
-    // not fall back to the one shared `~/.cargo` lock. Resolve the home for this
-    // worktree set when the caller did not name one.
-    if std::env::var_os("CARGO_HOME").is_none() && std::env::var_os("BOB_NO_CARGO_HOME").is_none() {
-        match bob_cargo_home(root) {
-            Ok(home) => {
-                command.env("CARGO_HOME", &home);
-            }
-            Err(err) => eprintln!(
-                "mush: no per-worktree CARGO_HOME ({err}); cargo will share ~/.cargo and serialize on its lock"
-            ),
-        }
+    // The build plane is bob's: which lane a target goes to, which cache a
+    // compile may reuse, which CARGO_HOME holds the package-cache lock. The
+    // allowlist above is mush's policy; this is the environment a build needs
+    // to run inside it. A host without bob keeps the plain environment.
+    if let Some(build) = &build {
+        build.apply(&mut command, overlay.path());
     }
     command.env("MUSH_ROOT", root);
     command.env("MUSH_OVERLAY", &workspace);

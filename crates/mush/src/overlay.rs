@@ -80,9 +80,30 @@ impl FileStamp {
     }
 }
 
+/// A scratch directory for one overlay.
+///
+/// `TMPDIR` is inherited, and an inherited `TMPDIR` can name a directory that no
+/// longer exists: an agent session's per-turn scratch directory is deleted
+/// between turns, and `tempfile` then fails with `ENOENT` — which would make
+/// every host command fail for the rest of the session. Fall back to the system
+/// temp instead of making that the caller's problem.
+fn overlay_tempdir() -> Result<TempDir> {
+    #[cfg(unix)]
+    const FALLBACK: &str = "/tmp";
+    #[cfg(not(unix))]
+    const FALLBACK: &str = "C:\\Windows\\Temp";
+    match tempfile::tempdir() {
+        Ok(dir) => Ok(dir),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            tempfile::tempdir_in(FALLBACK).context("create overlay directory")
+        }
+        Err(err) => Err(err).context("create overlay directory"),
+    }
+}
+
 impl Overlay {
     pub fn materialize(vfs_root: impl AsRef<Path>) -> Result<Self> {
-        let dir = tempfile::tempdir().context("create overlay directory")?;
+        let dir = overlay_tempdir()?;
         let mut vfs = Vfs::open(vfs_root).context("open VFS for overlay")?;
         let mut written: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for entry in vfs.list("")? {

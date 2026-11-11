@@ -11,7 +11,7 @@
 //! still read `$HOME`, so anything that talks to the network or holds
 //! credentials belongs here only after a decision, not by default.
 
-use std::{path::Path, process::Command};
+use std::{path::{Path, PathBuf}, process::Command};
 
 use anyhow::{Context, Result};
 
@@ -275,7 +275,16 @@ fn run_host(
 
     let overlay = Overlay::materialize(root)
         .with_context(|| format!("materialize a workspace for {program}"))?;
-    let mut command = Command::new(program);
+    // bob owns the build plane; mush decides who is asking. A command that is
+    // not a build gets nothing extra, and a host without bob gets nothing at
+    // all — the command still runs, uncached.
+    let build = crate::build::Build::prepare(program, &crate::session_key(None, root));
+    let mut command = Command::new(
+        build
+            .as_ref()
+            .map(|build| build.program(program))
+            .unwrap_or_else(|| PathBuf::from(program)),
+    );
     command.args(args);
     // `cwd` is the Spore's directory; fall back to the overlay root when it does
     // not name a directory there (a stale session, or a directory the overlay
@@ -291,6 +300,9 @@ fn run_host(
     // instead of leaving the link to be reconstructed later.
     for (key, value) in identity(root) {
         command.env(key, value);
+    }
+    if let Some(build) = &build {
+        build.apply(&mut command, overlay.path());
     }
     let capturing = !output.inherits_stdio();
     if capturing {

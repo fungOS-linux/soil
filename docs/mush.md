@@ -698,8 +698,9 @@ mush run host --no-apply -- cargo fmt --check
 ```
 
 The environment starts empty and is rebuilt from a small allowlist (`PATH`,
-`HOME`, `TMPDIR`, the Rust and sccache variables, `BOB_AGENT_KEY`). Add more
-with `--allow-env NAME`. The command must be a bare name on the allowlist
+`HOME`, `USER`, `TMPDIR`, `RUSTUP_HOME`), then handed to bob when the program is
+one that builds. Add more with `--allow-env NAME`. The command must be a bare
+name on the allowlist
 (`cargo`, `rustc`, `cc`, `clang`, `clang++`, `c++`, `git`, `make`, `cmake`,
 `ninja`, `pkg-config`); shells and paths such as `./cargo` are rejected.
 
@@ -709,6 +710,38 @@ changes back, and `--keep` prints the overlay path for inspection.
 This is a policy boundary, not a sandbox: an allowed program runs as the user
 and can read their home. It exists so a host toolchain can operate on the VFS
 view without handing the agent's secrets to it.
+
+### Builds go through bob
+
+A build inside mush is a build on the machine, and the machine has one Mac. bob
+is what keeps that from meaning one build at a time: it picks the lane for a
+target triple, owns the per-agent `CARGO_HOME` that holds cargo's package-cache
+lock, and wraps rustc in a fail-open sccache shim.
+
+mush asks bob for that environment rather than inheriting it:
+
+```sh
+fpl bob env --key <session> --target-dir   # KEY=VALUE: the same facts the
+                                           # shell env file exports
+```
+
+and applies it to every host process whose program is a build (`cargo`,
+`rustc`, a C compiler, `make`, `cmake`, `zig`, `go`, `npm`, ...). Three
+consequences are worth knowing:
+
+- **`cargo` runs as `bob-cargo`.** The shim is what routes a lane and places the
+  per-agent `CARGO_HOME`; no exported variable does either for a child process.
+  `FPL_BOB_LOCAL=1` is the escape hatch, and bob passes it through.
+- **`CARGO_TARGET_DIR` outlives the overlay.** The overlay is a fresh directory
+  per command, so a `target/` inside it would be thrown away and every build
+  would start cold. bob points it at `~/.cache/bob/targets/<agent>`.
+- **The overlay joins `SCCACHE_BASEDIRS`.** Each run's overlay has a different
+  path; without normalizing it into the hash, the cached unit changes every
+  time and the cache never hits.
+
+No bob, a bob too old to know `env`, or a failed probe leaves the command
+running with the plain environment: uncached and serialized, but working.
+`mush doctor` prints what the next build will use.
 
 ## Host boundary
 `mush` opens the VFS root, links the grants, and calls the Spore one line at a
