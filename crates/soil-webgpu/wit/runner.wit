@@ -5,6 +5,7 @@ package soil:webgpu-host@0.1.0;
 world runner {
   include wasi:webgpu/imports@0.3.0-rc.2;
   import soil:canvas-gpu/surface@0.1.0;
+  import soil:records/records@0.1.0;
 
   /// Run one bounded WebGPU workload and return a host-visible status code.
   export run: async func() -> u32;

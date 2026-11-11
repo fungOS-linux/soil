@@ -4,10 +4,11 @@
 //!   soil-webgpu <component.wasm>
 //!   soil-webgpu --frame FILE.bgr [--size WxH] <component.wasm>
 
-use std::{env, fs, path::Path, process::ExitCode};
+use std::{env, fs, path::Path, path::PathBuf, process::ExitCode};
 
 fn main() -> ExitCode {
     let mut frame_path = None;
+    let mut records_dir: Option<PathBuf> = None;
     let mut size = (480, 640);
     let mut component = None;
     let mut args = env::args().skip(1);
@@ -19,6 +20,13 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 frame_path = Some(path);
+            }
+            "--records-dir" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--records-dir requires a directory");
+                    return ExitCode::FAILURE;
+                };
+                records_dir = Some(PathBuf::from(path));
             }
             "--size" => {
                 let Some(value) = args.next() else {
@@ -42,7 +50,7 @@ fn main() -> ExitCode {
             _ => {
                 if component.replace(arg).is_some() {
                     eprintln!(
-                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] <component.wasm>"
+                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--records-dir DIR] <component.wasm>"
                     );
                     return ExitCode::FAILURE;
                 }
@@ -50,7 +58,9 @@ fn main() -> ExitCode {
         }
     }
     let Some(path) = component else {
-        eprintln!("usage: soil-webgpu [--frame FILE.bgr] [--size WxH] <component.wasm>");
+        eprintln!(
+            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--records-dir DIR] <component.wasm>"
+        );
         return ExitCode::FAILURE;
     };
     let bytes = match fs::read(&path) {
@@ -61,7 +71,13 @@ fn main() -> ExitCode {
         }
     };
     let result = if frame_path.is_some() {
-        match soil_webgpu::run_component_capture(&bytes, size.0, size.1) {
+        let capture = match records_dir.as_deref() {
+            Some(root) => {
+                soil_webgpu::run_component_capture_with_records(&bytes, size.0, size.1, root)
+            }
+            None => soil_webgpu::run_component_capture(&bytes, size.0, size.1),
+        };
+        match capture {
             Ok((status, frame)) => {
                 if status != 0 {
                     eprintln!("webgpu: guest status {status}");

@@ -7401,6 +7401,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "pollster",
+ "soil-records-host",
  "wasi-webgpu-wasmtime",
  "wasmtime",
  "wasmtime-wasi",

@@ -26,6 +26,11 @@ success/error. It cannot create a device, texture, window, swapchain, or input
 event. The host chooses the target extent through `size()`; the guest does not
 control the Canvas surface.
 
+Renderer Spores that need the Spore-owned view model also import
+`soil:records`. The host links one read-only namespace, `vitals.view`, backed by
+the `dev/personal/telemetry` book. It cannot write, scan another collection, or
+name a filesystem path.
+
 ## Host
 
 [`crates/soil-webgpu`](../crates/soil-webgpu) is the host:
@@ -34,6 +39,8 @@ control the Canvas surface.
   `9624cae`) binds the WIT and adds host texture readback;
 - `wgpu-core` 29 (Metal / Vulkan / GLES / DX12) owns adapter, device, shaders,
   pipelines, buffers, textures, queues and error scopes;
+- `soil:records` is a read-only `vitals.view` namespace; the renderer cannot
+  mutate the store or read health signals directly;
 - one `Store` and `ResourceTable` per component, so two guests never share
   handles;
 - no native device, surface, pointer, queue or mapped memory crosses into Wasm.
@@ -120,6 +127,14 @@ cargo run -p soil-webgpu -- crates/soil-webgpu/fixtures/wgpu-compute.wasm
 # both print: webgpu: ok
 ```
 
+A renderer that reads `vitals.view` names the records root explicitly:
+
+```sh
+cargo run -p soil-webgpu --bin soil-webgpu -- \
+  --records-dir .soil-dev/records \
+  --frame /tmp/vitals.bgr --size 1280x900 spores/vitals-view/module.wasm
+```
+
 The wgpu fixtures need a GPU adapter and are tested with:
 
 ```sh
@@ -144,6 +159,9 @@ the corners are the clear colour, and the frame is opaque.
 - Presentation is a full-frame handoff, not a composited Canvas layer yet. The
   owner UI does not blend a GPU texture with widgets; the next step is a
   `software-image`/layer adapter inside the Canvas owner.
+- The records grant is deliberately one read-only collection. A renderer that
+  needs another view model adds a namespace here rather than receiving the
+  whole store.
 - `gpu-canvas-context` remains unimplemented. It has no constructor in
   `wasi:webgpu@0.3.0-rc.2`; the narrow `soil:canvas-gpu` package is the
   presentation boundary instead of a guest-owned surface.
