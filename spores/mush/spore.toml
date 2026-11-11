@@ -30,3 +30,4 @@ surfaces = ["native", "canvas", "web"]
 "soil:vfs-mut" = "write, rename, unlink, mkdir, and rmdir in the workspace"
 "soil:command" = "run installed wasm commands with explicit args and no host PATH"
 "soil:net" = "resolve names and probe TCP ports through the host"
+"soil:http" = "bounded HTTP through the host allowlist, with no credentials by default"

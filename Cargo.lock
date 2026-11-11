@@ -4114,6 +4114,7 @@ dependencies = [
  "serde",
  "serde_json",
  "soil-command",
+ "soil-http-host",
  "soil-inference",
  "soil-records-host",
  "soil-scrub",

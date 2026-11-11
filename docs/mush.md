@@ -489,6 +489,7 @@ json set FILE PATH JSON|-
 json del FILE PATH
 json merge TARGET SOURCE...
 json pretty [--indent N] [FILE|-]
+fetch URL [-X METHOD] [-H 'Name: value'] [-d DATA] [-i] [-o FILE]
 dig NAME [A|AAAA]
 ping NAME [--port N]
 rm [-r] PATH...
@@ -523,6 +524,22 @@ Spore packages are read from `~/.local/share/fungos/spores` (a sibling of the
 command root), or `MUSH_SPORE_ROOT` when set. `man` works with no display and no
 network: the page is generated from the installed manifest and the body ships
 inside the package.
+
+## Network verbs
+
+`fetch URL` is one bounded HTTP request through `soil:http`: the host owns the
+origin allowlist, TLS, header rules, body caps and the deadline, and the guest
+only names a URL. `-X`, `-H 'Name: value'`, `-d DATA` (which implies POST),
+`-i` (status line and headers) and `-o FILE` (write through the VFS, byte for
+byte) cover the useful surface. A 4xx/5xx exits 1 so an error page is not
+mistaken for a result.
+
+The allowlist is `MUSH_HTTP_ALLOW`, a comma-separated list of origins such as
+`https://api.github.com`. **Empty means nothing** — a shell that can fetch
+anything is ambient authority with extra steps, and this is where the
+principal/consent policy will attach rather than a place to default open.
+Credentials are not used yet: the capability accepts a handle, but no caller
+supplies one.
 
 ## Names and reachability
 

@@ -9,6 +9,7 @@ mod config;
 mod deadline;
 mod desktop;
 mod gateway;
+mod http;
 mod job;
 mod mcp_gateway;
 mod mcp_server;
@@ -56,6 +57,7 @@ struct Host {
     table: ResourceTable,
     commands: CommandHost,
     spores: SporeCatalog,
+    http: soil_http_host::HttpHost,
 }
 
 /// Installed Spore packages, as much of them as a manual needs.
@@ -210,6 +212,7 @@ impl Host {
             table: ResourceTable::new(),
             commands: CommandHost::new(command_root, records)?,
             spores: SporeCatalog::new(spore_root),
+            http: soil_http_host::HttpHost::new(http::policy_from_env()),
         })
     }
 
@@ -400,6 +403,7 @@ impl Runtime {
         soil_vfs_host::add_mutation_to_linker::<Host>(&mut linker)?;
         command_abi::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         soil::net::net::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
+        soil::http::http::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         let component = Component::new(&engine, wasm)?;
         let host = Host::new(root, command_root, records)?;
         let mut store = Store::new(&engine, host);

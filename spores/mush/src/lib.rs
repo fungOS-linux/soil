@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use soil::command::command as command_abi;
 use soil::index::index::{self, Mode, Query};
+use soil::http::http as http_abi;
 use soil::net::net::{self as net_abi, Family};
 use soil::vfs::vfs::{self, Kind};
 use soil::vfs_mut::vfs_mut;
@@ -670,6 +671,7 @@ impl Shell {
             "json" => self.json(args).map(|_| 0),
             "dig" => self.dig(args).map(|_| 0),
             "ping" => self.ping(args),
+            "fetch" => self.fetch(args),
             "rm" => self.rm(args).map(|_| 0),
             "mv" => self.mv(args).map(|_| 0),
             "cp" => self.cp(args).map(|_| 0),
@@ -1462,6 +1464,112 @@ impl Shell {
         self.out
             .push_str(&format!("{}: {action} (v{})\n", self.display(path), result.version));
         Ok(())
+    }
+
+    /// `fetch URL [-X METHOD] [-H 'Name: value'] [-d DATA] [-i] [-o FILE]`
+    /// — one bounded HTTP request through `soil:http`.
+    ///
+    /// The host owns the origin allowlist, TLS, body caps and the deadline; the
+    /// guest only names a URL. `MUSH_HTTP_ALLOW` is the allowlist, so an empty
+    /// one denies everything. Exit 1 on a 4xx/5xx so an agent does not mistake
+    /// an error page for a result.
+    fn fetch(&mut self, args: &[String]) -> Result<i32, String> {
+        const USAGE: &str = "fetch URL [-X METHOD] [-H 'Name: value'] [-d DATA] [-i] [-o FILE] [--max-bytes N]";
+        let mut url: Option<&str> = None;
+        let mut method: Option<http_abi::Method> = None;
+        let mut headers: Vec<http_abi::Header> = Vec::new();
+        let mut body: Option<Vec<u8>> = None;
+        let mut include = false;
+        let mut output: Option<&str> = None;
+        let mut max_bytes = 8 * 1024 * 1024u32;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "-X" | "--method" => {
+                    let value = args.get(index + 1).ok_or(USAGE)?;
+                    method = Some(fetch_method(value)?);
+                    index += 1;
+                }
+                "-H" | "--header" => {
+                    let value = args.get(index + 1).ok_or(USAGE)?;
+                    let (name, value) = value
+                        .split_once(':')
+                        .ok_or_else(|| format!("fetch: header {value:?} needs `Name: value`"))?;
+                    headers.push(http_abi::Header {
+                        name: name.trim().to_string(),
+                        value: value.trim().to_string(),
+                    });
+                    index += 1;
+                }
+                "-d" | "--data" => {
+                    body = Some(args.get(index + 1).ok_or(USAGE)?.clone().into_bytes());
+                    index += 1;
+                }
+                "-i" | "--include" => include = true,
+                "-o" | "--output" => {
+                    output = Some(args.get(index + 1).ok_or(USAGE)?);
+                    index += 1;
+                }
+                "--max-bytes" => {
+                    let value = args.get(index + 1).ok_or(USAGE)?;
+                    max_bytes = value
+                        .parse()
+                        .map_err(|_| format!("fetch: bad --max-bytes {value:?}"))?;
+                    index += 1;
+                }
+                other => {
+                    if url.is_some() {
+                        return Err(USAGE.into());
+                    }
+                    url = Some(other);
+                }
+            }
+            index += 1;
+        }
+        let url = url.ok_or(USAGE)?;
+        let method = method.unwrap_or(if body.is_some() {
+            http_abi::Method::Post
+        } else {
+            http_abi::Method::Get
+        });
+        let response = http_abi::fetch(&http_abi::Request {
+            url: url.to_string(),
+            method,
+            headers,
+            body,
+            credential: None,
+            max_bytes,
+            timeout_ms: 30_000,
+        })
+        .map_err(|error| format!("fetch: {url}: {}", http_error(&error)))?;
+        let mut bytes = Vec::new();
+        if include {
+            bytes.extend_from_slice(format!("HTTP {}\n", response.status).as_bytes());
+            for header in &response.headers {
+                bytes.extend_from_slice(format!("{}: {}\n", header.name, header.value).as_bytes());
+            }
+            bytes.push(b'\n');
+        }
+        bytes.extend_from_slice(&response.body);
+        if let Some(target) = output {
+            let path = self.resolve(target)?;
+            let result = vfs_mut::write(&path, &bytes, media_type(&path), None)
+                .map_err(|error| format!("fetch {}: {error:?}", self.display(&path)))?;
+            self.out.push_str(&format!(
+                "wrote {} ({} bytes) v{}\n",
+                self.display(&path),
+                bytes.len(),
+                result.version
+            ));
+        } else {
+            self.out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        if response.status >= 400 {
+            self.err
+                .push_str(&format!("fetch: {url}: HTTP {}\n", response.status));
+            return Ok(1);
+        }
+        Ok(0)
     }
 
     /// `dig NAME [A|AAAA]` — resolve a name through the host's resolver.
@@ -2657,6 +2765,32 @@ impl Shell {
     }
 }
 
+fn fetch_method(value: &str) -> Result<http_abi::Method, String> {
+    match value.to_ascii_uppercase().as_str() {
+        "GET" => Ok(http_abi::Method::Get),
+        "HEAD" => Ok(http_abi::Method::Head),
+        "POST" => Ok(http_abi::Method::Post),
+        "PUT" => Ok(http_abi::Method::Put),
+        "PATCH" => Ok(http_abi::Method::Patch),
+        "DELETE" => Ok(http_abi::Method::Delete),
+        other => Err(format!("fetch: unsupported method {other:?}")),
+    }
+}
+
+fn http_error(error: &http_abi::Error) -> &'static str {
+    match error {
+        http_abi::Error::Denied => "denied by the host origin allowlist (MUSH_HTTP_ALLOW)",
+        http_abi::Error::Invalid => "invalid URL, header or credential",
+        http_abi::Error::OverBudget => "over the host response budget",
+        http_abi::Error::Timeout => "timed out",
+        http_abi::Error::Unavailable => "host or DNS unavailable",
+        http_abi::Error::Tls => "TLS verification failed",
+        http_abi::Error::Http => "upstream returned an error",
+        http_abi::Error::Io => "transport failed",
+        http_abi::Error::Unsupported => "this host has no HTTP backend",
+    }
+}
+
 fn net_error(error: &net_abi::Error) -> &'static str {
     match error {
         net_abi::Error::NotFound => "does not resolve",
@@ -3661,6 +3795,7 @@ mush — a sandboxed VFS shell
   json del FILE PATH               remove an object key or array element
   json merge TARGET SOURCE...      deep-merge objects into TARGET
   json pretty [--indent N] [FILE]  reformat to stdout (stdin when FILE is - or absent)
+  fetch URL [-X METHOD] [-H 'Name: value'] [-d DATA] [-i] [-o FILE]  one HTTP request
   dig NAME [A|AAAA]                resolve a name, `*.myc` through the mesh resolver
   ping NAME [--port N]             resolve and open a TCP session (default 443)
   rm [-r] PATH...         unlink files or recursively remove a directory

@@ -26,6 +26,7 @@ ureq = { version = "2", features = ["json"] }
 fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "6a12314e673ee6814486f9079a57b11715039e13" }
 soil-vfs-host = { path = "../soil-vfs-host" }
 soil-command = { path = "../soil-command" }
+soil-http-host = { path = "../soil-http-host" }
 soil-spore = { path = "../soil-spore" }
 tempfile = "3"
 wasmtime = { version = "50", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std"] }

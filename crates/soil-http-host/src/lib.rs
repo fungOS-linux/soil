@@ -27,6 +27,63 @@ const ALLOWED_HEADERS: &[&str] = &[
     "range",
 ];
 
+/// One request in host-internal form.
+///
+/// The WIT types are generated per consumer, so two crates that import
+/// `soil:http` cannot pass them to each other. Everything between the guest
+/// boundary and the transport speaks these plain types instead, which is what
+/// lets another host (mush) reuse this policy rather than keep a second copy.
+#[derive(Clone, Debug)]
+pub struct Request {
+    pub url: String,
+    pub method: Method,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    pub credential: Option<String>,
+    pub max_bytes: u32,
+    pub timeout_ms: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Head,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+#[derive(Clone, Debug)]
+pub struct Response {
+    pub status: u16,
+    pub final_url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// Origin, method, header, or credential was not granted.
+    Denied,
+    /// URL, header, credential handle, or budget is malformed.
+    Invalid,
+    /// The caller exceeded the host response/time budget.
+    OverBudget,
+    /// The request exceeded its deadline.
+    Timeout,
+    /// DNS, connect, or proxy failure.
+    Unavailable,
+    /// TLS verification or handshake failure.
+    Tls,
+    /// Upstream returned an error that is not a normal HTTP response.
+    Http,
+    /// The host transport failed.
+    Io,
+    /// This host has no HTTP backend.
+    Unsupported,
+}
+
 /// Host-owned policy for one `soil:http` installation.
 #[derive(Clone, Debug)]
 pub struct HttpPolicy {
@@ -264,67 +321,67 @@ impl WasiView for HttpHost {
     }
 }
 
-impl http::Host for HttpHost {
-    fn fetch(&mut self, request: http::Request) -> Result<http::Response, http::Error> {
-        let url = Url::parse(&request.url).map_err(|_| http::Error::Invalid)?;
-        let origin = origin_of(&url).ok_or(http::Error::Invalid)?;
+impl HttpHost {
+    /// Run one request through the policy and the transport.
+    ///
+    /// This is the whole `soil:http` contract in plain types: allowlist, budget,
+    /// header and body rules, credential resolution, transport, response. The
+    /// guest adapter below only converts, so another host with a different
+    /// store type can call this and inherit the same behaviour.
+    pub fn perform(&mut self, request: Request) -> Result<Response, Error> {
+        let url = Url::parse(&request.url).map_err(|_| Error::Invalid)?;
+        let origin = origin_of(&url).ok_or(Error::Invalid)?;
         if !self.policy.origins.contains(&origin) {
-            return Err(http::Error::Denied);
+            return Err(Error::Denied);
         }
         if request.max_bytes == 0
             || request.max_bytes as usize > self.policy.max_bytes
             || request.timeout_ms == 0
             || Duration::from_millis(request.timeout_ms as u64) > self.policy.timeout
         {
-            return Err(http::Error::OverBudget);
+            return Err(Error::OverBudget);
         }
-        for header in &request.headers {
-            if !ALLOWED_HEADERS.contains(&header.name.to_ascii_lowercase().as_str()) {
-                return Err(http::Error::Invalid);
+        for (name, value) in &request.headers {
+            if !ALLOWED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+                return Err(Error::Invalid);
             }
-            if header.name.contains(['\r', '\n']) || header.value.contains(['\r', '\n']) {
-                return Err(http::Error::Invalid);
+            if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
+                return Err(Error::Invalid);
             }
         }
-        // A body belongs to a write. Allowing one on GET/HEAD would make a
-        // read look like an action and is not something any transport here
-        // supports predictably.
-        if matches!(request.method, http::Method::Get | http::Method::Head)
-            && request.body.is_some()
-        {
-            return Err(http::Error::Invalid);
+        // A body belongs to a write. Allowing one on GET/HEAD would make a read
+        // look like an action and is not something any transport here supports
+        // predictably.
+        if matches!(request.method, Method::Get | Method::Head) && request.body.is_some() {
+            return Err(Error::Invalid);
         }
         if request
             .body
             .as_ref()
             .is_some_and(|body| body.len() > self.policy.max_bytes)
         {
-            return Err(http::Error::OverBudget);
+            return Err(Error::OverBudget);
         }
         let mut auth = None;
         if let Some(handle) = &request.credential {
             let header = self
                 .credentials
                 .resolve(handle)
-                .map_err(|_| http::Error::Denied)?
-                .ok_or(http::Error::Denied)?;
+                .map_err(|_| Error::Denied)?
+                .ok_or(Error::Denied)?;
             if header.0.contains(['\r', '\n']) || header.1.contains(['\r', '\n']) {
-                return Err(http::Error::Denied);
+                return Err(Error::Denied);
             }
             auth = Some(header);
         }
 
-        let mut headers = request
-            .headers
-            .iter()
-            .map(|header| (header.name.clone(), header.value.clone()))
-            .collect::<Vec<_>>();
+        let mut headers = request.headers.clone();
         if let Some(header) = auth {
             headers.push(header);
         }
         let transport_request = TransportRequest {
             url,
-            method: request.method,
+            method: method_to_wit(request.method),
             headers,
             body: request.body,
             timeout: Duration::from_millis(request.timeout_ms as u64),
@@ -334,12 +391,38 @@ impl http::Host for HttpHost {
             .transport
             .fetch(&transport_request)
             .map_err(|error| match error {
-                TransportError::Unavailable => http::Error::Unavailable,
-                TransportError::Tls => http::Error::Tls,
-                TransportError::Http => http::Error::Http,
-                TransportError::Io => http::Error::Io,
-                TransportError::Unsupported => http::Error::Unsupported,
+                TransportError::Unavailable => Error::Unavailable,
+                TransportError::Tls => Error::Tls,
+                TransportError::Http => Error::Http,
+                TransportError::Io => Error::Io,
+                TransportError::Unsupported => Error::Unsupported,
             })?;
+        Ok(Response {
+            status: response.status,
+            final_url: response.final_url,
+            headers: response.headers,
+            body: response.body,
+        })
+    }
+}
+
+impl http::Host for HttpHost {
+    fn fetch(&mut self, request: http::Request) -> Result<http::Response, http::Error> {
+        let response = self
+            .perform(Request {
+                url: request.url,
+                method: method_from_wit(request.method),
+                headers: request
+                    .headers
+                    .into_iter()
+                    .map(|header| (header.name, header.value))
+                    .collect(),
+                body: request.body,
+                credential: request.credential,
+                max_bytes: request.max_bytes,
+                timeout_ms: request.timeout_ms,
+            })
+            .map_err(error_to_wit)?;
         Ok(http::Response {
             status: response.status,
             final_url: response.final_url,
@@ -350,6 +433,42 @@ impl http::Host for HttpHost {
                 .collect(),
             body: response.body,
         })
+    }
+}
+
+fn method_from_wit(method: http::Method) -> Method {
+    match method {
+        http::Method::Get => Method::Get,
+        http::Method::Head => Method::Head,
+        http::Method::Post => Method::Post,
+        http::Method::Put => Method::Put,
+        http::Method::Patch => Method::Patch,
+        http::Method::Delete => Method::Delete,
+    }
+}
+
+fn method_to_wit(method: Method) -> http::Method {
+    match method {
+        Method::Get => http::Method::Get,
+        Method::Head => http::Method::Head,
+        Method::Post => http::Method::Post,
+        Method::Put => http::Method::Put,
+        Method::Patch => http::Method::Patch,
+        Method::Delete => http::Method::Delete,
+    }
+}
+
+fn error_to_wit(error: Error) -> http::Error {
+    match error {
+        Error::Denied => http::Error::Denied,
+        Error::Invalid => http::Error::Invalid,
+        Error::OverBudget => http::Error::OverBudget,
+        Error::Timeout => http::Error::Timeout,
+        Error::Unavailable => http::Error::Unavailable,
+        Error::Tls => http::Error::Tls,
+        Error::Http => http::Error::Http,
+        Error::Io => http::Error::Io,
+        Error::Unsupported => http::Error::Unsupported,
     }
 }
 

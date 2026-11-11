@@ -435,6 +435,69 @@ fn wasm_spore_keeps_quoted_empty_arguments() {
 }
 
 #[test]
+fn wasm_spore_fetches_through_the_host_allowlist() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let origin = format!("http://127.0.0.1:{port}");
+    let dir = tempfile::tempdir().unwrap();
+
+    let run = |command: &str, allow: &str| {
+        let output = mush_command()
+            .arg("--root")
+            .arg(dir.path())
+            .arg("--wasm")
+            .arg(module())
+            .arg("--command")
+            .arg(command)
+            .env("MUSH_HTTP_ALLOW", allow)
+            .output()
+            .unwrap();
+        (
+            output.status.code().unwrap(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let answer = |body: &'static [u8], status: &'static str| {
+        let listener = listener.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 2048];
+            let _ = conn.read(&mut buffer);
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            conn.write_all(head.as_bytes()).unwrap();
+            conn.write_all(body).unwrap();
+        })
+    };
+
+    let served = answer(b"hello", "200 OK");
+    let (status, stdout, stderr) = run(&format!("fetch {origin}/hello"), &origin);
+    served.join().unwrap();
+    assert_eq!(status, 0, "{stdout}{stderr}");
+    assert_eq!(stdout, "hello");
+
+    // An empty allowlist denies everything: a shell that can fetch anything is
+    // ambient authority with extra steps.
+    let (status, stdout, stderr) = run(&format!("fetch {origin}/hello"), "");
+    assert_eq!(status, 1, "{stdout}{stderr}");
+    assert!(stderr.contains("denied"), "{stdout}{stderr}");
+
+    // A 4xx is a result, not a success.
+    let served = answer(b"missing", "404 Not Found");
+    let (status, stdout, stderr) = run(&format!("fetch {origin}/nope"), &origin);
+    served.join().unwrap();
+    assert_eq!(status, 1, "{stdout}{stderr}");
+    assert!(stderr.contains("HTTP 404"), "{stdout}{stderr}");
+    assert_eq!(stdout, "missing");
+}
+
+#[test]
 fn wasm_spore_resolves_and_probes_through_the_host() {
     use std::net::TcpListener;
 
