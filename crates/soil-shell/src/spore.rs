@@ -17,13 +17,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use soil_spore::{Manifest, OriginAuth as ClaimedAuth};
 use soil_wasi_host::{
-    GatewayRoute, HttpGatewayBuilder, HttpService, OriginAuth, UnibusBus, WasiHostBuilder,
-    WasiHostPolicy,
+    GatewayRoute, GeodeCredentials, HttpGatewayBuilder, HttpService, OriginAuth, UnibusBus,
+    WasiHostBuilder, WasiHostPolicy,
 };
 use tokio::net::TcpListener;
 
 /// How a run is asked for.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Run {
     pub listen: Option<SocketAddr>,
     pub unibus_config: Option<PathBuf>,
@@ -31,6 +31,11 @@ pub struct Run {
     pub max_body: Option<usize>,
     pub trusted_terminators: Vec<IpAddr>,
     pub state: Option<PathBuf>,
+    /// `geoded`'s socket. When set, the Spore resolves credentials through a
+    /// lease instead of anything in this process.
+    pub geode_socket: Option<PathBuf>,
+    pub geode_purpose: String,
+    pub geode_ttl_secs: u64,
 }
 
 pub fn parse(args: &[String]) -> Result<(PathBuf, Run)> {
@@ -42,7 +47,19 @@ pub fn parse(args: &[String]) -> Result<(PathBuf, Run)> {
     let Some(spore) = args.first().map(PathBuf::from) else {
         bail!("usage: soil spore run <spore-dir|package.spore> [options]");
     };
-    let mut run = Run::default();
+    let mut run = Run {
+        listen: None,
+        unibus_config: None,
+        hubs: Vec::new(),
+        max_body: None,
+        trusted_terminators: Vec::new(),
+        state: None,
+        geode_socket: None,
+        // Verification is what an ingress does with a credential; signing is a
+        // separate capability and must be asked for explicitly.
+        geode_purpose: "verify".into(),
+        geode_ttl_secs: 600,
+    };
     let mut index = 1;
     while index < args.len() {
         let value = |index: usize| {
@@ -77,6 +94,20 @@ pub fn parse(args: &[String]) -> Result<(PathBuf, Run)> {
             }
             "--state" => {
                 run.state = Some(PathBuf::from(value(index + 1)?));
+                index += 2;
+            }
+            "--geode-socket" => {
+                run.geode_socket = Some(PathBuf::from(value(index + 1)?));
+                index += 2;
+            }
+            "--geode-purpose" => {
+                run.geode_purpose = value(index + 1)?;
+                index += 2;
+            }
+            "--geode-ttl-secs" => {
+                run.geode_ttl_secs = value(index + 1)?
+                    .parse()
+                    .context("--geode-ttl-secs is seconds")?;
                 index += 2;
             }
             other => bail!("unknown option `{other}`"),
@@ -168,6 +199,13 @@ async fn serve(spore: Spore, run: Run) -> Result<()> {
         .with_context(|| format!("read module {}", module.path))?;
 
     let mut builder = WasiHostBuilder::new(WasiHostPolicy::default());
+    if let Some(socket) = &run.geode_socket {
+        builder = builder.credential_provider(Arc::new(GeodeCredentials::new(
+            socket,
+            run.geode_purpose.clone(),
+            Duration::from_secs(run.geode_ttl_secs),
+        )));
+    }
     if let Some(bus) = bus(&spore.manifest, &run)? {
         builder = builder.bus(bus);
     }

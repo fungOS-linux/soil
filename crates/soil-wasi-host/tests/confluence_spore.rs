@@ -5,8 +5,8 @@ use base64::Engine as _;
 use http::Method;
 use serde_json::Value;
 use soil_wasi_host::{
-    Algorithm, CredentialProvider, GatewayRoute, HttpGatewayBuilder, HttpService, MemoryBus,
-    StaticCredentials, WasiHostBuilder, WasiHostPolicy,
+    Algorithm, CredentialProvider, GatewayRoute, GeodeCredentials, HttpGatewayBuilder, HttpService,
+    MemoryBus, StaticCredentials, WasiHostBuilder, WasiHostPolicy,
 };
 use tokio::{net::TcpListener, task::JoinHandle};
 
@@ -24,7 +24,7 @@ fn now_seconds() -> i64 {
         .as_secs() as i64
 }
 
-fn signature(credentials: &StaticCredentials, id: &str, timestamp: i64, body: &str) -> String {
+fn signature(credentials: &dyn CredentialProvider, id: &str, timestamp: i64, body: &str) -> String {
     let signable = format!("{id}.{timestamp}.{body}");
     let handle = credentials.resolve(CREDENTIAL).unwrap();
     let signature = credentials
@@ -38,18 +38,10 @@ fn signature(credentials: &StaticCredentials, id: &str, timestamp: i64, body: &s
 
 async fn start(
     sink: Arc<MemoryBus>,
-) -> (
-    std::net::SocketAddr,
-    JoinHandle<anyhow::Result<()>>,
-    Arc<StaticCredentials>,
-) {
-    let mut credentials = StaticCredentials::new();
-    credentials
-        .insert_hmac(CREDENTIAL, SECRET.to_vec(), "verify confluence webhooks")
-        .unwrap();
-    let credentials = Arc::new(credentials);
+    credentials: Arc<dyn CredentialProvider>,
+) -> (std::net::SocketAddr, JoinHandle<anyhow::Result<()>>) {
     let builder = WasiHostBuilder::new(WasiHostPolicy::default())
-        .credential_provider(credentials.clone())
+        .credential_provider(credentials)
         .bus(sink);
     let service = Arc::new(
         HttpService::from_bytes_named("dev.fungos.confluence", CONFLUENCE, builder).unwrap(),
@@ -68,18 +60,23 @@ async fn start(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(Arc::new(gateway).serve(listener));
-    (address, task, credentials)
+    (address, task)
 }
 
 #[tokio::test]
 async fn verifies_signs_and_publishes_one_event() {
     let sink = Arc::new(MemoryBus::default());
-    let (address, task, credentials) = start(sink.clone()).await;
+    let mut static_credentials = StaticCredentials::new();
+    static_credentials
+        .insert_hmac(CREDENTIAL, SECRET.to_vec(), "verify confluence webhooks")
+        .unwrap();
+    let credentials: Arc<dyn CredentialProvider> = Arc::new(static_credentials);
+    let (address, task) = start(sink.clone(), Arc::clone(&credentials)).await;
 
     let body = r#"{"action":"opened","page":{"id":"123"}}"#;
     let timestamp = now_seconds();
     let timestamp_text = timestamp.to_string();
-    let signature = signature(&credentials, "delivery-1", timestamp, body);
+    let signature = signature(credentials.as_ref(), "delivery-1", timestamp, body);
     let headers = [
         ("content-type", "application/json"),
         ("webhook-id", "delivery-1"),
@@ -132,7 +129,12 @@ async fn verifies_signs_and_publishes_one_event() {
 #[tokio::test]
 async fn rejects_bad_signatures_stale_timestamps_and_wrong_methods() {
     let sink = Arc::new(MemoryBus::default());
-    let (address, task, credentials) = start(sink.clone()).await;
+    let mut static_credentials = StaticCredentials::new();
+    static_credentials
+        .insert_hmac(CREDENTIAL, SECRET.to_vec(), "verify confluence webhooks")
+        .unwrap();
+    let credentials: Arc<dyn CredentialProvider> = Arc::new(static_credentials);
+    let (address, task) = start(sink.clone(), Arc::clone(&credentials)).await;
 
     let body = r#"{"action":"opened"}"#;
     let timestamp = now_seconds();
@@ -153,7 +155,7 @@ async fn rejects_bad_signatures_stale_timestamps_and_wrong_methods() {
 
     let stale = timestamp - 1000;
     let stale_text = stale.to_string();
-    let stale_signature = signature(&credentials, "delivery-3", stale, body);
+    let stale_signature = signature(credentials.as_ref(), "delivery-3", stale, body);
     let stale_headers = [
         ("content-type", "application/json"),
         ("webhook-id", "delivery-3"),
@@ -193,7 +195,12 @@ async fn rejects_bad_signatures_stale_timestamps_and_wrong_methods() {
 #[tokio::test]
 async fn rejects_oversized_and_non_object_bodies() {
     let sink = Arc::new(MemoryBus::default());
-    let (address, task, credentials) = start(sink.clone()).await;
+    let mut static_credentials = StaticCredentials::new();
+    static_credentials
+        .insert_hmac(CREDENTIAL, SECRET.to_vec(), "verify confluence webhooks")
+        .unwrap();
+    let credentials: Arc<dyn CredentialProvider> = Arc::new(static_credentials);
+    let (address, task) = start(sink.clone(), Arc::clone(&credentials)).await;
 
     // The gateway rejects on Content-Length before reading; do not write the
     // body, so the client is not racing a close for 70 KiB it already sent.
@@ -207,7 +214,7 @@ async fn rejects_oversized_and_non_object_bodies() {
     let body = "[1,2,3]";
     let timestamp = now_seconds();
     let timestamp_text = timestamp.to_string();
-    let signature = signature(&credentials, "delivery-4", timestamp, body);
+    let signature = signature(credentials.as_ref(), "delivery-4", timestamp, body);
     let headers = [
         ("content-type", "application/json"),
         ("webhook-id", "delivery-4"),
@@ -223,4 +230,76 @@ async fn rejects_oversized_and_non_object_bodies() {
 
     assert!(sink.frames().is_empty());
     task.abort();
+}
+
+/// The same delivery, with the secret living in `geoded` instead of the host.
+///
+/// A daemon answers one lease per request, the Spore resolves the credential
+/// through `soil:creds`, and the signature it accepts is the same one - so this
+/// covers the whole path: socket, lease, handle, HMAC, 202.
+#[tokio::test]
+async fn a_geode_lease_verifies_a_delivery() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let socket = std::env::temp_dir().join(format!("soil-geode-e2e-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket).unwrap();
+    let secret = SECRET.to_vec();
+    let daemon = std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut line = String::new();
+            if BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap_or(0)
+                == 0
+            {
+                break;
+            }
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["op"], "lease", "the adapter speaks the lease op");
+            assert_eq!(request["reference"], CREDENTIAL);
+            assert_eq!(request["purpose"], "verify", "the host picks the purpose");
+            let reply = serde_json::json!({
+                "ok": true,
+                "secret_b64": base64::engine::general_purpose::STANDARD.encode(&secret),
+                "expires_at": now_seconds() + 60,
+            });
+            writeln!(stream, "{reply}").unwrap();
+        }
+    });
+
+    let credentials: Arc<dyn CredentialProvider> = Arc::new(GeodeCredentials::new(
+        &socket,
+        "verify",
+        std::time::Duration::from_secs(60),
+    ));
+    let sink = Arc::new(MemoryBus::default());
+    let (address, task) = start(sink.clone(), Arc::clone(&credentials)).await;
+
+    let body = r#"{"action":"opened","page":{"id":"456"}}"#;
+    let timestamp = now_seconds();
+    let timestamp_text = timestamp.to_string();
+    let signature = signature(credentials.as_ref(), "delivery-9", timestamp, body);
+    let headers = [
+        ("content-type", "application/json"),
+        ("webhook-id", "delivery-9"),
+        ("webhook-timestamp", timestamp_text.as_str()),
+        ("webhook-signature", signature.as_str()),
+        ("x-event-type", "page_updated"),
+    ];
+    let response = send(
+        address,
+        &post("confluence.test", "/webhooks/provider-a", body, &headers),
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 202"), "{response}");
+    let frames = sink.frames();
+    assert_eq!(frames.len(), 1, "a leased secret published the same fact");
+    assert_eq!(frames[0].kind, "confluence.webhook.received.v1");
+
+    task.abort();
+    drop(daemon);
+    let _ = std::fs::remove_file(&socket);
 }
