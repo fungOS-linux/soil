@@ -12,6 +12,7 @@ pub mod signal;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use soil_ble_api::{Backend, BleEvent, CharInfo, DeviceInfo, ServiceInfo};
@@ -114,6 +115,10 @@ struct SimState {
     events: VecDeque<BleEvent>,
     writes: HashMap<String, Vec<u8>>,
     tick: u64,
+    /// Optional real-time delay per generated tick. Tests use 0; the desktop
+    /// dev host uses a small value so a 1 s guest run does not produce hundreds
+    /// of samples.
+    pacing: Duration,
 }
 
 pub struct SimBackend {
@@ -122,10 +127,18 @@ pub struct SimBackend {
 
 impl SimBackend {
     pub fn builtin() -> Result<Self> {
-        Ok(Self::with_devices(vec![pine_time(), ring(), omi()]))
+        Self::builtin_paced(Duration::ZERO)
+    }
+
+    pub fn builtin_paced(pacing: Duration) -> Result<Self> {
+        Ok(Self::with_pacing(vec![pine_time(), ring(), omi()], pacing))
     }
 
     pub fn with_devices(devices: Vec<SimDevice>) -> Self {
+        Self::with_pacing(devices, Duration::ZERO)
+    }
+
+    pub fn with_pacing(devices: Vec<SimDevice>, pacing: Duration) -> Self {
         Self {
             state: Mutex::new(SimState {
                 devices,
@@ -134,6 +147,7 @@ impl SimBackend {
                 events: VecDeque::new(),
                 writes: HashMap::new(),
                 tick: 0,
+                pacing,
             }),
         }
     }
@@ -309,7 +323,6 @@ impl Backend for SimBackend {
         device.battery_percent = (device.battery_percent - device.drain_per_tick).max(0.0);
         let disconnect_at = device.faults.disconnect_at;
         let drop_every = device.faults.drop_every;
-
         if disconnect_at.is_some_and(|at| tick >= at) {
             state.link = None;
             state.subscribed.clear();
@@ -333,6 +346,15 @@ impl Backend for SimBackend {
                 if characteristic.source == Source::Battery && tick % 10 != 0 {
                     continue;
                 }
+                // Button-driven events are one-shot scripts, not a value that
+                // changes every tick. A music event at tick 5 and a call
+                // response at tick 10 are enough to exercise both paths.
+                if characteristic.source == Source::MusicEvent && tick != 5 {
+                    continue;
+                }
+                if characteristic.source == Source::CallResponse && tick != 10 {
+                    continue;
+                }
                 generated.push(BleEvent::Notification {
                     char_uuid: characteristic.uuid.clone(),
                     data: notify_value(device, characteristic, tick),
@@ -341,6 +363,9 @@ impl Backend for SimBackend {
         }
         let first = generated.first().cloned();
         state.events.extend(generated.into_iter().skip(1));
+        if state.pacing > Duration::ZERO {
+            std::thread::sleep(state.pacing);
+        }
         Ok(first)
     }
 }
@@ -1023,6 +1048,27 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn music_and_call_events_are_one_shot_scripts() {
+        for (uuid, expected_tick) in [(PINETIME_MUSIC_EVENT, 5), (PINETIME_NOTIFICATION_EVENT, 10)]
+        {
+            let mut sim = backend();
+            sim.connect("sim-pinetime").expect("connect");
+            sim.subscribe(uuid).expect("subscribe");
+            let mut seen = 0;
+            for _ in 0..12 {
+                if let Some(BleEvent::Notification { char_uuid, .. }) =
+                    sim.next_event(100).expect("event")
+                {
+                    assert_eq!(char_uuid, uuid);
+                    assert_eq!(sim.tick(), expected_tick);
+                    seen += 1;
+                }
+            }
+            assert_eq!(seen, 1, "{uuid} must fire once, not every tick");
+        }
     }
 
     #[test]

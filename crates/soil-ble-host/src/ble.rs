@@ -26,6 +26,15 @@ impl Ble {
         })
     }
 
+    /// Simulated backend with a real-time delay per generated tick. The dev
+    /// host uses this so a one-second guest run produces a sane sample count
+    /// instead of spinning the virtual clock as fast as the CPU allows.
+    pub fn sim_paced(pacing: std::time::Duration) -> Result<Self> {
+        Ok(Self {
+            backend: Box::new(soil_ble_sim::SimBackend::builtin_paced(pacing)?),
+        })
+    }
+
     pub fn from_env() -> Result<Self> {
         if std::env::var_os("SOIL_BLE_SIM").is_some() {
             Self::sim()
