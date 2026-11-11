@@ -7,11 +7,8 @@
 //! See `ajmwagar/spores/spores/colmi-ring/README.md` for the COLMI target matrix
 //! and lease model, and `crates/soil-ble-sim` for the deterministic backend.
 
-mod ble;
-mod btleplug;
-mod session;
-
 use anyhow::{Context, Result, anyhow, bail};
+use soil_ble_host::{ble, session};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
