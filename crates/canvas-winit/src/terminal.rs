@@ -138,7 +138,6 @@ impl State {
 struct Session {
     id: u32,
     label: String,
-    command: Option<String>,
     terminal: PtyTerminal,
 }
 
@@ -228,7 +227,6 @@ impl TerminalHost for Terminals {
         self.sessions.push(Session {
             id,
             label,
-            command: command.clone(),
             terminal: PtyTerminal::new(self.cols, self.rows, command),
         });
         self.active = Some(id);
