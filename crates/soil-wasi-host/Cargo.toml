@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 bytes = "1"
 serde_json = "1"
 tracing = "0.1"
@@ -22,6 +23,7 @@ hyper = { version = "1", default-features = false, features = ["http1", "server"
 ipnet = "2"
 sha2 = "0.10"
 soil-host = { path = "../soil-host" }
+tempfile = "3"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 url = "2"
 wasmtime = { version = "50", default-features = false, features = [
@@ -38,7 +40,6 @@ wasmtime-wasi-http = { version = "50", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-base64 = "0.22"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"

@@ -1,0 +1,15 @@
+[package]
+name = "wasm-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wgpu = { version = "23", features = ["webgpu"] }
+vello = "0.4"
+parley = { version = "0.2", default-features = false, features = ["std"] }
+peniko = "0.3"
+taffy = "0.7"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+
+[workspace]

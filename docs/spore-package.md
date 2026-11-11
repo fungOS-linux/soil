@@ -138,7 +138,9 @@ Validation is strict because a package is executable content:
 - `[[surfaces]]` declares a view the package ships: a `web` or `canvas` kind, an
   optional entry point that defaults to `web/index.html` or the package's own
   `[ui] entry`, and an optional engine requirement. Declaring none is the
-  behaviour every manifest had before surfaces existed.
+  behaviour every manifest had before surfaces existed. A declared surface is
+  an **entrypoint**: a page is a program, so a web-only Spore needs no module,
+  Lua view or chrome region to be valid.
 
 ## Skills
 
@@ -204,17 +206,20 @@ Soil never generates, stores, interprets, or fetches a key.
 
 ```sh
 soil-spore sign markdown.spore --key <fingerprint>
+soil-spore sign markdown.spore --principal alice [--socket PATH] [--fingerprint FP]
 soil-spore verify-signature markdown.spore --keyring <file> [--key <fingerprint>]
 ```
 
-Signatures are detached, armored, and PGP. `sign` and `verify-signature` shell
-out to `gpg`; no key material enters this repository or a Spore package.
+Signatures are detached, armored, and PGP. `sign --key` shells out to `gpg`;
+`sign --principal` asks `geode-pgp`, which leases the key from `geoded` and
+returns only the signature. No key material enters this repository or a Spore
+package.
 
 Trust is Mycelium's job, not Soil's. Mycelium binds a PGP key to a user and
-manages it (for example in Geode), or accepts an external keyring supplied by
-the operator. Soil receives a keyring and, optionally, a required fingerprint.
-If Mycelium later supplies keys through a resolver, only the argument to
-`verify-signature` changes.
+manages it in Geode, or accepts an external keyring supplied by the operator.
+`--principal` is the Geode account label: the reference is
+`geode://principal/<label>/pgp`. Soil receives a keyring for verification and,
+optionally, a required fingerprint.
 
 A Spore may declare a host-system surface:
 
@@ -226,8 +231,9 @@ role = "consent"
 This is not a grant. The host must allowlist the exact Spore id, role and signed
 digest before treating it as a system surface.
 
-The next signing layer is Mycelium-backed publisher identity with delegated
-keys and revocation. The signature must cover the manifest, lock and module; a
+Publisher identity is a Geode-backed PGP key. A store operator delegates that
+key to a publisher principal; the delegation and the package signature are
+verified separately. The signature covers the manifest, lock and module; a
 revoked or expired delegated key fails closed. Package trust and capability
 grants stay separate.
 
@@ -241,7 +247,7 @@ soil-spore man     <dir|pkg> [--width N] # generated man page
 soil-spore info    <dir|pkg>             # listing/identity block
 soil-spore pack    <dir> [-o file.spore] # deterministic tar
 soil-spore verify  <file.spore>          # tar safety, lock, digests
-soil-spore sign    <file.spore> [--key ID]
+soil-spore sign    <file.spore> [--key ID | --principal LABEL [--socket PATH] [--fingerprint FP]]
 soil-spore verify-signature <file.spore> [--keyring FILE] [--key ID]
 soil-spore --version
 ```
@@ -267,11 +273,31 @@ prints the page, and `markdown --version` prints the identity line. Both are
 reads of installed metadata, not a launch, so they work in a session with no
 display.
 
+## Host install
+
+`soil-install` is the host authority, separate from the store presenter:
+
+```sh
+soil-install install <file.spore> --root DIR [--keyring FILE] [--key FP]
+soil-install rollback --id ID --root DIR
+soil-install status --root DIR [--json]
+soil-install apply --index FILE --root DIR --packages DIR --operator-key FILE [--write]
+```
+
+`install` verifies the tar and optional publisher signature, caches the tar by
+digest, unpacks into staging, and swaps the installed directory. `rollback`
+reinstalls the one previous digest. `apply` first calls `soil-store verify`: the
+checkpoint must match the entries, every delegation must be signed by the
+operator key, every entry must name a delegated publisher key and carry that
+publisher's signature, and the package sidecar must match the delegated key.
+It then uses `soil-store plan` and applies only `live` and `restart`; `consent`,
+`system` and `hold` are reported, never applied. `--allow-unsigned-dev` bypasses
+the index chain and is for local development only.
+
 ## Not implemented
 
-- The store service and the store Spore. The manifest, listing rules and review
-  gate are here; `docs/spore-store.md` is the design the service implements.
-- `soil:spore.install`. The install pipeline is specified, not granted.
+- The store Spore's `soil:spore.install` capability. `soil-install` is the host
+  CLI; granting that capability to `spores/store` is still a separate step.
 - Publishing to IPFS or a mirror set. `pack` produces the bytes; pinning them is
   the publisher's step.
 - Revocation. Mycelium owns that record; a package carries no revocation state.

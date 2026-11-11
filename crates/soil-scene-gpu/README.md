@@ -1,5 +1,12 @@
 # soil-scene-gpu
 
+> **Status: being retired.** Spore surfaces move to texture leases produced by
+the guest's own UI stack (GPUI today), with Canvas as compositor; see
+[`docs/gpu-spores.md`](../../docs/gpu-spores.md). This crate stays as the
+renderer for `tend`/`soil-viz` and for Lua guests that have no device, until
+the Lua-to-GPUI path lands. Its `GpuDense` decimation is the part with no GPUI
+equivalent and will move into the chart Spores themselves.
+
 Rasterize a `soil_scene` document into one RGBA frame with wgpu.
 
 ```sh

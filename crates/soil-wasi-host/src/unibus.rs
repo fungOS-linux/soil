@@ -152,6 +152,16 @@ fn validate_publish(
         return Err(BusError::Invalid);
     }
     if body.len() > MAX_BUS_BODY {
+        // The guest cannot say this: inside wasm its tracing goes nowhere, and
+        // the typed error it gets back becomes a bare 503 in the access log.
+        // A security delivery refused for size must name its cause here, or
+        // the next person reads the hub's logs to learn what the host knew.
+        tracing::warn!(
+            kind,
+            bytes = body.len(),
+            limit = MAX_BUS_BODY,
+            "bus publish refused: body over the control-plane ceiling"
+        );
         return Err(BusError::OverBudget);
     }
     if body.is_empty() {

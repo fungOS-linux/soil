@@ -1,0 +1,22 @@
+[package]
+name = "soil-openapi"
+description = "OpenAPI and TypeScript generated from the canonical Soil WIT"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+soil-abi = { path = "../soil-abi" }
+wit-parser = "0.233"
+
+[[bin]]
+name = "soil-openapi"
+path = "src/main.rs"
+
+[lints]
+workspace = true

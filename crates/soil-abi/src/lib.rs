@@ -151,6 +151,12 @@ pub const CONTRACTS: &[Contract] = &[
         interfaces: &[("appdata", &["open"])],
     },
     Contract {
+        file: "wit/fungos-mycelium.wit",
+        source: include_str!("../../../wit/fungos-mycelium.wit"),
+        package: "fungos:mycelium@0.1.0",
+        interfaces: &[("pulse", &["all", "put", "remove", "runs"])],
+    },
+    Contract {
         file: "wit/soil-mycelium.wit",
         source: include_str!("../../../wit/soil-mycelium.wit"),
         package: "soil:mycelium@0.1.0",

@@ -7,7 +7,7 @@ use soil_spore::manual::{Manual, read_prose, render_info};
 use soil_spore::publisher::TrustedPublisher;
 use soil_spore::{
     Error, Manifest, check, identity::Identity, lease, pack, publish_blockers, read_package, sign,
-    verify, verify_signature, write_lock,
+    sign_principal, verify, verify_signature, write_lock,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -96,9 +96,22 @@ fn run(args: Vec<String>) -> Result<(), Error> {
             print!("{}", Manual::from_manifest(&manifest, prose).render(width));
         }
         "info" => {
-            let root = one_path(rest)?;
+            let json = rest.iter().any(|arg| arg == "--json");
+            let paths: Vec<&String> = rest.iter().filter(|arg| *arg != "--json").collect();
+            let root = match paths.as_slice() {
+                [path] => PathBuf::from(path.as_str()),
+                _ => return Err(Error::Invalid(usage())),
+            };
             let (manifest, _) = load(&root)?;
-            print!("{}", render_info(&manifest));
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&manifest.info_json())
+                        .map_err(|error| Error::Invalid(error.to_string()))?
+                );
+            } else {
+                print!("{}", render_info(&manifest));
+            }
         }
         "pack" => {
             let (root, output) = pack_args(rest)?;
@@ -137,8 +150,26 @@ fn run(args: Vec<String>) -> Result<(), Error> {
         }
         "sign" => {
             let (package, key) = optional_arg(rest, "--key")?;
+            let principal = named_text(rest, "--principal");
+            let socket = named_arg(rest, "--socket");
+            let fingerprint = named_text(rest, "--fingerprint");
             let signature = signature_path(&package);
-            sign(&package, &signature, key.as_deref())?;
+            if let Some(principal) = principal {
+                if key.is_some() {
+                    return Err(Error::Invalid(
+                        "--principal and --key are mutually exclusive".into(),
+                    ));
+                }
+                sign_principal(
+                    &package,
+                    &signature,
+                    &principal,
+                    socket.as_deref(),
+                    fingerprint.as_deref(),
+                )?;
+            } else {
+                sign(&package, &signature, key.as_deref())?;
+            }
             println!("{}", signature.display());
         }
         "verify-signature" => {
@@ -164,7 +195,7 @@ fn run(args: Vec<String>) -> Result<(), Error> {
 }
 
 fn usage() -> String {
-    "usage: soil-spore check <dir> [--publish]\n       soil-spore lock <dir>\n       soil-spore digest <dir>\n       soil-spore man <dir|package.spore> [--width N]\n       soil-spore info <dir|package.spore>\n       soil-spore pack <dir> [-o out.spore]\n       soil-spore verify <package.spore>\n       soil-spore sign <package.spore> [--key ID]\n       soil-spore verify-signature <package.spore> [--keyring FILE] [--key ID]\n       soil-spore announce <dir> --endpoint URI [--home DIR] [--out FILE] [--every SECS] [--once] [--unsigned-dev]\n       soil-spore --version\n\nThe node id is read from --home's enrollment (default ~/.mycelium), never typed:\nthat is what makes a restarted node announce as itself.".into()
+    "usage: soil-spore check <dir> [--publish]\n       soil-spore lock <dir>\n       soil-spore digest <dir>\n       soil-spore man <dir|package.spore> [--width N]\n       soil-spore info <dir|package.spore> [--json]\n       soil-spore pack <dir> [-o out.spore]\n       soil-spore verify <package.spore>\n       soil-spore sign <package.spore> [--key ID | --principal LABEL [--socket PATH] [--fingerprint FP]]\n       soil-spore verify-signature <package.spore> [--keyring FILE] [--key ID]\n       soil-spore announce <dir> --endpoint URI [--home DIR] [--out FILE] [--every SECS] [--once] [--unsigned-dev]\n       soil-spore --version\n\nThe node id is read from --home's enrollment (default ~/.mycelium), never typed:\nthat is what makes a restarted node announce as itself.".into()
 }
 
 /// Read a Spore from a directory or a packed package.
@@ -560,6 +591,13 @@ fn named_arg(args: &[String], name: &str) -> Option<PathBuf> {
         .position(|arg| arg == name)
         .and_then(|index| args.get(index + 1))
         .map(PathBuf::from)
+}
+
+fn named_text(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|index| args.get(index + 1))
+        .cloned()
 }
 
 fn signature_path(package: &Path) -> PathBuf {

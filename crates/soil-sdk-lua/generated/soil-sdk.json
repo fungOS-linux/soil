@@ -315,6 +315,188 @@
       "version": "1.0.0"
     },
     {
+      "docs": "Host-attested context for an incoming HTTP invocation.\n\nThe host owns the listener, TLS, and routing. A Spore sees the request only\nthrough `wasi:http`; this interface adds the host-side facts that must not be\nspoofable request headers: which Spore ran, which route grant matched, and\nwho is on the other end of the transport.\n\n`current` is valid only for the duration of one `incoming-handler` call. A\nhost that calls a component outside an HTTP invocation has no context to\nreport and fails the call rather than inventing one.",
+      "id": "fungos:http-context@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "current",
+              "member": "current",
+              "name": "current",
+              "params": [],
+              "resource": null,
+              "result": "request-context"
+            }
+          ],
+          "id": "fungos:http-context@0.1.0/context",
+          "name": "context",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "request-id",
+                  "type": "string"
+                },
+                {
+                  "name": "spore",
+                  "type": "string"
+                },
+                {
+                  "name": "route",
+                  "type": "string"
+                },
+                {
+                  "name": "peer",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "tls-peer",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "received-at-ms",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "RequestContext",
+              "name": "request-context"
+            }
+          ]
+        }
+      ],
+      "name": "http-context",
+      "namespace": "fungos",
+      "version": "0.1.0"
+    },
+    {
+      "docs": "Hook administration: the one door the CLI and a console both use.\n\nThis is a product contract, not a runtime one (`fungos:`, not `soil:`): only a\nwebhook product knows what a slug, a provider and a tenant are. The host\nimplements it because the host owns the registry and, later, Geode - a guest\nthat can create a hook is not a guest that should be able to read the secret\nbytes behind one.\n\nThe secret crosses this boundary exactly once, in `created`. There is no\nread, no export and no list-of-secrets: a hook that is lost is revoked and\nmade again, which is cheaper than a capability that hands out credentials.",
+      "id": "fungos:webhooks@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Register a hook and mint its credential.\n\nOne call, not two: a hook without a credential accepts nothing, and a\ncredential without a hook is a secret nobody owns.",
+              "kind": "freestanding",
+              "lua": "create",
+              "member": "create",
+              "name": "create",
+              "params": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "provider",
+                  "type": "string"
+                },
+                {
+                  "name": "tenant",
+                  "type": "string"
+                },
+                {
+                  "name": "slug",
+                  "type": "option<string>"
+                }
+              ],
+              "resource": null,
+              "result": "result<created, error>"
+            },
+            {
+              "docs": "Every hook the caller may see. Never includes secrets.",
+              "kind": "freestanding",
+              "lua": "hooks",
+              "member": "hooks",
+              "name": "hooks",
+              "params": [],
+              "resource": null,
+              "result": "result<list<hook>, error>"
+            },
+            {
+              "docs": "Revoke a hook and its credential. `false` means it was already gone,\nwhich is not an error - the caller wanted it absent and it is absent.",
+              "kind": "freestanding",
+              "lua": "revoke",
+              "member": "revoke",
+              "name": "revoke",
+              "params": [
+                {
+                  "name": "slug",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<bool, error>"
+            }
+          ],
+          "id": "fungos:webhooks@0.1.0/admin",
+          "name": "admin",
+          "types": [
+            {
+              "docs": "The only value that ever carries a secret.",
+              "fields": [
+                {
+                  "name": "hook",
+                  "type": "hook"
+                },
+                {
+                  "name": "secret",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Created",
+              "name": "created"
+            },
+            {
+              "cases": [
+                "invalid",
+                "conflict",
+                "denied",
+                "unavailable"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": "A registered endpoint. The secret is deliberately absent.",
+              "fields": [
+                {
+                  "name": "slug",
+                  "type": "string"
+                },
+                {
+                  "name": "provider",
+                  "type": "string"
+                },
+                {
+                  "name": "tenant",
+                  "type": "string"
+                },
+                {
+                  "name": "created-at-ms",
+                  "type": "u64"
+                }
+              ],
+              "kind": "record",
+              "lua": "Hook",
+              "name": "hook"
+            }
+          ]
+        }
+      ],
+      "name": "webhooks",
+      "namespace": "fungos",
+      "version": "0.1.0"
+    },
+    {
       "docs": "Private app storage.\n\nAppData is scoped to the signed Spore's app identity and the current user.\nThe Spore sees opaque keys and bytes, never a host path, table, app id, or\nanother app's namespace.\n\n`local` is device-only. `synced` is a per-app, per-user private book that\nreplicates through the native records engine. Synced AppData is not indexed\nor shareable; structured/shareable data belongs in `soil:records`.",
       "id": "soil:appdata@1.0.0",
       "interfaces": [
@@ -914,12 +1096,17 @@
               "result": "result<state, failure>"
             },
             {
-              "docs": "Render the granted owner surface. The host retains the pixels.",
+              "docs": "Present into the space the host granted.\n\n`document` is a versioned payload from `soil-scene`: a scene the host\nrasterizes, an RGBA frame the Spore rendered, or a lease on a GPU texture.\nIt is bytes rather than a WIT type on purpose -- a new node kind must not\nrebuild every Spore that draws. The host validates it and refuses anything\nit cannot present, naming the reason.",
               "kind": "freestanding",
               "lua": "present",
               "member": "present",
               "name": "present",
-              "params": [],
+              "params": [
+                {
+                  "name": "document",
+                  "type": "list<u8>"
+                }
+              ],
               "resource": null,
               "result": "result<state, failure>"
             }
@@ -976,6 +1163,26 @@
               "docs": null,
               "fields": [
                 {
+                  "name": "r",
+                  "type": "u8"
+                },
+                {
+                  "name": "g",
+                  "type": "u8"
+                },
+                {
+                  "name": "b",
+                  "type": "u8"
+                }
+              ],
+              "kind": "record",
+              "lua": "Rgb",
+              "name": "rgb"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
                   "name": "generation",
                   "type": "u64"
                 },
@@ -998,16 +1205,239 @@
                 {
                   "name": "visible",
                   "type": "bool"
+                },
+                {
+                  "name": "theme",
+                  "type": "theme"
                 }
               ],
               "kind": "record",
               "lua": "State",
               "name": "state"
+            },
+            {
+              "docs": "Theme tokens the host has already resolved. A Spore-owned renderer reads\nthese instead of guessing colors from a screenshot or hard-coding its own.",
+              "fields": [
+                {
+                  "name": "mode",
+                  "type": "theme-mode"
+                },
+                {
+                  "name": "background",
+                  "type": "rgb"
+                },
+                {
+                  "name": "surface",
+                  "type": "rgb"
+                },
+                {
+                  "name": "text",
+                  "type": "rgb"
+                },
+                {
+                  "name": "muted",
+                  "type": "rgb"
+                },
+                {
+                  "name": "primary",
+                  "type": "rgb"
+                },
+                {
+                  "name": "success",
+                  "type": "rgb"
+                },
+                {
+                  "name": "warning",
+                  "type": "rgb"
+                },
+                {
+                  "name": "danger",
+                  "type": "rgb"
+                },
+                {
+                  "name": "info",
+                  "type": "rgb"
+                },
+                {
+                  "name": "micro",
+                  "type": "f32"
+                },
+                {
+                  "name": "small",
+                  "type": "f32"
+                },
+                {
+                  "name": "body",
+                  "type": "f32"
+                },
+                {
+                  "name": "large",
+                  "type": "f32"
+                },
+                {
+                  "name": "title",
+                  "type": "f32"
+                },
+                {
+                  "name": "display",
+                  "type": "f32"
+                },
+                {
+                  "name": "hero",
+                  "type": "f32"
+                },
+                {
+                  "name": "space-two",
+                  "type": "f32"
+                },
+                {
+                  "name": "radius",
+                  "type": "f32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Theme",
+              "name": "theme"
+            },
+            {
+              "cases": [
+                "light",
+                "dark"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "ThemeMode",
+              "name": "theme-mode"
             }
           ]
         }
       ],
       "name": "canvas",
+      "namespace": "soil",
+      "version": "1.0.0"
+    },
+    {
+      "docs": "Host-mediated credentials.\n\nA Spore names a credential and asks the host to sign or verify. Secret bytes\nnever enter the guest: `resolve` returns an opaque handle, and every\noperation is re-checked against the host's grant and expiry on use.\n\nThe host adapter for this interface is Geode (Mycelium). This contract is\ndeliberately smaller than a key store: no enumeration, no read, no export.",
+      "id": "soil:creds@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Resolve a granted credential name to an opaque handle.",
+              "kind": "freestanding",
+              "lua": "resolve",
+              "member": "resolve",
+              "name": "resolve",
+              "params": [
+                {
+                  "name": "name",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<handle, error>"
+            },
+            {
+              "docs": "Sign a message with a resolved handle.",
+              "kind": "freestanding",
+              "lua": "sign",
+              "member": "sign",
+              "name": "sign",
+              "params": [
+                {
+                  "name": "handle",
+                  "type": "handle"
+                },
+                {
+                  "name": "algorithm",
+                  "type": "algorithm"
+                },
+                {
+                  "name": "message",
+                  "type": "list<u8>"
+                }
+              ],
+              "resource": null,
+              "result": "result<list<u8>, error>"
+            },
+            {
+              "docs": "Verify a signature with a resolved handle. A mismatched signature is\n`ok(false)`, not an error; errors describe the credential or request.",
+              "kind": "freestanding",
+              "lua": "verify",
+              "member": "verify",
+              "name": "verify",
+              "params": [
+                {
+                  "name": "handle",
+                  "type": "handle"
+                },
+                {
+                  "name": "algorithm",
+                  "type": "algorithm"
+                },
+                {
+                  "name": "message",
+                  "type": "list<u8>"
+                },
+                {
+                  "name": "signature",
+                  "type": "list<u8>"
+                }
+              ],
+              "resource": null,
+              "result": "result<bool, error>"
+            }
+          ],
+          "id": "soil:creds@1.0.0/creds",
+          "name": "creds",
+          "types": [
+            {
+              "cases": [
+                "hmac-sha256",
+                "ed25519"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Algorithm",
+              "name": "algorithm"
+            },
+            {
+              "cases": [
+                "denied",
+                "invalid",
+                "expired",
+                "unavailable"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "purpose",
+                  "type": "string"
+                },
+                {
+                  "name": "expires-at-ms",
+                  "type": "option<u64>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Handle",
+              "name": "handle"
+            }
+          ]
+        }
+      ],
+      "name": "creds",
       "namespace": "soil",
       "version": "1.0.0"
     },
@@ -1545,7 +1975,11 @@
             {
               "cases": [
                 "get",
-                "head"
+                "head",
+                "post",
+                "put",
+                "patch",
+                "delete"
               ],
               "docs": null,
               "kind": "enum",
@@ -1566,6 +2000,10 @@
                 {
                   "name": "headers",
                   "type": "list<header>"
+                },
+                {
+                  "name": "body",
+                  "type": "option<list<u8>>"
                 },
                 {
                   "name": "credential",
@@ -4738,8 +5176,83 @@
       "version": "0.1.0"
     },
     {
+      "docs": "The scene payload is data, not an interface: it is what `soil:canvas.present`\ncarries, and it is versioned inside the document so a new node kind never\nrebuilds the Spores that draw.\n\nThis package exists only so a Spore can ask the host what it accepts before it\nbuilds a document. It deliberately does not describe the document's shape --\nthat lives in `soil-scene` (Rust) and is checked at present time, where a\nproducer can be told *why* something was refused.",
+      "id": "soil:scene@1.0.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Host-enforced ceilings, so a producer can budget against the same numbers\nthe host will refuse at rather than discovering them by trial.",
+              "kind": "freestanding",
+              "lua": "budget",
+              "member": "budget",
+              "name": "budget",
+              "params": [],
+              "resource": null,
+              "result": "limits"
+            },
+            {
+              "docs": "Highest schema version the host can draw. A producer that needs newer\nnodes gets `false` here instead of a failure at present time.",
+              "kind": "freestanding",
+              "lua": "supports",
+              "member": "supports",
+              "name": "supports",
+              "params": [
+                {
+                  "name": "schema",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "bool"
+            }
+          ],
+          "id": "soil:scene@1.0.0/payload",
+          "name": "payload",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "max-nodes",
+                  "type": "u32"
+                },
+                {
+                  "name": "max-text-bytes",
+                  "type": "u32"
+                },
+                {
+                  "name": "max-payload-bytes",
+                  "type": "u32"
+                },
+                {
+                  "name": "width",
+                  "type": "u32"
+                },
+                {
+                  "name": "height",
+                  "type": "u32"
+                },
+                {
+                  "name": "scale",
+                  "type": "f32"
+                }
+              ],
+              "kind": "record",
+              "lua": "Limits",
+              "name": "limits"
+            }
+          ]
+        }
+      ],
+      "name": "scene",
+      "namespace": "soil",
+      "version": "1.0.0"
+    },
+    {
       "docs": "Host-composed global search across granted local sources.\n\nThis is a derived discovery surface, not authority. Files still come from\n`soil:vfs`, records from `soil:records`, and actions from their owning host\ncapability. A hit is a locator plus display metadata; the caller fetches the\nauthoritative object through the source capability.",
-      "id": "soil:search@0.5.0",
+      "id": "soil:search@0.6.0",
       "interfaces": [
         {
           "docs": "Typed mention resolver for `@` autocomplete.\n\nA candidate is a stable locator, never a copied display name. The caller\ninserts `token` into a document/task/record and persists it as a\n`mentions` graph link. The host resolves labels and visibility from the\nsame approved books used by search.",
@@ -4768,7 +5281,7 @@
               "result": "result<list<candidate>, error>"
             }
           ],
-          "id": "soil:search@0.5.0/mentions",
+          "id": "soil:search@0.6.0/mentions",
           "name": "mentions",
           "types": [
             {
@@ -4859,7 +5372,7 @@
               "result": "result<search-state, error>"
             }
           ],
-          "id": "soil:search@0.5.0/search",
+          "id": "soil:search@0.6.0/search",
           "name": "search",
           "types": [
             {
@@ -4915,6 +5428,10 @@
                 {
                   "name": "references",
                   "type": "list<reference>"
+                },
+                {
+                  "name": "icon",
+                  "type": "option<string>"
                 }
               ],
               "kind": "record",
@@ -4929,6 +5446,7 @@
                 "spore",
                 "peer",
                 "service",
+                "application",
                 "action",
                 "task",
                 "principal"
@@ -5048,7 +5566,157 @@
       ],
       "name": "search",
       "namespace": "soil",
-      "version": "0.5.0"
+      "version": "0.6.0"
+    },
+    {
+      "docs": "Installed Spore catalog and host-owned launch.\n\nA Spore never scans the filesystem, starts a process, or chooses a window.\nThe host validates packages, maps them to a launch target, and performs the\nlaunch outside the guest.",
+      "id": "soil:spore@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": null,
+              "kind": "freestanding",
+              "lua": "entries",
+              "member": "entries",
+              "name": "entries",
+              "params": [],
+              "resource": null,
+              "result": "result<list<entry>, error>"
+            },
+            {
+              "docs": "Launch `surface` of `id`.\n\nFails with `unsupported` when this host cannot present the surface's kind\n— a host without a browser view refuses a `web` surface rather than\nopening something it cannot render. A name the package does not declare\nis `not-found`.",
+              "kind": "freestanding",
+              "lua": "launch",
+              "member": "launch",
+              "name": "launch",
+              "params": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "surface",
+                  "type": "string"
+                }
+              ],
+              "resource": null,
+              "result": "result<launched, error>"
+            }
+          ],
+          "id": "soil:spore@0.1.0/catalog",
+          "name": "catalog",
+          "types": [
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "version",
+                  "type": "string"
+                },
+                {
+                  "name": "summary",
+                  "type": "string"
+                },
+                {
+                  "name": "workspace",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "default-surface",
+                  "type": "string"
+                },
+                {
+                  "name": "surfaces",
+                  "type": "list<surface>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Entry",
+              "name": "entry"
+            },
+            {
+              "cases": [
+                "denied",
+                "not-found",
+                "invalid",
+                "unsupported",
+                "io"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "string"
+                },
+                {
+                  "name": "surface",
+                  "type": "string"
+                },
+                {
+                  "name": "target",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Launched",
+              "name": "launched"
+            },
+            {
+              "docs": "One view a package ships, declared so a host can tell what it would have\nto provide before it opens anything.\n\n`entry` is a path inside the package, never a content id. The package is\nthe unit of identity and provenance: its lock and digest already cover\nevery byte under its root, so a per-asset content id would be a second\nversion of the same fact and the two would drift.",
+              "fields": [
+                {
+                  "name": "name",
+                  "type": "string"
+                },
+                {
+                  "name": "kind",
+                  "type": "surface-kind"
+                },
+                {
+                  "name": "entry",
+                  "type": "string"
+                },
+                {
+                  "name": "requires",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Surface",
+              "name": "surface"
+            },
+            {
+              "cases": [
+                "canvas",
+                "web"
+              ],
+              "docs": "How a host presents a surface.\n\nNative rendering is deliberately absent: it is the default, it is what\n`[module]` and `[ui]` already are, and a package that needs nothing extra\nshould not have to declare it.",
+              "kind": "enum",
+              "lua": "SurfaceKind",
+              "name": "surface-kind"
+            }
+          ]
+        }
+      ],
+      "name": "spore",
+      "namespace": "soil",
+      "version": "0.1.0"
     },
     {
       "docs": "Host content-addressed asset cache.\n\nA Spore names a CID, never a path, directory, URL or handle. `read` is\ngranted by `soil:storage.read` (the default) and `write` by the separate\n`soil:storage.write` grant. Writes reach a bounded host cache, never the\nasset store or the Spore Store.",
@@ -5340,7 +6008,8 @@
                 "remote",
                 "media",
                 "spore",
-                "retained"
+                "retained",
+                "browser"
               ],
               "docs": null,
               "kind": "enum",
@@ -5785,6 +6454,139 @@
       "name": "time",
       "namespace": "soil",
       "version": "1.0.0"
+    },
+    {
+      "docs": "Bounded observation and publication on the Unibus.\n\nUnibus L1 routes opaque envelopes; this capability is the Spore-facing edge.\nIt never exposes credentials, peer identities, or raw sockets. A Spore\nsubscribes by kind and receives metadata/body bytes; it does not get bus\ninternals or the ability to bypass grants.",
+      "id": "soil:unibus@0.1.0",
+      "interfaces": [
+        {
+          "docs": null,
+          "functions": [
+            {
+              "docs": "Poll retained frames for the listed kinds. An empty `kinds` list means\nno kinds, never \"all\"; a Spore must name what it observes.",
+              "kind": "freestanding",
+              "lua": "poll",
+              "member": "poll",
+              "name": "poll",
+              "params": [
+                {
+                  "name": "kinds",
+                  "type": "list<string>"
+                },
+                {
+                  "name": "cursor",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "limit",
+                  "type": "u32"
+                }
+              ],
+              "resource": null,
+              "result": "result<page, error>"
+            },
+            {
+              "docs": "Publish one frame. Requires `soil:unibus.publish`; destinations and TTL\nare bounded by the host. No credentials cross this boundary.",
+              "kind": "freestanding",
+              "lua": "publish",
+              "member": "publish",
+              "name": "publish",
+              "params": [
+                {
+                  "name": "kind",
+                  "type": "string"
+                },
+                {
+                  "name": "body",
+                  "type": "list<u8>"
+                },
+                {
+                  "name": "destination",
+                  "type": "option<string>"
+                },
+                {
+                  "name": "ttl-ms",
+                  "type": "u64"
+                }
+              ],
+              "resource": null,
+              "result": "result<receipt, error>"
+            }
+          ],
+          "id": "soil:unibus@0.1.0/bus",
+          "name": "bus",
+          "types": [
+            {
+              "cases": [
+                "denied",
+                "invalid",
+                "over-budget",
+                "stale",
+                "unavailable"
+              ],
+              "docs": null,
+              "kind": "enum",
+              "lua": "Error",
+              "name": "error"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "kind",
+                  "type": "string"
+                },
+                {
+                  "name": "producer",
+                  "type": "string"
+                },
+                {
+                  "name": "issued-at-ms",
+                  "type": "u64"
+                },
+                {
+                  "name": "body",
+                  "type": "list<u8>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Frame",
+              "name": "frame"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "frames",
+                  "type": "list<frame>"
+                },
+                {
+                  "name": "next",
+                  "type": "option<string>"
+                }
+              ],
+              "kind": "record",
+              "lua": "Page",
+              "name": "page"
+            },
+            {
+              "docs": null,
+              "fields": [
+                {
+                  "name": "request-id",
+                  "type": "string"
+                }
+              ],
+              "kind": "record",
+              "lua": "Receipt",
+              "name": "receipt"
+            }
+          ]
+        }
+      ],
+      "name": "unibus",
+      "namespace": "soil",
+      "version": "0.1.0"
     },
     {
       "docs": "Bounded, explicitly granted VFS mutation.\n\nThis is a separate grant from read-only `soil:vfs`. Paths remain canonical\nworkspace-relative paths; the Spore never receives a host path, descriptor,\nprovider locator, or raw CID.",

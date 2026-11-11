@@ -14,7 +14,18 @@ path = "src/main.rs"
 anyhow = "1"
 fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af" }
 soil-host = { path = "../soil-host" }
+# Hosting any `.spore`: the launcher is the generic one, so it links the host
+# instead of re-implementing it per product.
+soil-spore = { path = "../soil-spore" }
+soil-web-bridge = { path = "../soil-web-bridge" }
+soil-wasi-host = { path = "../soil-wasi-host" }
+http = "1"
 serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unibus = { git = "https://github.com/fungOS-linux/unibus.git", rev = "8bf8f79" }
 
 [dev-dependencies]
 tempfile = "3"

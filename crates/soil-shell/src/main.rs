@@ -16,6 +16,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use fungos_vfs::Vfs;
 
+mod spore;
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("soil: {error:#}");
@@ -26,6 +28,8 @@ fn main() {
 fn usage() -> &'static str {
     "usage: soil --root ROOT <command>\n\
      commands:\n\
+       spore run <dir|package.spore> [--listen ADDR] [--hub ADDR]... [--unibus-config FILE]\n\
+                                    [--bridge ADDR] [--bridge-wait SECS] [--allow-origin URL]...\n\
        shell [--mount DIR] [--fuse-binary PATH] [--shell PATH] [--no-mount] [-- command...]\n\
        ls [PREFIX]\n\
        stat PATH\n\
@@ -45,6 +49,9 @@ fn run() -> Result<()> {
     };
     args.remove(0);
     match command.as_str() {
+        // Any `.spore` on the names it claims: the same launcher for every
+        // Spore, so a product never ships its own host again.
+        "spore" => spore::run(&args),
         "shell" => shell(&root, args),
         "rm" => remove(&root, args),
         "ls" => list(&root, args),
@@ -273,17 +280,33 @@ fn expand_home(value: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A store inside the root's own state directory: it dies with the tempdir,
+    /// and no other test (or the operator's real store) can see it.
+    fn open_owned(root: &std::path::Path) -> Vfs {
+        Vfs::open_with(
+            root,
+            fungos_vfs::NodeRole::Full,
+            Some(&root.join(".fungos/store")),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn rm_unlinks_namespace_and_keeps_history() {
         let dir = tempfile::tempdir().unwrap();
-        let mut vfs = Vfs::open(dir.path()).unwrap();
+        let mut vfs = open_owned(dir.path());
         let entry = vfs
-            .put("notes.txt", b"keep this blob", "text/plain", None)
+            .put(
+                "notes.txt",
+                b"keep this blob",
+                "text/plain",
+                fungos_vfs::Expect::Any,
+            )
             .unwrap();
         remove(dir.path(), vec!["notes.txt".into()]).unwrap();
         assert!(vfs.file("notes.txt").unwrap().is_none());
         let history = vfs.history("notes.txt").unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].1, entry.content_id);
+        assert_eq!(history[0].content_id, entry.content_id);
     }
 }

@@ -129,6 +129,15 @@ pub struct Manifest {
     /// authorizes it.
     #[serde(default)]
     pub anycast: Option<Anycast>,
+    /// The names this Spore answers on, and what it will accept there.
+    ///
+    /// A claim is routing, not privilege. Claiming `contacts.myc` says where
+    /// requests arrive; it says nothing about what the Spore may do with them,
+    /// which stays in `[grants]`. The host refuses two live claims on one name
+    /// unless an operator pins the name, because a silently stolen name is the
+    /// failure that never shows up in a unit test.
+    #[serde(default)]
+    pub http: Option<Http>,
     /// Chrome regions this Spore draws, when it draws any.
     #[serde(default)]
     pub chrome: Option<Chrome>,
@@ -161,6 +170,14 @@ pub struct Manifest {
     /// keeps working untouched.
     #[serde(default)]
     pub surfaces: Vec<Surface>,
+    /// Command-line programs this Spore installs into a shell's virtual PATH.
+    ///
+    /// A command is not an action: an action takes one JSON request, a command
+    /// takes argv and stdin and answers on stdout with an exit code. Both are
+    /// declared here because the package owns both faces; the shell decides
+    /// which of them it exposes.
+    #[serde(default)]
+    pub commands: Vec<SporeCommand>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -178,6 +195,17 @@ pub struct Action {
     pub expose: Vec<String>,
     #[serde(default)]
     pub idempotent: bool,
+}
+
+/// One program a Spore installs into a shell's virtual PATH.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SporeCommand {
+    /// The name a shell resolves. A slug, so it cannot be mistaken for a path.
+    pub name: String,
+    pub summary: String,
+    /// A `wasi:cli` command component, relative to the package root.
+    pub module: String,
 }
 
 /// One agent skill: a `SKILL.md` whose frontmatter names it.
@@ -351,7 +379,14 @@ pub const CHROME_REGIONS: [&str; 8] = [
 #[serde(deny_unknown_fields)]
 pub struct SporeMeta {
     pub id: String,
+    /// The package directory and registry slug. Stable and lower-case; it is
+    /// identity, not a label.
     pub name: String,
+    /// How the app names itself in a window title, a Dock, or a launcher row.
+    /// Optional so every manifest written before this field keeps working; a
+    /// host falls back to title-casing `name`.
+    #[serde(default)]
+    pub title: Option<String>,
     pub version: String,
     pub license: String,
     pub summary: String,
@@ -440,6 +475,90 @@ pub struct Anycast {
 }
 
 pub const MAX_LEASE_SECS: u64 = 300;
+
+/// A command name: a slug a shell resolves, never a path or a flag.
+fn command_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        // It must start like a word, not like a flag: `--force` in a PATH is a
+        // name a shell would hand to the wrong program.
+        && value
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A hostname a vhost could be granted: lowercase labels, no scheme, no port.
+fn http_host(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+}
+
+/// Most hostnames one Spore may claim. A Spore serving a handful of names is
+/// ordinary; one claiming dozens is a registry, not a Spore.
+pub const MAX_HTTP_HOSTS: usize = 16;
+
+/// Most routes one Spore may declare.
+pub const MAX_HTTP_ROUTES: usize = 32;
+
+/// Largest request body a claimed route may accept.
+pub const MAX_HTTP_BODY: usize = 1024 * 1024;
+
+/// Methods a route may name.
+///
+/// A closed set: an unknown method is a typo or a fresh idea, and both should
+/// arrive as a change to this list rather than as a route that silently never
+/// matches.
+pub const HTTP_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+/// Where a Spore answers, declared by the Spore so an install needs no sidecar
+/// config.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Http {
+    /// Hostnames, as a vhost would match them: no scheme, no port, no path.
+    pub hosts: Vec<String>,
+    #[serde(default = "default_max_body")]
+    pub max_body: usize,
+    #[serde(default)]
+    pub origin_auth: OriginAuth,
+    pub routes: Vec<HttpRoute>,
+}
+
+/// One URL prefix this Spore will service, and the methods it accepts there.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpRoute {
+    pub methods: Vec<String>,
+    /// Prefix, beginning with `/`. A grant is a prefix rather than a pattern:
+    /// the vhost already decides which Spore sees the request.
+    pub path: String,
+}
+
+/// Transport truth for a listener.
+///
+/// Most Spores verify a provider's own signature. A declared terminator says
+/// the reverse: only that peer may assert a verified identity, because it saw
+/// the client certificate and this process did not.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OriginAuth {
+    #[default]
+    ProviderSignature,
+    TrustedTerminator,
+}
+
+const fn default_max_body() -> usize {
+    64 * 1024
+}
 
 const fn default_lease_secs() -> u64 {
     240
@@ -669,6 +788,69 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /// A stable, non-secret projection for authoring tools.
+    ///
+    /// `tend dev`/`tend publish` need the id, view entry, declared surfaces and
+    /// listing fields without implementing a second TOML parser. This is the
+    /// JSON shape they consume; it contains no package bytes and no keys.
+    #[must_use]
+    pub fn info_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.spore.id,
+            "name": self.spore.name,
+            "version": self.spore.version,
+            "license": self.spore.license,
+            "summary": self.spore.summary,
+            "description": self.spore.description,
+            "homepage": self.spore.homepage,
+            "engine": {
+                "soil": self.engine.soil,
+                "target": self.engine.target,
+                "abi": self.engine.abi,
+            },
+            "module": self.module.as_ref().map(|module| serde_json::json!({
+                "path": module.path,
+                "sha256": module.sha256,
+            })),
+            "ui": self.ui.as_ref().map(|ui| serde_json::json!({
+                "entry": ui.entry,
+                "jit": ui.jit,
+                "hot_reload": ui.hot_reload,
+            })),
+            "launch": {
+                "default": self.launch.default,
+                "surfaces": self.launch.surfaces,
+                "canvas_module": self.launch.canvas_module,
+            },
+            "surfaces": self.surfaces.iter().map(|surface| serde_json::json!({
+                "name": surface.name,
+                "kind": surface.kind.as_str(),
+                "entry": surface.entry,
+                "requires": surface.requires,
+            })).collect::<Vec<_>>(),
+            "grants": self.grants,
+            "docs": self.docs.as_ref().map(|docs| serde_json::json!({
+                "usage": docs.usage,
+                "man": docs.man,
+            })),
+            "presentation": self.presentation.as_ref().map(|presentation| serde_json::json!({
+                "badge": presentation.badge,
+                "color": presentation.color,
+                "icon": presentation.icon,
+            })),
+            "catalog": self.catalog.as_ref().map(|catalog| serde_json::json!({
+                "categories": catalog.categories,
+                "keywords": catalog.keywords,
+                "screenshots": catalog.screenshots.iter().map(|screenshot| serde_json::json!({
+                    "cid": screenshot.cid,
+                    "caption": screenshot.caption,
+                })).collect::<Vec<_>>(),
+                "record": catalog.record,
+            })),
+            "system": self.system.as_ref().map(|system| system.role.clone()),
+        })
+    }
+
     /// Skills are files, so only `load` can check them: `parse` has no root.
     /// A declared skill that is missing, unnamed, or misnamed is a packaging
     /// error, not a runtime surprise.
@@ -767,10 +949,18 @@ impl Manifest {
             // A Spore without a module still has to do something. Any entrypoint
             // counts, and Lua is one of them: the host JITs `[ui] entry`, so a
             // Lua-only Spore is a program, not a second-class attachment to a
-            // wasm build. `chrome` counts because a host draws the region.
-            None if self.ui.is_none() && self.chrome.is_none() => {
+            // wasm build. `chrome` counts because a host draws the region, and a
+            // declared surface counts because a page is an entrypoint too: a
+            // web-only Spore is a program the host presents in a browser view.
+            None if self.ui.is_none()
+                && self.chrome.is_none()
+                && !self
+                    .surfaces
+                    .iter()
+                    .any(|surface| surface.entry(self.ui.as_ref()).is_some()) =>
+            {
                 return Err(Error::Invalid(
-                    "a Spore needs an entrypoint: a module, a Lua UI, or a chrome region".into(),
+                    "a Spore needs an entrypoint: a module, a Lua UI, a chrome region, or a declared surface".into(),
                 ));
             }
             None => {}
@@ -833,13 +1023,13 @@ impl Manifest {
                         surface.name, surface.kind
                     )));
                 }
-                if let Some(requires) = &surface.requires {
-                    if !identifier(requires) {
-                        return Err(Error::Invalid(format!(
-                            "surface {:?} requires {requires:?}, which must be lowercase letters, digits, - or _",
-                            surface.name
-                        )));
-                    }
+                if let Some(requires) = &surface.requires
+                    && !identifier(requires)
+                {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} requires {requires:?}, which must be lowercase letters, digits, - or _",
+                        surface.name
+                    )));
                 }
                 // A kind list, when given, is an outer bound: one artifact can
                 // render on more engines than the package names surfaces for,
@@ -916,6 +1106,96 @@ impl Manifest {
                 return Err(Error::Invalid(format!(
                     "anycast.ttl_secs {} must be 1..={MAX_LEASE_SECS}",
                     anycast.ttl_secs
+                )));
+            }
+        }
+
+        if let Some(http) = &self.http {
+            if self.module.is_none() {
+                return Err(Error::Invalid(
+                    "[http] needs a module: a Spore that answers on a name must be able to answer"
+                        .into(),
+                ));
+            }
+            if http.hosts.is_empty() || http.hosts.len() > MAX_HTTP_HOSTS {
+                return Err(Error::Invalid(format!(
+                    "[http] needs 1..={MAX_HTTP_HOSTS} hosts"
+                )));
+            }
+            for host in &http.hosts {
+                if !http_host(host) {
+                    return Err(Error::Invalid(format!(
+                        "http host {host:?} must be a lowercase hostname, no scheme, port or path"
+                    )));
+                }
+            }
+            if http.max_body == 0 || http.max_body > MAX_HTTP_BODY {
+                return Err(Error::Invalid(format!(
+                    "http.max_body {} must be 1..={MAX_HTTP_BODY}",
+                    http.max_body
+                )));
+            }
+            if http.routes.is_empty() || http.routes.len() > MAX_HTTP_ROUTES {
+                return Err(Error::Invalid(format!(
+                    "[http] needs 1..={MAX_HTTP_ROUTES} routes"
+                )));
+            }
+            for route in &http.routes {
+                if !route.path.starts_with('/')
+                    || route.path.len() > 128
+                    || route
+                        .path
+                        .chars()
+                        .any(|c| c.is_whitespace() || c.is_control())
+                {
+                    return Err(Error::Invalid(format!(
+                        "route path {:?} must start with `/`, be at most 128 bytes, and contain no whitespace",
+                        route.path
+                    )));
+                }
+                if route.methods.is_empty() {
+                    return Err(Error::Invalid(format!(
+                        "route {} names no methods",
+                        route.path
+                    )));
+                }
+                for method in &route.methods {
+                    if !HTTP_METHODS.contains(&method.as_str()) {
+                        return Err(Error::Invalid(format!(
+                            "route {} names method {method:?}; allowed: {}",
+                            route.path,
+                            HTTP_METHODS.join(", ")
+                        )));
+                    }
+                }
+            }
+        }
+
+        let mut command_names = std::collections::BTreeSet::new();
+        for command in &self.commands {
+            if !command_slug(&command.name) {
+                return Err(Error::Invalid(format!(
+                    "command name {:?} must be lowercase [a-z0-9-] and at most 32 bytes",
+                    command.name
+                )));
+            }
+            if !command_names.insert(command.name.clone()) {
+                return Err(Error::Invalid(format!(
+                    "command {:?} is declared twice",
+                    command.name
+                )));
+            }
+            if command.summary.trim().is_empty() {
+                return Err(Error::Invalid(format!(
+                    "command {:?} has no summary, so a shell cannot list it",
+                    command.name
+                )));
+            }
+            safe_relative(&command.module)?;
+            if !command.module.ends_with(".wasm") {
+                return Err(Error::Invalid(format!(
+                    "command {:?} module must end in .wasm",
+                    command.name
                 )));
             }
         }
@@ -1099,6 +1379,7 @@ impl Manifest {
         }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
         paths.extend(self.skills.iter().map(|skill| skill.path.clone()));
+        paths.extend(self.commands.iter().map(|command| command.module.clone()));
         if let Some(man) = self.docs.as_ref().and_then(|docs| docs.man.clone()) {
             paths.push(man);
         }
@@ -1836,11 +2117,27 @@ pub fn write_lock(root: &Path) -> Result<Lock> {
 pub fn pack(root: &Path) -> Result<Vec<u8>> {
     let manifest = Manifest::load(root)?;
     let lock = write_lock(root)?;
+    tarball(root, &manifest, &lock)
+}
+
+/// Pack a tree whose `spore.lock` is already current, without writing to it.
+///
+/// The lock is the package identity a publisher reviewed, so a reader that only
+/// wants the bytes — the store index, a mirror, a review queue — must not
+/// refresh it. A stale lock means the tree is not what was published, and the
+/// answer is `soil-spore lock`, not a digest nobody looked at.
+pub fn pack_locked(root: &Path) -> Result<Vec<u8>> {
+    let manifest = Manifest::load(root)?;
+    let lock = check(root)?;
+    tarball(root, &manifest, &lock)
+}
+
+fn tarball(root: &Path, manifest: &Manifest, lock: &Lock) -> Result<Vec<u8>> {
     if lock.id != manifest.spore.id || lock.version != manifest.spore.version {
         return Err(Error::Lock("lock does not match the manifest".into()));
     }
 
-    let mut files = collect_package(root, &manifest)?;
+    let mut files = collect_package(root, manifest)?;
     files.push((LOCK_NAME.to_owned(), lock.render().into_bytes()));
 
     let total: u64 = files.iter().map(|(_, bytes)| bytes.len() as u64).sum();
@@ -2025,6 +2322,198 @@ pub fn sign(package: &Path, signature: &Path, key: Option<&str>) -> Result<()> {
     }
     command.arg(package);
     run(command, "gpg --detach-sign")
+}
+
+/// Sign a package through a running Geode broker.
+///
+/// `principal` is the Geode account label, not the raw OIDC subject: the
+/// reference is `geode://principal/<label>/pgp`. The `geode-pgp` client leases
+/// the key from `geoded` and returns only the detached signature; Soil never
+/// sees key material.
+///
+/// `socket` defaults to `GEODE_SOCKET` or `$HOME/.geode/geode.sock` in the
+/// client. `fingerprint` is optional because the client can read it from the
+/// leased key.
+pub fn sign_principal(
+    package: &Path,
+    signature: &Path,
+    principal: &str,
+    socket: Option<&Path>,
+    fingerprint: Option<&str>,
+) -> Result<()> {
+    validate_geode_label(principal)?;
+    let reference = format!("geode://principal/{principal}/pgp");
+    let mut command = std::process::Command::new("geode-pgp");
+    command
+        .arg("sign")
+        .arg("--reference")
+        .arg(&reference)
+        .arg("--purpose")
+        .arg("spore.package.sign")
+        .arg("--message")
+        .arg(package);
+    if let Some(socket) = socket {
+        command.arg("--socket").arg(socket);
+    }
+    if let Some(fingerprint) = fingerprint {
+        command.arg("--fingerprint").arg(fingerprint);
+    }
+    let output = command
+        .output()
+        .map_err(|error| Error::Tool(format!("geode-pgp: {error}")))?;
+    if !output.status.success() {
+        return Err(Error::Signature(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    std::fs::write(signature, output.stdout)
+        .map_err(|error| Error::Io(format!("{}: {error}", signature.display())))
+}
+
+fn validate_geode_label(label: &str) -> Result<()> {
+    let mut bytes = label.bytes();
+    let starts_well = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric());
+    let rest_well =
+        bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if label.is_empty() || label.len() > 64 || !starts_well || !rest_well {
+        return Err(Error::Invalid(
+            "--principal must be a Geode label: 1..=64 letters, digits, `.`, `_` or `-`".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Verify a detached armored signature over an arbitrary payload.
+///
+/// This is the catalog/delegation counterpart to [`verify_signature`], which is
+/// tied to a package file. The public key is imported into a temporary GnuPG
+/// home for one verification and then removed. A missing `gpg` fails closed.
+pub fn verify_detached(public_key: &[u8], payload: &[u8], signature: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let base = if Path::new("/tmp").is_dir() {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let home = tempfile::Builder::new()
+        .prefix("soil-pgp-")
+        .tempdir_in(&base)
+        .map_err(|error| Error::Tool(format!("temporary GnuPG home: {error}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700))
+            .map_err(|error| Error::Tool(format!("protect GnuPG home: {error}")))?;
+    }
+
+    let import = {
+        let mut command = Command::new("gpg");
+        command
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--batch", "--no-tty", "--import"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|error| Error::Tool(format!("gpg: {error}")))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Tool("gpg import has no stdin".into()))?
+            .write_all(public_key)
+            .map_err(|error| Error::Tool(format!("gpg import: {error}")))?;
+        child
+            .wait_with_output()
+            .map_err(|error| Error::Tool(format!("gpg import: {error}")))?
+    };
+    if !import.status.success() {
+        return Err(Error::Signature(format!(
+            "could not import public key: {}",
+            String::from_utf8_lossy(&import.stderr).trim()
+        )));
+    }
+
+    let signature_path = home.path().join("signature.asc");
+    let payload_path = home.path().join("payload");
+    fs::write(&signature_path, signature)
+        .map_err(|error| Error::Io(format!("{}: {error}", signature_path.display())))?;
+    fs::write(&payload_path, payload)
+        .map_err(|error| Error::Io(format!("{}: {error}", payload_path.display())))?;
+
+    let verified = {
+        let mut command = Command::new("gpg");
+        command
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--batch", "--no-tty", "--verify"])
+            .arg(&signature_path)
+            .arg(&payload_path);
+        let output = command
+            .output()
+            .map_err(|error| Error::Tool(format!("gpg verify: {error}")))?;
+        let _ = Command::new("gpgconf")
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--kill", "all"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        output
+    };
+    if verified.status.success() {
+        Ok(())
+    } else {
+        Err(Error::Signature(
+            String::from_utf8_lossy(&verified.stderr).trim().to_owned(),
+        ))
+    }
+}
+
+/// Sign an arbitrary payload with a detached, armored PGP signature.
+///
+/// The counterpart to [`verify_detached`]: a store operator signs delegations
+/// and revocations, and a publisher signs catalog entries, over canonical text
+/// rather than a package file. `home` selects the GnuPG home that holds the
+/// secret key and `key` names that key (fingerprint or user id). Soil never
+/// generates or stores a key, so an empty `home` means the caller's keyring.
+pub fn sign_detached(home: Option<&Path>, key: &str, payload: &[u8]) -> Result<String> {
+    let base = if Path::new("/tmp").is_dir() {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("soil-sign-")
+        .tempdir_in(&base)
+        .map_err(|error| Error::Tool(format!("temporary directory: {error}")))?;
+    let payload_path = dir.path().join("payload");
+    let signature_path = dir.path().join("signature.asc");
+    fs::write(&payload_path, payload).map_err(io_error)?;
+
+    let mut command = std::process::Command::new("gpg");
+    if let Some(home) = home {
+        command.arg("--homedir").arg(home);
+    }
+    command
+        .arg("--batch")
+        .arg("--yes")
+        .arg("--armor")
+        .arg("--detach-sign")
+        .arg("--local-user")
+        .arg(key)
+        .arg("--output")
+        .arg(&signature_path)
+        .arg(&payload_path);
+    run(command, "gpg --detach-sign")?;
+
+    fs::read_to_string(&signature_path)
+        .map_err(|error| Error::Io(format!("{}: {error}", signature_path.display())))
 }
 
 /// Verify a detached signature against a trusted keyring.
@@ -2557,5 +3046,218 @@ mod anycast_tests {
             .is_err(),
             "the daemon drops an observation with more than 32 endpoints"
         );
+    }
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::fixtures::{manifest, with_ui};
+    use super::{HTTP_METHODS, Manifest, OriginAuth};
+
+    fn claim(extra: &str) -> String {
+        format!(
+            "[http]\nhosts = [\"contacts.myc\"]\nroutes = [{{ methods = [\"GET\", \"POST\"], path = \"/\" }}]\n{extra}"
+        )
+    }
+
+    #[test]
+    fn a_spore_declares_where_it_answers() {
+        let parsed = Manifest::parse(&manifest(&claim(""))).expect("claim parses");
+        let http = parsed.http.expect("an [http] table");
+        assert_eq!(http.hosts, vec!["contacts.myc"]);
+        assert_eq!(http.max_body, 64 * 1024, "a body limit exists by default");
+        assert_eq!(http.routes[0].path, "/");
+        assert_eq!(http.routes[0].methods, vec!["GET", "POST"]);
+        assert_eq!(http.origin_auth, OriginAuth::ProviderSignature);
+        assert!(HTTP_METHODS.contains(&"PATCH"), "the method set is closed");
+    }
+
+    #[test]
+    fn a_host_a_vhost_could_not_match_is_refused() {
+        for bad in [
+            "Contacts.myc",
+            "contacts.myc:443",
+            "https://contacts.myc",
+            ".myc",
+            "contacts.myc/",
+        ] {
+            let text = format!(
+                "[http]\nhosts = [{bad:?}]\nroutes = [{{ methods = [\"GET\"], path = \"/\" }}]\n"
+            );
+            assert!(
+                Manifest::parse(&manifest(&text)).is_err(),
+                "{bad} is not a hostname a vhost can match"
+            );
+        }
+    }
+
+    #[test]
+    fn a_route_needs_a_prefix_and_a_known_method() {
+        for bad in ["contacts", "/a b", ""] {
+            let text = format!(
+                "[http]\nhosts = [\"contacts.myc\"]\nroutes = [{{ methods = [\"GET\"], path = {bad:?} }}]\n"
+            );
+            assert!(
+                Manifest::parse(&manifest(&text)).is_err(),
+                "{bad:?} is not a prefix"
+            );
+        }
+        let unknown = "[http]\nhosts = [\"contacts.myc\"]\nroutes = [{ methods = [\"FETCH\"], path = \"/\" }]\n";
+        assert!(
+            Manifest::parse(&manifest(unknown)).is_err(),
+            "an unknown method would silently never match"
+        );
+    }
+
+    #[test]
+    fn a_spore_without_a_module_cannot_claim_a_name() {
+        let text = claim("");
+        let bare = with_ui("[ui]\nentry = \"ui/main.lua\"\n", &text)
+            .replace("[module]\npath = \"module.wasm\"\n", "");
+        let refused = Manifest::parse(&bare);
+        assert!(
+            refused.is_err(),
+            "a Spore must be able to answer on the name it claims"
+        );
+    }
+
+    #[test]
+    fn a_body_limit_past_a_megabyte_is_refused() {
+        let text = format!("{}\nmax_body = {}\n", claim(""), super::MAX_HTTP_BODY + 1);
+        assert!(Manifest::parse(&manifest(&text)).is_err());
+    }
+}
+#[cfg(test)]
+mod command_tests {
+    use super::Manifest;
+    use super::fixtures::manifest;
+
+    const OK: &str = "[[commands]]\nname = \"unibus\"\nsummary = \"read the inbox\"\nmodule = \"bin/unibus.wasm\"\n";
+
+    #[test]
+    fn a_spore_installs_its_own_commands() {
+        let parsed = Manifest::parse(&manifest(OK)).expect("command parses");
+        assert_eq!(parsed.commands.len(), 1);
+        assert_eq!(parsed.commands[0].name, "unibus");
+        // The module travels with the package like any other declared path.
+        assert!(
+            parsed
+                .declared_paths()
+                .iter()
+                .any(|path| path == std::path::Path::new("bin/unibus.wasm")),
+            "a command module that is not locked could vanish from the package"
+        );
+    }
+
+    #[test]
+    fn a_command_a_shell_could_misread_is_refused() {
+        for bad in [
+            // A path, a flag, or an empty name: a shell resolves names, not paths.
+            "[[commands]]\nname = \"bin/x\"\nsummary = \"s\"\nmodule = \"bin/x.wasm\"\n",
+            "[[commands]]\nname = \"--force\"\nsummary = \"s\"\nmodule = \"bin/x.wasm\"\n",
+            "[[commands]]\nname = \"\"\nsummary = \"s\"\nmodule = \"bin/x.wasm\"\n",
+            // No summary means a shell cannot list what it would run.
+            "[[commands]]\nname = \"x\"\nsummary = \"  \"\nmodule = \"bin/x.wasm\"\n",
+            // A module must be a wasm component, not a script.
+            "[[commands]]\nname = \"x\"\nsummary = \"s\"\nmodule = \"bin/x.lua\"\n",
+        ] {
+            assert!(Manifest::parse(&manifest(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn two_commands_cannot_share_a_name() {
+        let twice = format!("{OK}{OK}");
+        assert!(Manifest::parse(&manifest(&twice)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    /// A composition Spore: no module, so the tar is the manifest, the view and
+    /// the lock — enough to exercise packing without a real wasm build.
+    fn tree() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("ui")).expect("ui");
+        std::fs::write(
+            dir.path().join("spore.toml"),
+            "schema = 1\n[spore]\nid = \"dev.fungos.demo\"\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             license = \"MIT\"\nsummary = \"demo\"\n[engine]\nsoil = \">=0.1\"\n\
+             target = \"wasm32-wasip2\"\n[ui]\nentry = \"ui/main.lua\"\n\
+             [launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("ui/main.lua"), "return {}").expect("view");
+        dir
+    }
+
+    #[test]
+    fn packing_for_publication_never_rewrites_the_lock() {
+        let dir = tree();
+        let root = dir.path();
+        write_lock(root).expect("a first lock");
+        let lock_path = root.join(LOCK_NAME);
+        let current = std::fs::read_to_string(&lock_path).expect("read lock");
+
+        assert_eq!(
+            pack_locked(root).expect("a current lock packs"),
+            pack(root).expect("pack"),
+            "a fresh lock and a refreshed one are the same bytes"
+        );
+
+        // An author edits a view without re-locking: the lock no longer describes
+        // the tree, and packing for publication refuses rather than blessing a
+        // digest nobody reviewed.
+        std::fs::write(root.join("ui/main.lua"), "return { edited = true }").expect("edit");
+        let error = pack_locked(root).expect_err("a stale lock is not publishable");
+        assert!(error.to_string().contains("stale"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("read lock"),
+            current,
+            "a refused pack writes nothing"
+        );
+
+        // Authoring still refreshes it, which is what `soil-spore pack` is for.
+        let refreshed = pack(root).expect("authoring pack refreshes");
+        assert_ne!(
+            std::fs::read_to_string(&lock_path).expect("read lock"),
+            current,
+            "the authoring pack wrote the new lock"
+        );
+        assert_eq!(
+            pack_locked(root).expect("the refreshed lock is current"),
+            refreshed,
+            "and it describes the tree it was written for"
+        );
+    }
+
+    const PAGE: &str = "schema = 1\n[spore]\nid = \"dev.fungos.store\"\nname = \"store\"\nversion = \"0.2.0\"\n\
+        license = \"MIT\"\nsummary = \"a page\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n\
+        [system]\nrole = \"store\"\n";
+
+    #[test]
+    fn a_web_surface_is_an_entrypoint() {
+        // A storefront is a page: no module, no Lua view, no chrome region. The
+        // host presents it in a browser view, which is why the surface counts as
+        // the program rather than an attachment to one.
+        let page = Manifest::parse(&format!(
+            "{PAGE}[[surfaces]]\nname = \"store\"\nkind = \"web\"\n[launch]\ndefault = \"store\"\nsurfaces = [\"web\"]\n"
+        ))
+        .expect("a web surface is an entrypoint");
+        assert_eq!(
+            page.surface("store")
+                .and_then(|surface| surface.entry(None)),
+            Some("web/index.html"),
+            "the conventional artifact needs no `entry`"
+        );
+
+        // Nothing to present is still an error, and it names every way out.
+        let empty = Manifest::parse(&format!(
+            "{PAGE}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n"
+        ));
+        let message = empty.expect_err("no entrypoint").to_string();
+        assert!(message.contains("declared surface"), "{message}");
     }
 }

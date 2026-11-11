@@ -17,6 +17,11 @@ wasmtime::component::bindgen!({ path: "wit/http", world: "runner" });
 
 use self::soil::http::http;
 
+// The generated interface, re-exported so a host that links `soil:http` from
+// its own store (rather than running a `runner`-world component) implements the
+// same trait this crate does instead of a second copy of it.
+pub use soil::http::http as api;
+
 const ALLOWED_HEADERS: &[&str] = &[
     "accept",
     "accept-language",
@@ -171,6 +176,56 @@ pub struct TransportRequest {
     pub max_bytes: usize,
 }
 
+impl TransportRequest {
+    /// The `soil:http` enum value (`get`, `post`, …).
+    ///
+    /// Not the HTTP verb: `ureq` wants `GET`, the WIT wants `get`, and a
+    /// transport that speaks the value rather than this crate's enum should not
+    /// have to name the generated type to read it.
+    pub fn method_name(&self) -> &'static str {
+        match self.method {
+            http::Method::Get => "get",
+            http::Method::Head => "head",
+            http::Method::Post => "post",
+            http::Method::Put => "put",
+            http::Method::Patch => "patch",
+            http::Method::Delete => "delete",
+        }
+    }
+
+    /// Build a request from the names a wire transport uses.
+    ///
+    /// The generated `Method` enum is not part of this crate's public surface,
+    /// so an out-of-tree transport (and its tests) needs a way in that does not
+    /// depend on it.
+    pub fn from_parts(
+        url: &str,
+        method: &str,
+        headers: Vec<(String, String)>,
+        body: Option<Vec<u8>>,
+        timeout: Duration,
+        max_bytes: usize,
+    ) -> Result<Self> {
+        let method = match method.to_ascii_lowercase().as_str() {
+            "get" => http::Method::Get,
+            "head" => http::Method::Head,
+            "post" => http::Method::Post,
+            "put" => http::Method::Put,
+            "patch" => http::Method::Patch,
+            "delete" => http::Method::Delete,
+            other => anyhow::bail!("{other:?} is not a soil:http method"),
+        };
+        Ok(Self {
+            url: Url::parse(url).with_context(|| format!("parse {url}"))?,
+            method,
+            headers,
+            body,
+            timeout,
+            max_bytes,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TransportResponse {
     pub status: u16,
@@ -181,11 +236,17 @@ pub struct TransportResponse {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportError {
+    /// The transport cannot serve this request at all, so a composed transport
+    /// may try another one. This is the only variant that means "not me"; every
+    /// other one is an answer.
+    Unsupported,
+    Denied,
+    OverBudget,
+    Timeout,
     Unavailable,
     Tls,
     Http,
     Io,
-    Unsupported,
 }
 
 /// A host-owned HTTP transport. Direct DNS/TLS is the first implementation.
@@ -196,6 +257,33 @@ pub enum TransportError {
 /// health. The Spore never selects the route.
 pub trait HttpTransport: Send + Sync {
     fn fetch(&self, request: &TransportRequest) -> Result<TransportResponse, TransportError>;
+}
+
+/// Prefer one transport, fall back to another when the first says it cannot
+/// serve the request.
+///
+/// The distinction is deliberate: [`TransportError::Unsupported`] means "not
+/// this transport", and everything else — including a timeout or a refusal — is
+/// an answer that must reach the caller. A fallback on *failure* would silently
+/// route around a provider that explicitly declined a URL.
+pub struct PreferProvider {
+    provider: Arc<dyn HttpTransport>,
+    fallback: Arc<dyn HttpTransport>,
+}
+
+impl PreferProvider {
+    pub fn new(provider: Arc<dyn HttpTransport>, fallback: Arc<dyn HttpTransport>) -> Self {
+        Self { provider, fallback }
+    }
+}
+
+impl HttpTransport for PreferProvider {
+    fn fetch(&self, request: &TransportRequest) -> Result<TransportResponse, TransportError> {
+        match self.provider.fetch(request) {
+            Err(TransportError::Unsupported) => self.fallback.fetch(request),
+            other => other,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -250,7 +338,7 @@ impl HttpTransport for DirectTransport {
                 .read_to_end(&mut body)
                 .map_err(|_| TransportError::Io)?;
             if body.len() > request.max_bytes {
-                return Err(TransportError::Unsupported);
+                return Err(TransportError::OverBudget);
             }
         }
         Ok(TransportResponse {
@@ -324,116 +412,143 @@ impl WasiView for HttpHost {
 impl HttpHost {
     /// Run one request through the policy and the transport.
     ///
-    /// This is the whole `soil:http` contract in plain types: allowlist, budget,
-    /// header and body rules, credential resolution, transport, response. The
-    /// guest adapter below only converts, so another host with a different
-    /// store type can call this and inherit the same behaviour.
+    /// This is the whole `soil:http` contract in plain types; the guest adapter
+    /// below only converts. `perform` is free-standing for the same reason: mush
+    /// links its own `soil:http` instance and calls it rather than keeping a
+    /// second answer to "is this request allowed".
     pub fn perform(&mut self, request: Request) -> Result<Response, Error> {
-        let url = Url::parse(&request.url).map_err(|_| Error::Invalid)?;
-        let origin = origin_of(&url).ok_or(Error::Invalid)?;
-        if !self.policy.origins.contains(&origin) {
-            return Err(Error::Denied);
-        }
-        if request.max_bytes == 0
-            || request.max_bytes as usize > self.policy.max_bytes
-            || request.timeout_ms == 0
-            || Duration::from_millis(request.timeout_ms as u64) > self.policy.timeout
-        {
-            return Err(Error::OverBudget);
-        }
-        for (name, value) in &request.headers {
-            if !ALLOWED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
-                return Err(Error::Invalid);
-            }
-            if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
-                return Err(Error::Invalid);
-            }
-        }
-        // A body belongs to a write. Allowing one on GET/HEAD would make a read
-        // look like an action and is not something any transport here supports
-        // predictably.
-        if matches!(request.method, Method::Get | Method::Head) && request.body.is_some() {
-            return Err(Error::Invalid);
-        }
-        if request
-            .body
-            .as_ref()
-            .is_some_and(|body| body.len() > self.policy.max_bytes)
-        {
-            return Err(Error::OverBudget);
-        }
-        let mut auth = None;
-        if let Some(handle) = &request.credential {
-            let header = self
-                .credentials
-                .resolve(handle)
-                .map_err(|_| Error::Denied)?
-                .ok_or(Error::Denied)?;
-            if header.0.contains(['\r', '\n']) || header.1.contains(['\r', '\n']) {
-                return Err(Error::Denied);
-            }
-            auth = Some(header);
-        }
-
-        let mut headers = request.headers.clone();
-        if let Some(header) = auth {
-            headers.push(header);
-        }
-        let transport_request = TransportRequest {
-            url,
-            method: method_to_wit(request.method),
-            headers,
-            body: request.body,
-            timeout: Duration::from_millis(request.timeout_ms as u64),
-            max_bytes: request.max_bytes as usize,
-        };
-        let response = self
-            .transport
-            .fetch(&transport_request)
-            .map_err(|error| match error {
-                TransportError::Unavailable => Error::Unavailable,
-                TransportError::Tls => Error::Tls,
-                TransportError::Http => Error::Http,
-                TransportError::Io => Error::Io,
-                TransportError::Unsupported => Error::Unsupported,
-            })?;
-        Ok(Response {
-            status: response.status,
-            final_url: response.final_url,
-            headers: response.headers,
-            body: response.body,
-        })
+        perform(&self.policy, &*self.credentials, &*self.transport, request)
     }
 }
 
 impl http::Host for HttpHost {
     fn fetch(&mut self, request: http::Request) -> Result<http::Response, http::Error> {
-        let response = self
-            .perform(Request {
-                url: request.url,
-                method: method_from_wit(request.method),
-                headers: request
-                    .headers
-                    .into_iter()
-                    .map(|header| (header.name, header.value))
-                    .collect(),
-                body: request.body,
-                credential: request.credential,
-                max_bytes: request.max_bytes,
-                timeout_ms: request.timeout_ms,
-            })
-            .map_err(error_to_wit)?;
-        Ok(http::Response {
-            status: response.status,
-            final_url: response.final_url,
-            headers: response
+        fetch(&self.policy, &*self.credentials, &*self.transport, request)
+    }
+}
+
+/// The one implementation of `soil:http` policy, in host-internal types.
+///
+/// Every host that links the interface calls this: the `runner`-world host
+/// above, `soil-wasi-host` through `fetch` below, and mush directly. A second
+/// copy would be a second answer to "is this request allowed".
+pub fn perform(
+    policy: &HttpPolicy,
+    credentials: &dyn CredentialProvider,
+    transport: &dyn HttpTransport,
+    request: Request,
+) -> Result<Response, Error> {
+    let url = Url::parse(&request.url).map_err(|_| Error::Invalid)?;
+    let origin = origin_of(&url).ok_or(Error::Invalid)?;
+    if !policy.origins.contains(&origin) {
+        return Err(Error::Denied);
+    }
+    if request.max_bytes == 0
+        || request.max_bytes as usize > policy.max_bytes
+        || request.timeout_ms == 0
+        || Duration::from_millis(request.timeout_ms as u64) > policy.timeout
+    {
+        return Err(Error::OverBudget);
+    }
+    for (name, value) in &request.headers {
+        if !ALLOWED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+            return Err(Error::Invalid);
+        }
+        if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
+            return Err(Error::Invalid);
+        }
+    }
+    // A body belongs to a write. Allowing one on GET/HEAD would make a read
+    // look like an action and is not something any transport here supports
+    // predictably.
+    if matches!(request.method, Method::Get | Method::Head) && request.body.is_some() {
+        return Err(Error::Invalid);
+    }
+    if request
+        .body
+        .as_ref()
+        .is_some_and(|body| body.len() > policy.max_bytes)
+    {
+        return Err(Error::OverBudget);
+    }
+    let mut auth = None;
+    if let Some(handle) = &request.credential {
+        let header = credentials.resolve(handle).map_err(|_| Error::Denied)?;
+        let header = header.ok_or(Error::Denied)?;
+        if header.0.contains(['\r', '\n']) || header.1.contains(['\r', '\n']) {
+            return Err(Error::Denied);
+        }
+        auth = Some(header);
+    }
+
+    let mut headers = request.headers.clone();
+    if let Some(header) = auth {
+        headers.push(header);
+    }
+    let transport_request = TransportRequest {
+        url,
+        method: method_to_wit(request.method),
+        headers,
+        body: request.body,
+        timeout: Duration::from_millis(request.timeout_ms as u64),
+        max_bytes: request.max_bytes as usize,
+    };
+    let response = transport
+        .fetch(&transport_request)
+        .map_err(|error| match error {
+            TransportError::Denied => Error::Denied,
+            TransportError::OverBudget => Error::OverBudget,
+            TransportError::Timeout => Error::Timeout,
+            TransportError::Unavailable => Error::Unavailable,
+            TransportError::Tls => Error::Tls,
+            TransportError::Http => Error::Http,
+            TransportError::Io => Error::Io,
+            TransportError::Unsupported => Error::Unsupported,
+        })?;
+    Ok(Response {
+        status: response.status,
+        final_url: response.final_url,
+        headers: response.headers,
+        body: response.body,
+    })
+}
+
+/// `soil:http` as a guest sees it: convert, run the policy, convert back.
+pub fn fetch(
+    policy: &HttpPolicy,
+    credentials: &dyn CredentialProvider,
+    transport: &dyn HttpTransport,
+    request: http::Request,
+) -> Result<http::Response, http::Error> {
+    let response = perform(
+        policy,
+        credentials,
+        transport,
+        Request {
+            url: request.url,
+            method: method_from_wit(request.method),
+            headers: request
                 .headers
                 .into_iter()
-                .map(|(name, value)| http::Header { name, value })
+                .map(|header| (header.name, header.value))
                 .collect(),
-            body: response.body,
-        })
-    }
+            body: request.body,
+            credential: request.credential,
+            max_bytes: request.max_bytes,
+            timeout_ms: request.timeout_ms,
+        },
+    )
+    .map_err(error_to_wit)?;
+    Ok(http::Response {
+        status: response.status,
+        final_url: response.final_url,
+        headers: response
+            .headers
+            .into_iter()
+            .map(|(name, value)| http::Header { name, value })
+            .collect(),
+        body: response.body,
+    })
 }
 
 fn method_from_wit(method: http::Method) -> Method {
@@ -687,6 +802,53 @@ mod tests {
         );
         assert!(request.contains(r#"{"on":true}"#), "{request}");
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn the_provider_is_preferred_and_only_unsupported_falls_back() {
+        struct Always(Result<TransportResponse, TransportError>);
+        impl HttpTransport for Always {
+            fn fetch(
+                &self,
+                _request: &TransportRequest,
+            ) -> Result<TransportResponse, TransportError> {
+                self.0.clone()
+            }
+        }
+
+        let request = TransportRequest {
+            url: Url::parse("https://example.com/").unwrap(),
+            method: http::Method::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_secs(1),
+            max_bytes: 64,
+        };
+        let answer = |from: &'static str| {
+            Arc::new(Always(Ok(TransportResponse {
+                status: 200,
+                final_url: from.into(),
+                headers: vec![],
+                body: from.as_bytes().to_vec(),
+            }))) as Arc<dyn HttpTransport>
+        };
+
+        let prefer = PreferProvider::new(answer("page"), answer("node"));
+        assert_eq!(prefer.fetch(&request).unwrap().body, b"page");
+
+        let absent = PreferProvider::new(
+            Arc::new(Always(Err(TransportError::Unsupported))),
+            answer("node"),
+        );
+        assert_eq!(absent.fetch(&request).unwrap().body, b"node");
+
+        // A refusal is an answer, not an absence: it must reach the caller
+        // rather than quietly routing around the provider.
+        let denied = PreferProvider::new(
+            Arc::new(Always(Err(TransportError::Denied))),
+            answer("node"),
+        );
+        assert_eq!(denied.fetch(&request).unwrap_err(), TransportError::Denied);
     }
 
     #[test]

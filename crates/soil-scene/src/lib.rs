@@ -700,6 +700,40 @@ pub enum GpuDenseMode {
     Scatter,
 }
 
+/// How the host reduces a dense series into buckets before drawing it.
+///
+/// Every variant runs in the same compute pass; the reduction is a field on the
+/// node rather than a new node kind, so a host implements one pass and a view
+/// picks the shape of the answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GpuReduction {
+    /// Mean y per bucket, one point per bucket. Smooth and cheap, but a spike
+    /// narrower than a bucket disappears into the average.
+    #[default]
+    Average,
+    /// Min and max y per bucket, two points per bucket. Keeps vertical extent,
+    /// so spikes survive; doubles the vertices.
+    MinMax,
+    /// Keep the real sample with the largest triangle area against the line
+    /// through the neighbouring buckets' means -- LTTB's rule, applied per
+    /// bucket. Exact LTTB chains each choice to the previously selected point
+    /// and is sequential; this form runs one bucket per workgroup, so it keeps
+    /// a spike and its own x, but cannot chain choices across the series.
+    Lttb,
+}
+
+impl GpuReduction {
+    /// Points the compute pass writes per bucket. The draw side needs this to
+    /// size the output buffer and the vertex count.
+    pub fn points_per_bucket(self) -> u32 {
+        match self {
+            Self::Average | Self::Lttb => 1,
+            Self::MinMax => 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GpuDense {
@@ -707,11 +741,14 @@ pub struct GpuDense {
     pub resource: String,
     #[serde(default)]
     pub mode: GpuDenseMode,
+    /// How points collapse into buckets. Additive: absent means `average`.
+    #[serde(default)]
+    pub reduction: GpuReduction,
     /// Data-space range: `[x_min, y_min, x_max, y_max]`.
     #[serde(default = "unit_range")]
     pub range: [f32; 4],
-    /// Number of buckets the compute pass reduces to. The output has one point
-    /// per bucket.
+    /// Number of buckets the compute pass reduces to. The output has
+    /// `buckets * reduction.points_per_bucket()` points.
     #[serde(default = "default_buckets")]
     pub buckets: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]

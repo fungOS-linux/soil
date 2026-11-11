@@ -1,0 +1,60 @@
+// Mycelium control-plane capabilities exposed to Spores.
+//
+// This is not the host directory/session surface in `soil:mycelium`. This
+// package is for daemon-owned control-plane state: schedules, runs and the
+// system tasks that share the same clock. The host bridges it to myceliumd;
+// the Spore never sees a socket, a store path or a node key.
+package fungos:mycelium@0.1.0;
+
+interface pulse {
+  enum error {
+    denied,
+    invalid,
+    not-found,
+    unavailable,
+    io,
+  }
+
+  record cron {
+    id: string,
+    schedule: string,
+    command: string,
+    enabled: bool,
+    next-at-ms: option<u64>,
+    last-fired-ms: u64,
+  }
+
+  record system-pulse {
+    id: string,
+    interval-secs: u64,
+    description: string,
+  }
+
+  record snapshot {
+    system: list<system-pulse>,
+    user: list<cron>,
+  }
+
+  record run {
+    id: string,
+    pulse-id: string,
+    scheduled-at-ms: u64,
+    fired-at-ms: u64,
+    finished-at-ms: u64,
+    outcome: string,
+    detail: string,
+  }
+
+  /// System and user pulses. System entries are read-only.
+  all: func() -> result<snapshot, error>;
+
+  /// Create or replace a user pulse. The host validates the cron expression
+  /// and the command before persisting it.
+  put: func(pulse: cron) -> result<cron, error>;
+
+  /// Remove a user pulse by id.
+  remove: func(id: string) -> result<bool, error>;
+
+  /// Run history, newest first. `id` filters to one user pulse.
+  runs: func(id: option<string>, limit: u32) -> result<list<run>, error>;
+}

@@ -350,6 +350,7 @@ mod tests {
                 grants: Vec::new(),
                 system: None,
                 publisher: None,
+                publisher_key: None,
                 signature: String::new(),
             },
         );

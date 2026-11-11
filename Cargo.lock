@@ -667,6 +667,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-winit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "pollster",
+ "portable-pty",
+ "softbuffer",
+ "soil-spore",
+ "soil-vt",
+ "soil-webgpu",
+ "winit",
+]
+
+[[package]]
 name = "canvas-workspace-ui"
 version = "0.1.0"
 source = "git+https://github.com/FuturePresentLabs/dock.git?rev=6e3ba644388196224f2588b4fc78fdfddb866bed#6e3ba644388196224f2588b4fc78fdfddb866bed"
@@ -1667,6 +1682,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
+ "const-oid 0.10.2",
  "crypto-common 0.2.2",
 ]
 
@@ -2087,6 +2103,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
+name = "erased-serde"
+version = "0.4.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e59b668157f32d3459d4bd634861a06ffa2503a461ca5f0916b9f0252605e66"
+dependencies = [
+ "serde",
+ "serde_core",
+ "typeid",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2410,7 +2437,7 @@ dependencies = [
 [[package]]
 name = "fungos-vfs"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af#8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af"
+source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=a41aaceeef21b24739900d7ef65b434afe24a706#a41aaceeef21b24739900d7ef65b434afe24a706"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3855,6 +3882,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "luau0-src"
+version = "0.22.0+luau740"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ea012e8a8aaff2f7b6c788fad41a60630003b6a0932bcf045f7d14952c9bd31"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "luna-core"
 version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4011,6 +4047,37 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mlua"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a7ae6b65bf54b7fdd4cf5b6f44f60862350ebf3fe3779b3a9cc005e7fa14f81"
+dependencies = [
+ "bstr",
+ "either",
+ "erased-serde",
+ "libc",
+ "mlua-sys",
+ "num-traits",
+ "parking_lot",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde-value",
+]
+
+[[package]]
+name = "mlua-sys"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1631cda17bd6486410ab751d91f5fd4484f441589278cdad879eb3afc721a285"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "luau0-src",
+ "pkg-config",
 ]
 
 [[package]]
@@ -5174,6 +5241,15 @@ dependencies = [
 
 [[package]]
 name = "ordered-float"
+version = "2.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "ordered-float"
 version = "5.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f59006ce1e204c30956638535b74d317bca99477b9356dfaec54c37f6f600ab"
@@ -5660,7 +5736,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6296,6 +6372,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-value"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
+dependencies = [
+ "ordered-float 2.10.1",
+ "serde",
+]
+
+[[package]]
 name = "serde-xml-rs"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6387,6 +6473,17 @@ dependencies = [
  "cfg-if",
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -6760,6 +6857,7 @@ dependencies = [
  "serde",
  "serde_json",
  "soil-host",
+ "soil-spore",
  "tempfile",
  "toml 0.8.23",
  "wasmtime",
@@ -6847,6 +6945,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-desktop"
+version = "0.1.0"
+
+[[package]]
 name = "soil-dfm-viz"
 version = "0.1.0"
 dependencies = [
@@ -6870,6 +6972,14 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "soil-home"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -6931,6 +7041,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-install"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soil-spore",
+ "soil-store",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "soil-iroh-http"
 version = "0.1.0"
 dependencies = [
@@ -6952,6 +7074,17 @@ dependencies = [
  "serde",
  "serde_json",
  "taffy",
+]
+
+[[package]]
+name = "soil-lua"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mlua",
+ "serde_json",
+ "soil-scene",
+ "soil-spore",
 ]
 
 [[package]]
@@ -7008,6 +7141,17 @@ dependencies = [
  "unibus",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "soil-openapi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "soil-abi",
+ "wit-parser 0.233.0",
 ]
 
 [[package]]
@@ -7186,9 +7330,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fungos-vfs",
+ "http",
  "serde_json",
  "soil-host",
+ "soil-spore",
+ "soil-wasi-host",
+ "soil-web-bridge",
  "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "unibus",
 ]
 
 [[package]]
@@ -7201,9 +7354,21 @@ dependencies = [
  "sha2 0.10.9",
  "signal-hook",
  "tar",
+ "tempfile",
  "toml 0.8.23",
  "wit-component 0.247.0",
  "wit-parser 0.247.0",
+]
+
+[[package]]
+name = "soil-store"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "soil-spore",
+ "tempfile",
 ]
 
 [[package]]
@@ -7231,6 +7396,17 @@ dependencies = [
  "tokio",
  "unibus",
  "unibus-iroh",
+]
+
+[[package]]
+name = "soil-termd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "soil-vt",
 ]
 
 [[package]]
@@ -7304,11 +7480,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-web-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "soil-host",
+ "soil-spore",
+ "tempfile",
+ "tungstenite",
+]
+
+[[package]]
 name = "soil-webgpu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "pollster",
+ "sha2 0.10.9",
+ "soil-spore",
+ "ureq 2.12.1",
  "wasi-webgpu-wasmtime",
  "wasmtime",
  "wasmtime-wasi",
@@ -7571,14 +7766,6 @@ dependencies = [
  "once_cell",
  "rustix 1.1.6",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tend-core"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "soil-spore",
 ]
 
 [[package]]
@@ -8087,6 +8274,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.10.3",
+ "sha1",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "type-map"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8094,6 +8297,12 @@ checksum = "cb30dbbd9036155e74adad6812e9898d03ec374946234fbcebd5dfc7b9187b90"
 dependencies = [
  "rustc-hash 2.1.3",
 ]
+
+[[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "typenum"
@@ -9322,7 +9531,7 @@ dependencies = [
  "ndk-sys",
  "objc",
  "once_cell",
- "ordered-float",
+ "ordered-float 5.5.1",
  "parking_lot",
  "portable-atomic",
  "portable-atomic-util",
@@ -9372,7 +9581,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "once_cell",
- "ordered-float",
+ "ordered-float 5.5.1",
  "parking_lot",
  "profiling",
  "range-alloc",

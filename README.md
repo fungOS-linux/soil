@@ -10,7 +10,8 @@ capability host (BLE) and one real Spore do run. Nothing here is a shipped
 product surface yet. Canonical capability contracts for `soil:view`,
 `soil:time`, `soil:storage`, `soil:ble` and `soil:canvas` live in [`wit/`](wit)
 and are enforced by `crates/soil-abi`. Canvas is the cross-platform owner;
-`soil:surface` is deferred. The broader design record lives in the `mycelium`
+the spore-facing half is frozen as `soil:surface@1.1.0` in the spores repo, with
+Canvas's own crates still on `soil:canvas@1.0.0`. The broader design record lives in the `mycelium`
 repository (`docs/soil-capabilities.md`, PR pending) and covers the remaining
 capability boundary (`soil:gpu`, `soil:audio`, `soil:stream`),
 signed-Spore verification, and the target matrix (macOS, Linux, Android/Fire TV,
@@ -91,7 +92,7 @@ WebGPU host is [`crates/soil-webgpu`](crates/soil-webgpu): raw
 `wasi:webgpu` components and real wgpu 29 programs both request a GPU
 adapter/device, run WGSL compute and render passes, read results back through
 `wgpu-core`, and hand a standard WebGPU texture to a host-owned Canvas frame
-through the narrow `soil:canvas-gpu` presentation bridge. See [`docs/soil-webgpu.md`](docs/soil-webgpu.md).
+through the narrow `soil:present` presentation bridge. See [`docs/soil-webgpu.md`](docs/soil-webgpu.md).
 The draft audio sink is [`crates/wasi-audio-wasmtime`](crates/wasi-audio-wasmtime):
 a real component pushes bounded PCM into a cpal host. See
 [`docs/wasi-audio.md`](docs/wasi-audio.md). Guest code uses the umbrella

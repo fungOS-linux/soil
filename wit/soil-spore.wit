@@ -47,7 +47,11 @@ interface catalog {
 
   record entry {
     id: string,
+    /// Registry slug: identity, not a label.
     name: string,
+    /// What a window title or a launcher row shows. Falls back to `name` when
+    /// the package does not name itself.
+    title: string,
     version: string,
     summary: string,
     /// Optional Canvas workspace id supplied by host policy.

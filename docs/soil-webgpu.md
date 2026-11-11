@@ -1,6 +1,9 @@
 # Soil WebGPU
 
-Status: **host + Canvas presentation proof, 2026-11-02.** Soil runs real
+Status: **host + Canvas presentation proof, 2026-11-02; superseded by the
+[GPU-spore decision](gpu-spores.md).** The host moves to `wgpu` 30 and
+`wgpu-core` retires with the wasmtime fork; this document stays as the proof of
+the WIT, the texture handoff and the readback path. Soil runs real
 components that import upstream `wasi:webgpu@0.3.0-rc.2`, request a GPU device,
 compile WGSL, run compute and render passes, read results back, and hand a
 standard WebGPU texture to a host-owned Canvas frame.
@@ -19,7 +22,7 @@ without it the component cannot instantiate.
 
 Canvas presentation is a separate, presentation-only package:
 
-- [`soil:canvas-gpu@0.1.0`](../crates/soil-webgpu/wit/deps/soil-canvas-gpu/package.wit)
+- [`soil:present@0.1.0`](../crates/soil-webgpu/wit/deps/soil-present/package.wit)
 
 It accepts a `wasi:webgpu` `gpu-texture` by borrow and returns nothing but a
 success/error. It cannot create a device, texture, window, swapchain, or input
@@ -76,7 +79,7 @@ let texture = device.create_texture(&wgpu::TextureDescriptor {
 queue.submit([encoder.finish()]);
 
 let texture = wgpu_wasi_webgpu::host_texture(texture);
-soil::canvas_gpu::surface::present(&texture)?;
+soil::present::surface::present(&texture)?;
 ```
 
 The host:
@@ -124,7 +127,7 @@ The wgpu fixtures need a GPU adapter and are tested with:
 
 ```sh
 cargo test -p soil-webgpu --test wgpu_compute -- --ignored --nocapture
-cargo test -p soil-webgpu --test wgpu_canvas -- --ignored --nocapture
+cargo test -p soil-webgpu --test wgpu_test -- --ignored --nocapture
 ```
 
 Run the Canvas fixture and write the same BGR24 frame format used by
@@ -132,7 +135,7 @@ Run the Canvas fixture and write the same BGR24 frame format used by
 
 ```sh
 cargo run -p soil-webgpu -- --frame /tmp/triangle.bgr --size 480x640 \
-  crates/soil-webgpu/fixtures/wgpu-canvas.wasm
+  crates/soil-webgpu/fixtures/wgpu-test.wasm
 # webgpu: ok frame=/tmp/triangle.bgr width=480 height=640 format=bgr24
 ```
 
@@ -145,7 +148,7 @@ the corners are the clear colour, and the frame is opaque.
   owner UI does not blend a GPU texture with widgets; the next step is a
   `software-image`/layer adapter inside the Canvas owner.
 - `gpu-canvas-context` remains unimplemented. It has no constructor in
-  `wasi:webgpu@0.3.0-rc.2`; the narrow `soil:canvas-gpu` package is the
+  `wasi:webgpu@0.3.0-rc.2`; the narrow `soil:present` package is the
   presentation boundary instead of a guest-owned surface.
 - `wasi-webgpu-wasmtime` still has TODOs and `unimplemented!` paths outside the
   compute/render/readback path.

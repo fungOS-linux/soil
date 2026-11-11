@@ -14,7 +14,9 @@ use std::num::NonZeroU64;
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
-use soil_scene::{Content, DenseResource, GpuDenseMode, GpuResource, PointCloudResource, Scene};
+use soil_scene::{
+    Content, DenseResource, GpuDenseMode, GpuReduction, GpuResource, PointCloudResource, Scene,
+};
 
 use crate::{Theme, rgb_or_ink, world_bounds};
 
@@ -25,13 +27,34 @@ struct Params {
   count: u32,
   buckets: u32,
   dispatch_x: u32,
-  pad: u32,
+  // 0 average, 1 min-max, 2 lttb. Uniform per dispatch, so the branch is free.
+  mode: u32,
 };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> points: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read_write> output: array<vec2<f32>>;
 
 var<workgroup> sums: array<f32, 256>;
+var<workgroup> mins: array<f32, 256>;
+var<workgroup> maxs: array<f32, 256>;
+var<workgroup> previous_sums: array<f32, 256>;
+var<workgroup> following_sums: array<f32, 256>;
+var<workgroup> areas: array<f32, 256>;
+var<workgroup> picks: array<u32, 256>;
+
+// [start, end) of a bucket. Every lane computes the same answer, so a bucket's
+// workgroup can read a neighbour's range without a second pass.
+fn bucket_range(bucket: u32) -> vec2<u32> {
+  // Avoid u32 overflow in `bucket * count`; keep the product <= count.
+  let base = params.count / params.buckets;
+  let extra = params.count % params.buckets;
+  let start = bucket * base + min(bucket, extra);
+  return vec2<u32>(start, start + base + select(0u, 1u, bucket < extra));
+}
+
+fn bucket_center_x(range: vec2<u32>) -> f32 {
+  return mix(points[range.x].x, points[range.y - 1u].x, 0.5);
+}
 
 @compute @workgroup_size(256)
 fn main(
@@ -42,29 +65,112 @@ fn main(
   if (bucket >= params.buckets) {
     return;
   }
-  // Avoid u32 overflow in `bucket * count`; keep the product <= count.
-  let base = params.count / params.buckets;
-  let extra = params.count % params.buckets;
-  let start = bucket * base + min(bucket, extra);
-  let end = start + base + select(0u, 1u, bucket < extra);
+  let own = bucket_range(bucket);
+  let start = own.x;
+  let end = own.y;
   let local = local_id.x;
 
+  if (params.mode == 2u) {
+    // LTTB, one bucket per workgroup: the chord is the line through the
+    // previous and next bucket means, which is what the triangle area is
+    // measured against in the sequential algorithm.
+    let before = bucket_range(select(bucket - 1u, bucket, bucket == 0u));
+    let after = bucket_range(min(bucket + 1u, params.buckets - 1u));
+    var sum_before = 0.0;
+    for (var i = before.x + local; i < before.y; i = i + 256u) {
+      sum_before = sum_before + points[i].y;
+    }
+    var sum_after = 0.0;
+    for (var i = after.x + local; i < after.y; i = i + 256u) {
+      sum_after = sum_after + points[i].y;
+    }
+    previous_sums[local] = sum_before;
+    following_sums[local] = sum_after;
+    workgroupBarrier();
+    var stride = 128u;
+    loop {
+      if (stride == 0u) { break; }
+      if (local < stride) {
+        previous_sums[local] = previous_sums[local] + previous_sums[local + stride];
+        following_sums[local] = following_sums[local] + following_sums[local + stride];
+      }
+      workgroupBarrier();
+      stride = stride / 2u;
+    }
+
+    let ax = bucket_center_x(before);
+    let ay = previous_sums[0] / f32(max(before.y - before.x, 1u));
+    let bx = bucket_center_x(after);
+    let by = following_sums[0] / f32(max(after.y - after.x, 1u));
+
+    var area = -1.0;
+    var pick = start;
+    for (var i = start + local; i < end; i = i + 256u) {
+      let p = points[i];
+      let triangle = abs((bx - ax) * (p.y - ay) - (by - ay) * (p.x - ax));
+      if (triangle > area) {
+        area = triangle;
+        pick = i;
+      }
+    }
+    areas[local] = area;
+    picks[local] = pick;
+    workgroupBarrier();
+    var reduce = 128u;
+    loop {
+      if (reduce == 0u) { break; }
+      if (local < reduce) {
+        if (areas[local + reduce] > areas[local]) {
+          areas[local] = areas[local + reduce];
+          picks[local] = picks[local + reduce];
+        }
+      }
+      workgroupBarrier();
+      reduce = reduce / 2u;
+    }
+    if (local == 0u) {
+      output[bucket] = points[picks[0]];
+    }
+    return;
+  }
+
+  let first = points[start];
   var sum = 0.0;
+  var lo = first.y;
+  var hi = first.y;
   for (var i = start + local; i < end; i = i + 256u) {
-    sum = sum + points[i].y;
+    let y = points[i].y;
+    sum = sum + y;
+    lo = min(lo, y);
+    hi = max(hi, y);
   }
   sums[local] = sum;
+  mins[local] = lo;
+  maxs[local] = hi;
   workgroupBarrier();
+
   var stride = 128u;
   loop {
     if (stride == 0u) { break; }
-    if (local < stride) { sums[local] = sums[local] + sums[local + stride]; }
+    if (local < stride) {
+      sums[local] = sums[local] + sums[local + stride];
+      mins[local] = min(mins[local], mins[local + stride]);
+      maxs[local] = max(maxs[local], maxs[local + stride]);
+    }
     workgroupBarrier();
     stride = stride / 2u;
   }
-  let average = sums[0] / f32(max(end - start, 1u));
-  if (local == 0u) {
-    let center = (f32(start) + f32(end - 1u)) * 0.5 / f32(max(params.count - 1u, 1u));
+  if (local != 0u) {
+    return;
+  }
+
+  // Data-space x at the middle of the bucket.
+  let center = bucket_center_x(own);
+  if (params.mode == 1u) {
+    output[bucket * 2u] = vec2<f32>(center, mins[0]);
+    output[bucket * 2u + 1u] = vec2<f32>(center, maxs[0]);
+  } else {
+    let average = sums[0] / f32(max(end - start, 1u));
     output[bucket] = vec2<f32>(center, average);
   }
 }
@@ -204,7 +310,8 @@ struct DenseParams {
     count: u32,
     buckets: u32,
     dispatch_x: u32,
-    pad: u32,
+    /// 0 average, 1 min-max, 2 lttb; matches `GpuReduction`.
+    mode: u32,
 }
 
 #[repr(C)]
@@ -232,6 +339,9 @@ struct CameraDraw {
 struct DenseGpu {
     generation: u64,
     buckets: u32,
+    reduction: GpuReduction,
+    /// Vertices the output buffer holds: one or two per bucket.
+    points: u32,
     output: wgpu::Buffer,
     draw: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -247,8 +357,15 @@ struct CloudGpu {
 
 #[derive(Debug, Clone)]
 pub(crate) enum GpuDraw {
-    Dense { node: String, scatter: bool },
-    Points3D { node: String },
+    Dense {
+        node: String,
+        scatter: bool,
+        /// Vertices (or scatter instances) the output buffer holds.
+        points: u32,
+    },
+    Points3D {
+        node: String,
+    },
 }
 
 pub(crate) struct GpuState {
@@ -475,11 +592,12 @@ impl GpuState {
                             pad: 0.0,
                         };
                         queue.write_buffer(&cache.draw, 0, bytemuck::bytes_of(&uniform));
+                        draws.push(GpuDraw::Dense {
+                            node: node.id.clone(),
+                            scatter: content.mode == GpuDenseMode::Scatter,
+                            points: cache.points,
+                        });
                     }
-                    draws.push(GpuDraw::Dense {
-                        node: node.id.clone(),
-                        scatter: content.mode == GpuDenseMode::Scatter,
-                    });
                 }
                 Content::GpuPoints3D(content) => {
                     let resource = scene
@@ -532,7 +650,9 @@ impl GpuState {
         resource: &DenseResource,
     ) -> Result<()> {
         let reusable = self.dense.get(node).is_some_and(|cache| {
-            cache.generation == resource.generation && cache.buckets == content.buckets
+            cache.generation == resource.generation
+                && cache.buckets == content.buckets
+                && cache.reduction == content.reduction
         });
         if reusable {
             return Ok(());
@@ -540,6 +660,8 @@ impl GpuState {
         let count = resource.points.len();
         anyhow::ensure!(count >= 2, "dense resource needs at least two points");
         let buckets = content.buckets.min(count as u32).max(2);
+        let per_bucket = content.reduction.points_per_bucket();
+        let points = buckets * per_bucket;
         let input = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("soil-gpu dense input"),
             size: (count * std::mem::size_of::<[f32; 2]>()) as u64,
@@ -549,7 +671,7 @@ impl GpuState {
         queue.write_buffer(&input, 0, bytemuck::cast_slice(&resource.points));
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("soil-gpu dense output"),
-            size: (buckets as usize * std::mem::size_of::<[f32; 2]>()) as u64,
+            size: (points as usize * std::mem::size_of::<[f32; 2]>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
@@ -565,7 +687,11 @@ impl GpuState {
             count: count as u32,
             buckets,
             dispatch_x,
-            pad: 0,
+            mode: match content.reduction {
+                GpuReduction::Average => 0,
+                GpuReduction::MinMax => 1,
+                GpuReduction::Lttb => 2,
+            },
         };
         queue.write_buffer(&params, 0, bytemuck::bytes_of(&params_value));
         let compute_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -618,6 +744,8 @@ impl GpuState {
             DenseGpu {
                 generation: resource.generation,
                 buckets,
+                reduction: content.reduction,
+                points,
                 output,
                 draw,
                 bind_group,
@@ -679,7 +807,11 @@ impl GpuState {
     pub(crate) fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, draws: &[GpuDraw]) {
         for draw in draws {
             match draw {
-                GpuDraw::Dense { node, scatter } => {
+                GpuDraw::Dense {
+                    node,
+                    scatter,
+                    points,
+                } => {
                     let Some(cache) = self.dense.get(node) else {
                         continue;
                     };
@@ -687,12 +819,12 @@ impl GpuState {
                         pass.set_pipeline(&self.dense_scatter);
                         pass.set_bind_group(0, &cache.bind_group, &[]);
                         pass.set_vertex_buffer(0, cache.output.slice(..));
-                        pass.draw(0..6, 0..cache.buckets);
+                        pass.draw(0..6, 0..*points);
                     } else {
                         pass.set_pipeline(&self.dense_line);
                         pass.set_bind_group(0, &cache.bind_group, &[]);
                         pass.set_vertex_buffer(0, cache.output.slice(..));
-                        pass.draw(0..cache.buckets, 0..1);
+                        pass.draw(0..*points, 0..1);
                     }
                 }
                 GpuDraw::Points3D { node } => {
@@ -895,7 +1027,8 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
 mod tests {
     use super::*;
     use soil_scene::{
-        Content, DenseResource, GpuDense, GpuDenseMode, GpuResource, Node, Scene, Transform,
+        Content, DenseResource, GpuDense, GpuDenseMode, GpuReduction, GpuResource, Node, Scene,
+        Transform,
     };
     use std::sync::Arc;
 
@@ -925,6 +1058,7 @@ mod tests {
                 content: Content::GpuDense(GpuDense {
                     resource: "dense".into(),
                     mode: GpuDenseMode::Line,
+                    reduction: GpuReduction::Average,
                     range: [0.0, 0.0, 1.0, 1.0],
                     buckets: 6000,
                     ink: None,
@@ -951,6 +1085,80 @@ mod tests {
         assert!(
             min_y >= 70 && max_y <= 110,
             "line escaped panel: {min_y}..{max_y}"
+        );
+    }
+
+    /// Lit pixels above `row`. The panel is the same in both frames, so this
+    /// asks whether the reduction kept any of the spike's height.
+    fn lit_above(frame: &crate::Frame, row: u32) -> usize {
+        frame
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(i, px)| {
+                (*i as u32) / frame.width < row && px[0] > 180 && px[1] > 180 && px[2] > 180
+            })
+            .count()
+    }
+
+    fn spiked_frame(reduction: GpuReduction) -> crate::Frame {
+        // One sample out of 10,000 sits at 0.9; everything else is flat at 0.5.
+        // Averaging a bucket of 20 samples hides it (0.52), min/max keeps it.
+        let points: Vec<[f32; 2]> = (0..10_000)
+            .map(|i| {
+                let x = i as f32 / 9_999.0;
+                let y = if i == 5_000 { 0.9 } else { 0.5 };
+                [x, y]
+            })
+            .collect();
+        let scene = Scene::with_gpu(
+            vec![Node {
+                id: "line".into(),
+                parent: None,
+                transition_ms: None,
+                transform: Transform {
+                    translation: [-2.0, 1.0, 0.0],
+                    rotation: [0.0; 3],
+                    scale: [4.0, 2.0, 1.0],
+                },
+                content: Content::GpuDense(GpuDense {
+                    resource: "dense".into(),
+                    mode: GpuDenseMode::Line,
+                    reduction,
+                    range: [0.0, 0.0, 1.0, 1.0],
+                    buckets: 500,
+                    ink: None,
+                    rgb: Some([255, 255, 255]),
+                    opacity: 1.0,
+                    size: 2.0,
+                }),
+            }],
+            vec![Arc::new(GpuResource::Dense(DenseResource {
+                id: "dense".into(),
+                generation: 1,
+                points,
+            }))],
+        );
+        crate::render(&scene, 400, 200, Theme::default()).expect("render")
+    }
+
+    #[test]
+    fn min_max_keeps_a_spike_the_average_hides() {
+        // The panel maps y in 0..1 onto 100 px, so the flat line sits near row
+        // 99 and the 0.9 spike near row 59. Row 90 is clear air between them.
+        let average = lit_above(&spiked_frame(GpuReduction::Average), 90);
+        let min_max = lit_above(&spiked_frame(GpuReduction::MinMax), 90);
+        let lttb = lit_above(&spiked_frame(GpuReduction::Lttb), 90);
+        assert_eq!(average, 0, "averaging hid the spike, as expected");
+        assert!(
+            min_max > 5,
+            "min-max should paint the spike above row 90, painted {min_max} pixels"
+        );
+        assert!(
+            lttb > 5,
+            "lttb keeps the sample with the largest triangle area, painted {lttb} pixels"
         );
     }
 }

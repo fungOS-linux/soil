@@ -75,6 +75,23 @@ impl VfsHost {
         Self::open_with_role_and_index(root, role, index_path)
     }
 
+    /// Open against an explicit content store.
+    ///
+    /// `None` means the machine-wide store every root on this host shares. A
+    /// test, a service or a sandbox passes its own: content is the part of the
+    /// VFS that is *not* per-root, so two processes sharing one store can see
+    /// each other's writes, and a test that leaks into it is a test that can
+    /// fail only when it runs next to another one.
+    pub fn open_with_role_and_store(
+        root: impl AsRef<std::path::Path>,
+        role: NodeRole,
+        store: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
+        let root = root.as_ref();
+        let index_path = root.join(".fungos/soil-index.sqlite3");
+        Self::open_with_store(root, role, index_path, store)
+    }
+
     /// Open with an explicit derived-index database. The database is a cache and
     /// can be deleted at any time; it must not live inside `records`.
     pub fn open_with_index(
@@ -89,7 +106,17 @@ impl VfsHost {
         role: NodeRole,
         index_path: impl AsRef<std::path::Path>,
     ) -> anyhow::Result<Self> {
-        let mut vfs = Vfs::open_with_role(root, role).context("open fungos-vfs")?;
+        Self::open_with_store(root, role, index_path, None)
+    }
+
+    /// The full form: root, role, index location and content store.
+    pub fn open_with_store(
+        root: impl AsRef<std::path::Path>,
+        role: NodeRole,
+        index_path: impl AsRef<std::path::Path>,
+        store: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
+        let mut vfs = Vfs::open_with(root, role, store).context("open fungos-vfs")?;
         let mut index = SqliteIndex::open(index_path).context("open soil index")?;
         index.refresh(&mut vfs).context("refresh soil index")?;
         Ok(Self {
@@ -465,6 +492,9 @@ impl vfs_mut_api::Host for VfsHost {
         if data.len() > MAX_MUTATION_BYTES || media_type.trim().is_empty() {
             return Err(vfs_mut_api::Error::OverBudget);
         }
+        // The VFS distinguishes "overwrite" from "replace this version" and
+        // "replace a head holding this content"; the ABI's Option<u64> only
+        // ever expressed the first two.
         let entry = {
             let mut vfs = self.vfs.lock().expect("vfs poisoned");
             let expect = expected_version

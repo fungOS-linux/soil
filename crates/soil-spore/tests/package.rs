@@ -618,3 +618,13 @@ height = 52
         soil_spore::chrome::DEFAULT_HEIGHT
     );
 }
+
+#[test]
+fn info_json_is_the_authoring_projection() {
+    let manifest = Manifest::parse(MANIFEST).expect("manifest parses");
+    let info = manifest.info_json();
+    assert_eq!(info["id"], "dev.fungos.markdown");
+    assert_eq!(info["ui"]["entry"], "ui/editor.lua");
+    assert_eq!(info["launch"]["default"], "canvas");
+    assert_eq!(info["module"]["path"], "module.wasm");
+}

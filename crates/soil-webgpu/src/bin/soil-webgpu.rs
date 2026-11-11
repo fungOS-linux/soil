@@ -9,6 +9,8 @@ use std::{env, fs, path::Path, process::ExitCode};
 fn main() -> ExitCode {
     let mut frame_path = None;
     let mut size = (480, 640);
+    let mut spores_root = None;
+    let mut store_origin = None;
     let mut component = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -39,10 +41,24 @@ fn main() -> ExitCode {
                 }
                 size = (width, height);
             }
+            "--spores-root" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--spores-root requires a directory");
+                    return ExitCode::FAILURE;
+                };
+                spores_root = Some(path);
+            }
+            "--store-origin" => {
+                let Some(origin) = args.next() else {
+                    eprintln!("--store-origin requires a URL");
+                    return ExitCode::FAILURE;
+                };
+                store_origin = Some(origin);
+            }
             _ => {
                 if component.replace(arg).is_some() {
                     eprintln!(
-                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] <component.wasm>"
+                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] <component.wasm>"
                     );
                     return ExitCode::FAILURE;
                 }
@@ -50,7 +66,9 @@ fn main() -> ExitCode {
         }
     }
     let Some(path) = component else {
-        eprintln!("usage: soil-webgpu [--frame FILE.bgr] [--size WxH] <component.wasm>");
+        eprintln!(
+            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] <component.wasm>"
+        );
         return ExitCode::FAILURE;
     };
     let bytes = match fs::read(&path) {
@@ -61,7 +79,17 @@ fn main() -> ExitCode {
         }
     };
     let result = if frame_path.is_some() {
-        match soil_webgpu::run_component_capture(&bytes, size.0, size.1) {
+        let catalog = spores_root.as_ref().map(|root| {
+            Box::new(soil_webgpu::InstallCatalog::new(root.clone()))
+                as Box<dyn soil_webgpu::CatalogHost>
+        });
+        match soil_webgpu::run_component_capture_with(
+            &bytes,
+            size.0,
+            size.1,
+            catalog,
+            store_origin.clone(),
+        ) {
             Ok((status, frame)) => {
                 if status != 0 {
                     eprintln!("webgpu: guest status {status}");
