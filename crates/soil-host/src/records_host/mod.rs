@@ -13,9 +13,9 @@ use wasmtime::component::{HasSelf, Linker};
 mod namespaced;
 pub use namespaced::{Namespace, NamespacedRecordsHost};
 
-wasmtime::component::bindgen!({ path: "wit", world: "records-host" });
+wasmtime::component::bindgen!({ path: "wit/records", world: "records-host" });
 
-pub use soil::records::records;
+pub use self::soil::records::records;
 
 const MAX_PAGE: u32 = 512;
 const CONTACT_SCHEMA: &str = "fungos.contacts/contact";
@@ -424,7 +424,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::soil::records::records::Host as _;
+    use crate::records_host::soil::records::records::Host as _;
 
     fn contact(id: &str) -> records::Entry {
         let value = serde_json::json!({

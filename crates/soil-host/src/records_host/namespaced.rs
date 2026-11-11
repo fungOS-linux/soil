@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, sync::Mutex};
 use anyhow::Context;
 use fungos_records::{Record, Store};
 
-use crate::soil::records::records;
+use crate::records_host::soil::records::records;
 
 const MAX_PAGE: u32 = 512;
 
@@ -383,7 +383,7 @@ impl records::Host for NamespacedRecordsHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::soil::records::records::Host as _;
+    use crate::records_host::soil::records::records::Host as _;
 
     fn host(root: &std::path::Path) -> NamespacedRecordsHost {
         NamespacedRecordsHost::open(

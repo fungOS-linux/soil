@@ -10,7 +10,7 @@
 use std::{env, fs, path::PathBuf, process::ExitCode, sync::Arc};
 
 use anyhow::{Context, Result, bail};
-use soil_records_host::RecordsBookHost;
+use soil_host::records_host::RecordsBookHost;
 use soil_wasi_host::{
     HttpPolicy, HttpService, NetworkPolicy, UnibusBus, WasiHostBuilder, WasiHostPolicy,
 };

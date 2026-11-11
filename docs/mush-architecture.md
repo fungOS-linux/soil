@@ -10,8 +10,8 @@ that gives an agent a prompt over both.
 | --- | --- | --- |
 | Host binary | [`crates/mush`](../crates/mush) | the VFS root, the grants, the daemon, the overlay, the MCP endpoint |
 | The Spore | [`spores/mush`](../spores/mush) | shell parsing, builtins, job control, the prompt; compiled to `wasm32-wasip2` and embedded in the host binary |
-| VFS host | [`crates/soil-vfs-host`](../crates/soil-vfs-host) | `soil:vfs`, `soil:vfs-mut`, `soil:index` implementations; the derived index |
-| HTTP host | [`crates/soil-http-host`](../crates/soil-http-host) | the `soil:http` contract: origin allowlist, budget, credentials, transport |
+| VFS host | [`crates/soil-host`](../crates/soil-host) | `soil:vfs`, `soil:vfs-mut`, `soil:index` implementations; the derived index |
+| HTTP host | [`crates/soil-host`](../crates/soil-host) | the `soil:http` contract: origin allowlist, budget, credentials, transport |
 | Net host | [`crates/mush/src/net.rs`](../crates/mush/src/net.rs) | `soil:net`: bounded resolve and TCP probe |
 | Contracts | [`wit/`](../wit) | `soil-vfs`, `soil-vfs-mut`, `soil-http`, `soil-net`, `soil-index`, `soil-command`, `soil-principal` |
 | Spore dependencies | [`spores/mush/wit/deps`](../spores/mush/wit/deps) | the vendored copies the guest compiles against |
@@ -112,7 +112,7 @@ flowchart TB
 | `soil:vfs-mut` | write, remove, mkdir, rename, chmod | host, version-fenced |
 | `soil:index` | browse, search, knn | derived index, rebuildable |
 | `soil:command` | run an installed wasm command | command root |
-| `soil:http` | one request with an origin allowlist and a budget | `crates/soil-http-host` + `access.rs` |
+| `soil:http` | one request with an origin allowlist and a budget | `crates/soil-host` + `access.rs` |
 | `soil:net` | resolve a name, probe a TCP port | `crates/mush/src/net.rs` |
 
 Access is resolved once per session: `MUSH_PRINCIPAL` / `MUSH_GROUPS` (or the

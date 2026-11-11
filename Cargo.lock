@@ -4104,12 +4104,10 @@ dependencies = [
  "serde",
  "serde_json",
  "soil-command",
- "soil-http-host",
+ "soil-host",
  "soil-inference",
- "soil-records-host",
  "soil-scrub",
  "soil-spore",
- "soil-vfs-host",
  "tempfile",
  "tiny_http",
  "ureq 2.12.1",
@@ -6761,7 +6759,7 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
- "soil-records-host",
+ "soil-host",
  "tempfile",
  "toml 0.8.23",
  "wasmtime",
@@ -6875,11 +6873,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "soil-http-host"
+name = "soil-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "clap",
+ "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-vfs",
+ "model2vec-rs",
+ "regex",
+ "rusqlite",
+ "serde_json",
  "tempfile",
+ "tiny_http",
  "ureq 2.12.1",
  "url",
  "wasmtime",
@@ -7028,20 +7035,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "soil-records-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
- "serde_json",
- "tempfile",
- "tiny_http",
- "wasmtime",
- "wasmtime-wasi",
-]
-
-[[package]]
 name = "soil-runtime"
 version = "0.1.0"
 dependencies = [
@@ -7180,9 +7173,9 @@ dependencies = [
  "plist",
  "serde",
  "serde_json",
+ "soil-host",
  "soil-marbles",
  "soil-spore",
- "soil-vfs-host",
  "tempfile",
  "wasmtime",
 ]
@@ -7194,7 +7187,7 @@ dependencies = [
  "anyhow",
  "fungos-vfs",
  "serde_json",
- "soil-vfs-host",
+ "soil-host",
  "tempfile",
 ]
 
@@ -7275,22 +7268,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "soil-vfs-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "fungos-vfs",
- "model2vec-rs",
- "regex",
- "rusqlite",
- "serde_json",
- "tempfile",
- "ureq 2.12.1",
- "wasmtime",
-]
-
-[[package]]
 name = "soil-vt"
 version = "0.1.0"
 dependencies = [
@@ -7314,7 +7291,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "soil-records-host",
+ "soil-host",
  "tempfile",
  "tokio",
  "tracing",

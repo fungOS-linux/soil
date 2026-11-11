@@ -13,9 +13,9 @@ use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-wasmtime::component::bindgen!({ path: "wit", world: "runner" });
+wasmtime::component::bindgen!({ path: "wit/http", world: "runner" });
 
-use soil::http::http;
+use self::soil::http::http;
 
 const ALLOWED_HEADERS: &[&str] = &[
     "accept",
@@ -522,7 +522,7 @@ impl HttpRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::soil::http::http::Host as _;
+    use crate::http_host::soil::http::http::Host as _;
     use std::{io::Write as _, net::TcpListener, sync::mpsc, thread};
 
     struct StaticCredentials;

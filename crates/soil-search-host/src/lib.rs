@@ -26,7 +26,7 @@ use git::GitIndex;
 use graph::GraphIndex;
 use mru::{MruCache, hit_from_usage, now_ms, usage_from_hit};
 use soil_marbles::MarblesIndex;
-use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
+use soil_host::vfs_host::{EmbeddingProvider, VfsHost, index};
 use tgrep::TgrepSource;
 use wasmtime::component::{HasSelf, Linker};
 
@@ -553,7 +553,7 @@ impl SearchService {
             offset: 0,
             limit: MAX_PAGE,
         };
-        use soil_vfs_host::index::Host as _;
+        use soil_host::vfs_host::index::Host as _;
         let page = vfs.search(index_query).map_err(index_error)?;
         Ok(page
             .hits
@@ -792,7 +792,7 @@ impl SearchService {
         let Some(vfs) = self.vfs.as_mut() else {
             return Ok(Vec::new());
         };
-        use soil_vfs_host::index::Host as _;
+        use soil_host::vfs_host::index::Host as _;
         let page = vfs
             .search(index::Query {
                 text: text.to_string(),

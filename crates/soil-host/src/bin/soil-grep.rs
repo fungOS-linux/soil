@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use soil_vfs_host::{VfsHost, index};
+use soil_host::vfs_host::{VfsHost, index};
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -72,7 +72,7 @@ fn main() -> Result<()> {
         Some(path) => VfsHost::open_with_index(&root, path)?,
         None => VfsHost::open(&root)?,
     };
-    use soil_vfs_host::index::Host as _;
+    use soil_host::vfs_host::index::Host as _;
     let page = host.search(index::Query {
         text: query.join(" "),
         mode: Some(mode),

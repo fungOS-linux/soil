@@ -42,7 +42,7 @@ use soil::command::command as command_abi;
 use soil_command::{CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
 use soil_inference::{GeodeResolver, SoilConfig};
 use soil_spore::manual::{Manual, read_prose};
-use soil_vfs_host::{VfsHost, index, vfs, vfs_mut};
+use soil_host::vfs_host::{VfsHost, index, vfs, vfs_mut};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -59,7 +59,7 @@ struct Host {
     table: ResourceTable,
     commands: CommandHost,
     spores: SporeCatalog,
-    http: soil_http_host::HttpHost,
+    http: soil_host::http_host::HttpHost,
 }
 
 /// Installed Spore packages, as much of them as a manual needs.
@@ -407,8 +407,8 @@ impl Runtime {
         let engine = Engine::new(&config)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
-        soil_vfs_host::add_to_linker::<Host>(&mut linker)?;
-        soil_vfs_host::add_mutation_to_linker::<Host>(&mut linker)?;
+        soil_host::vfs_host::add_to_linker::<Host>(&mut linker)?;
+        soil_host::vfs_host::add_mutation_to_linker::<Host>(&mut linker)?;
         command_abi::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         soil::net::net::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         soil::http::http::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;

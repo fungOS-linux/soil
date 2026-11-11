@@ -22,7 +22,7 @@ use wasmtime_wasi::{
     },
 };
 
-use soil_records_host::RecordsBookHost;
+use soil_host::records_host::RecordsBookHost;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,7 +249,7 @@ impl CommandRunner {
             None => None,
         };
         if records.is_some() {
-            soil_records_host::add_to_linker::<Host>(&mut linker)?;
+            soil_host::records_host::add_to_linker::<Host>(&mut linker)?;
         }
 
         let stdout = MemoryOutputPipe::new(entry.max_stdout_bytes);
@@ -313,14 +313,14 @@ impl WasiView for Host {
     }
 }
 
-impl soil_records_host::records::Host for Host {
+impl soil_host::records_host::records::Host for Host {
     fn get(
         &mut self,
-        key: soil_records_host::records::Key,
-    ) -> Result<soil_records_host::records::Entry, soil_records_host::records::Error> {
+        key: soil_host::records_host::records::Key,
+    ) -> Result<soil_host::records_host::records::Entry, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .get(key)
     }
 
@@ -329,42 +329,42 @@ impl soil_records_host::records::Host for Host {
         collection: String,
         cursor: Option<String>,
         limit: u32,
-    ) -> Result<soil_records_host::records::Page, soil_records_host::records::Error> {
+    ) -> Result<soil_host::records_host::records::Page, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .scan(collection, cursor, limit)
     }
 
     fn upsert(
         &mut self,
-        entry: soil_records_host::records::Entry,
-    ) -> Result<soil_records_host::records::Entry, soil_records_host::records::Error> {
+        entry: soil_host::records_host::records::Entry,
+    ) -> Result<soil_host::records_host::records::Entry, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .upsert(entry)
     }
 
     fn compare_and_swap(
         &mut self,
-        key: soil_records_host::records::Key,
-        expected: Option<soil_records_host::records::Version>,
-        entry: soil_records_host::records::Entry,
-    ) -> Result<soil_records_host::records::CasResult, soil_records_host::records::Error> {
+        key: soil_host::records_host::records::Key,
+        expected: Option<soil_host::records_host::records::Version>,
+        entry: soil_host::records_host::records::Entry,
+    ) -> Result<soil_host::records_host::records::CasResult, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .compare_and_swap(key, expected, entry)
     }
 
     fn delete(
         &mut self,
-        key: soil_records_host::records::Key,
-    ) -> Result<(), soil_records_host::records::Error> {
+        key: soil_host::records_host::records::Key,
+    ) -> Result<(), soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .delete(key)
     }
 
@@ -372,20 +372,20 @@ impl soil_records_host::records::Host for Host {
         &mut self,
         since: Option<String>,
         limit: u32,
-    ) -> Result<soil_records_host::records::Page, soil_records_host::records::Error> {
+    ) -> Result<soil_host::records_host::records::Page, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .changes(since, limit)
     }
 
     fn apply(
         &mut self,
-        entries: Vec<soil_records_host::records::Entry>,
-    ) -> Result<soil_records_host::records::ApplyResult, soil_records_host::records::Error> {
+        entries: Vec<soil_host::records_host::records::Entry>,
+    ) -> Result<soil_host::records_host::records::ApplyResult, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .apply(entries)
     }
 }

@@ -79,7 +79,7 @@ impl HttpService {
         creds::add_to_linker(&mut linker)?;
         unibus::add_to_linker(&mut linker)?;
         if builder.has_records() {
-            soil_records_host::add_to_linker(&mut linker).context("link soil:records")?;
+            soil_host::records_host::add_to_linker(&mut linker).context("link soil:records")?;
         }
         let pre = ProxyPre::new(linker.instantiate_pre(&component)?)
             .map_err(anyhow::Error::from)

@@ -1,5 +1,5 @@
 [package]
-name = "soil-vfs-host"
+name = "soil-host"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -9,18 +9,23 @@ publish = false
 [features]
 default = ["model2vec"]
 model2vec = ["dep:model2vec-rs"]
-remote = ["dep:ureq"]
+remote = []
 
 [dependencies]
 anyhow = "1"
 blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+fungos-records.workspace = true
 fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af" }
 model2vec-rs = { version = "0.4", default-features = false, features = ["fancy-regex", "hf-hub"], optional = true }
 regex = "1"
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde_json = "1"
-ureq = { version = "2", features = ["json"], optional = true }
+tiny_http = "0.12"
+url = "2"
+ureq = { version = "2", features = ["json"] }
 wasmtime = { version = "50", features = ["anyhow"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 
 [dev-dependencies]
 tempfile = "3"

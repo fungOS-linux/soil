@@ -14,7 +14,7 @@ use anyhow::Context;
 use fungos_vfs::{FileEntry, Hydration, Vfs};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::soil::index::index;
+use crate::vfs_host::soil::index::index;
 
 pub(crate) const MAX_INDEX_TEXT: usize = 64 * 1024;
 const MAX_CHUNK_BYTES: usize = 4096;
@@ -165,7 +165,7 @@ impl SqliteIndex {
                         },
                         pinned: row.get::<_, i64>(6)? != 0,
                         updated_at_ms: row.get(7)?,
-                        mode: crate::NEW_FILE_MODE,
+                        mode: super::NEW_FILE_MODE,
                     },
                     kind: if kind == "dir" {
                         NodeKind::Directory
@@ -644,7 +644,7 @@ impl IndexBackend for SqliteIndex {
     }
 
     fn search(&self, query: &index::Query) -> Result<index::Page, index::Error> {
-        if query.limit == 0 || query.limit > crate::MAX_PAGE {
+        if query.limit == 0 || query.limit > super::MAX_PAGE {
             return Err(index::Error::OverBudget);
         }
         if query.text.trim().is_empty() {
@@ -653,7 +653,7 @@ impl IndexBackend for SqliteIndex {
         let parent = query
             .parent
             .as_deref()
-            .map(crate::normalize_parent)
+            .map(super::normalize_parent)
             .transpose()
             .map_err(|_| index::Error::Invalid)?;
         if !self.ready {
@@ -726,7 +726,7 @@ fn build_nodes(
                 hydration: Hydration::Present,
                 pinned: false,
                 updated_at_ms: 0,
-                mode: crate::NEW_FILE_MODE,
+                mode: super::NEW_FILE_MODE,
             },
             kind: NodeKind::Directory,
             child_count: 0,
@@ -771,7 +771,7 @@ fn build_nodes(
                 hydration: Hydration::Present,
                 pinned: false,
                 updated_at_ms: 0,
-                mode: crate::NEW_FILE_MODE,
+                mode: super::NEW_FILE_MODE,
             },
             kind: NodeKind::Directory,
             child_count: 0,
@@ -827,7 +827,7 @@ fn add_ancestors(nodes: &mut BTreeMap<String, Node>, path: &str) {
                 hydration: Hydration::Present,
                 pinned: false,
                 updated_at_ms: 0,
-                mode: crate::NEW_FILE_MODE,
+                mode: super::NEW_FILE_MODE,
             },
             kind: NodeKind::Directory,
             child_count: 0,

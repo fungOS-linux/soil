@@ -2,7 +2,7 @@
 //! and `soil:index`.
 //!
 //! ```sh
-//! cargo run -p soil-vfs-host --bin soil-vfs-web -- \
+//! cargo run -p soil-host --bin soil-vfs-web -- \
 //!   --root ~/.local/share/fungos/vfs --listen 127.0.0.1:8788
 //! ```
 //!
@@ -21,7 +21,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use soil_vfs_host::{VfsHost, index, vfs};
+use soil_host::vfs_host::{VfsHost, index, vfs};
 
 const DEFAULT_ROOT: &str = "~/.local/share/fungos/vfs";
 const DEFAULT_LISTEN: &str = "127.0.0.1:8788";

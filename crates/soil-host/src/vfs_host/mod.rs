@@ -12,7 +12,7 @@ use anyhow::Context;
 use fungos_vfs::{Expect, Hydration, NodeRole, Vfs, VfsError, normalize_path};
 use wasmtime::component::{HasSelf, Linker};
 
-wasmtime::component::bindgen!({ path: "wit", world: "host" });
+wasmtime::component::bindgen!({ path: "wit/vfs", world: "host" });
 
 pub use embeddings::EmbeddingProvider;
 #[cfg(feature = "model2vec")]
@@ -20,11 +20,11 @@ pub use embeddings::Model2VecEmbedder;
 #[cfg(feature = "remote")]
 pub use embeddings::RemoteEmbeddingProvider;
 use indexer::{IndexBackend, Node, NodeKind, SqliteIndex};
-pub use soil::index::index;
-pub use soil::vfs::vfs;
-pub use soil::vfs_mut::vfs_mut;
+pub use self::soil::index::index;
+pub use self::soil::vfs::vfs;
+pub use self::soil::vfs_mut::vfs_mut;
 
-use soil::vfs_mut::vfs_mut as vfs_mut_api;
+use self::soil::vfs_mut::vfs_mut as vfs_mut_api;
 
 pub(crate) const MAX_PAGE: u32 = 512;
 const MAX_RANGE: u32 = 1024 * 1024;
@@ -599,17 +599,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::soil::index::index::Host as _;
-    use crate::soil::vfs::vfs::Host as _;
+    use crate::vfs_host::soil::index::index::Host as _;
+    use crate::vfs_host::soil::vfs::vfs::Host as _;
     use std::path::Path;
 
     fn seed(root: &Path) {
         let mut vfs = Vfs::open(root).unwrap();
-        vfs.put("notes.txt", b"hello greece trip", "text/plain", None)
+        vfs.put("notes.txt", b"hello greece trip", "text/plain", Expect::Any)
             .unwrap();
-        vfs.put("photos/greece-01.jpg", b"jpeg-one", "image/jpeg", None)
+        vfs.put("photos/greece-01.jpg", b"jpeg-one", "image/jpeg", Expect::Any)
             .unwrap();
-        vfs.put("photos/greece-02.jpg", b"jpeg-two", "image/jpeg", None)
+        vfs.put("photos/greece-02.jpg", b"jpeg-two", "image/jpeg", Expect::Any)
             .unwrap();
     }
 
@@ -702,7 +702,7 @@ mod tests {
             "src/main.rs",
             b"fn main() {\n    run();\n}\n",
             "application/octet-stream",
-            None,
+            Expect::Any,
         )
         .unwrap();
         let mut host = VfsHost::open(dir.path()).unwrap();
@@ -786,7 +786,7 @@ mod tests {
         assert_eq!(reopened.entries, state.entries);
 
         let mut vfs = Vfs::open(dir.path()).unwrap();
-        vfs.put("notes/new.txt", b"a new semantic note", "text/plain", None)
+        vfs.put("notes/new.txt", b"a new semantic note", "text/plain", Expect::Any)
             .unwrap();
         let state = host.refresh_index().unwrap();
         assert_eq!(state.generation, 2);

@@ -6,7 +6,7 @@
 
 use std::{env, fs, process::ExitCode, sync::Arc, time::Duration};
 
-use soil_http_host::{BearerCredential, HttpHost, HttpPolicy, HttpRuntime};
+use soil_host::http_host::{BearerCredential, HttpHost, HttpPolicy, HttpRuntime};
 
 fn main() -> ExitCode {
     match run() {

@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Result;
 use http_body_util::BodyExt;
-use soil_records_host::{RecordsBookHost, records};
+use soil_host::records_host::{RecordsBookHost, records};
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{

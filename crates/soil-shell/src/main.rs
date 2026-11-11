@@ -169,8 +169,11 @@ fn history(root: &Path, args: Vec<String>) -> Result<()> {
         bail!("usage: soil history PATH");
     };
     let vfs = Vfs::open(root)?;
-    for (version, content_id, size, created) in vfs.history(path)? {
-        println!("{version}\t{size}\t{created}\t{content_id}");
+    for entry in vfs.history(path)? {
+        println!(
+            "{}\t{}\t{}\t{}",
+            entry.version, entry.size, entry.created_at_ms, entry.content_id
+        );
     }
     Ok(())
 }
@@ -180,11 +183,11 @@ fn search(root: &Path, args: Vec<String>) -> Result<()> {
     if query.trim().is_empty() {
         bail!("usage: soil search QUERY");
     }
-    let mut host = soil_vfs_host::VfsHost::open(root)?;
-    use soil_vfs_host::index::Host as _;
-    let page = host.search(soil_vfs_host::index::Query {
+    let mut host = soil_host::vfs_host::VfsHost::open(root)?;
+    use soil_host::vfs_host::index::Host as _;
+    let page = host.search(soil_host::vfs_host::index::Query {
         text: query,
-        mode: Some(soil_vfs_host::index::Mode::Fuzzy),
+        mode: Some(soil_host::vfs_host::index::Mode::Fuzzy),
         parent: None,
         media_type_prefix: None,
         offset: 0,

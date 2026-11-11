@@ -4,7 +4,7 @@
 //! This is deliberately a small local tool, not a production web service:
 //!
 //! ```sh
-//! cargo run -p soil-records-host --bin soil-records-web -- \
+//! cargo run -p soil-host --bin soil-records-web -- \
 //!   --book personal/avery/contacts --collection contact
 //! ```
 //!
@@ -22,7 +22,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use soil_records_host::{RecordsBookHost, records::Entry};
+use soil_host::records_host::{RecordsBookHost, records::Entry};
 
 const DEFAULT_ROOT: &str = "~/.local/share/fungos/records";
 const DEFAULT_BOOK: &str = "personal/avery/contacts";
