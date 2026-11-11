@@ -6572,6 +6572,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-brain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "soil-scene",
+]
+
+[[package]]
 name = "soil-canvas-actions-host"
 version = "0.1.0"
 dependencies = [
