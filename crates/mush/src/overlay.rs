@@ -62,12 +62,29 @@ impl Overlay {
             let bytes = vfs.get(&entry.path)?;
             let target = safe_join(dir.path(), &entry.path)?;
             if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
+                // A path in the VFS can name both a file and a directory (a
+                // `directories` row that outlived the file replacing it, or a
+                // file claiming a parent that is itself a file). No filesystem
+                // can hold that, and one such entry must not fail every host
+                // command for the workspace, so the entry that cannot be
+                // represented is skipped and the rest still materializes.
+                if parent.is_file() {
+                    continue;
+                }
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create overlay directory {}", parent.display()))?;
             }
             fs::write(&target, &bytes).with_context(|| format!("write overlay {}", entry.path))?;
         }
         for path in vfs.directories("")? {
-            fs::create_dir_all(safe_join(dir.path(), &path)?)?;
+            let target = safe_join(dir.path(), &path)?;
+            // The file won above: `stat` in the VFS reports the file, and a
+            // directory cannot also exist at that path.
+            if target.is_file() {
+                continue;
+            }
+            fs::create_dir_all(&target)
+                .with_context(|| format!("create overlay directory {}", target.display()))?;
         }
 
         // Snapshot after materialization so nested ignore files apply to the
@@ -309,6 +326,35 @@ mod tests {
         assert!(store.file("notes/b.txt").unwrap().is_none());
         assert_eq!(store.get("new.txt").unwrap(), b"fresh");
         assert!(store.is_directory("empty/nested").unwrap());
+    }
+
+    #[test]
+    fn overlay_survives_a_path_that_is_both_a_file_and_a_directory() {
+        let vfs = tempfile::tempdir().unwrap();
+        {
+            let mut store = Vfs::open(vfs.path()).unwrap();
+            // A `directories` row can outlive the file that replaced it: `put`
+            // only consults the file table, so both name `docs/a.txt` and no
+            // filesystem can hold both.
+            store.mkdir("docs").unwrap();
+            store.mkdir("docs/a.txt").unwrap();
+            store
+                .put("docs/a.txt", b"file wins", "text/plain", Expect::Any)
+                .unwrap();
+            store
+                .put("docs/ok.txt", b"ok", "text/plain", Expect::Any)
+                .unwrap();
+            store.mkdir("stale").unwrap();
+        }
+
+        let overlay = Overlay::materialize(vfs.path()).unwrap();
+        assert!(overlay.path().join("docs/a.txt").is_file());
+        assert_eq!(
+            fs::read(overlay.path().join("docs/a.txt")).unwrap(),
+            b"file wins"
+        );
+        assert!(overlay.path().join("docs/ok.txt").is_file());
+        assert!(overlay.path().join("stale").is_dir());
     }
 
     #[test]

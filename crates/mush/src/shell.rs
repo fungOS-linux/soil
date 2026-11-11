@@ -225,7 +225,10 @@ fn run_one(
         return run_in_spore(output, runtime, &line);
     }
     if host_allowed(&words[0]) {
-        return run_host(output, root, &words[0], &words[1..], control);
+        // The Spore owns `cd`; the host program runs on the overlay, so ask
+        // where the shell is before starting it.
+        let cwd = spore_cwd(runtime);
+        return run_host(output, root, &words[0], &words[1..], &cwd, control);
     }
     run_in_spore(output, runtime, command)
 }
@@ -235,6 +238,23 @@ fn run_in_spore(output: &mut dyn Output, runtime: &mut Runtime, command: &str) -
     output.stdout(&executed.output);
     output.stderr(&executed.stderr);
     Ok(executed.status)
+}
+
+/// The Spore's current directory, relative to the workspace root.
+///
+/// A host program runs against the overlay, so without this `cd docs && git
+/// status` would report on the workspace root. A failed `pwd` is not worth
+/// failing the command over: the overlay root is where it would have run
+/// anyway.
+fn spore_cwd(runtime: &mut Runtime) -> String {
+    let Ok(executed) = runtime.execute("pwd") else {
+        return String::new();
+    };
+    executed
+        .output
+        .trim()
+        .trim_start_matches('/')
+        .to_string()
 }
 
 /// Materialize the VFS, run the program there, apply whatever it changed.
@@ -248,6 +268,7 @@ fn run_host(
     root: &Path,
     program: &str,
     args: &[String],
+    cwd: &str,
     control: &Control,
 ) -> Result<i32> {
     use crate::outcome::{CANCELLED_STATUS, TIMEOUT_STATUS};
@@ -255,7 +276,16 @@ fn run_host(
     let overlay = Overlay::materialize(root)
         .with_context(|| format!("materialize a workspace for {program}"))?;
     let mut command = Command::new(program);
-    command.args(args).current_dir(overlay.path());
+    command.args(args);
+    // `cwd` is the Spore's directory; fall back to the overlay root when it does
+    // not name a directory there (a stale session, or a directory the overlay
+    // could not hold).
+    let start = overlay.path().join(cwd);
+    command.current_dir(if start.is_dir() {
+        start
+    } else {
+        overlay.path().to_path_buf()
+    });
     // Whoever is running also knows who it is running as. Passing that to the
     // child is what lets a tool record *which* agent claimed a piece of work
     // instead of leaving the link to be reconstructed later.
@@ -562,6 +592,10 @@ fn split_words(command: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut buffer = String::new();
     let mut quote: Option<char> = None;
+    // An argument that was quoted counts even when it is empty: BSD sed is
+    // invoked as `sed -i '' 's/a/b/' f`, and dropping that word turns the
+    // script into a backup suffix and the file into a command.
+    let mut quoted = false;
     for c in command.chars() {
         match quote {
             Some(q) => {
@@ -572,17 +606,21 @@ fn split_words(command: &str) -> Vec<String> {
                 }
             }
             None => match c {
-                '\'' | '"' => quote = Some(c),
+                '\'' | '"' => {
+                    quote = Some(c);
+                    quoted = true;
+                }
                 c if c.is_whitespace() => {
-                    if !buffer.is_empty() {
+                    if !buffer.is_empty() || quoted {
                         out.push(std::mem::take(&mut buffer));
                     }
+                    quoted = false;
                 }
                 _ => buffer.push(c),
             },
         }
     }
-    if !buffer.is_empty() {
+    if !buffer.is_empty() || quoted {
         out.push(buffer);
     }
     out
@@ -613,6 +651,12 @@ mod tests {
             vec!["git", "commit", "-m", "hi there"]
         );
         assert!(split_words("   ").is_empty());
+        // BSD sed's empty backup suffix is an argument, not nothing.
+        assert_eq!(
+            split_words("sed -i '' 's/a/b/' f"),
+            vec!["sed", "-i", "", "s/a/b/", "f"]
+        );
+        assert_eq!(split_words("echo '' end"), vec!["echo", "", "end"]);
     }
 
     #[test]
