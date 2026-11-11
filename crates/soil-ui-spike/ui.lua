@@ -14,12 +14,12 @@ function M.new(host, theme)
     opts = opts or {}
     return host.text(value, at.x, at.y, opts.size or theme.font.size.body,
       opts.colour or theme.colour.text, opts.anchor or "middle",
-      opts.align or "left", opts.font or "body")
+      opts.align or "left", opts.font or "body", opts.wrap)
   end
 
   function ui.measure(value, opts)
     opts = opts or {}
-    return host.measure(value, opts.size or theme.font.size.body, opts.font or "body")
+    return host.measure(value, opts.size or theme.font.size.body, opts.font or "body", opts.wrap)
   end
 
   -- Hit ids are scoped to the component instance that registered them, so two
@@ -29,7 +29,11 @@ function M.new(host, theme)
   function ui.scope(id, paint)
     local previous = prefix
     prefix = previous .. tostring(id) .. "."
+    -- Commands between these markers belong to one key: that is what a
+    -- fragment cache slices on, and why scope is the identity primitive.
+    host.group(prefix)
     paint()
+    host.group(previous)
     prefix = previous
   end
 
@@ -40,6 +44,23 @@ function M.new(host, theme)
 
   function ui.hit(id, rect, action)
     host.hit(prefix .. tostring(id), rect.x, rect.y, rect.w, rect.h, action or "")
+  end
+
+  -- A virtualized list. The host gives the extent and the scroll offset; this
+  -- emits only what fits, plus one row of overscan. The expensive part of a UI
+  -- with N rows is the number of rows you *build*, so don't build the hidden
+  -- ones.
+  function ui.list(rect, count, row_height, scroll, paint_row)
+    local first = math.max(1, math.floor((scroll or 0) / row_height) + 1)
+    local visible = math.ceil(rect.h / row_height) + 1
+    local last = math.min(count, first + visible)
+    ui.clip(rect, function()
+      for i = first, last do
+        local y = rect.y + (i - 1) * row_height - (scroll or 0)
+        paint_row(i, { x = rect.x, y = y, w = rect.w, h = row_height - 4,
+                       cx = rect.x + rect.w / 2, cy = y + (row_height - 4) / 2 })
+      end
+    end)
   end
 
   function ui.clip(rect, paint)

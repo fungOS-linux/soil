@@ -1,0 +1,8 @@
+target/
+out.png
+out-*.png
+lua.wasm
+browser/bundle.lua
+browser/lua.wasm
+
+bench.png

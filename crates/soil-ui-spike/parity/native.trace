@@ -1,0 +1,34 @@
+cmd Rect { x: 0.0, y: 0.0, w: 640.0, h: 360.0, r: 0.0, colour: [11, 14, 17] }
+cmd Rect { x: 8.0, y: 8.0, w: 184.0, h: 344.0, r: 12.0, colour: [20, 27, 33] }
+cmd Text { value: "SHELLS", x: 24.0, y: 32.0, size: 9.0, colour: [91, 107, 120], anchor: "middle", align: "left", font: "body", wrap: None }
+cmd Group("nav.")
+cmd Group("nav.studio.")
+cmd Rect { x: 16.0, y: 56.0, w: 168.0, h: 30.0, r: 8.0, colour: [29, 39, 48] }
+cmd Rect { x: 22.0, y: 64.0, w: 3.0, h: 14.0, r: 2.0, colour: [125, 211, 168] }
+cmd Text { value: "studio", x: 34.0, y: 71.0, size: 13.0, colour: [220, 229, 234], anchor: "middle", align: "left", font: "body", wrap: None }
+cmd Hit { id: "nav.studio.studio", x: 16.0, y: 56.0, w: 168.0, h: 30.0, action: "open:studio" }
+cmd Group("nav.")
+cmd Group("nav.neo.")
+cmd Rect { x: 16.0, y: 92.0, w: 168.0, h: 30.0, r: 8.0, colour: [29, 39, 48] }
+cmd Rect { x: 179.0, y: 100.0, w: 2.0, h: 14.0, r: 1.0, colour: [125, 211, 168] }
+cmd Text { value: "neo", x: 34.0, y: 107.0, size: 13.0, colour: [220, 229, 234], anchor: "middle", align: "left", font: "body", wrap: None }
+cmd Hit { id: "nav.neo.neo", x: 16.0, y: 92.0, w: 168.0, h: 30.0, action: "open:neo" }
+cmd Group("nav.")
+cmd Group("nav.acme.")
+cmd Text { value: "acme", x: 34.0, y: 143.0, size: 13.0, colour: [131, 149, 162], anchor: "middle", align: "left", font: "body", wrap: None }
+cmd Hit { id: "nav.acme.acme", x: 16.0, y: 128.0, w: 168.0, h: 30.0, action: "open:acme" }
+cmd Group("nav.")
+cmd Group("")
+cmd Text { value: "This session is attached to a local shell. Keys go to the pty, the pty sends frames back, and the view repaints from the snapshot it is given.", x: 224.0, y: 84.0, size: 11.0, colour: [91, 107, 120], anchor: "top", align: "left", font: "body", wrap: Some(392.0) }
+cmd Text { value: "studio", x: 224.0, y: 40.0, size: 16.0, colour: [220, 229, 234], anchor: "middle", align: "left", font: "body", wrap: None }
+cmd Text { value: "zsh · 80×24 · attached", x: 224.0, y: 60.0, size: 11.0, colour: [91, 107, 120], anchor: "middle", align: "left", font: "body", wrap: None }
+cmd Group("new.")
+cmd Rect { x: 224.0, y: 284.0, w: 132.0, h: 32.0, r: 8.0, colour: [125, 211, 168] }
+cmd Text { value: "new session", x: 290.0, y: 300.0, size: 11.0, colour: [8, 17, 13], anchor: "middle", align: "center", font: "body", wrap: None }
+cmd Hit { id: "new.new session", x: 224.0, y: 284.0, w: 132.0, h: 32.0, action: "new" }
+cmd Group("")
+cmd Group("detach.")
+cmd Rect { x: 368.0, y: 284.0, w: 100.0, h: 32.0, r: 8.0, colour: [125, 211, 168] }
+cmd Text { value: "detach", x: 418.0, y: 300.0, size: 11.0, colour: [8, 17, 13], anchor: "middle", align: "center", font: "body", wrap: None }
+cmd Hit { id: "detach.detach", x: 368.0, y: 284.0, w: 100.0, h: 32.0, action: "detach" }
+cmd Group("")

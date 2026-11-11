@@ -9,9 +9,13 @@ function M.render(ui, props)
     local id = ui.id(props.label)
     local pressed = props.pressed_id == id
     local hover = props.hovered_id == id
-    local fill = pressed and t.colour.primary or (hover and t.colour.primary or t.colour.primary)
+    local fill = pressed and t.colour.primary_pressed
+      or (hover and t.colour.primary_raised or t.colour.primary)
     ui.rect(props.rect, fill, t.radius.md)
-    ui.text(props.label, { x = props.rect.cx, y = props.rect.cy },
+    -- A press moves the label down a pixel: the cheapest "this is happening"
+    -- signal there is, and it needs no extra colour.
+    local lift = pressed and 1 or 0
+    ui.text(props.label, { x = props.rect.cx, y = props.rect.cy + lift },
       { colour = t.colour.on_primary, size = t.font.size.small, align = "center" })
     ui.hit(props.label, props.rect, props.action or props.label)
   end)

@@ -3,17 +3,27 @@ name = "soil-ui-spike"
 version = "0.1.0"
 edition = "2021"
 publish = false
+default-run = "soil-ui-spike"
 
 [dependencies]
 anyhow = "1"
-wgpu = "24"
+wgpu = "23"
 vello = "0.4"
-parley = "0.2"
+parley = { version = "0.2", default-features = false, features = ["std"] }
 peniko = "0.3"
 taffy = "0.7"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 pollster = "0.4"
+winit = "0.30"
 bytemuck = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[[bin]]
+name = "soil-ui-spike"
+path = "src/main.rs"
+
+[[bin]]
+name = "png_diff"
+path = "src/bin/png_diff.rs"
 
 [workspace]
