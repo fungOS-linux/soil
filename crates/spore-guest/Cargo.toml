@@ -1,0 +1,15 @@
+[package]
+name = "spore-guest"
+description = "The guest half of a Spore: Lua view + the surface contract, no renderer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Excluded from the workspace on purpose: `mlua` with Lua 5.4 has `links = "lua"`,
+# and the workspace already links Luau through `soil-lua`. One Lua per graph.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+serde_json = "1"
