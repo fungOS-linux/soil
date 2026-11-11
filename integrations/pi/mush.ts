@@ -177,7 +177,7 @@ function vfs(command: string): VfsRun {
         const args: string[] = [];
         if (shell.desktop) args.push("--desktop", shell.desktop);
         else if (shell.root) args.push("--root", shell.root);
-        args.push("--timeout", TIMEOUT, "sh", "-c", command);
+        args.push("--timeout", TIMEOUT, "--adaptive-background", "sh", "-c", command);
         const result = mush(args);
         const out = stripBanner(result.out);
         const err = result.error ? String(result.error) : vfsError(out);
@@ -291,7 +291,7 @@ export default function (pi: ExtensionAPI) {
                         const args: string[] = [];
                         if (shell.desktop) args.push("--desktop", shell.desktop);
                         else if (shell.root) args.push("--root", shell.root);
-                        args.push("--timeout", TIMEOUT, "sh", "-c", line);
+                        args.push("--timeout", TIMEOUT, "--adaptive-background", "sh", "-c", line);
                         const result = mush(args);
                         if (result.error) {
                                 return textResult(`mush failed to start: ${result.error}`, true);

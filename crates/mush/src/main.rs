@@ -902,6 +902,12 @@ fn run() -> Result<()> {
     let no_daemon = args.iter().any(|arg| arg == "--no-daemon")
         || std::env::var("MUSH_NO_DAEMON").is_ok();
     args.retain(|arg| arg != "--no-daemon");
+    // Let the daemon decide when to hand back a job id instead of treating
+    // `--timeout` as the caller's patience. Agents pass a long timeout as a
+    // safety net, not because they intend to wait that long.
+    let adaptive_background = args.iter().any(|arg| arg == "--adaptive-background")
+        || std::env::var("MUSH_ADAPTIVE_BACKGROUND").is_ok();
+    args.retain(|arg| arg != "--adaptive-background");
     let configured_token =
         take_option(&mut args, "--mcp-token").or_else(|| std::env::var("MUSH_MCP_TOKEN").ok());
     let mcp_token = configured_token.clone().unwrap_or_else(new_mcp_token);
@@ -934,10 +940,13 @@ fn run() -> Result<()> {
             &socket_path,
             &root,
             desktop_id.as_deref(),
-            &line,
-            shell_command.is_some(),
-            idle_timeout.unwrap_or(Duration::from_secs(30 * 60)),
-            budget,
+            service::Forward {
+                line: &line,
+                shell: shell_command.is_some(),
+                idle: idle_timeout.unwrap_or(Duration::from_secs(30 * 60)),
+                budget,
+                adaptive: adaptive_background,
+            },
         ) {
             return finish(status);
         }
@@ -1108,6 +1117,7 @@ fn usage() -> String {
          \x20 --script PATH              source a VFS script\n\
          \x20 --timeout SECONDS          interrupt a command after this long (0 disables)\n\
          \x20 --background-after SECONDS hand the caller a job id after this long (0 disables)\n\
+         \x20 --adaptive-background    let the daemon decide when to background, from the command's own timings\n\
          \x20 --foreground               allow a server subcommand to take the terminal\n\n\
          A one-shot command forwards to a daemon for its VFS root, starting one if\n\
          none is listening; the daemon compiles the Spore once instead of per call.\n\

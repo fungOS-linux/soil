@@ -186,6 +186,27 @@ fn handle(stream: UnixStream, jobs: &Jobs) -> Result<()> {
     Ok(())
 }
 
+/// What a client sends for one command line.
+///
+/// `budget` is the caller's deadline. It is also the background threshold unless
+/// the caller asked for adaptive backgrounding: an agent that passes
+/// `--timeout 900` as a safety net would otherwise wait the full 15 minutes
+/// before learning that its command is stuck, which is the failure the job
+/// queue exists to prevent.
+fn request_body(line: &str, shell: bool, budget: Option<Duration>, adaptive: bool) -> Value {
+    let mut request = json!({
+        "kind": if shell { "shell" } else { "exec" },
+        "command": line,
+    });
+    if let Some(budget) = budget {
+        request["timeout_secs"] = json!(budget.as_secs());
+        if !adaptive {
+            request["background_after_secs"] = json!(budget.as_secs());
+        }
+    }
+    request
+}
+
 fn write_response(mut stream: UnixStream, response: &Value) -> Result<()> {
     stream.write_all(serde_json::to_string(response)?.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -262,25 +283,34 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// `None` means no daemon answered and none could be started, so the caller
 /// should run the command in-process; `Some(status)` is the command's own exit
 /// status, already printed.
+/// What a one-shot caller wants forwarded to the daemon.
+pub struct Forward<'a> {
+    pub line: &'a str,
+    /// Run the line as a shell line (builtins, `&&`/`||`, host programs) rather
+    /// than straight to the Spore.
+    pub shell: bool,
+    pub idle: Duration,
+    /// The caller's deadline, when it set one.
+    pub budget: Option<Duration>,
+    /// Let the daemon choose the background threshold from the command's own
+    /// timings instead of treating `budget` as the caller's patience.
+    pub adaptive: bool,
+}
+
 pub fn forward(
     socket: &Path,
     root: &Path,
     desktop: Option<&str>,
-    line: &str,
-    shell: bool,
-    idle: Duration,
-    budget: Option<Duration>,
+    forward: Forward<'_>,
 ) -> Option<i32> {
-    // The caller's patience, not the daemon's: a command the caller would have
-    // waited 15 minutes for must not be handed back as a job id after 60s.
-    let mut request = json!({
-        "kind": if shell { "shell" } else { "exec" },
-        "command": line,
-    });
-    if let Some(budget) = budget {
-        request["background_after_secs"] = json!(budget.as_secs());
-        request["timeout_secs"] = json!(budget.as_secs());
-    }
+    let Forward {
+        line,
+        shell,
+        idle,
+        budget,
+        adaptive,
+    } = forward;
+    let request = request_body(line, shell, budget, adaptive);
     let wait = budget.unwrap_or(Duration::from_secs(120)) + Duration::from_secs(5);
     let mut response = request_once(socket, &request, wait);
     if response.is_none() {
@@ -399,4 +429,32 @@ fn start(
         std::thread::sleep(Duration::from_millis(50));
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_backgrounding_leaves_the_threshold_to_the_daemon() {
+        let budget = Some(Duration::from_secs(900));
+        let request = request_body("cargo build", true, budget, true);
+        assert_eq!(request["kind"], json!("shell"));
+        assert_eq!(request["timeout_secs"], json!(900));
+        assert!(
+            request.get("background_after_secs").is_none(),
+            "the caller's deadline must not become the background threshold: {request}"
+        );
+
+        // Without the flag the old contract holds: a caller that asked to wait
+        // is not handed a job id early.
+        let request = request_body("cargo build", true, budget, false);
+        assert_eq!(request["background_after_secs"], json!(900));
+
+        // No deadline, no threshold either way.
+        let request = request_body("git status", false, None, false);
+        assert_eq!(request["kind"], json!("exec"));
+        assert!(request.get("timeout_secs").is_none());
+        assert!(request.get("background_after_secs").is_none());
+    }
 }

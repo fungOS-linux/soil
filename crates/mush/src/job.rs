@@ -29,14 +29,102 @@ use crate::{
     outcome::{Executed, State},
 };
 
-/// Patience before a command is left running in the background.
-pub const DEFAULT_BACKGROUND: Duration = Duration::from_secs(10 * 60);
-/// Never background sooner than this; a cold start alone can take seconds.
-pub const MIN_BACKGROUND: Duration = Duration::from_secs(60);
+/// Patience for a command that is expected to be slow and has no history yet:
+/// a cold build, a network fetch, a push.
+pub const PATIENT_BACKGROUND: Duration = Duration::from_secs(10 * 60);
+/// Patience for anything else with no history. An agent stuck behind a `find`
+/// that never returns loses a session; 30 seconds is long enough for an honest
+/// command to finish and short enough that a stuck one comes back as a job.
+pub const UNSEEN_BACKGROUND: Duration = Duration::from_secs(30);
+/// The shortest patience an adapted command can get; below this a fast command
+/// would be handed back before it had a chance to finish.
+pub const MIN_BACKGROUND: Duration = Duration::from_secs(2);
 /// Never wait longer than this before handing the caller back its life.
 pub const MAX_BACKGROUND: Duration = Duration::from_secs(20 * 60);
-/// Samples needed before the threshold adapts to observed durations.
-const MIN_SAMPLES: usize = 3;
+/// Samples needed before the threshold adapts: one number has no deviation.
+const MIN_SAMPLES: usize = 2;
+
+/// Invocations that are slow by nature even without a sample.
+const PATIENT: &[&str] = &[
+    "cargo",
+    "rustc",
+    "cc",
+    "clang",
+    "c++",
+    "make",
+    "cmake",
+    "ninja",
+    "pkg-config",
+    "rustup",
+    "npm",
+    "pnpm",
+    "yarn",
+    "bun install",
+    "docker",
+    "podman",
+    "git push",
+    "git pull",
+    "git fetch",
+    "git clone",
+    "git merge",
+    "git rebase",
+    "git submodule",
+    "gh",
+];
+
+fn patient(key: &str) -> bool {
+    PATIENT
+        .iter()
+        .any(|prefix| key == *prefix || (key.starts_with(prefix) && key[prefix.len()..].starts_with(' ')))
+}
+
+/// The bucket a command's durations are recorded under.
+///
+/// The first word, except for tools whose verbs have very different costs:
+/// `git status` and `git push` must not share a threshold, or a fast status
+/// makes every push a background job.
+fn sample_key(command: &str) -> String {
+    const SUBCOMMANDED: &[&str] = &["git", "gh", "cargo", "rustup"];
+    let mut words = command.split_whitespace();
+    let Some(first) = words.next() else {
+        return String::new();
+    };
+    if SUBCOMMANDED.contains(&first)
+        && let Some(second) = words.next()
+        && !second.starts_with('-')
+    {
+        return format!("{first} {second}");
+    }
+    first.to_string()
+}
+
+/// Patience for `key`, given the durations recorded for it so far.
+///
+/// Mean plus one standard deviation, floored and capped: a command that
+/// usually takes 200ms gets the floor, one that usually takes 40s gets its own
+/// spread, and a command that has not been timed twice yet borrows a default
+/// chosen by what it is.
+fn threshold_for(key: &str, samples: &[u64]) -> Duration {
+    if samples.len() < MIN_SAMPLES {
+        return if patient(key) {
+            PATIENT_BACKGROUND
+        } else {
+            UNSEEN_BACKGROUND
+        };
+    }
+    let count = samples.len() as f64;
+    let mean = samples.iter().map(|value| *value as f64).sum::<f64>() / count;
+    let variance = samples
+        .iter()
+        .map(|value| (*value as f64 - mean).powi(2))
+        .sum::<f64>()
+        / count;
+    let millis = (mean + variance.sqrt()).clamp(
+        MIN_BACKGROUND.as_millis() as f64,
+        MAX_BACKGROUND.as_millis() as f64,
+    );
+    Duration::from_millis(millis as u64)
+}
 /// Samples kept per command.
 const MAX_SAMPLES: usize = 16;
 
@@ -262,31 +350,14 @@ impl Jobs {
 
     /// Patience for `command`, adapted from its recorded durations.
     pub fn suggest(&self, command: &str) -> Duration {
-        let word = command
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_string();
+        let key = sample_key(command);
         let inner = self.lock();
-        let Some(samples) = inner.durations.get(&word) else {
-            return DEFAULT_BACKGROUND;
-        };
-        if samples.len() < MIN_SAMPLES {
-            return DEFAULT_BACKGROUND;
-        }
-        let count = samples.len() as f64;
-        let mean = samples.iter().map(|value| *value as f64).sum::<f64>() / count;
-        let variance = samples
-            .iter()
-            .map(|value| (*value as f64 - mean).powi(2))
-            .sum::<f64>()
-            / count;
-        let threshold = mean + 3.0 * variance.sqrt();
-        let millis = threshold.clamp(
-            MIN_BACKGROUND.as_millis() as f64,
-            MAX_BACKGROUND.as_millis() as f64,
-        );
-        Duration::from_millis(millis as u64)
+        let samples = inner
+            .durations
+            .get(&key)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        threshold_for(&key, samples)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -302,12 +373,8 @@ impl Shared {
         {
             let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
             let elapsed = started_ago(&inner, id);
-            let word = command
-                .split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .to_string();
-            let samples = inner.durations.entry(word).or_default();
+            let key = sample_key(&command);
+            let samples = inner.durations.entry(key).or_default();
             samples.push(elapsed);
             if samples.len() > MAX_SAMPLES {
                 samples.remove(0);
@@ -392,4 +459,52 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unseen_command_gets_short_patience_unless_it_is_expected_to_be_slow() {
+        // The failure this fixes: an agent behind a `find` that never returns.
+        assert_eq!(threshold_for("find", &[]), UNSEEN_BACKGROUND);
+        assert_eq!(threshold_for("git status", &[]), UNSEEN_BACKGROUND);
+        assert_eq!(threshold_for("rg", &[]), UNSEEN_BACKGROUND);
+        // A cold build or a network fetch is allowed its time.
+        assert_eq!(threshold_for("cargo build", &[]), PATIENT_BACKGROUND);
+        assert_eq!(threshold_for("git push", &[]), PATIENT_BACKGROUND);
+        assert_eq!(threshold_for("gh pr create", &[]), PATIENT_BACKGROUND);
+        assert_eq!(threshold_for("make", &[]), PATIENT_BACKGROUND);
+    }
+
+    #[test]
+    fn a_sampled_command_gets_its_own_mean_plus_one_sigma() {
+        // Mean 1s, no deviation: the floor keeps it from being cut short.
+        assert_eq!(threshold_for("find", &[1_000, 1_000]), MIN_BACKGROUND);
+        // Mean 11s, sigma 1s.
+        assert_eq!(
+            threshold_for("git status", &[10_000, 12_000]),
+            Duration::from_secs(12)
+        );
+        // One number is not a distribution.
+        assert_eq!(threshold_for("git status", &[10_000]), UNSEEN_BACKGROUND);
+        // A slow command is capped rather than handed a day.
+        assert_eq!(
+            threshold_for("cargo build", &[u64::MAX / 2, u64::MAX / 2]),
+            MAX_BACKGROUND
+        );
+    }
+
+    #[test]
+    fn the_sample_key_keeps_git_verbs_apart() {
+        // A fast `git status` must not teach the daemon that `git push` is
+        // cheap: they are different buckets.
+        assert_eq!(sample_key("git status --short"), "git status");
+        assert_eq!(sample_key("git push origin main"), "git push");
+        assert_eq!(sample_key("cargo build --release"), "cargo build");
+        assert_eq!(sample_key("git --version"), "git");
+        assert_eq!(sample_key("find / -name '*.rs'"), "find");
+        assert_eq!(sample_key("   "), "");
+    }
 }
