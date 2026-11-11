@@ -671,6 +671,7 @@ name = "canvas-winit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "image",
  "pollster",
  "softbuffer",
  "soil-spore",

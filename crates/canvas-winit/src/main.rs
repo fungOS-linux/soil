@@ -221,6 +221,55 @@ impl App {
         }
     }
 
+    fn paint_splash(&mut self, (width, height): (u32, u32)) {
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
+        let (Some(width), Some(height)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else {
+            return;
+        };
+        if surface.resize(width, height).is_err() {
+            return;
+        }
+        let Ok(mut buffer) = surface.buffer_mut() else {
+            return;
+        };
+        buffer.fill(0x0c10_15);
+        let logo = image::load_from_memory(include_bytes!("../assets/fungos.png"))
+            .ok()
+            .map(|image| image.to_rgba8());
+        if let Some(logo) = logo {
+            let side = 256.min(width.get()).min(height.get());
+            let scaled =
+                image::imageops::resize(&logo, side, side, image::imageops::FilterType::Lanczos3);
+            let left = (width.get() - side) / 2;
+            let top = (height.get() - side) / 2;
+            for (x, y, pixel) in scaled.enumerate_pixels() {
+                let Some(destination) =
+                    buffer.get_mut(((top + y) * width.get() + left + x) as usize)
+                else {
+                    continue;
+                };
+                let alpha = u32::from(pixel[3]);
+                if alpha == 0 {
+                    continue;
+                }
+                let blend = |foreground: u8, background: u8| {
+                    ((u32::from(foreground) * alpha + u32::from(background) * (255 - alpha)) / 255)
+                        as u8
+                };
+                let background = *destination;
+                let r = blend(pixel[0], (background >> 16) as u8);
+                let g = blend(pixel[1], (background >> 8) as u8);
+                let b = blend(pixel[2], background as u8);
+                *destination = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+            }
+        }
+        if let Err(error) = buffer.present() {
+            eprintln!("canvas-winit: splash: {error}");
+        }
+    }
+
     fn paint(&mut self) {
         let (Some(surface), Some(frame)) = (self.surface.as_mut(), self.frame.as_ref()) else {
             return;
@@ -297,6 +346,7 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.context = Some(context);
         self.surface = Some(surface);
+        self.paint_splash((physical.width, physical.height));
         self.start_component(
             (physical.width, physical.height),
             self.window.as_ref().unwrap().clone(),
@@ -398,9 +448,25 @@ fn main() -> Result<()> {
             ),
         }
     }
-    let module = module.context(
-        "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--spores DIR]",
-    )?;
+    let module = match module {
+        Some(module) => module,
+        None => {
+            // A .app bundle runs this binary directly; the launcher module sits
+            // in Contents/Resources next to Contents/MacOS.
+            let executable = std::env::current_exe().context("locate the executable")?;
+            let candidate = executable
+                .parent()
+                .and_then(|macos| macos.parent())
+                .map(|contents| contents.join("Resources/launcher.wasm"))
+                .context("locate the bundle Resources directory")?;
+            if !candidate.is_file() {
+                anyhow::bail!(
+                    "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--spores DIR]"
+                );
+            }
+            candidate
+        }
+    };
     let input = Arc::new(Mutex::new(VecDeque::new()));
     if let Some(key) = key {
         let text = (key.chars().count() == 1).then(|| key.clone());
@@ -417,6 +483,7 @@ fn main() -> Result<()> {
                 meta: false,
             });
     }
+    let frames = frames.unwrap_or(if capture.is_some() { 1 } else { usize::MAX });
     let (tx, rx) = mpsc::channel();
     let mut app = App {
         module,
@@ -427,7 +494,7 @@ fn main() -> Result<()> {
         surface: None,
         frame: None,
         capture,
-        frames: frames.unwrap_or(1),
+        frames,
         frames_seen: 0,
         input,
         spores: spores.unwrap_or_else(|| {
