@@ -115,10 +115,7 @@ impl Store {
         // Whether this host already runs it, and whether the offering is newer
         // than what it runs. The page, a Spore view and an agent all need the
         // same answer, so it is computed here and not in a client.
-        let installed = self
-            .installed
-            .iter()
-            .find(|app| app.id() == entry.spore_id);
+        let installed = self.installed.iter().find(|app| app.id() == entry.spore_id);
         let state = match installed {
             None => "available",
             Some(app) if app.digest == entry.digest => "installed",
@@ -511,6 +508,7 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
         None => (target, None),
     };
     let mut line = String::new();
+    let mut headers: Vec<(String, String)> = Vec::new();
     loop {
         line.clear();
         match reader.read_line(&mut line) {
@@ -518,7 +516,11 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
             // An empty line ends the headers; waiting for EOF would hang the
             // request until the client gave up.
             Ok(_) if line.trim().is_empty() => break,
-            Ok(_) => {}
+            Ok(_) => {
+                if let Some((name, value)) = line.split_once(':') {
+                    headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
+                }
+            }
             Err(_) => break,
         }
     }
@@ -560,6 +562,36 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
             .into_bytes(),
             JSON,
         ),
+        ("GET", "/api/whoami") => {
+            // Who this request is, as far as the store can tell. The gateway
+            // authenticates (OIDC or mTLS) and passes the principal down; a
+            // loopback request with no proxy is this machine's own user. The
+            // page shows this, and never invents an account when it is absent.
+            let principal = headers
+                .iter()
+                .find(|(name, _)| name == "x-mycelium-principal")
+                .map(|(_, value)| value.clone())
+                .or_else(|| {
+                    let loopback = stream
+                        .peer_addr()
+                        .map(|address| address.ip().is_loopback())
+                        .unwrap_or(false);
+                    loopback.then(|| "mycelium:local".to_owned())
+                });
+            (
+                "200 OK",
+                serde_json::json!({
+                    "principal": principal,
+                    "store": store.snapshot.value["source"]["name"],
+                    "through_gateway": headers
+                        .iter()
+                        .any(|(name, _)| name == "x-mycelium-principal"),
+                })
+                .to_string()
+                .into_bytes(),
+                JSON,
+            )
+        }
         ("GET", "/api/catalog") => {
             // The machine view: an agent gets the same rows a browser draws, with
             // each listing resolved to its document and the package it names.
