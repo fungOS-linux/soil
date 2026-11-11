@@ -16,7 +16,9 @@ fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "a4
 soil-vfs-host = { path = "../soil-vfs-host" }
 # Hosting any `.spore`: the launcher is the generic one, so it links the host
 # instead of re-implementing it per product.
+soil-http-host = { path = "../soil-http-host" }
 soil-spore = { path = "../soil-spore" }
+soil-web-bridge = { path = "../soil-web-bridge" }
 soil-wasi-host = { path = "../soil-wasi-host" }
 http = "1"
 serde_json = "1"

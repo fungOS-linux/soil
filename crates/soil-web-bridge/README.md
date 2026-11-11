@@ -176,31 +176,35 @@ origin allowlist, its CORS — without the node opening a socket.
 
 ### Wiring it into a host
 
-The bridge does not run Spores; it is the session side. A process that does both
-composes the two pieces, and `SessionTransport` is the adapter:
+The launcher is `soil spore run`; a browser is an option on it:
+
+```sh
+soil spore run spores/worklog --bridge 127.0.0.1:8795 --bridge-wait 30 \
+  --allow-origin https://example.com
+```
+
+`soil` starts the bridge, waits for a page to offer `soil:http`, and runs the
+Spore with the provider-first transport. When no page offers the interface, the
+Spore falls back to the node's own network.
+
+For a host that composes its own process, the pieces are the same:
 
 ```rust
 use std::sync::Arc;
-use soil_http_host::{DirectTransport, HttpHost, HttpPolicy, PreferProvider};
-use soil_web_bridge::{Bridge, SessionTransport};
+use soil_http_host::{DirectTransport, PreferProvider};
+use soil_web_bridge::SessionTransport;
 
-let bridge = Arc::new(bridge);
 let transport = Arc::new(PreferProvider::new(
     Arc::new(SessionTransport::new(bridge.clone())),
-    Arc::new(DirectTransport),          // the node's own network, when nobody offers
+    Arc::new(DirectTransport),
 ));
-let host = HttpHost::new(policy).with_transport(transport);
+let builder = builder.with_http(HttpCapability::new(policy, transport));
 ```
 
 `PreferProvider` falls back **only** on `TransportError::Unsupported`, which is
 the transport's way of saying "not me". A provider that declines a URL returns
 `denied` and nobody routes around it: a fallback on failure would quietly
 overrule the page's own policy.
-
-That composition is tested here (`a_spore_fetch_goes_through_the_session…`) and
-in [`soil-http-host`](../soil-http-host/src/lib.rs); what does not exist yet is a
-binary that both serves the bridge and runs a Spore. Today that is two commands
-in two processes — which is exactly why the seam is a trait rather than a call.
 
 ## What is not here yet
 

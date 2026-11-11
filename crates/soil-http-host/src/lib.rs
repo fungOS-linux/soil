@@ -17,6 +17,11 @@ wasmtime::component::bindgen!({ path: "wit", world: "runner" });
 
 use soil::http::http;
 
+// The generated interface, re-exported so a host that links `soil:http` from
+// its own store (rather than running a `runner`-world component) implements the
+// same trait this crate does instead of a second copy of it.
+pub use soil::http::http as api;
+
 const ALLOWED_HEADERS: &[&str] = &[
     "accept",
     "accept-language",
@@ -349,94 +354,105 @@ impl WasiView for HttpHost {
 
 impl http::Host for HttpHost {
     fn fetch(&mut self, request: http::Request) -> Result<http::Response, http::Error> {
-        let url = Url::parse(&request.url).map_err(|_| http::Error::Invalid)?;
-        let origin = origin_of(&url).ok_or(http::Error::Invalid)?;
-        if !self.policy.origins.contains(&origin) {
-            return Err(http::Error::Denied);
-        }
-        if request.max_bytes == 0
-            || request.max_bytes as usize > self.policy.max_bytes
-            || request.timeout_ms == 0
-            || Duration::from_millis(request.timeout_ms as u64) > self.policy.timeout
-        {
-            return Err(http::Error::OverBudget);
-        }
-        for header in &request.headers {
-            if !ALLOWED_HEADERS.contains(&header.name.to_ascii_lowercase().as_str()) {
-                return Err(http::Error::Invalid);
-            }
-            if header.name.contains(['\r', '\n']) || header.value.contains(['\r', '\n']) {
-                return Err(http::Error::Invalid);
-            }
-        }
-        // A body belongs to a write. Allowing one on GET/HEAD would make a
-        // read look like an action and is not something any transport here
-        // supports predictably.
-        if matches!(request.method, http::Method::Get | http::Method::Head)
-            && request.body.is_some()
-        {
+        fetch(&self.policy, &*self.credentials, &*self.transport, request)
+    }
+}
+
+/// The one implementation of `soil:http` policy.
+///
+/// Every host that links the interface calls this: the `runner`-world host above
+/// and `soil-wasi-host`, which serves `wasi:http` spores and needs the same
+/// allowlist, header rules, budgets and transport mapping. A second copy would
+/// be a second answer to "is this request allowed".
+pub fn fetch(
+    policy: &HttpPolicy,
+    credentials: &dyn CredentialProvider,
+    transport: &dyn HttpTransport,
+    request: http::Request,
+) -> Result<http::Response, http::Error> {
+    let url = Url::parse(&request.url).map_err(|_| http::Error::Invalid)?;
+    let origin = origin_of(&url).ok_or(http::Error::Invalid)?;
+    if !policy.origins.contains(&origin) {
+        return Err(http::Error::Denied);
+    }
+    if request.max_bytes == 0
+        || request.max_bytes as usize > policy.max_bytes
+        || request.timeout_ms == 0
+        || Duration::from_millis(request.timeout_ms as u64) > policy.timeout
+    {
+        return Err(http::Error::OverBudget);
+    }
+    for header in &request.headers {
+        if !ALLOWED_HEADERS.contains(&header.name.to_ascii_lowercase().as_str()) {
             return Err(http::Error::Invalid);
         }
-        if request
-            .body
-            .as_ref()
-            .is_some_and(|body| body.len() > self.policy.max_bytes)
-        {
-            return Err(http::Error::OverBudget);
+        if header.name.contains(['\r', '\n']) || header.value.contains(['\r', '\n']) {
+            return Err(http::Error::Invalid);
         }
-        let mut auth = None;
-        if let Some(handle) = &request.credential {
-            let header = self
-                .credentials
-                .resolve(handle)
-                .map_err(|_| http::Error::Denied)?
-                .ok_or(http::Error::Denied)?;
-            if header.0.contains(['\r', '\n']) || header.1.contains(['\r', '\n']) {
-                return Err(http::Error::Denied);
-            }
-            auth = Some(header);
-        }
-
-        let mut headers = request
-            .headers
-            .iter()
-            .map(|header| (header.name.clone(), header.value.clone()))
-            .collect::<Vec<_>>();
-        if let Some(header) = auth {
-            headers.push(header);
-        }
-        let transport_request = TransportRequest {
-            url,
-            method: request.method,
-            headers,
-            body: request.body,
-            timeout: Duration::from_millis(request.timeout_ms as u64),
-            max_bytes: request.max_bytes as usize,
-        };
-        let response = self
-            .transport
-            .fetch(&transport_request)
-            .map_err(|error| match error {
-                TransportError::Denied => http::Error::Denied,
-                TransportError::OverBudget => http::Error::OverBudget,
-                TransportError::Timeout => http::Error::Timeout,
-                TransportError::Unavailable => http::Error::Unavailable,
-                TransportError::Tls => http::Error::Tls,
-                TransportError::Http => http::Error::Http,
-                TransportError::Io => http::Error::Io,
-                TransportError::Unsupported => http::Error::Unsupported,
-            })?;
-        Ok(http::Response {
-            status: response.status,
-            final_url: response.final_url,
-            headers: response
-                .headers
-                .into_iter()
-                .map(|(name, value)| http::Header { name, value })
-                .collect(),
-            body: response.body,
-        })
     }
+    // A body belongs to a write. Allowing one on GET/HEAD would make a
+    // read look like an action and is not something any transport here
+    // supports predictably.
+    if matches!(request.method, http::Method::Get | http::Method::Head) && request.body.is_some() {
+        return Err(http::Error::Invalid);
+    }
+    if request
+        .body
+        .as_ref()
+        .is_some_and(|body| body.len() > policy.max_bytes)
+    {
+        return Err(http::Error::OverBudget);
+    }
+    let mut auth = None;
+    if let Some(handle) = &request.credential {
+        let header = credentials
+            .resolve(handle)
+            .map_err(|_| http::Error::Denied)?
+            .ok_or(http::Error::Denied)?;
+        if header.0.contains(['\r', '\n']) || header.1.contains(['\r', '\n']) {
+            return Err(http::Error::Denied);
+        }
+        auth = Some(header);
+    }
+
+    let mut headers = request
+        .headers
+        .iter()
+        .map(|header| (header.name.clone(), header.value.clone()))
+        .collect::<Vec<_>>();
+    if let Some(header) = auth {
+        headers.push(header);
+    }
+    let transport_request = TransportRequest {
+        url,
+        method: request.method,
+        headers,
+        body: request.body,
+        timeout: Duration::from_millis(request.timeout_ms as u64),
+        max_bytes: request.max_bytes as usize,
+    };
+    let response = transport
+        .fetch(&transport_request)
+        .map_err(|error| match error {
+            TransportError::Denied => http::Error::Denied,
+            TransportError::OverBudget => http::Error::OverBudget,
+            TransportError::Timeout => http::Error::Timeout,
+            TransportError::Unavailable => http::Error::Unavailable,
+            TransportError::Tls => http::Error::Tls,
+            TransportError::Http => http::Error::Http,
+            TransportError::Io => http::Error::Io,
+            TransportError::Unsupported => http::Error::Unsupported,
+        })?;
+    Ok(http::Response {
+        status: response.status,
+        final_url: response.final_url,
+        headers: response
+            .headers
+            .into_iter()
+            .map(|(name, value)| http::Header { name, value })
+            .collect(),
+        body: response.body,
+    })
 }
 
 fn normalize_origin(origin: &str) -> Result<String> {

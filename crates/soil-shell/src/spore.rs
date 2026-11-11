@@ -38,6 +38,12 @@ pub struct Run {
     pub geode_prefix: String,
     pub geode_purpose: String,
     pub geode_ttl_secs: u64,
+    /// Serve a web bridge here, so a browser can offer `soil:http`.
+    pub bridge: Option<SocketAddr>,
+    /// How long to wait for a page to offer `soil:http` before starting anyway.
+    pub bridge_wait: Duration,
+    /// Origins this Spore may reach through `soil:http`.
+    pub allow_origins: Vec<String>,
 }
 
 pub fn parse(args: &[String]) -> Result<(PathBuf, Run)> {
@@ -62,6 +68,9 @@ pub fn parse(args: &[String]) -> Result<(PathBuf, Run)> {
         // separate capability and must be asked for explicitly.
         geode_purpose: "verify".into(),
         geode_ttl_secs: 600,
+        bridge: None,
+        bridge_wait: Duration::ZERO,
+        allow_origins: Vec::new(),
     };
     let mut index = 1;
     while index < args.len() {
@@ -115,6 +124,22 @@ pub fn parse(args: &[String]) -> Result<(PathBuf, Run)> {
                 run.geode_ttl_secs = value(index + 1)?
                     .parse()
                     .context("--geode-ttl-secs is seconds")?;
+                index += 2;
+            }
+            "--bridge" => {
+                run.bridge = Some(value(index + 1)?.parse().context("--bridge is addr:port")?);
+                index += 2;
+            }
+            "--bridge-wait" => {
+                run.bridge_wait = Duration::from_secs(
+                    value(index + 1)?
+                        .parse()
+                        .context("--bridge-wait is seconds")?,
+                );
+                index += 2;
+            }
+            "--allow-origin" => {
+                run.allow_origins.push(value(index + 1)?);
                 index += 2;
             }
             other => bail!("unknown option `{other}`"),
@@ -228,6 +253,53 @@ async fn serve(spore: Spore, run: Run) -> Result<()> {
     }
     if let Some(bus) = bus(&spore.manifest, &run)? {
         builder = builder.bus(bus);
+    }
+
+    // The browser, when one connects. The Spore still runs here; `soil:http`
+    // reaches the network through a page that volunteered the interface, and
+    // falls back to this process's own socket when none did.
+    let mut _bridge_server = None;
+    if let Some(listen) = run.bridge {
+        let policy = soil_http_host::HttpPolicy::new(
+            run.allow_origins.iter().cloned(),
+            8 * 1024 * 1024,
+            Duration::from_secs(30),
+        )
+        .context("soil:http policy")?;
+        let grants = soil_web_bridge::GrantSet::from_manifest(&spore.manifest);
+        let bridge = Arc::new(
+            soil_web_bridge::Bridge::new(
+                spore.manifest.spore.id.clone(),
+                grants,
+                soil_web_bridge::Registry::new(),
+            )
+            .with_auth(soil_web_bridge::Auth::loopback_only()),
+        );
+        let server = bridge
+            .clone()
+            .serve(listen)
+            .context("start the web bridge")?;
+        println!("soil: bridge on http://{}", server.addr());
+        if run.allow_origins.is_empty() {
+            println!("soil: no --allow-origin, so soil:http reaches nothing");
+        } else {
+            println!("soil: soil:http may reach {}", run.allow_origins.join(", "));
+        }
+        if !run.bridge_wait.is_zero() {
+            let deadline = tokio::time::Instant::now() + run.bridge_wait;
+            while !bridge.provides("soil:http") && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            if !bridge.provides("soil:http") {
+                println!("soil: no page offered soil:http; fetches use this process's network");
+            }
+        }
+        let transport = Arc::new(soil_http_host::PreferProvider::new(
+            Arc::new(soil_web_bridge::SessionTransport::new(bridge)),
+            Arc::new(soil_http_host::DirectTransport),
+        ));
+        builder = builder.with_http(soil_wasi_host::HttpCapability::new(policy, transport));
+        _bridge_server = Some(server);
     }
     let service = Arc::new(
         HttpService::from_bytes_named(spore.manifest.spore.id.clone(), &wasm, builder)

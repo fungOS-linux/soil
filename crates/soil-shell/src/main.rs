@@ -14,7 +14,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use fungos_vfs::{Expect, Vfs};
+use fungos_vfs::Vfs;
 
 mod spore;
 
@@ -28,8 +28,8 @@ fn main() {
 fn usage() -> &'static str {
     "usage: soil --root ROOT <command>\n\
      commands:\n\
-       spore run <dir|package.spore> [--listen ADDR] [--hub ADDR]... [--unibus-config FILE]
-\
+       spore run <dir|package.spore> [--listen ADDR] [--hub ADDR]... [--unibus-config FILE]\n\
+                                    [--bridge ADDR] [--bridge-wait SECS] [--allow-origin URL]...\n\
        shell [--mount DIR] [--fuse-binary PATH] [--shell PATH] [--no-mount] [-- command...]\n\
        ls [PREFIX]\n\
        stat PATH\n\
@@ -296,7 +296,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut vfs = open_owned(dir.path());
         let entry = vfs
-            .put("notes.txt", b"keep this blob", "text/plain", Expect::Any)
+            .put(
+                "notes.txt",
+                b"keep this blob",
+                "text/plain",
+                fungos_vfs::Expect::Any,
+            )
             .unwrap();
         remove(dir.path(), vec!["notes.txt".into()]).unwrap();
         assert!(vfs.file("notes.txt").unwrap().is_none());
