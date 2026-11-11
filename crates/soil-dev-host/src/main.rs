@@ -344,6 +344,8 @@ fn main() -> Result<()> {
         vec![
             Namespace::write("signal", "dev/personal/telemetry", "signal"),
             Namespace::write("device.state", "dev/personal/telemetry", "device.state"),
+            Namespace::write("vitals.summary", "dev/personal/telemetry", "vitals.summary"),
+            Namespace::write("vitals.latest", "dev/personal/telemetry", "vitals.latest"),
         ],
     )
     .with_context(|| format!("open records {records_dir}"))?;

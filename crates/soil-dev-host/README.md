@@ -28,6 +28,12 @@ target/debug/soil-dev-host --records-dir .soil-dev/records \
   path/to/jarvis-telemetry/module.wasm seed
 target/debug/soil-dev-host --records-dir .soil-dev/records \
   path/to/jarvis-telemetry/module.wasm once --wearer owner
+
+# Vitals summary + latest bus frame
+target/debug/soil-dev-host --records-dir .soil-dev/records \
+  path/to/vitals/module.wasm seed
+target/debug/soil-dev-host --records-dir .soil-dev/records \
+  path/to/vitals/module.wasm once --wearer owner
 ```
 
 `once` prints the fused snapshot and then each Unibus frame the guest
@@ -40,8 +46,9 @@ bus attention.state.v1 {"state":"focused","wearer":"owner",...}
 
 ## Records and leases
 
-- The dev host grants two namespace names to the guest: `signal` and
-  `device.state`, both backed by the `dev/personal/telemetry` book.
+- The dev host grants four namespace names to the guest: `signal`,
+  `device.state`, `vitals.summary`, and `vitals.latest`, all backed by the
+  `dev/personal/telemetry` book.
 - The radio lease uses the same `SessionStore` as `soil-ble-host`; the default
   session is `.soil-dev/soil-ble-session.json`.
 - `--records-dir`, `--session`, and `--host-id` override the defaults;
