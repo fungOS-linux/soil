@@ -52,7 +52,7 @@ pub const HOST_ALLOWLIST: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Connector {
+pub enum Connector {
     First,
     And,
     Or,
@@ -543,7 +543,65 @@ fn quote_word(word: &str) -> Option<String> {
     Some(format!("'{word}'"))
 }
 
-fn split_commands(line: &str) -> Vec<(Connector, String)> {
+/// Split a line into the commands the host may run one at a time.
+///
+/// `;`, `&&` and `||` separate commands, except inside a shell block: the Spore
+/// parses `if`/`for`/`while` itself, and the host splits before it sees the line,
+/// so `if a; then b; fi` has to be joined back into one command or it arrives as
+/// three and `then` is "command not found".
+pub fn split_commands(line: &str) -> Vec<(Connector, String)> {
+    let mut out: Vec<(Connector, String)> = Vec::new();
+    let mut open: Option<(Connector, String)> = None;
+    let mut depth = 0i32;
+    for (connector, segment) in split_segments(line) {
+        let delta = block_depth(&segment);
+        match open.as_mut() {
+            Some((_, text)) => {
+                text.push_str("; ");
+                text.push_str(&segment);
+            }
+            None => open = Some((connector, segment)),
+        }
+        depth += delta;
+        if depth <= 0 {
+            depth = 0;
+            if let Some(entry) = open.take() {
+                out.push(entry);
+            }
+        }
+    }
+    // An unclosed block still goes to the Spore as one command, so it can say
+    // what is missing instead of running its pieces.
+    if let Some(entry) = open {
+        out.push(entry);
+    }
+    out
+}
+
+/// How a segment changes the shell's block nesting.
+///
+/// A keyword counts only where a command can start: at the beginning of the
+/// segment or after `then`, `else`, `elif`, `do` or `!`. That is what finds the
+/// second `if` in `then if b`, and what keeps `echo if` from opening a block.
+/// A word carrying a quote is text, not a keyword.
+fn block_depth(segment: &str) -> i32 {
+    let mut depth = 0;
+    let mut command_position = true;
+    for word in segment.split_whitespace() {
+        let quoted = word.contains(['\'', '"']);
+        if command_position && !quoted {
+            match word {
+                "if" | "for" | "while" => depth += 1,
+                "fi" | "done" => depth -= 1,
+                _ => {}
+            }
+        }
+        command_position = !quoted && matches!(word, "then" | "else" | "elif" | "do" | "!");
+    }
+    depth
+}
+
+fn split_segments(line: &str) -> Vec<(Connector, String)> {
     let mut out = Vec::new();
     let mut buffer = String::new();
     let mut connector = Connector::First;
@@ -642,6 +700,56 @@ mod tests {
         assert_eq!(parts[3].0, Connector::Or);
         let quoted = split_commands("echo 'a && b'");
         assert_eq!(quoted.len(), 1);
+    }
+
+    #[test]
+    fn a_shell_block_is_one_command() {
+        assert_eq!(
+            split_commands("if test -f a; then echo yes; fi"),
+            vec![(
+                Connector::First,
+                "if test -f a; then echo yes; fi".to_string()
+            )]
+        );
+        assert_eq!(
+            split_commands("for x in a b; do echo $x; done"),
+            vec![(Connector::First, "for x in a b; do echo $x; done".to_string())]
+        );
+        // Nested blocks join all the way out.
+        assert_eq!(
+            split_commands("if a; then if b; then echo c; fi; fi"),
+            vec![(
+                Connector::First,
+                "if a; then if b; then echo c; fi; fi".to_string()
+            )]
+        );
+        // A finished block chains like any other command.
+        assert_eq!(
+            split_commands("if a; then b; fi && echo done"),
+            vec![
+                (Connector::First, "if a; then b; fi".to_string()),
+                (Connector::And, "echo done".to_string()),
+            ]
+        );
+        // Outside a block, statements still split.
+        assert_eq!(
+            split_commands("echo a; echo b"),
+            vec![
+                (Connector::First, "echo a".to_string()),
+                (Connector::Always, "echo b".to_string()),
+            ]
+        );
+        // An unclosed block goes over whole, so the Spore can say what is
+        // missing instead of running its pieces.
+        assert_eq!(
+            split_commands("if a; then b"),
+            vec![(Connector::First, "if a; then b".to_string())]
+        );
+        // Quoted separators never split, block or not.
+        assert_eq!(
+            split_commands("echo 'a; b'"),
+            vec![(Connector::First, "echo 'a; b'".to_string())]
+        );
     }
 
     #[test]

@@ -30,6 +30,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use shell::{Connector, split_commands};
 use rand::Rng;
 use rustyline::{Editor, error::ReadlineError, history::FileHistory};
 use serde::{Deserialize, Serialize};
@@ -1700,14 +1701,6 @@ fn run_lines(runtime: &mut Runtime) -> Result<i32> {
     Ok(status)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Connector {
-    First,
-    Always,
-    And,
-    Or,
-}
-
 #[derive(Debug, Default)]
 struct ShellArgs {
     /// The `-c` command line. None means read stdin.
@@ -1926,53 +1919,6 @@ impl Session {
     }
 }
 
-/// Split a command line on `;`, `&&`, and `||`, leaving quoted operators alone.
-fn split_commands(line: &str) -> Vec<(Connector, String)> {
-    let mut out = Vec::new();
-    let mut buf = String::new();
-    let mut connector = Connector::First;
-    let mut quote: Option<char> = None;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match quote {
-            Some(q) => {
-                buf.push(c);
-                if c == q {
-                    quote = None;
-                }
-            }
-            None => match c {
-                '\'' | '"' => {
-                    quote = Some(c);
-                    buf.push(c);
-                }
-                ';' => {
-                    out.push((connector, buf.trim().to_string()));
-                    buf.clear();
-                    connector = Connector::Always;
-                }
-                '&' if chars.peek() == Some(&'&') => {
-                    chars.next();
-                    out.push((connector, buf.trim().to_string()));
-                    buf.clear();
-                    connector = Connector::And;
-                }
-                '|' if chars.peek() == Some(&'|') => {
-                    chars.next();
-                    out.push((connector, buf.trim().to_string()));
-                    buf.clear();
-                    connector = Connector::Or;
-                }
-                _ => buf.push(c),
-            },
-        }
-    }
-    if !buf.trim().is_empty() || out.is_empty() {
-        out.push((connector, buf.trim().to_string()));
-    }
-    out
-}
-
 /// Split one simple command into argv, resolving quotes and backslashes.
 fn split_words(line: &str) -> Vec<String> {
     let mut words = Vec::new();
@@ -2116,11 +2062,10 @@ fn run_shell(
     Ok(())
 }
 
-/// Host commands allowed to run against a materialized VFS overlay are declared
-/// once, in `shell::HOST_ALLOWLIST`. A second list here is how the interactive
-/// shell and the daemon drifted apart: `rg`, `sed` and `gh` were reachable over
-/// MCP and refused at a prompt.
-
+// Host commands allowed to run against a materialized VFS overlay are declared
+// once, in `shell::HOST_ALLOWLIST`. A second list here is how the interactive
+// shell and the daemon drifted apart: `rg`, `sed` and `gh` were reachable over
+// MCP and refused at a prompt.
 fn run_host(root: &Path, args: Vec<String>) -> Result<()> {
     let status = run_host_status(root, args)?;
     if status != 0 {
