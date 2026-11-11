@@ -1474,13 +1474,14 @@ impl Shell {
     /// one denies everything. Exit 1 on a 4xx/5xx so an agent does not mistake
     /// an error page for a result.
     fn fetch(&mut self, args: &[String]) -> Result<i32, String> {
-        const USAGE: &str = "fetch URL [-X METHOD] [-H 'Name: value'] [-d DATA] [-i] [-o FILE] [--max-bytes N]";
+        const USAGE: &str = "fetch URL [-X METHOD] [-H 'Name: value'] [-d DATA] [--credential HANDLE] [-i] [-o FILE] [--max-bytes N]";
         let mut url: Option<&str> = None;
         let mut method: Option<http_abi::Method> = None;
         let mut headers: Vec<http_abi::Header> = Vec::new();
         let mut body: Option<Vec<u8>> = None;
         let mut include = false;
         let mut output: Option<&str> = None;
+        let mut credential: Option<String> = None;
         let mut max_bytes = 8 * 1024 * 1024u32;
         let mut index = 0;
         while index < args.len() {
@@ -1503,6 +1504,10 @@ impl Shell {
                 }
                 "-d" | "--data" => {
                     body = Some(args.get(index + 1).ok_or(USAGE)?.clone().into_bytes());
+                    index += 1;
+                }
+                "--credential" => {
+                    credential = Some(args.get(index + 1).ok_or(USAGE)?.clone());
                     index += 1;
                 }
                 "-i" | "--include" => include = true,
@@ -1537,7 +1542,7 @@ impl Shell {
             method,
             headers,
             body,
-            credential: None,
+            credential,
             max_bytes,
             timeout_ms: 30_000,
         })
@@ -2779,7 +2784,7 @@ fn fetch_method(value: &str) -> Result<http_abi::Method, String> {
 
 fn http_error(error: &http_abi::Error) -> &'static str {
     match error {
-        http_abi::Error::Denied => "denied by the host origin allowlist (MUSH_HTTP_ALLOW)",
+        http_abi::Error::Denied => "denied by the host policy (group allowlist or credential handle)",
         http_abi::Error::Invalid => "invalid URL, header or credential",
         http_abi::Error::OverBudget => "over the host response budget",
         http_abi::Error::Timeout => "timed out",
@@ -3795,7 +3800,7 @@ mush — a sandboxed VFS shell
   json del FILE PATH               remove an object key or array element
   json merge TARGET SOURCE...      deep-merge objects into TARGET
   json pretty [--indent N] [FILE]  reformat to stdout (stdin when FILE is - or absent)
-  fetch URL [-X METHOD] [-H 'Name: value'] [-d DATA] [-i] [-o FILE]  one HTTP request
+  fetch URL [-X METHOD] [-H 'Name: value'] [-d DATA] [--credential HANDLE] [-i] [-o FILE]  one HTTP request
   dig NAME [A|AAAA]                resolve a name, `*.myc` through the mesh resolver
   ping NAME [--port N]             resolve and open a TCP session (default 443)
   rm [-r] PATH...         unlink files or recursively remove a directory

@@ -9,28 +9,59 @@
 //! (`https://api.github.com`). Empty means "nothing": a shell that can fetch
 //! anything is ambient authority with extra steps.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use soil_http_host::{Error, HttpPolicy, Method, Request};
+use anyhow::Result;
+use soil_http_host::{CredentialProvider, Error, HttpHost, HttpPolicy, Method, Request};
 
 use crate::soil::http::http;
 
 pub const MAX_BYTES: usize = 8 * 1024 * 1024;
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 
-pub fn policy_from_env() -> HttpPolicy {
-    let configured = std::env::var("MUSH_HTTP_ALLOW").unwrap_or_default();
-    let origins = configured
-        .split(',')
-        .map(str::trim)
-        .filter(|origin| !origin.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    HttpPolicy::new(origins, MAX_BYTES, TIMEOUT).unwrap_or_else(|error| {
+/// The principal's groups decide the origin allowlist; see `access`.
+pub fn host(access: &crate::access::Access) -> HttpHost {
+    let origins = access.origins.iter().cloned().collect::<Vec<_>>();
+    let policy = HttpPolicy::new(origins, MAX_BYTES, TIMEOUT).unwrap_or_else(|error| {
         // A malformed allowlist must not hand the caller a policy it cannot see.
-        eprintln!("mush: MUSH_HTTP_ALLOW ignored: {error}");
+        eprintln!("mush: unusable fetch policy ({error}); fetching nothing");
         HttpPolicy::new(Vec::new(), MAX_BYTES, TIMEOUT).expect("an empty policy is valid")
-    })
+    });
+    HttpHost::new(policy).with_credentials(Arc::new(EnvCredentials::from_env()))
+}
+
+/// Bearer tokens the host holds on the guest's behalf.
+///
+/// The guest only ever names a handle; the token is read from the host's own
+/// environment (`MUSH_HTTP_TOKEN_<HANDLE>`) and injected here. A Geode adapter
+/// implementing the same trait replaces this without the Spore changing.
+#[derive(Default)]
+pub struct EnvCredentials {
+    tokens: BTreeMap<String, String>,
+}
+
+impl EnvCredentials {
+    pub fn from_env() -> Self {
+        let mut tokens = BTreeMap::new();
+        for (name, value) in std::env::vars() {
+            if let Some(handle) = name.strip_prefix("MUSH_HTTP_TOKEN_")
+                && !handle.is_empty()
+                && !value.is_empty()
+            {
+                tokens.insert(handle.to_ascii_lowercase(), value);
+            }
+        }
+        Self { tokens }
+    }
+}
+
+impl CredentialProvider for EnvCredentials {
+    fn resolve(&self, handle: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .tokens
+            .get(&handle.to_ascii_lowercase())
+            .map(|token| ("authorization".to_string(), format!("Bearer {token}"))))
+    }
 }
 
 impl http::Host for crate::Host {

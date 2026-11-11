@@ -534,12 +534,26 @@ only names a URL. `-X`, `-H 'Name: value'`, `-d DATA` (which implies POST),
 byte) cover the useful surface. A 4xx/5xx exits 1 so an error page is not
 mistaken for a result.
 
-The allowlist is `MUSH_HTTP_ALLOW`, a comma-separated list of origins such as
-`https://api.github.com`. **Empty means nothing** — a shell that can fetch
-anything is ambient authority with extra steps, and this is where the
-principal/consent policy will attach rather than a place to default open.
-Credentials are not used yet: the capability accepts a handle, but no caller
-supplies one.
+The allowlist comes from the caller's groups:
+
+```toml
+# ~/.config/fungos/mush/config.toml
+groups = agents                 # MUSH_GROUPS adds to these
+group.agents.fetch = "https://api.github.com"
+group.build-fleet.fetch = "https://internal.example"
+```
+
+A principal in several groups gets the union. With no groups configured,
+`MUSH_HTTP_ALLOW` (comma-separated origins) is the fallback; with neither, the
+answer is **nothing** — a shell that can fetch anything is ambient authority with
+extra steps. `mush doctor` prints the resolved answer: `access: <principal>
+groups=… fetch=…`.
+
+Credentials never enter the guest. `fetch --credential HANDLE` names an opaque
+handle; the host injects the header from its own `MUSH_HTTP_TOKEN_<HANDLE>`
+environment. A Geode adapter replaces that store without the Spore changing, and
+the guest cannot read the token, ask what it is, or send `authorization`
+directly (the header allowlist refuses it).
 
 ## Names and reachability
 

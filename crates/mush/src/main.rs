@@ -4,6 +4,7 @@
 //! VFS root, the `soil:vfs` / `soil:index` / `soil:vfs-mut` grants, and the
 //! line-oriented terminal.
 
+mod access;
 mod complete;
 mod config;
 mod deadline;
@@ -212,7 +213,7 @@ impl Host {
             table: ResourceTable::new(),
             commands: CommandHost::new(command_root, records)?,
             spores: SporeCatalog::new(spore_root),
-            http: soil_http_host::HttpHost::new(http::policy_from_env()),
+            http: http::host(&access::from_env()),
         })
     }
 
@@ -1472,6 +1473,9 @@ fn doctor_report(
     println!("mush {}", env!("CARGO_PKG_VERSION"));
     println!("user: {user} (uid {uid})");
     println!("config: {}", config_path.display());
+    // What this session may reach, resolved the same way the capabilities are:
+    // the answer to "why was my fetch denied" without reading the policy twice.
+    println!("access: {}", access::from_env().describe());
     match budget {
         Some(budget) => println!("command deadline: {}s [enabled]", budget.as_secs_f64()),
         None => println!("command deadline: disabled [interactive]"),

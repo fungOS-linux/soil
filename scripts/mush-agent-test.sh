@@ -57,6 +57,7 @@ In /project:
 2. Add "diff" as the next element of the `features` array.
 3. Append a line `reviewed by agent` to /project/notes.md.
 4. Create /project/status.txt containing exactly the line: ready
+5. Run `dig localhost` and write its first line to /project/dig.txt
 
 Then reply with one line: what /project/config.json now contains.
 TEXT
@@ -78,10 +79,11 @@ echo "== agent exit $status ==" >&2
 config="$("$mush" --root "$vfs" sh -c 'cat /project/config.json')"
 notes="$("$mush" --root "$vfs" sh -c 'cat /project/notes.md')"
 status_file="$("$mush" --root "$vfs" sh -c 'cat /project/status.txt' 2>/dev/null)"
+dig_file="$("$mush" --root "$vfs" sh -c 'cat /project/dig.txt' 2>/dev/null)"
 
-python3 - "$config" "$notes" "$status_file" <<'PY'
+python3 - "$config" "$notes" "$status_file" "$dig_file" <<'PY'
 import json, sys
-config, notes, status = sys.argv[1], sys.argv[2], sys.argv[3]
+config, notes, status, dig = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 failures = []
 try:
     doc = json.loads(config)
@@ -96,6 +98,8 @@ if "reviewed by agent" not in notes:
     failures.append(f"notes.md lost the appended line: {notes!r}")
 if status.strip() != "ready":
     failures.append(f"status.txt is {status!r}, want 'ready'")
+if "localhost" not in dig:
+    failures.append(f"dig.txt lost the resolver line: {dig!r}")
 if failures:
     print("\n".join(f"FAIL {failure}" for failure in failures), file=sys.stderr)
     sys.exit(1)

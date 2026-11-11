@@ -444,53 +444,77 @@ fn wasm_spore_fetches_through_the_host_allowlist() {
     let origin = format!("http://127.0.0.1:{port}");
     let dir = tempfile::tempdir().unwrap();
 
-    let run = |command: &str, allow: &str| {
-        let output = mush_command()
+    let run = |line: &str, allow: &str, token: Option<&str>| {
+        let mut command = mush_command();
+        command
             .arg("--root")
             .arg(dir.path())
             .arg("--wasm")
             .arg(module())
             .arg("--command")
-            .arg(command)
+            .arg(line)
             .env("MUSH_HTTP_ALLOW", allow)
-            .output()
-            .unwrap();
+            .env_remove("MUSH_GROUPS")
+            .env_remove("MUSH_HTTP_TOKEN_TEST");
+        if let Some(token) = token {
+            command.env("MUSH_HTTP_TOKEN_TEST", token);
+        }
+        let output = command.output().unwrap();
         (
             output.status.code().unwrap(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
             String::from_utf8_lossy(&output.stderr).into_owned(),
         )
     };
+    // The thread hands back the request head, so a test can see what the host
+    // actually sent — which is how the credential assertion works.
     let answer = |body: &'static [u8], status: &'static str| {
         let listener = listener.try_clone().unwrap();
         std::thread::spawn(move || {
             let (mut conn, _) = listener.accept().unwrap();
             let mut buffer = [0u8; 2048];
-            let _ = conn.read(&mut buffer);
+            let read = conn.read(&mut buffer).unwrap_or(0);
             let head = format!(
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             conn.write_all(head.as_bytes()).unwrap();
             conn.write_all(body).unwrap();
+            String::from_utf8_lossy(&buffer[..read]).into_owned()
         })
     };
 
     let served = answer(b"hello", "200 OK");
-    let (status, stdout, stderr) = run(&format!("fetch {origin}/hello"), &origin);
-    served.join().unwrap();
+    let (status, stdout, stderr) = run(&format!("fetch {origin}/hello"), &origin, None);
+    let request = served.join().unwrap();
     assert_eq!(status, 0, "{stdout}{stderr}");
     assert_eq!(stdout, "hello");
+    assert!(!request.to_lowercase().contains("authorization"), "{request}");
+
+    // A credential handle is resolved by the host; the guest never sees the
+    // token and cannot send `authorization` itself.
+    let served = answer(b"hello", "200 OK");
+    let (status, stdout, stderr) = run(
+        &format!("fetch --credential test {origin}/hello"),
+        &origin,
+        Some("sekret"),
+    );
+    let request = served.join().unwrap();
+    assert_eq!(status, 0, "{stdout}{stderr}");
+    assert!(
+        request.to_lowercase().contains("authorization: bearer sekret"),
+        "{request}"
+    );
 
     // An empty allowlist denies everything: a shell that can fetch anything is
     // ambient authority with extra steps.
-    let (status, stdout, stderr) = run(&format!("fetch {origin}/hello"), "");
+    let (status, stdout, stderr) = run(&format!("fetch {origin}/hello"), "", None);
     assert_eq!(status, 1, "{stdout}{stderr}");
     assert!(stderr.contains("denied"), "{stdout}{stderr}");
 
     // A 4xx is a result, not a success.
     let served = answer(b"missing", "404 Not Found");
-    let (status, stdout, stderr) = run(&format!("fetch {origin}/nope"), &origin);
+    let (status, stdout, stderr) = run(&format!("fetch {origin}/nope"), &origin, None);
     served.join().unwrap();
     assert_eq!(status, 1, "{stdout}{stderr}");
     assert!(stderr.contains("HTTP 404"), "{stdout}{stderr}");
