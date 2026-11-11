@@ -138,7 +138,10 @@ fn run(args: Vec<String>) -> Result<()> {
         }
         "serve" => {
             let addr = named(rest, "--addr").unwrap_or_else(|| DEFAULT_ADDR.to_owned());
-            let store = Store::new(Some(&index), installed, source(rest, &index));
+            let mut store = Store::new(Some(&index), installed, source(rest, &index));
+            if let Some(packages) = named(rest, "--packages") {
+                store = store.with_packages(packages);
+            }
             let listener = soil_store::serve::bind(&addr)?;
             match listener.local_addr() {
                 Ok(address) => eprintln!("soil-store: http://{address}/ on {addr}"),
@@ -214,8 +217,10 @@ fn build_index(rest: &[String]) -> Result<()> {
 fn entry_for(dir: &Path) -> Result<Entry> {
     let installed = Installed::read(dir, None, None)?;
     // The package address is the digest of the tar a gateway would hand back,
-    // so the index references bytes rather than a path on this machine.
-    let package = soil_store::cid::raw(&soil_spore::pack(dir)?);
+    // so the index references bytes rather than a path on this machine. Packing
+    // through the existing lock keeps the publisher's tree untouched: a store
+    // that refreshed locks as it scanned would be editing what it reviewed.
+    let package = soil_store::cid::raw(&soil_spore::pack_locked(dir)?);
     let manifest = installed.manifest;
     Ok(Entry {
         seq: 0,
@@ -394,7 +399,7 @@ fn scan(root: &Path, pins: &BTreeMap<String, String>) -> Result<Vec<Installed>> 
 }
 
 fn usage() -> String {
-    "usage: soil-store index    --spores-root DIR [--source NAME] [-o FILE]\n       soil-store delegate --publisher PRINCIPAL --operator-key KEY (--public-key FILE | --fingerprint KEY)\n                           [--scope spore|*] [--days N] [--gnupg-home DIR] [-o FILE]\n       soil-store sign     --index FILE --publisher PRINCIPAL --key KEY [--delegation FILE]...\n                           [--countersign OPERATOR-KEY] [--gnupg-home DIR] [--write]\n       soil-store revoke   --index FILE --publisher PRINCIPAL --key KEY --reason TEXT\n                           --operator-key KEY [--gnupg-home DIR] [--write]\n       soil-store verify   --index FILE --operator-key FILE\n       soil-store plan     --index FILE --spores-root DIR [--json] [--pin ID=LABEL]\n       soil-store snapshot --index FILE --spores-root DIR [-o FILE] [--source-name NAME] [--source-index CID]\n       soil-store serve    --index FILE --spores-root DIR [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]\n       soil-store --version".into()
+    "usage: soil-store index    --spores-root DIR [--source NAME] [-o FILE]\n       soil-store delegate --publisher PRINCIPAL --operator-key KEY (--public-key FILE | --fingerprint KEY)\n                           [--scope spore|*] [--days N] [--gnupg-home DIR] [-o FILE]\n       soil-store sign     --index FILE --publisher PRINCIPAL --key KEY [--delegation FILE]...\n                           [--countersign OPERATOR-KEY] [--gnupg-home DIR] [--write]\n       soil-store revoke   --index FILE --publisher PRINCIPAL --key KEY --reason TEXT\n                           --operator-key KEY [--gnupg-home DIR] [--write]\n       soil-store verify   --index FILE --operator-key FILE\n       soil-store plan     --index FILE --spores-root DIR [--json] [--pin ID=LABEL]\n       soil-store snapshot --index FILE --spores-root DIR [-o FILE] [--source-name NAME] [--source-index CID]\n       soil-store serve    --index FILE --spores-root DIR [--packages DIR] [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]\n       soil-store --version".into()
 }
 
 /// Every value given after a repeatable flag, in order.

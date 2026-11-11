@@ -2109,11 +2109,27 @@ pub fn write_lock(root: &Path) -> Result<Lock> {
 pub fn pack(root: &Path) -> Result<Vec<u8>> {
     let manifest = Manifest::load(root)?;
     let lock = write_lock(root)?;
+    tarball(root, &manifest, &lock)
+}
+
+/// Pack a tree whose `spore.lock` is already current, without writing to it.
+///
+/// The lock is the package identity a publisher reviewed, so a reader that only
+/// wants the bytes — the store index, a mirror, a review queue — must not
+/// refresh it. A stale lock means the tree is not what was published, and the
+/// answer is `soil-spore lock`, not a digest nobody looked at.
+pub fn pack_locked(root: &Path) -> Result<Vec<u8>> {
+    let manifest = Manifest::load(root)?;
+    let lock = check(root)?;
+    tarball(root, &manifest, &lock)
+}
+
+fn tarball(root: &Path, manifest: &Manifest, lock: &Lock) -> Result<Vec<u8>> {
     if lock.id != manifest.spore.id || lock.version != manifest.spore.version {
         return Err(Error::Lock("lock does not match the manifest".into()));
     }
 
-    let mut files = collect_package(root, &manifest)?;
+    let mut files = collect_package(root, manifest)?;
     files.push((LOCK_NAME.to_owned(), lock.render().into_bytes()));
 
     let total: u64 = files.iter().map(|(_, bytes)| bytes.len() as u64).sum();
@@ -3145,5 +3161,67 @@ mod command_tests {
     fn two_commands_cannot_share_a_name() {
         let twice = format!("{OK}{OK}");
         assert!(Manifest::parse(&manifest(&twice)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    /// A composition Spore: no module, so the tar is the manifest, the view and
+    /// the lock — enough to exercise packing without a real wasm build.
+    fn tree() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("ui")).expect("ui");
+        std::fs::write(
+            dir.path().join("spore.toml"),
+            "schema = 1\n[spore]\nid = \"dev.fungos.demo\"\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             license = \"MIT\"\nsummary = \"demo\"\n[engine]\nsoil = \">=0.1\"\n\
+             target = \"wasm32-wasip2\"\n[ui]\nentry = \"ui/main.lua\"\n\
+             [launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("ui/main.lua"), "return {}").expect("view");
+        dir
+    }
+
+    #[test]
+    fn packing_for_publication_never_rewrites_the_lock() {
+        let dir = tree();
+        let root = dir.path();
+        write_lock(root).expect("a first lock");
+        let lock_path = root.join(LOCK_NAME);
+        let current = std::fs::read_to_string(&lock_path).expect("read lock");
+
+        assert_eq!(
+            pack_locked(root).expect("a current lock packs"),
+            pack(root).expect("pack"),
+            "a fresh lock and a refreshed one are the same bytes"
+        );
+
+        // An author edits a view without re-locking: the lock no longer describes
+        // the tree, and packing for publication refuses rather than blessing a
+        // digest nobody reviewed.
+        std::fs::write(root.join("ui/main.lua"), "return { edited = true }").expect("edit");
+        let error = pack_locked(root).expect_err("a stale lock is not publishable");
+        assert!(error.to_string().contains("stale"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("read lock"),
+            current,
+            "a refused pack writes nothing"
+        );
+
+        // Authoring still refreshes it, which is what `soil-spore pack` is for.
+        let refreshed = pack(root).expect("authoring pack refreshes");
+        assert_ne!(
+            std::fs::read_to_string(&lock_path).expect("read lock"),
+            current,
+            "the authoring pack wrote the new lock"
+        );
+        assert_eq!(
+            pack_locked(root).expect("the refreshed lock is current"),
+            refreshed,
+            "and it describes the tree it was written for"
+        );
     }
 }

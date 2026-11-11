@@ -475,8 +475,10 @@ soil-store serve    --index index.json --spores-root ~/.local/share/fungos/spore
 
 `index` seals a fresh log from a package tree: it numbers the entries, folds them
 into the checkpoint root, and addresses each tar by the CID of the bytes it would
-hand back. Its output is deliberately unsigned — `delegate` and `sign` are the
-steps that make it a source.
+hand back. It reads the tree without writing to it, so a stale `spore.lock` is an
+error with the tree left as it was — publishing is not the moment to bless a
+digest nobody reviewed. Its output is deliberately unsigned: `delegate` and `sign`
+are the steps that make it a source.
 
 `delegate` is the operator's one signature per publisher key: it covers the
 publisher principal, the key fingerprint, the key itself (by digest), the scope
@@ -493,9 +495,13 @@ the log for history but are skipped by `verify` and dropped from `catalog()`: on
 lost device must not brick every other package.
 
 `serve` is the loopback presenter: it reads the index and the install root once,
-answers `/`, `/updates`, `/spore/<id>`, `/api/plan` and `/api/index`, and never
-writes to either. It rescans on start, so publishing a new index means restarting
-the service (`launchctl kickstart -k gui/$UID/dev.fungos.soil-store`).
+answers `/`, `/updates`, `/spore/<id>`, `/api/plan`, `/api/index`, and — when it
+is given `--packages DIR` — the tar (`/package/<digest>`) and its publisher
+signature (`/signature/<digest>`) for any digest the active catalog lists. It
+never writes to either, and it will not serve a digest the catalog does not
+offer, so the directory cannot be used to enumerate the disk. It rescans on
+start, so publishing a new index means restarting the service
+(`launchctl kickstart -k gui/$UID/dev.fungos.soil-store`).
 
 `plan` classifies every installed Spore against the catalog (`live`, `restart`,
 `consent`, `system`, `hold`) and reports current and yanked packages. `snapshot`

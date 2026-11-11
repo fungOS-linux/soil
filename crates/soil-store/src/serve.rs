@@ -25,6 +25,9 @@ pub struct Store {
     /// The catalog this presenter reads. Kept so `/api/index` serves the bytes
     /// the rows came from instead of re-deriving them.
     pub index: Option<Index>,
+    /// Where packed tars live, named `<digest>.spore` — the same layout
+    /// `soil-install` keeps. A store with no directory serves listings only.
+    pub packages: Option<std::path::PathBuf>,
 }
 
 impl Store {
@@ -38,7 +41,34 @@ impl Store {
             snapshot,
             catalog,
             index: index.cloned(),
+            packages: None,
         }
+    }
+
+    /// Serve packed tars from `dir`. Only digests the catalog offers are
+    /// readable, so the directory cannot be used to enumerate the disk.
+    pub fn with_packages(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.packages = Some(dir.into());
+        self
+    }
+
+    /// The tar for a digest the active catalog lists, if this store has it.
+    pub fn package(&self, digest: &str) -> Option<Vec<u8>> {
+        self.artifact(digest, "spore")
+    }
+
+    /// The publisher's detached signature over that tar, so a client can check
+    /// the bytes against the key the index delegated without trusting this host.
+    pub fn signature(&self, digest: &str) -> Option<Vec<u8>> {
+        self.artifact(digest, "spore.asc")
+    }
+
+    fn artifact(&self, digest: &str, extension: &str) -> Option<Vec<u8>> {
+        let dir = self.packages.as_ref()?;
+        if !crate::digest(digest) || !self.catalog.values().any(|entry| entry.digest == digest) {
+            return None;
+        }
+        std::fs::read(dir.join(format!("{digest}.{extension}"))).ok()
     }
 
     fn find(&self, id: &str) -> Option<&Installed> {
@@ -271,17 +301,19 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
         }
     }
 
-    let (status, body, content_type) = match (method, path) {
-        ("GET", "/") => ("200 OK", store.page(), HTML),
-        ("GET", "/updates") => ("200 OK", store.updates_page(), HTML),
-        ("GET", "/healthz") => ("200 OK", "ok\n".into(), TEXT),
+    let (status, body, content_type): (&str, Vec<u8>, &str) = match (method, path) {
+        ("GET", "/") => ("200 OK", store.page().into_bytes(), HTML),
+        ("GET", "/updates") => ("200 OK", store.updates_page().into_bytes(), HTML),
+        ("GET", "/healthz") => ("200 OK", b"ok\n".to_vec(), TEXT),
         ("GET", "/api/index") => match &store.index {
             Some(index) => (
                 "200 OK",
-                serde_json::to_string_pretty(index).unwrap_or_else(|_| "{}".into()),
+                serde_json::to_string_pretty(index)
+                    .unwrap_or_else(|_| "{}".into())
+                    .into_bytes(),
                 JSON,
             ),
-            None => ("404 Not Found", "no index\n".into(), TEXT),
+            None => ("404 Not Found", b"no index\n".to_vec(), TEXT),
         },
         ("GET", "/api/apps") => {
             let value = &store.snapshot.value;
@@ -290,7 +322,7 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
                 "pending": value["pending"],
                 "source": value["source"],
             });
-            ("200 OK", body.to_string(), JSON)
+            ("200 OK", body.to_string().into_bytes(), JSON)
         }
         ("GET", "/api/plan") => (
             "200 OK",
@@ -302,30 +334,56 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
                 "current": store.plan.current,
                 "yanked": store.plan.yanked,
             })
-            .to_string(),
+            .to_string()
+            .into_bytes(),
             JSON,
         ),
         ("GET", other) if other.starts_with("/spore/") => {
             let id = &other[7..];
             match store.spore_page(id) {
-                Some(page) => ("200 OK", page, HTML),
-                None => ("404 Not Found", "no such Spore\n".into(), TEXT),
+                Some(page) => ("200 OK", page.into_bytes(), HTML),
+                None => ("404 Not Found", b"no such Spore\n".to_vec(), TEXT),
             }
         }
-        _ => ("404 Not Found", "not found\n".into(), TEXT),
+        ("GET", other) if other.starts_with("/package/") => {
+            let digest = &other[9..];
+            match store.package(digest) {
+                Some(bytes) => ("200 OK", bytes, SPORE),
+                None => (
+                    "404 Not Found",
+                    b"no such package on this store\n".to_vec(),
+                    TEXT,
+                ),
+            }
+        }
+        ("GET", other) if other.starts_with("/signature/") => {
+            let digest = &other[11..];
+            match store.signature(digest) {
+                Some(bytes) => ("200 OK", bytes, PGP),
+                None => (
+                    "404 Not Found",
+                    b"no signature on this store\n".to_vec(),
+                    TEXT,
+                ),
+            }
+        }
+        _ => ("404 Not Found", b"not found\n".to_vec(), TEXT),
     };
 
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
+    stream.write_all(&body)?;
     stream.flush()
 }
 
 const HTML: &str = "text/html; charset=utf-8";
 const JSON: &str = "application/json";
 const TEXT: &str = "text/plain; charset=utf-8";
+const SPORE: &str = "application/vnd.fungos.spore";
+const PGP: &str = "application/pgp-signature";
 
 pub fn bind(address: &str) -> Result<TcpListener> {
     TcpListener::bind(address).map_err(|error| Error::Io(format!("listen {address}: {error}")))
@@ -389,3 +447,88 @@ footer { padding: 16px 32px 28px; color: #6f7787; font-size: 12px; border-top: 1
 "#;
 
 const FOOTER: &str = "<footer>Served on loopback by <code>soil-store serve</code> · the index is signed and package digests are verified at install</footer>";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{Checkpoint, EntryKind, SCHEMA};
+
+    const CID: &str = "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+
+    fn store(packages: Option<&std::path::Path>) -> Store {
+        let digest = "a".repeat(64);
+        let entry = Entry {
+            seq: 1,
+            kind: EntryKind::Add,
+            spore_id: "dev.fungos.demo".into(),
+            version: "0.1.0".into(),
+            digest: digest.clone(),
+            package: CID.into(),
+            listing: None,
+            module: None,
+            ui: None,
+            grants: Vec::new(),
+            system: None,
+            publisher: None,
+            publisher_key: None,
+            signature: String::new(),
+        };
+        let index = Index {
+            schema: SCHEMA,
+            source: "test".into(),
+            checkpoint: Checkpoint {
+                seq: 1,
+                root: Index::root(std::slice::from_ref(&entry)),
+                signature: String::new(),
+            },
+            entries: vec![entry],
+            delegations: Vec::new(),
+            revocations: Vec::new(),
+        };
+        let source = Source {
+            name: "test".into(),
+            index: "unsigned".into(),
+            verified: false,
+        };
+        let store = Store::new(Some(&index), Vec::new(), source);
+        match packages {
+            Some(dir) => store.with_packages(dir),
+            None => store,
+        }
+    }
+
+    #[test]
+    fn only_catalogued_digests_are_served() {
+        let temp = tempfile::tempdir().unwrap();
+        let listed = "a".repeat(64);
+        let unlisted = "b".repeat(64);
+        std::fs::write(temp.path().join(format!("{listed}.spore")), b"tar").unwrap();
+        std::fs::write(temp.path().join(format!("{listed}.spore.asc")), b"sig").unwrap();
+        std::fs::write(temp.path().join(format!("{unlisted}.spore")), b"other").unwrap();
+        std::fs::write(temp.path().join(format!("{unlisted}.spore.asc")), b"other").unwrap();
+
+        let served = store(Some(temp.path()));
+        assert_eq!(served.package(&listed), Some(b"tar".to_vec()));
+        assert_eq!(served.signature(&listed), Some(b"sig".to_vec()));
+        assert_eq!(
+            served.package(&unlisted),
+            None,
+            "a digest the catalog omits"
+        );
+        assert_eq!(
+            served.signature(&unlisted),
+            None,
+            "a signature for an unlisted digest"
+        );
+        assert_eq!(
+            served.package("../../etc/passwd"),
+            None,
+            "a path is not a digest"
+        );
+        assert_eq!(
+            store(None).package(&listed),
+            None,
+            "a listing-only store serves no bytes"
+        );
+    }
+}
