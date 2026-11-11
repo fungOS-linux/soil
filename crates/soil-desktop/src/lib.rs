@@ -101,6 +101,8 @@ pub enum Refusal {
     NoProvider,
     /// A relation existed and has run out.
     Expired,
+    /// This desktop refuses this Spore outright.
+    Denied,
 }
 
 /// A machine.
@@ -160,6 +162,13 @@ pub struct Desktop {
     pub members: Vec<Membership>,
     pub shares: Vec<Share>,
     pub installs: Vec<Install>,
+    /// Spores this desktop refuses, whatever a device has installed.
+    ///
+    /// The mirror of `required`: a desktop that can insist on one Spore should
+    /// be able to refuse another, or "shared desktop" means only "shared
+    /// installs". `spore.toml` already carries a `denied` map for capabilities;
+    /// this is the same intent one level up.
+    pub denied: BTreeSet<String>,
 }
 
 /// A capability offered by a machine, for a desktop that admitted it.
@@ -219,6 +228,34 @@ impl Desktop {
         self.installs
             .iter()
             .filter(|install| install.required && !installed.contains(&install.spore))
+            .collect()
+    }
+
+    /// Whether this desktop lets the Spore run at all.
+    ///
+    /// Denial is checked before any install state, so installing a refused
+    /// Spore is not a way to run it. This is the one rule that has to hold
+    /// against a device that has been tampered with, and it is why the answer
+    /// is a refusal rather than a boolean the caller can forget to check.
+    pub fn permits(&self, spore: &str) -> Result<(), Refusal> {
+        if self.denied.contains(spore) {
+            return Err(Refusal::Denied);
+        }
+        Ok(())
+    }
+
+    /// Spores this desktop both requires and refuses.
+    ///
+    /// Not an error the model can throw on its own — a desktop is configured by
+    /// people — but a contradiction it can *name*, so a host can refuse to load
+    /// it instead of silently letting denial win and leaving a required install
+    /// permanently unsatisfiable.
+    #[must_use]
+    pub fn contradictions(&self) -> Vec<&str> {
+        self.installs
+            .iter()
+            .filter(|install| install.required && self.denied.contains(&install.spore))
+            .map(|install| install.spore.as_str())
             .collect()
     }
 }
@@ -311,6 +348,7 @@ mod tests {
                 .collect(),
             shares: Vec::new(),
             installs: Vec::new(),
+            denied: BTreeSet::new(),
         }
     }
 
@@ -527,5 +565,39 @@ mod tests {
     fn the_owner_is_a_member_without_being_listed() {
         let fpl = desktop("avery", &[]);
         assert_eq!(fpl.relation(&principal("avery"), NOW), Ok(Role::Owner));
+    }
+
+    #[test]
+    fn a_desktop_refuses_a_spore_even_where_it_is_installed() {
+        let mut fpl = desktop("avery", &[("kwame", Role::Writer)]);
+        fpl.denied.insert("dev.fungos.chatmail".to_owned());
+
+        // Having it installed is not a way to run it.
+        assert_eq!(fpl.permits("dev.fungos.chatmail"), Err(Refusal::Denied));
+        // Everything not named is permitted: denying is a list, not a gate.
+        assert_eq!(fpl.permits("dev.fungos.sheets"), Ok(()));
+    }
+
+    #[test]
+    fn a_desktop_that_both_requires_and_refuses_a_spore_can_say_so() {
+        let mut fpl = desktop("avery", &[("kwame", Role::Writer)]);
+        fpl.denied.insert("dev.fungos.chatmail".to_owned());
+        fpl.installs.push(Install {
+            spore: "dev.fungos.chatmail".to_owned(),
+            version: None,
+            grants: BTreeMap::new(),
+            required: true,
+        });
+        fpl.installs.push(Install {
+            spore: "dev.fungos.sheets".to_owned(),
+            version: None,
+            grants: BTreeMap::new(),
+            required: true,
+        });
+
+        // A configuration nobody could satisfy is named rather than left to
+        // manifest as an install that never completes.
+        assert_eq!(fpl.contradictions(), vec!["dev.fungos.chatmail"]);
+        assert_eq!(fpl.permits("dev.fungos.chatmail"), Err(Refusal::Denied));
     }
 }
