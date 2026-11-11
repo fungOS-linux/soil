@@ -6,19 +6,21 @@
 //! no hit-testing here — those belong to the Spore.
 
 use std::{
+    collections::VecDeque,
     num::NonZeroU32,
     path::PathBuf,
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread,
 };
 
 use anyhow::{Context as _, Result};
-use soil_webgpu::{CanvasFrame, CanvasGpuPresenter, WebGpuRuntime};
+use soil_webgpu::{CanvasFrame, CanvasGpuPresenter, InputKey, WebGpuRuntime};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::WindowEvent,
+    event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{Key as WinitKey, NamedKey},
     window::{Window, WindowId},
 };
 
@@ -58,6 +60,9 @@ struct App {
     surface: Option<SoftSurface>,
     frame: Option<CanvasFrame>,
     capture: Option<PathBuf>,
+    frames: usize,
+    frames_seen: usize,
+    input: Arc<Mutex<VecDeque<InputKey>>>,
     started: bool,
 }
 
@@ -70,14 +75,17 @@ impl App {
         eprintln!("canvas-winit: starting component at {}x{}", size.0, size.1);
         let module = self.module.clone();
         let tx = self.tx.clone();
+        let input = self.input.clone();
         thread::spawn(move || {
             let result = (|| -> Result<()> {
                 let bytes =
                     std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
                 let runtime = WebGpuRuntime::new()?;
-                let status = pollster::block_on(runtime.run_component_with_presenter(
+                let status = pollster::block_on(runtime.run_component_with_presenter_and_input(
                     &bytes,
                     Box::new(FramePresenter { size, tx, window }),
+                    input,
+                    true,
                 ))?;
                 eprintln!("canvas-winit: guest returned {status}");
                 anyhow::ensure!(status == 0, "guest returned status {status}");
@@ -87,6 +95,22 @@ impl App {
                 eprintln!("canvas-winit: {error:#}");
             }
         });
+    }
+
+    fn take_frames(&mut self, event_loop: &ActiveEventLoop) {
+        while let Ok(frame) = self.rx.try_recv() {
+            eprintln!("canvas-winit: frame {}x{}", frame.width, frame.height);
+            if let Some(path) = &self.capture
+                && let Err(error) = std::fs::write(path, &frame.rgba)
+            {
+                eprintln!("canvas-winit: write {}: {error}", path.display());
+            }
+            self.frames_seen += 1;
+            self.frame = Some(frame);
+            if self.frames_seen >= self.frames {
+                event_loop.exit();
+            }
+        }
     }
 
     fn paint(&mut self) {
@@ -180,37 +204,63 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                while let Ok(frame) = self.rx.try_recv() {
-                    self.frame = Some(frame);
-                }
+                self.take_frames(event_loop);
                 self.paint();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed {
+                    let key = key_name(&event.logical_key);
+                    let text = event.text.as_ref().map(|text| text.to_string());
+                    self.input
+                        .lock()
+                        .expect("input queue poisoned")
+                        .push_back(InputKey {
+                            key,
+                            text,
+                            pressed: true,
+                            shift: false,
+                            control: false,
+                            alt: false,
+                            meta: false,
+                        });
+                }
             }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let mut drew = false;
-        while let Ok(frame) = self.rx.try_recv() {
-            eprintln!("canvas-winit: frame {}x{}", frame.width, frame.height);
-            if let Some(path) = &self.capture {
-                if let Err(error) = std::fs::write(path, &frame.rgba) {
-                    eprintln!("canvas-winit: write {}: {error}", path.display());
-                }
-                event_loop.exit();
-            }
-            self.frame = Some(frame);
-            drew = true;
-        }
-        if drew && let Some(window) = &self.window {
+        let before = self.frames_seen;
+        self.take_frames(event_loop);
+        if self.frames_seen > before
+            && let Some(window) = &self.window
+        {
             window.request_redraw();
         }
+    }
+}
+
+fn key_name(key: &WinitKey) -> String {
+    match key {
+        WinitKey::Named(NamedKey::Enter) => "enter".into(),
+        WinitKey::Named(NamedKey::Escape) => "escape".into(),
+        WinitKey::Named(NamedKey::ArrowDown) => "arrow-down".into(),
+        WinitKey::Named(NamedKey::ArrowUp) => "arrow-up".into(),
+        WinitKey::Named(NamedKey::ArrowLeft) => "arrow-left".into(),
+        WinitKey::Named(NamedKey::ArrowRight) => "arrow-right".into(),
+        WinitKey::Named(NamedKey::Space) => "space".into(),
+        WinitKey::Named(NamedKey::Tab) => "tab".into(),
+        WinitKey::Named(NamedKey::Backspace) => "backspace".into(),
+        WinitKey::Character(text) => text.to_string(),
+        other => format!("{other:?}").to_lowercase(),
     }
 }
 
 fn main() -> Result<()> {
     let mut module = None;
     let mut capture = None;
+    let mut frames = None;
+    let mut key = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -219,11 +269,40 @@ fn main() -> Result<()> {
                     args.next().context("--capture needs a path")?,
                 ));
             }
+            "--frames" => {
+                frames = Some(
+                    args.next()
+                        .context("--frames needs a count")?
+                        .parse()
+                        .context("--frames needs a number")?,
+                );
+            }
+            "--key" => key = Some(args.next().context("--key needs a key name")?),
             value if module.is_none() => module = Some(PathBuf::from(value)),
-            _ => anyhow::bail!("usage: canvas-winit <module.wasm> [--capture FILE.rgba]"),
+            _ => anyhow::bail!(
+                "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY]"
+            ),
         }
     }
-    let module = module.context("usage: canvas-winit <module.wasm> [--capture FILE.rgba]")?;
+    let module = module.context(
+        "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY]",
+    )?;
+    let input = Arc::new(Mutex::new(VecDeque::new()));
+    if let Some(key) = key {
+        let text = (key.chars().count() == 1).then(|| key.clone());
+        input
+            .lock()
+            .expect("input queue poisoned")
+            .push_back(InputKey {
+                key,
+                text,
+                pressed: true,
+                shift: false,
+                control: false,
+                alt: false,
+                meta: false,
+            });
+    }
     let (tx, rx) = mpsc::channel();
     let mut app = App {
         module,
@@ -234,6 +313,9 @@ fn main() -> Result<()> {
         surface: None,
         frame: None,
         capture,
+        frames: frames.unwrap_or(1),
+        frames_seen: 0,
+        input,
         started: false,
     };
     let event_loop = EventLoop::new()?;

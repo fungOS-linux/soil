@@ -6,7 +6,9 @@
 //! else. Adapter/device creation, validation, limits and queue submission stay
 //! in the host through `wgpu-core`; no native handle crosses the boundary.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use wasi_webgpu_wasmtime::reexports::{wgpu_core, wgpu_types};
@@ -92,6 +94,19 @@ impl CanvasGpuPresenter for FrameCapture {
     }
 }
 
+/// One normalized key waiting for the guest. The WIT type is built at the
+/// boundary; presenters only need this plain shape.
+#[derive(Clone, Debug)]
+pub struct InputKey {
+    pub key: String,
+    pub text: Option<String>,
+    pub pressed: bool,
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
 /// Host state for one component instance.
 pub struct WebGpuHost {
     instance: Arc<wgpu_core::global::Global>,
@@ -99,6 +114,8 @@ pub struct WebGpuHost {
     options: WasiWebGpuOptions,
     wasi: WasiCtx,
     presenter: Box<dyn CanvasGpuPresenter>,
+    input: Arc<Mutex<VecDeque<InputKey>>>,
+    interactive: bool,
 }
 
 impl WebGpuHost {
@@ -107,6 +124,14 @@ impl WebGpuHost {
     }
 
     pub fn with_presenter(presenter: Box<dyn CanvasGpuPresenter>) -> Result<Self> {
+        Self::with_presenter_and_input(presenter, Arc::new(Mutex::new(VecDeque::new())), false)
+    }
+
+    pub fn with_presenter_and_input(
+        presenter: Box<dyn CanvasGpuPresenter>,
+        input: Arc<Mutex<VecDeque<InputKey>>>,
+        interactive: bool,
+    ) -> Result<Self> {
         let descriptor = wgpu_types::InstanceDescriptor {
             backends: wgpu_types::Backends::all(),
             flags: wgpu_types::InstanceFlags::from_build_config(),
@@ -121,7 +146,36 @@ impl WebGpuHost {
             options: WasiWebGpuOptions::default(),
             wasi: WasiCtxBuilder::new().build(),
             presenter,
+            input,
+            interactive,
         })
+    }
+}
+
+impl soil::present::input::Host for WebGpuHost {
+    fn interactive(&mut self) -> bool {
+        self.interactive
+    }
+
+    fn poll(&mut self, timeout_ms: u32) -> Option<soil::present::input::Key> {
+        let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
+        loop {
+            if let Some(key) = self.input.lock().expect("input queue poisoned").pop_front() {
+                return Some(soil::present::input::Key {
+                    key: key.key,
+                    text: key.text,
+                    pressed: key.pressed,
+                    shift: key.shift,
+                    control: key.control,
+                    alt: key.alt,
+                    meta: key.meta,
+                });
+            }
+            if !self.interactive || timeout_ms == 0 || Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 }
 
@@ -190,6 +244,9 @@ impl WebGpuRuntime {
         soil::present::surface::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:present")?;
+        soil::present::input::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+            .map_err(anyhow::Error::from)
+            .context("link soil:present input")?;
         Ok(Self { engine, linker })
     }
 
@@ -213,10 +270,31 @@ impl WebGpuRuntime {
         bytes: &[u8],
         presenter: Box<dyn CanvasGpuPresenter>,
     ) -> Result<u32> {
+        self.run_component_with_presenter_and_input(
+            bytes,
+            presenter,
+            Arc::new(Mutex::new(VecDeque::new())),
+            false,
+        )
+        .await
+    }
+
+    /// Run with a live input queue. `interactive` tells the guest to keep
+    /// polling after the first frame; a capture host leaves it false.
+    pub async fn run_component_with_presenter_and_input(
+        &self,
+        bytes: &[u8],
+        presenter: Box<dyn CanvasGpuPresenter>,
+        input: Arc<Mutex<VecDeque<InputKey>>>,
+        interactive: bool,
+    ) -> Result<u32> {
         let component = Component::new(&self.engine, bytes)
             .map_err(anyhow::Error::from)
             .context("compile WebGPU component")?;
-        let mut store = Store::new(&self.engine, WebGpuHost::with_presenter(presenter)?);
+        let mut store = Store::new(
+            &self.engine,
+            WebGpuHost::with_presenter_and_input(presenter, input, interactive)?,
+        );
         let instance = Runner::instantiate_async(&mut store, &component, &self.linker)
             .await
             .map_err(anyhow::Error::from)
