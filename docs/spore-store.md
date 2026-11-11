@@ -454,6 +454,34 @@ at its own index, and the mesh that already moves releases moves the catalog and
 the packages too. The official store stays the fallback for a machine that is
 alone.
 
+## The store's own bytes
+
+A store is a **CID mirror**, not only a presenter. Three kinds of bytes live on
+disk and are served by address:
+
+| path | holds | addressed by |
+|---|---|---|
+| `--packages DIR` | packed tars, `<digest>.spore` and `<digest>.spore.asc` | package digest |
+| `--media DIR` | listings, icons, screenshots, clips | `ipfs://` CID |
+
+`soil-store add --media DIR FILE...` puts a file in the directory and prints its
+CID, and `soil-store listing DIR --media DIR` builds the
+`fungos.store.listing/1` document for a package tree, stores it, and prints the
+listing's CID for `[catalog].record`. A listing is one small JSON document —
+summary, prose, categories, keywords, icon, screenshots — and it names the
+package **digest** it describes, so a listing can never drift onto another build.
+
+Serving media is not gated the way packages are: a CID *is* the content, so
+there is nothing to authorize beyond having the bytes. Packages are gated on the
+active catalog because a digest alone says nothing about whether the store still
+offers it.
+
+`/api/catalog` is the machine view of the same rows a browser draws: id,
+version, digest, package CID, signature path, publisher, grants, listing CID and
+the resolved listing document. An agent that can read JSON can browse the store
+without a UI, and `GET /package/<digest>` + `GET /signature/<digest>` are the
+same two requests an install makes.
+
 ## The planner
 
 `soil-store` is the crate that answers the two questions a storefront has to get

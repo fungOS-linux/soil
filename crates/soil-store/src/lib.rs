@@ -20,12 +20,15 @@ use std::fmt;
 
 pub mod cid;
 pub mod index;
+pub mod listing;
+pub mod media;
 pub mod plan;
 pub mod publish;
 pub mod serve;
 pub mod snapshot;
 
 pub use index::{Checkpoint, Delegation, Entry, EntryKind, Index, Revocation, SCHEMA, Verified};
+pub use listing::{Listing, Shot};
 pub use plan::{Class, Installed, Plan, Update, plan};
 pub use snapshot::{Snapshot, Source, build as build_snapshot, to_lua};
 

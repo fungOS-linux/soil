@@ -28,6 +28,8 @@ pub struct Store {
     /// Where packed tars live, named `<digest>.spore` — the same layout
     /// `soil-install` keeps. A store with no directory serves listings only.
     pub packages: Option<std::path::PathBuf>,
+    /// Where the bytes behind an `ipfs://` link live, named by their CID.
+    pub media: Option<std::path::PathBuf>,
 }
 
 impl Store {
@@ -42,6 +44,7 @@ impl Store {
             catalog,
             index: index.cloned(),
             packages: None,
+            media: None,
         }
     }
 
@@ -50,6 +53,28 @@ impl Store {
     pub fn with_packages(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.packages = Some(dir.into());
         self
+    }
+
+    /// Serve artwork and listings from `dir`, keyed by CID.
+    pub fn with_media(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.media = Some(dir.into());
+        self
+    }
+
+    /// The bytes an `ipfs://` address names, when this store keeps them.
+    pub fn blob(&self, address: &str) -> Option<Vec<u8>> {
+        crate::media::get(self.media.as_ref()?, address)
+    }
+
+    /// The listing a catalog entry points at, if this store has the bytes.
+    pub fn listing(&self, entry: &Entry) -> Option<crate::Listing> {
+        let bytes = self.blob(entry.listing.as_ref()?)?;
+        crate::Listing::parse(std::str::from_utf8(&bytes).ok()?).ok()
+    }
+
+    /// `/media/<cid>` in a page: the address without its scheme.
+    fn media_path(address: &str) -> &str {
+        address.strip_prefix("ipfs://").unwrap_or(address)
     }
 
     /// The tar for a digest the active catalog lists, if this store has it.
@@ -123,10 +148,23 @@ impl Store {
         for app in &apps {
             let id = app["id"].as_str().unwrap_or_default();
             let state = app["state"].as_str().unwrap_or("get");
+            // Artwork is enrichment: the monogram is what a launcher draws when
+            // nothing resolves, so a card is never blank while a CID is missing.
+            let listing = self.catalog.get(id).and_then(|entry| self.listing(entry));
+            let mark = match listing.as_ref().and_then(|value| value.icon.as_deref()) {
+                Some(icon) if self.blob(icon).is_some() => format!(
+                    r#"<img class="mark" src="/media/{}" alt="">"#,
+                    escape(Self::media_path(icon))
+                ),
+                _ => format!(
+                    r#"<div class="mark">{}</div>"#,
+                    escape(app["badge"].as_str().unwrap_or("?"))
+                ),
+            };
             cards.push_str(&format!(
-                r#"<a class="card" href="/spore/{id}"><div class="mark">{badge}</div><div class="card-body"><div class="name">{name}<span class="version">{version}</span></div><div class="publisher">{publisher}</div><div class="summary">{summary}</div><div class="row"><span class="chip {state}">{state_label}</span><span class="category">{category}</span></div></div></a>"#,
+                r#"<a class="card" href="/spore/{id}">{mark}<div class="card-body"><div class="name">{name}<span class="version">{version}</span></div><div class="publisher">{publisher}</div><div class="summary">{summary}</div><div class="row"><span class="chip {state}">{state_label}</span><span class="category">{category}</span></div></div></a>"#,
                 id = escape(id),
-                badge = escape(app["badge"].as_str().unwrap_or("?")),
+                mark = mark,
                 name = escape(app["name"].as_str().unwrap_or(id)),
                 version = escape(app["version"].as_str().unwrap_or_default()),
                 publisher = escape(app["publisher"].as_str().unwrap_or("unknown")),
@@ -251,8 +289,33 @@ impl Store {
             None => "<p class=\"chip get\">not installed on this host</p>".to_owned(),
         };
 
+        // Screenshots are the listing's, not the package's: a client draws the
+        // ones it can fetch and skips the rest rather than showing a hole.
+        let gallery = entry
+            .and_then(|entry| self.listing(entry))
+            .map(|listing| {
+                listing
+                    .screenshots
+                    .iter()
+                    .filter(|shot| self.blob(&shot.cid).is_some())
+                    .map(|shot| {
+                        format!(
+                            r#"<figure><img src="/media/{src}" alt="{alt}"><figcaption>{alt}</figcaption></figure>"#,
+                            src = escape(Self::media_path(&shot.cid)),
+                            alt = escape(&shot.caption),
+                        )
+                    })
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let gallery = if gallery.is_empty() {
+            String::new()
+        } else {
+            format!("<section><h2>Screenshots</h2><div class=\"shots\">{gallery}</div></section>")
+        };
+
         Some(format!(
-            r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{name} · Spore Store</title><style>{css}</style></head><body><header><div><p><a href="/">← Store</a></p><h1>{name} <span class="version">{version}</span></h1><p class="subtle">{publisher} · {license} · {id}</p></div></header><main><section><p class="summary">{description}</p>{update}<h2>What it can reach</h2><ul class="grants">{grants}</ul></section><section><h2>Manual</h2><pre class="manual">{manual}</pre></section></main><footer>Rendered from the package manifest and the active catalog; the manual ships inside the package.</footer></body></html>"#,
+            r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{name} · Spore Store</title><style>{css}</style></head><body><header><div><p><a href="/">← Store</a></p><h1>{name} <span class="version">{version}</span></h1><p class="subtle">{publisher} · {license} · {id}</p></div></header><main><section><p class="summary">{description}</p>{update}{gallery}<h2>What it can reach</h2><ul class="grants">{grants}</ul></section><section><h2>Manual</h2><pre class="manual">{manual}</pre></section></main><footer>Rendered from the package manifest and the active catalog; the manual ships inside the package.</footer></body></html>"#,
             css = CSS,
             name = escape(&name),
             version = escape(&version),
@@ -261,6 +324,7 @@ impl Store {
             id = escape(id),
             description = escape(&description),
             update = update,
+            gallery = gallery,
             grants = grants,
             manual = manual,
         ))
@@ -338,6 +402,51 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
             .into_bytes(),
             JSON,
         ),
+        ("GET", "/api/catalog") => {
+            // The machine view: an agent gets the same rows a browser draws, with
+            // each listing resolved to its document and the package it names.
+            let rows: Vec<_> = store
+                .catalog
+                .values()
+                .map(|entry| {
+                    let listing = store.listing(entry);
+                    serde_json::json!({
+                        "id": entry.spore_id,
+                        "version": entry.version,
+                        "digest": entry.digest,
+                        "package": entry.package,
+                        "signature": format!("/signature/{}", entry.digest),
+                        "publisher": entry.publisher,
+                        "publisher_key": entry.publisher_key,
+                        "system": entry.system,
+                        "grants": entry.grants,
+                        "listing": entry.listing,
+                        "document": listing,
+                    })
+                })
+                .collect();
+            (
+                "200 OK",
+                serde_json::json!({ "source": store.snapshot.value["source"], "entries": rows })
+                    .to_string()
+                    .into_bytes(),
+                JSON,
+            )
+        }
+        ("GET", other) if other.starts_with("/media/") => {
+            let address = &other[7..];
+            match store.blob(address) {
+                Some(bytes) => {
+                    let kind = image_type(&bytes);
+                    ("200 OK", bytes, kind)
+                }
+                None => (
+                    "404 Not Found",
+                    b"no such content on this store\n".to_vec(),
+                    TEXT,
+                ),
+            }
+        }
         ("GET", other) if other.starts_with("/spore/") => {
             let id = &other[7..];
             match store.spore_page(id) {
@@ -385,6 +494,31 @@ const TEXT: &str = "text/plain; charset=utf-8";
 const SPORE: &str = "application/vnd.fungos.spore";
 const PGP: &str = "application/pgp-signature";
 
+/// What an `ipfs://` blob is, from its first bytes.
+///
+/// A CID carries no file name, so the store cannot trust an extension even if a
+/// client sends one. The four formats a listing is allowed to use are cheap to
+/// recognise; anything else is a blob to download, not to render.
+fn image_type(bytes: &[u8]) -> &'static str {
+    const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    if bytes.starts_with(PNG) {
+        return "image/png";
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return "image/jpeg";
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return "image/gif";
+    }
+    if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return "image/webp";
+    }
+    if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
+        return "image/svg+xml";
+    }
+    "application/octet-stream"
+}
+
 pub fn bind(address: &str) -> Result<TcpListener> {
     TcpListener::bind(address).map_err(|error| Error::Io(format!("listen {address}: {error}")))
 }
@@ -417,7 +551,11 @@ main { padding: 24px 32px 48px; display: grid; gap: 32px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
 .card { display: flex; gap: 14px; padding: 16px; border: 1px solid #232733; border-radius: 12px; background: #151922; }
 .card:hover { border-color: #3a4160; }
-.mark { width: 44px; height: 44px; border-radius: 10px; background: #232733; display: grid; place-items: center; font-size: 20px; font-weight: 600; color: #8b9dff; }
+.mark { width: 44px; height: 44px; border-radius: 10px; background: #232733; display: grid; place-items: center; font-size: 20px; font-weight: 600; color: #8b9dff; object-fit: cover; flex: 0 0 44px; }
+.shots { display: grid; gap: 14px; }
+.shots figure { margin: 0; }
+.shots img { width: 100%; border-radius: 12px; border: 1px solid #232733; display: block; }
+.shots figcaption { margin-top: 6px; color: #9aa3b2; font-size: 12px; }
 .card-body { min-width: 0; }
 .name { font-weight: 600; }
 .version { margin-left: 8px; color: #9aa3b2; font-weight: 400; font-size: 12px; }

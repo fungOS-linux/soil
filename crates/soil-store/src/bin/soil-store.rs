@@ -48,6 +48,12 @@ fn run(args: Vec<String>) -> Result<()> {
     if matches!(command, "index") {
         return build_index(rest);
     }
+    if matches!(command, "listing") {
+        return build_listing(rest);
+    }
+    if matches!(command, "add") {
+        return add_media(rest);
+    }
     if matches!(command, "delegate") {
         return delegate(rest);
     }
@@ -141,6 +147,9 @@ fn run(args: Vec<String>) -> Result<()> {
             let mut store = Store::new(Some(&index), installed, source(rest, &index));
             if let Some(packages) = named(rest, "--packages") {
                 store = store.with_packages(packages);
+            }
+            if let Some(media) = named(rest, "--media") {
+                store = store.with_media(media);
             }
             let listener = soil_store::serve::bind(&addr)?;
             match listener.local_addr() {
@@ -241,6 +250,42 @@ fn entry_for(dir: &Path) -> Result<Entry> {
         publisher_key: None,
         signature: String::new(),
     })
+}
+
+/// `listing`: the document a storefront and an agent both read.
+///
+/// The bytes are addressed, so the same listing is one CID: write it into the
+/// media directory and a publisher pastes that CID into `[catalog].record`.
+fn build_listing(rest: &[String]) -> Result<()> {
+    let root = positional(rest).ok_or_else(|| Error::Invalid(usage()))?;
+    let listing = soil_store::Listing::build(Path::new(&root))?;
+    match named(rest, "--media") {
+        Some(dir) => {
+            let bytes = serde_json::to_vec_pretty(&listing)
+                .map_err(|error| Error::Json(error.to_string()))?;
+            let address = soil_store::media::add(Path::new(&dir), &bytes)?;
+            println!("{address}");
+        }
+        None => emit(rest, &listing)?,
+    }
+    Ok(())
+}
+
+/// `add`: put files in the content-addressed directory and print their CIDs.
+///
+/// This is how an icon or a screenshot becomes an `ipfs://` link the manifest can
+/// carry: the bytes are the address, so nothing is renamed or re-encoded.
+fn add_media(rest: &[String]) -> Result<()> {
+    let dir = named(rest, "--media").ok_or_else(|| Error::Invalid(usage()))?;
+    let files = positionals(rest);
+    if files.is_empty() {
+        return Err(Error::Invalid(usage()));
+    }
+    for file in files {
+        let address = soil_store::media::add_file(Path::new(&dir), Path::new(&file))?;
+        println!("{address}\t{file}");
+    }
+    Ok(())
 }
 
 /// `delegate`: the operator authorizes one publisher key.
@@ -399,7 +444,21 @@ fn scan(root: &Path, pins: &BTreeMap<String, String>) -> Result<Vec<Installed>> 
 }
 
 fn usage() -> String {
-    "usage: soil-store index    --spores-root DIR [--source NAME] [-o FILE]\n       soil-store delegate --publisher PRINCIPAL --operator-key KEY (--public-key FILE | --fingerprint KEY)\n                           [--scope spore|*] [--days N] [--gnupg-home DIR] [-o FILE]\n       soil-store sign     --index FILE --publisher PRINCIPAL --key KEY [--delegation FILE]...\n                           [--countersign OPERATOR-KEY] [--gnupg-home DIR] [--write]\n       soil-store revoke   --index FILE --publisher PRINCIPAL --key KEY --reason TEXT\n                           --operator-key KEY [--gnupg-home DIR] [--write]\n       soil-store verify   --index FILE --operator-key FILE\n       soil-store plan     --index FILE --spores-root DIR [--json] [--pin ID=LABEL]\n       soil-store snapshot --index FILE --spores-root DIR [-o FILE] [--source-name NAME] [--source-index CID]\n       soil-store serve    --index FILE --spores-root DIR [--packages DIR] [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]\n       soil-store --version".into()
+    "usage: soil-store index    --spores-root DIR [--source NAME] [-o FILE]
+       soil-store listing  DIR [--media DIR] [-o FILE]
+       soil-store add      --media DIR FILE...
+       soil-store delegate --publisher PRINCIPAL --operator-key KEY (--public-key FILE | --fingerprint KEY)
+                           [--scope spore|*] [--days N] [--gnupg-home DIR] [-o FILE]
+       soil-store sign     --index FILE --publisher PRINCIPAL --key KEY [--delegation FILE]...
+                           [--countersign OPERATOR-KEY] [--gnupg-home DIR] [--write]
+       soil-store revoke   --index FILE --publisher PRINCIPAL --key KEY --reason TEXT
+                           --operator-key KEY [--gnupg-home DIR] [--write]
+       soil-store verify   --index FILE --operator-key FILE
+       soil-store plan     --index FILE --spores-root DIR [--json] [--pin ID=LABEL]
+       soil-store snapshot --index FILE --spores-root DIR [-o FILE] [--source-name NAME] [--source-index CID]
+       soil-store serve    --index FILE --spores-root DIR [--packages DIR] [--media DIR] [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]
+       soil-store --version"
+        .into()
 }
 
 /// Every value given after a repeatable flag, in order.
@@ -416,6 +475,32 @@ fn named(args: &[String], flag: &str) -> Option<String> {
         .position(|arg| arg == flag)
         .and_then(|index| args.get(index + 1))
         .cloned()
+}
+
+/// Every argument that is a value rather than a flag or a flag's value.
+///
+/// The command line here is small and every flag that takes a value takes
+/// exactly one, so "the token after a `-`-prefixed token is its value" is the
+/// whole rule; boolean flags are only used by commands that take no positionals.
+fn positionals(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for arg in args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if arg.starts_with('-') {
+            skip = true;
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+fn positional(args: &[String]) -> Option<String> {
+    positionals(args).into_iter().next()
 }
 
 fn flag(args: &[String], name: &str) -> bool {
