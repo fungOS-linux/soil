@@ -122,6 +122,7 @@ fn main() -> Result<()> {
     let mut dashboard = None;
     let mut data = None;
     let mut rgba = None;
+    let mut png = None;
     let mut width = 1200u32;
     let mut height = 840u32;
     while let Some(arg) = args.next() {
@@ -131,6 +132,9 @@ fn main() -> Result<()> {
             }
             "--data" => data = Some(PathBuf::from(args.next().context("--data PATH")?)),
             "--rgba" => rgba = Some(PathBuf::from(args.next().context("--rgba PATH")?)),
+            // A PNG is what a report attaches; the raw frame stays for the
+            // development loop that wants to diff bytes.
+            "--png" => png = Some(PathBuf::from(args.next().context("--png PATH")?)),
             "--width" => width = args.next().context("--width N")?.parse()?,
             "--height" => height = args.next().context("--height N")?.parse()?,
             other => anyhow::bail!("unknown argument {other}"),
@@ -167,7 +171,17 @@ fn main() -> Result<()> {
     let theme = painter.theme;
     let scene = painter.finish();
     let frame = soil_scene_gpu::render(&scene, width, height, theme)?;
-    let path = rgba.context("missing --rgba")?;
+    if let Some(path) = png {
+        write_png(&path, width, height, &frame.rgba)?;
+        eprintln!(
+            "soil-grafana: wrote {} {}x{} (png)",
+            path.display(),
+            width,
+            height
+        );
+        return Ok(());
+    }
+    let path = rgba.context("missing --rgba or --png")?;
     std::fs::write(&path, frame.rgba).with_context(|| format!("write {}", path.display()))?;
     eprintln!(
         "soil-grafana: wrote {} {}x{}",
@@ -802,4 +816,17 @@ impl Painter {
     fn finish(self) -> Scene {
         Scene::new(self.nodes)
     }
+}
+
+/// RGBA frame -> one PNG. The renderer is the only thing that knows how a
+/// dashboard becomes pixels; this just packages those pixels for a report.
+fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
+    let file = std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().context("png header")?;
+    writer.write_image_data(rgba).context("png data")?;
+    writer.finish().context("png finish")?;
+    Ok(())
 }

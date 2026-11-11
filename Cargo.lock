@@ -6914,6 +6914,7 @@ dependencies = [
  "base64 0.22.1",
  "bytemuck",
  "fontdue",
+ "png 0.17.16",
  "pollster",
  "portable-pty",
  "serde",
