@@ -530,19 +530,16 @@ impl State {
 
     /// Read an immutable blob from the VFS content store.
     ///
-    /// `fungos-vfs` currently exposes lookup by path, not by content id. The
-    /// blob path is the documented `.fungos/objects/<shard>/<hex>` layout, and
-    /// the bytes are verified against the content id before use.
+    /// The bytes live in whichever store the VFS was opened against: the
+    /// machine's shared store by default, a per-root `.fungos/objects`
+    /// directory on a root an older build wrote. Asking the store is the only
+    /// layout-independent answer — reading the old path directly is how this
+    /// broke when the default moved.
     fn read_content(&self, id: &ContentId) -> Result<Vec<u8>> {
-        let hex = id.hex();
-        let path = self
+        let bytes = self
             .vfs
-            .root()
-            .join(".fungos/objects")
-            .join(&hex[..2])
-            .join(hex);
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("read content {id} from {}", path.display()))?;
+            .content(id)
+            .with_context(|| format!("read content {id}"))?;
         let actual = ContentId::from_bytes(&bytes);
         if &actual != id {
             bail!("content mismatch for {id}: blob hashes to {actual}");

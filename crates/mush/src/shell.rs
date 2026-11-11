@@ -30,6 +30,12 @@ use crate::{Runtime, overlay::Overlay};
 /// `mush run host` all read it from here.
 pub const HOST_ALLOWLIST: &[&str] = &[
     "cargo",
+    // bob is the build plane: `fpl bob` inspects and drives it, `bob-cargo` is
+    // the shim that routes one build. They belong here with `cargo` for the
+    // same reason `cargo` does — they are the tool, not a way around the tool.
+    "bob-cargo",
+    "fpl",
+    "fpl-bob",
     "rustc",
     "cc",
     "clang",

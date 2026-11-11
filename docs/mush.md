@@ -702,7 +702,8 @@ The environment starts empty and is rebuilt from a small allowlist (`PATH`,
 one that builds. Add more with `--allow-env NAME`. The command must be a bare
 name on the allowlist
 (`cargo`, `rustc`, `cc`, `clang`, `clang++`, `c++`, `git`, `make`, `cmake`,
-`ninja`, `pkg-config`); shells and paths such as `./cargo` are rejected.
+`ninja`, `pkg-config`, and the build plane's own `fpl bob` / `bob-cargo`);
+shells and paths such as `./cargo` are rejected.
 
 Exit status is preserved. `--no-apply` discards the overlay instead of writing
 changes back, and `--keep` prints the overlay path for inspection.

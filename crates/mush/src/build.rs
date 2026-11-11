@@ -31,8 +31,8 @@ use std::{
 /// pay its cost — a per-agent `CARGO_HOME` clones gigabytes on first use — for
 /// `ls`. A build is still one entry point; its build scripts inherit the rest.
 const BUILD_PROGRAMS: &[&str] = &[
-    "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "clang++", "make", "cmake", "ninja",
-    "zig", "go", "npm", "pnpm", "yarn", "bun",
+    "bob-cargo", "cargo", "fpl", "fpl-bob", "rustc", "cc", "c++", "gcc", "g++", "clang", "clang++",
+    "make", "cmake", "ninja", "zig", "go", "npm", "pnpm", "yarn", "bun",
 ];
 
 /// How long bob's answer is trusted. It only changes when someone re-runs
