@@ -534,15 +534,16 @@ impl State {
     /// blob path is the documented `.fungos/objects/<shard>/<hex>` layout, and
     /// the bytes are verified against the content id before use.
     fn read_content(&self, id: &ContentId) -> Result<Vec<u8>> {
-        let hex = id.hex();
-        let path = self
+        // Ask the VFS where the bytes are; do not work it out from the layout.
+        // This used to reconstruct `<root>/.fungos/objects/<xx>/<hex>` by hand,
+        // which was correct until content moved to the machine-wide store -- at
+        // which point the path named a directory that no longer holds anything,
+        // and every checkout failed with "No such file". A consumer that knows
+        // the storage layout is a consumer that breaks when storage changes.
+        let bytes = self
             .vfs
-            .root()
-            .join(".fungos/objects")
-            .join(&hex[..2])
-            .join(hex);
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("read content {id} from {}", path.display()))?;
+            .content(id)
+            .with_context(|| format!("read content {id}"))?;
         let actual = ContentId::from_bytes(&bytes);
         if &actual != id {
             bail!("content mismatch for {id}: blob hashes to {actual}");
@@ -690,15 +691,25 @@ fn run_worktree(state: &mut State, args: &mut Vec<String>) -> Result<()> {
             // Fail before moving bytes if this device has never mounted the
             // worktree: there would be nothing to reconcile against.
             state.load_worktree_state(&args[0])?;
-            let outcomes = pull_over_ssh(&mut state.vfs, &from, &remote_root, &remote_bin, 500)?;
+            // The carrier reports what it moved alongside the outcomes: a
+            // streamed snapshot carries bytes and entries the outcome list does
+            // not describe, so dropping it would hide the one number that says
+            // whether a resume actually resumed.
+            let (outcomes, transfer) =
+                pull_over_ssh(&mut state.vfs, &from, &remote_root, &remote_bin, 500)?;
             let mut applied = 0;
             let mut duplicate = 0;
             let mut diverged = 0;
+            let mut snapshot = false;
             for outcome in &outcomes {
                 match outcome {
                     ApplyOutcome::Applied => applied += 1,
                     ApplyOutcome::Duplicate => duplicate += 1,
                     ApplyOutcome::Diverged => diverged += 1,
+                    // This store had fallen behind a compaction horizon, so the
+                    // peer answered with the live namespace rather than a delta
+                    // it could not recognise as short.
+                    ApplyOutcome::Snapshot => snapshot = true,
                 }
             }
             println!(
@@ -707,6 +718,10 @@ fn run_worktree(state: &mut State, args: &mut Vec<String>) -> Result<()> {
                     "applied": applied,
                     "duplicate": duplicate,
                     "diverged": diverged,
+                    "snapshot": snapshot,
+                    "bytes": transfer.bytes,
+                    "content_bytes": transfer.content_bytes,
+                    "resumed_from": transfer.resumed_from,
                 })
             );
             if diverged > 0 {
