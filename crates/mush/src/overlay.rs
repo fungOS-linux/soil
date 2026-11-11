@@ -50,14 +50,41 @@ pub struct ApplyReport {
 
 pub struct Overlay {
     dir: TempDir,
-    original: BTreeMap<String, Vec<u8>>,
+    original: BTreeMap<String, Snapshot>,
     original_dirs: BTreeSet<String>,
+}
+
+/// What a file looked like when the overlay was materialized.
+///
+/// The bytes are what confirms a change exactly; the size and mtime are what
+/// let an unchanged file skip being read at all. A host command that changed
+/// nothing — `git status`, a build writing only gitignored output — otherwise
+/// reads the whole tree twice.
+struct Snapshot {
+    bytes: Vec<u8>,
+    stamp: FileStamp,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    size: u64,
+    mtime: Option<std::time::SystemTime>,
+}
+
+impl FileStamp {
+    fn of(metadata: &fs::Metadata) -> Self {
+        Self {
+            size: metadata.len(),
+            mtime: metadata.modified().ok(),
+        }
+    }
 }
 
 impl Overlay {
     pub fn materialize(vfs_root: impl AsRef<Path>) -> Result<Self> {
         let dir = tempfile::tempdir().context("create overlay directory")?;
         let mut vfs = Vfs::open(vfs_root).context("open VFS for overlay")?;
+        let mut written: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for entry in vfs.list("")? {
             let bytes = vfs.get(&entry.path)?;
             let target = safe_join(dir.path(), &entry.path)?;
@@ -75,6 +102,7 @@ impl Overlay {
                     .with_context(|| format!("create overlay directory {}", parent.display()))?;
             }
             fs::write(&target, &bytes).with_context(|| format!("write overlay {}", entry.path))?;
+            written.insert(entry.path.clone(), bytes);
         }
         for path in vfs.directories("")? {
             let target = safe_join(dir.path(), &path)?;
@@ -88,9 +116,9 @@ impl Overlay {
         }
 
         // Snapshot after materialization so nested ignore files apply to the
-        // exact overlay tree the agent will see.
-        let original = collect_files(dir.path())?;
-        let original_dirs = collect_dirs(dir.path())?;
+        // exact overlay tree the agent will see. The bytes come from the write
+        // pass, not a second read of every file.
+        let (original, original_dirs) = snapshot(dir.path(), &mut written)?;
         Ok(Self {
             dir,
             original,
@@ -107,15 +135,18 @@ impl Overlay {
     }
 
     pub fn diff(&self) -> Result<Vec<Change>> {
-        let current = self.current_files()?;
+        Ok(self.changes(&self.current_files()?))
+    }
+
+    fn changes(&self, current: &BTreeMap<String, Vec<u8>>) -> Vec<Change> {
         let mut changes = Vec::new();
-        for (path, bytes) in &current {
+        for (path, bytes) in current {
             match self.original.get(path) {
                 None => changes.push(Change {
                     path: path.clone(),
                     kind: ChangeKind::Added,
                 }),
-                Some(original) if original != bytes => changes.push(Change {
+                Some(snapshot) if &snapshot.bytes != bytes => changes.push(Change {
                     path: path.clone(),
                     kind: ChangeKind::Modified,
                 }),
@@ -131,13 +162,13 @@ impl Overlay {
             }
         }
         changes.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(changes)
+        changes
     }
 
     pub fn apply(&self, vfs_root: impl AsRef<Path>) -> Result<ApplyReport> {
         let mut vfs = Vfs::open(vfs_root).context("open VFS to apply overlay")?;
-        let changes = self.diff()?;
         let current = self.current_files()?;
+        let changes = self.changes(&current);
         let mut written = 0;
         let mut deleted = 0;
         let mut directories = 0;
@@ -189,7 +220,29 @@ impl Overlay {
     }
 
     fn current_files(&self) -> Result<BTreeMap<String, Vec<u8>>> {
-        collect_files(self.path())
+        let mut out = BTreeMap::new();
+        for entry in walker(self.path())? {
+            let entry = entry?;
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let relative = relative(self.path(), entry.path())?;
+            if ignored(&relative) {
+                continue;
+            }
+            let stamp = entry.metadata().ok().map(|metadata| FileStamp::of(&metadata));
+            match self.original.get(&relative) {
+                // Same size and mtime: these are the bytes we materialized, so
+                // there is nothing to read.
+                Some(snapshot) if stamp == Some(snapshot.stamp) => {
+                    out.insert(relative, snapshot.bytes.clone());
+                }
+                _ => {
+                    out.insert(relative, fs::read(entry.path())?);
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn current_dirs(&self) -> Result<Vec<String>> {
@@ -213,33 +266,11 @@ fn walker(root: &Path) -> Result<ignore::Walk> {
     Ok(builder.build())
 }
 
-fn collect_files(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
-    let mut out = BTreeMap::new();
-    for entry in walker(root)? {
-        let entry = entry?;
-        let Some(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-        let relative = relative(root, entry.path())?;
-        if ignored(&relative) {
-            continue;
-        }
-        out.insert(relative, fs::read(entry.path())?);
-    }
-    Ok(out)
-}
-
 fn collect_dirs(root: &Path) -> Result<BTreeSet<String>> {
     let mut out = BTreeSet::new();
     for entry in walker(root)? {
         let entry = entry?;
-        let Some(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
+        if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
             continue;
         }
         let relative = relative(root, entry.path())?;
@@ -249,6 +280,48 @@ fn collect_dirs(root: &Path) -> Result<BTreeSet<String>> {
         out.insert(relative);
     }
     Ok(out)
+}
+
+/// Snapshot the materialized tree in one walk: the bytes that were written,
+/// stamped with the size and mtime the filesystem gave them.
+fn snapshot(
+    root: &Path,
+    written: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(BTreeMap<String, Snapshot>, BTreeSet<String>)> {
+    let mut files = BTreeMap::new();
+    let mut dirs = BTreeSet::new();
+    for entry in walker(root)? {
+        let entry = entry?;
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        let relative = relative(root, entry.path())?;
+        if ignored(&relative) {
+            continue;
+        }
+        if file_type.is_dir() {
+            if !relative.is_empty() {
+                dirs.insert(relative);
+            }
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let bytes = match written.remove(&relative) {
+            Some(bytes) => bytes,
+            None => fs::read(entry.path())?,
+        };
+        let stamp = entry
+            .metadata()
+            .map(|metadata| FileStamp::of(&metadata))
+            .unwrap_or(FileStamp {
+                size: 0,
+                mtime: None,
+            });
+        files.insert(relative, Snapshot { bytes, stamp });
+    }
+    Ok((files, dirs))
 }
 
 fn relative(root: &Path, path: &Path) -> Result<String> {
@@ -326,6 +399,43 @@ mod tests {
         assert!(store.file("notes/b.txt").unwrap().is_none());
         assert_eq!(store.get("new.txt").unwrap(), b"fresh");
         assert!(store.is_directory("empty/nested").unwrap());
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with `--ignored --nocapture`"]
+    fn bench_overlay_round_trip() {
+        use std::time::Instant;
+
+        // Shapes a real workspace: many small files, and a host command that
+        // changed nothing (the common case: `git status`, a build that only
+        // touches gitignored output).
+        for files in [250usize, 2_000, 10_000] {
+            let vfs = tempfile::tempdir().unwrap();
+            let body = vec![b'x'; 2048];
+            {
+                let mut store = Vfs::open(vfs.path()).unwrap();
+                for index in 0..files {
+                    store
+                        .put(
+                            &format!("src/f{index:05}.rs"),
+                            &body,
+                            "text/x-rust",
+                            Expect::Any,
+                        )
+                        .unwrap();
+                }
+            }
+            let start = Instant::now();
+            let overlay = Overlay::materialize(vfs.path()).unwrap();
+            let materialize = start.elapsed();
+            let start = Instant::now();
+            let report = overlay.apply(vfs.path()).unwrap();
+            let apply = start.elapsed();
+            println!(
+                "{files:>6} files x 2 KiB: materialize {:?}, apply {:?} ({} written)",
+                materialize, apply, report.written
+            );
+        }
     }
 
     #[test]
