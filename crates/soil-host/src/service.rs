@@ -78,6 +78,7 @@ impl HttpService {
         crate::context::add_to_linker(&mut linker)?;
         creds::add_to_linker(&mut linker)?;
         unibus::add_to_linker(&mut linker)?;
+        crate::time::add_to_linker(&mut linker)?;
         if builder.has_records() {
             crate::records_host::add_to_linker(&mut linker).context("link soil:records")?;
         }

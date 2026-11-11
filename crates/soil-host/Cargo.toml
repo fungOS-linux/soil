@@ -17,6 +17,7 @@ base64 = "0.22"
 blake3 = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+libc = "0.2"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 fungos-records.workspace = true
 fungos-vfs = { git = "https://github.com/mycelium-linux/fungos-vfs.git", rev = "8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af" }
