@@ -46,9 +46,9 @@ bus attention.state.v1 {"state":"focused","wearer":"owner",...}
 
 ## Records and leases
 
-- The dev host grants four namespace names to the guest: `signal`,
-  `device.state`, `vitals.summary`, and `vitals.latest`, all backed by the
-  `dev/personal/telemetry` book.
+- The dev host grants five namespace names to the guest: `signal`,
+  `device.state`, `vitals.summary`, `vitals.latest`, and `vitals.view`, all
+  backed by the `dev/personal/telemetry` book.
 - The radio lease uses the same `SessionStore` as `soil-ble-host`; the default
   session is `.soil-dev/soil-ble-session.json`.
 - `--records-dir`, `--session`, and `--host-id` override the defaults;

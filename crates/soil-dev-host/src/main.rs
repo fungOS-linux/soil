@@ -346,6 +346,7 @@ fn main() -> Result<()> {
             Namespace::write("device.state", "dev/personal/telemetry", "device.state"),
             Namespace::write("vitals.summary", "dev/personal/telemetry", "vitals.summary"),
             Namespace::write("vitals.latest", "dev/personal/telemetry", "vitals.latest"),
+            Namespace::write("vitals.view", "dev/personal/telemetry", "vitals.view"),
         ],
     )
     .with_context(|| format!("open records {records_dir}"))?;
