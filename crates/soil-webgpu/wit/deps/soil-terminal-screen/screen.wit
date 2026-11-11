@@ -1,0 +1,38 @@
+package soil:terminal-screen@0.1.0;
+
+/// A live terminal screen: the host owns the PTY and the emulator (soil-vt),
+/// the Spore renders the snapshot and sends keys back.
+interface screen {
+  record cell {
+    text: string,
+    fg: option<u32>,
+    bg: option<u32>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    faint: bool,
+    inverse: bool,
+    /// The cell to the left holds a wide cluster; do not advance twice.
+    wide-tail: bool,
+  }
+
+  record grid {
+    cols: u32,
+    rows: u32,
+    /// Row-major, cols * rows cells.
+    cells: list<cell>,
+    cursor-row: option<u32>,
+    cursor-col: option<u32>,
+    title: string,
+    /// Bumped whenever the emulator publishes a new grid.
+    generation: u64,
+  }
+
+  snapshot: func() -> result<grid, string>;
+  write: func(bytes: list<u8>) -> result<_, string>;
+  /// Move the viewport through scrollback. Negative is towards history;
+  /// the next snapshot already reflects the move, so a Spore never tracks
+  /// an offset of its own.
+  scroll: func(delta: s32) -> result<_, string>;
+  resize: func(cols: u32, rows: u32) -> result<_, string>;
+}

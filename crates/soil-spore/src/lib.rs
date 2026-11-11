@@ -379,7 +379,14 @@ pub const CHROME_REGIONS: [&str; 8] = [
 #[serde(deny_unknown_fields)]
 pub struct SporeMeta {
     pub id: String,
+    /// The package directory and registry slug. Stable and lower-case; it is
+    /// identity, not a label.
     pub name: String,
+    /// How the app names itself in a window title, a Dock, or a launcher row.
+    /// Optional so every manifest written before this field keeps working; a
+    /// host falls back to title-casing `name`.
+    #[serde(default)]
+    pub title: Option<String>,
     pub version: String,
     pub license: String,
     pub summary: String,

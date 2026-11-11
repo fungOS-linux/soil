@@ -14,7 +14,9 @@ path = "src/main.rs"
 anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "0.4"
+portable-pty = "0.9"
 softbuffer = "0.4"
 soil-spore = { path = "../soil-spore" }
+soil-vt = { path = "../soil-vt" }
 soil-webgpu = { path = "../soil-webgpu" }
 winit = "0.30"

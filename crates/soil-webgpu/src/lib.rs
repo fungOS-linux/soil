@@ -17,6 +17,8 @@ use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+use soil::present::input;
+
 wasmtime::component::bindgen!({
     path: "wit",
     world: "runner",
@@ -44,6 +46,12 @@ pub struct CanvasFrame {
 /// a guest callback.
 pub trait CanvasGpuPresenter: Send {
     fn size(&self) -> (u32, u32);
+
+    /// Device pixels per layout pixel. A capture host renders at 1:1.
+    fn scale(&self) -> f64 {
+        1.0
+    }
+
     fn present(&mut self, frame: CanvasFrame) -> Result<()>;
 }
 
@@ -100,6 +108,9 @@ impl CanvasGpuPresenter for FrameCapture {
 pub struct CatalogEntry {
     pub id: String,
     pub name: String,
+    /// Display label; the host resolves the manifest's `title` or title-cases
+    /// `name`, so every front door agrees on what an app is called.
+    pub title: String,
     pub version: String,
     pub summary: String,
     pub workspace: Option<String>,
@@ -156,6 +167,82 @@ impl CatalogHost for NoCatalog {
     }
 }
 
+/// One terminal cell, in the plain shape the host's emulator publishes.
+#[derive(Clone, Debug, Default)]
+pub struct TerminalCell {
+    pub text: String,
+    pub fg: Option<u32>,
+    pub bg: Option<u32>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub faint: bool,
+    pub inverse: bool,
+    pub wide_tail: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct TerminalSnapshot {
+    pub cols: u32,
+    pub rows: u32,
+    pub cells: Vec<TerminalCell>,
+    pub cursor: Option<(u32, u32)>,
+    pub title: String,
+    pub generation: u64,
+}
+
+/// The host's live terminal. The Spore asks for a snapshot and sends keys;
+/// it never owns a PTY, a shell, or an emulator.
+pub trait TerminalHost: Send {
+    fn snapshot(&mut self) -> Result<TerminalSnapshot, String>;
+    fn write(&mut self, bytes: &[u8]) -> Result<(), String>;
+    fn resize(&mut self, cols: u32, rows: u32) -> Result<(), String>;
+    /// Move through scrollback. Negative is towards history.
+    fn scroll(&mut self, delta: i32) -> Result<(), String>;
+}
+
+struct NoTerminal;
+
+impl TerminalHost for NoTerminal {
+    fn snapshot(&mut self) -> Result<TerminalSnapshot, String> {
+        Err("no terminal session attached".into())
+    }
+
+    fn write(&mut self, _bytes: &[u8]) -> Result<(), String> {
+        Err("no terminal session attached".into())
+    }
+
+    fn resize(&mut self, _cols: u32, _rows: u32) -> Result<(), String> {
+        Err("no terminal session attached".into())
+    }
+
+    fn scroll(&mut self, _delta: i32) -> Result<(), String> {
+        Err("no terminal session attached".into())
+    }
+}
+
+/// The pointer shape a Spore asks for. A presenter maps it to a native cursor;
+/// a headless host drops it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorStyle {
+    Default,
+    Text,
+    Pointer,
+    Crosshair,
+    Move,
+    Grab,
+    Grabbing,
+    NoDrop,
+    Wait,
+    Help,
+}
+
+/// The window's pointer shape. Presenters that own a window implement it;
+/// a capture or headless host leaves it unset and `set` succeeds doing nothing.
+pub trait CursorHost: Send {
+    fn set_cursor(&mut self, style: CursorStyle);
+}
+
 /// One normalized key waiting for the guest. The WIT type is built at the
 /// boundary; presenters only need this plain shape.
 #[derive(Clone, Debug)]
@@ -169,6 +256,39 @@ pub struct InputKey {
     pub meta: bool,
 }
 
+/// Presenter-independent pointer button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerButton {
+    Left,
+    Right,
+    Middle,
+}
+
+/// One event waiting for the guest, in the order the presenter produced it.
+/// Keys and pointer actions share a queue, so a click cannot overtake a
+/// keystroke that arrived before it.
+#[derive(Clone, Debug)]
+pub enum InputEvent {
+    Key(InputKey),
+    /// Surface-space position: the units `soil:present/surface.size` reports.
+    Moved {
+        x: f32,
+        y: f32,
+    },
+    Button {
+        x: f32,
+        y: f32,
+        button: PointerButton,
+        pressed: bool,
+    },
+    /// Positive `lines` scrolls towards earlier content.
+    Scrolled {
+        x: f32,
+        y: f32,
+        lines: f32,
+    },
+}
+
 /// Host state for one component instance.
 pub struct WebGpuHost {
     instance: Arc<wgpu_core::global::Global>,
@@ -176,34 +296,43 @@ pub struct WebGpuHost {
     options: WasiWebGpuOptions,
     wasi: WasiCtx,
     presenter: Box<dyn CanvasGpuPresenter>,
-    input: Arc<Mutex<VecDeque<InputKey>>>,
+    input: Arc<Mutex<VecDeque<InputEvent>>>,
     interactive: bool,
     catalog: Box<dyn CatalogHost>,
+    terminal: Box<dyn TerminalHost>,
+    cursor: Option<Box<dyn CursorHost>>,
+}
+
+/// Everything one Spore run is allowed to talk to. A presenter fills in the
+/// parts it owns; anything left as the denying default refuses the guest loudly
+/// instead of quietly doing nothing.
+pub struct HostSetup {
+    pub presenter: Box<dyn CanvasGpuPresenter>,
+    pub input: Arc<Mutex<VecDeque<InputEvent>>>,
+    /// Tells the guest to keep polling after the first frame.
+    pub interactive: bool,
+    pub catalog: Box<dyn CatalogHost>,
+    pub terminal: Box<dyn TerminalHost>,
+    /// `None` on hosts without a window; `soil:present/cursor` still succeeds.
+    pub cursor: Option<Box<dyn CursorHost>>,
+}
+
+impl HostSetup {
+    /// A one-shot capture host: one frame, no input, no catalog, no terminal.
+    pub fn capture(presenter: Box<dyn CanvasGpuPresenter>) -> Self {
+        Self {
+            presenter,
+            input: Arc::new(Mutex::new(VecDeque::new())),
+            interactive: false,
+            catalog: Box::new(NoCatalog),
+            terminal: Box::new(NoTerminal),
+            cursor: None,
+        }
+    }
 }
 
 impl WebGpuHost {
-    pub fn new() -> Result<Self> {
-        Self::with_presenter(Box::new(DiscardPresenter { size: (480, 640) }))
-    }
-
-    pub fn with_presenter(presenter: Box<dyn CanvasGpuPresenter>) -> Result<Self> {
-        Self::with_presenter_and_input(presenter, Arc::new(Mutex::new(VecDeque::new())), false)
-    }
-
-    pub fn with_presenter_and_input(
-        presenter: Box<dyn CanvasGpuPresenter>,
-        input: Arc<Mutex<VecDeque<InputKey>>>,
-        interactive: bool,
-    ) -> Result<Self> {
-        Self::with_presenter_input_catalog(presenter, input, interactive, Box::new(NoCatalog))
-    }
-
-    pub fn with_presenter_input_catalog(
-        presenter: Box<dyn CanvasGpuPresenter>,
-        input: Arc<Mutex<VecDeque<InputKey>>>,
-        interactive: bool,
-        catalog: Box<dyn CatalogHost>,
-    ) -> Result<Self> {
+    pub fn new(setup: HostSetup) -> Result<Self> {
         let descriptor = wgpu_types::InstanceDescriptor {
             backends: wgpu_types::Backends::all(),
             flags: wgpu_types::InstanceFlags::from_build_config(),
@@ -217,10 +346,12 @@ impl WebGpuHost {
             table: ResourceTable::new(),
             options: WasiWebGpuOptions::default(),
             wasi: WasiCtxBuilder::new().build(),
-            presenter,
-            input,
-            interactive,
-            catalog,
+            presenter: setup.presenter,
+            input: setup.input,
+            interactive: setup.interactive,
+            catalog: setup.catalog,
+            terminal: setup.terminal,
+            cursor: setup.cursor,
         })
     }
 }
@@ -230,18 +361,39 @@ impl soil::present::input::Host for WebGpuHost {
         self.interactive
     }
 
-    fn poll(&mut self, timeout_ms: u32) -> Option<soil::present::input::Key> {
+    fn poll(&mut self, timeout_ms: u32) -> Option<input::Event> {
         let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
         loop {
-            if let Some(key) = self.input.lock().expect("input queue poisoned").pop_front() {
-                return Some(soil::present::input::Key {
-                    key: key.key,
-                    text: key.text,
-                    pressed: key.pressed,
-                    shift: key.shift,
-                    control: key.control,
-                    alt: key.alt,
-                    meta: key.meta,
+            if let Some(event) = self.input.lock().expect("input queue poisoned").pop_front() {
+                return Some(match event {
+                    InputEvent::Key(key) => input::Event::KeyInput(input::Key {
+                        key: key.key,
+                        text: key.text,
+                        pressed: key.pressed,
+                        shift: key.shift,
+                        control: key.control,
+                        alt: key.alt,
+                        meta: key.meta,
+                    }),
+                    InputEvent::Moved { x, y } => input::Event::Moved(input::PointerMove { x, y }),
+                    InputEvent::Button {
+                        x,
+                        y,
+                        button,
+                        pressed,
+                    } => input::Event::Button(input::PointerPress {
+                        x,
+                        y,
+                        button: match button {
+                            PointerButton::Left => input::PointerButton::Left,
+                            PointerButton::Right => input::PointerButton::Right,
+                            PointerButton::Middle => input::PointerButton::Middle,
+                        },
+                        pressed,
+                    }),
+                    InputEvent::Scrolled { x, y, lines } => {
+                        input::Event::Scrolled(input::PointerScroll { x, y, lines })
+                    }
                 });
             }
             if !self.interactive || timeout_ms == 0 || Instant::now() >= deadline {
@@ -264,6 +416,10 @@ impl WasiView for WebGpuHost {
 impl soil::present::surface::Host for WebGpuHost {
     fn size(&mut self) -> (u32, u32) {
         self.presenter.size()
+    }
+
+    fn scale(&mut self) -> f64 {
+        self.presenter.scale()
     }
 
     fn present(
@@ -291,6 +447,7 @@ impl soil::spore::catalog::Host for WebGpuHost {
             .map(|entry| soil::spore::catalog::Entry {
                 id: entry.id,
                 name: entry.name,
+                title: entry.title,
                 version: entry.version,
                 summary: entry.summary,
                 workspace: entry.workspace,
@@ -336,6 +493,71 @@ fn catalog_error(error: CatalogError) -> soil::spore::catalog::Error {
     }
 }
 
+impl soil::terminal_screen::screen::Host for WebGpuHost {
+    fn snapshot(&mut self) -> std::result::Result<soil::terminal_screen::screen::Grid, String> {
+        let snapshot = self.terminal.snapshot()?;
+        Ok(soil::terminal_screen::screen::Grid {
+            cols: snapshot.cols,
+            rows: snapshot.rows,
+            cells: snapshot
+                .cells
+                .into_iter()
+                .map(|cell| soil::terminal_screen::screen::Cell {
+                    text: cell.text,
+                    fg: cell.fg,
+                    bg: cell.bg,
+                    bold: cell.bold,
+                    italic: cell.italic,
+                    underline: cell.underline,
+                    faint: cell.faint,
+                    inverse: cell.inverse,
+                    wide_tail: cell.wide_tail,
+                })
+                .collect(),
+            cursor_row: snapshot.cursor.map(|cursor| cursor.0),
+            cursor_col: snapshot.cursor.map(|cursor| cursor.1),
+            title: snapshot.title,
+            generation: snapshot.generation,
+        })
+    }
+
+    fn write(&mut self, bytes: Vec<u8>) -> std::result::Result<(), String> {
+        self.terminal.write(&bytes)
+    }
+
+    fn scroll(&mut self, delta: i32) -> std::result::Result<(), String> {
+        self.terminal.scroll(delta)
+    }
+
+    fn resize(&mut self, cols: u32, rows: u32) -> std::result::Result<(), String> {
+        self.terminal.resize(cols, rows)
+    }
+}
+
+impl soil::present::cursor::Host for WebGpuHost {
+    fn set(
+        &mut self,
+        style: soil::present::cursor::CursorStyle,
+    ) -> std::result::Result<(), String> {
+        let style = match style {
+            soil::present::cursor::CursorStyle::Default => CursorStyle::Default,
+            soil::present::cursor::CursorStyle::Text => CursorStyle::Text,
+            soil::present::cursor::CursorStyle::Pointer => CursorStyle::Pointer,
+            soil::present::cursor::CursorStyle::Crosshair => CursorStyle::Crosshair,
+            soil::present::cursor::CursorStyle::Move => CursorStyle::Move,
+            soil::present::cursor::CursorStyle::Grab => CursorStyle::Grab,
+            soil::present::cursor::CursorStyle::Grabbing => CursorStyle::Grabbing,
+            soil::present::cursor::CursorStyle::NoDrop => CursorStyle::NoDrop,
+            soil::present::cursor::CursorStyle::Wait => CursorStyle::Wait,
+            soil::present::cursor::CursorStyle::Help => CursorStyle::Help,
+        };
+        if let Some(cursor) = self.cursor.as_mut() {
+            cursor.set_cursor(style);
+        }
+        Ok(())
+    }
+}
+
 impl WasiWebGpuCtxView for WebGpuHost {
     fn webgpu_ctx(&mut self) -> WasiWebGpuCtx<'_> {
         WasiWebGpuCtx {
@@ -375,9 +597,15 @@ impl WebGpuRuntime {
         soil::present::input::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:present input")?;
+        soil::present::cursor::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+            .map_err(anyhow::Error::from)
+            .context("link soil:present cursor")?;
         soil::spore::catalog::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:spore catalog")?;
+        soil::terminal_screen::screen::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+            .map_err(anyhow::Error::from)
+            .context("link soil:terminal-screen")?;
         Ok(Self { engine, linker })
     }
 
@@ -392,8 +620,11 @@ impl WebGpuRuntime {
     /// Compile and run one guest component. The guest must export
     /// `run: async func() -> u32`; all other imports are denied by the linker.
     pub async fn run_component(&self, bytes: &[u8]) -> Result<u32> {
-        self.run_component_with_presenter(bytes, Box::new(DiscardPresenter { size: (480, 640) }))
-            .await
+        self.run_component_with(
+            bytes,
+            HostSetup::capture(Box::new(DiscardPresenter { size: (480, 640) })),
+        )
+        .await
     }
 
     pub async fn run_component_with_presenter(
@@ -401,49 +632,16 @@ impl WebGpuRuntime {
         bytes: &[u8],
         presenter: Box<dyn CanvasGpuPresenter>,
     ) -> Result<u32> {
-        self.run_component_with_presenter_and_input(
-            bytes,
-            presenter,
-            Arc::new(Mutex::new(VecDeque::new())),
-            false,
-        )
-        .await
+        self.run_component_with(bytes, HostSetup::capture(presenter))
+            .await
     }
 
-    /// Run with a live input queue. `interactive` tells the guest to keep
-    /// polling after the first frame; a capture host leaves it false.
-    pub async fn run_component_with_presenter_and_input(
-        &self,
-        bytes: &[u8],
-        presenter: Box<dyn CanvasGpuPresenter>,
-        input: Arc<Mutex<VecDeque<InputKey>>>,
-        interactive: bool,
-    ) -> Result<u32> {
-        self.run_component_with_presenter_input_catalog(
-            bytes,
-            presenter,
-            input,
-            interactive,
-            Box::new(NoCatalog),
-        )
-        .await
-    }
-
-    pub async fn run_component_with_presenter_input_catalog(
-        &self,
-        bytes: &[u8],
-        presenter: Box<dyn CanvasGpuPresenter>,
-        input: Arc<Mutex<VecDeque<InputKey>>>,
-        interactive: bool,
-        catalog: Box<dyn CatalogHost>,
-    ) -> Result<u32> {
+    /// Run one guest against a fully specified host.
+    pub async fn run_component_with(&self, bytes: &[u8], setup: HostSetup) -> Result<u32> {
         let component = Component::new(&self.engine, bytes)
             .map_err(anyhow::Error::from)
             .context("compile WebGPU component")?;
-        let mut store = Store::new(
-            &self.engine,
-            WebGpuHost::with_presenter_input_catalog(presenter, input, interactive, catalog)?,
-        );
+        let mut store = Store::new(&self.engine, WebGpuHost::new(setup)?);
         let instance = Runner::instantiate_async(&mut store, &component, &self.linker)
             .await
             .map_err(anyhow::Error::from)

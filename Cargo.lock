@@ -673,8 +673,10 @@ dependencies = [
  "anyhow",
  "image",
  "pollster",
+ "portable-pty",
  "softbuffer",
  "soil-spore",
+ "soil-vt",
  "soil-webgpu",
  "winit",
 ]
