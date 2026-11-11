@@ -526,6 +526,19 @@ pub const HTTP_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DEL
 pub struct Http {
     /// Hostnames, as a vhost would match them: no scheme, no port, no path.
     pub hosts: Vec<String>,
+    /// The component that answers, when it is not the package's own `[module]`.
+    ///
+    /// A package carries one artifact per face: a window, a shell command and a
+    /// network endpoint are three components with three worlds, and the HTTP
+    /// gateway can only instantiate one whose world exports
+    /// `wasi:http/incoming-handler`. Naming it here is the same statement
+    /// `[[commands]] module` already makes, so a Spore that answers on a name
+    /// does not have to give up its UI to do it.
+    ///
+    /// Absent means the package's `[module]` answers, which is what every
+    /// manifest written before this field had to mean.
+    #[serde(default)]
+    pub module: Option<String>,
     #[serde(default = "default_max_body")]
     pub max_body: usize,
     #[serde(default)]
@@ -927,9 +940,12 @@ impl Manifest {
                 )));
             }
             let path = safe_relative(&skill.path)?;
+            // `map(..) != Some(true)` covers both "a different file name" and
+            // "no file name at all" (the path is `skills/hello/`), which are
+            // the same mistake to a packager.
             if path
                 .file_name()
-                .map(|name| name.to_string_lossy() != "SKILL.md")
+                .map(|name| name.to_string_lossy() == "SKILL.md")
                 != Some(true)
             {
                 return Err(Error::Invalid(format!(
@@ -1111,11 +1127,22 @@ impl Manifest {
         }
 
         if let Some(http) = &self.http {
-            if self.module.is_none() {
+            // A Spore that answers on a name must name the component that
+            // answers: the package's own `[module]`, or an `[http] module` of
+            // its own when the window and the endpoint are different artifacts.
+            if self.module.is_none() && http.module.is_none() {
                 return Err(Error::Invalid(
                     "[http] needs a module: a Spore that answers on a name must be able to answer"
                         .into(),
                 ));
+            }
+            if let Some(module) = &http.module {
+                safe_relative(module)?;
+                if !module.ends_with(".wasm") {
+                    return Err(Error::Invalid(format!(
+                        "http module {module:?} must end in .wasm"
+                    )));
+                }
             }
             if http.hosts.is_empty() || http.hosts.len() > MAX_HTTP_HOSTS {
                 return Err(Error::Invalid(format!(
@@ -1380,6 +1407,9 @@ impl Manifest {
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
         paths.extend(self.skills.iter().map(|skill| skill.path.clone()));
         paths.extend(self.commands.iter().map(|command| command.module.clone()));
+        if let Some(module) = self.http.as_ref().and_then(|http| http.module.clone()) {
+            paths.push(module);
+        }
         if let Some(man) = self.docs.as_ref().and_then(|docs| docs.man.clone()) {
             paths.push(man);
         }
@@ -1395,6 +1425,36 @@ impl Manifest {
             .map(PathBuf::from)
             .filter(|path| seen.insert(path.clone()))
             .collect()
+    }
+
+    /// Every component the manifest names, labelled with the face that names
+    /// it.
+    ///
+    /// A package carries one artifact per face, and the manifest rule is the
+    /// same for each of them: what a component imports, `[grants]` declares.
+    /// The label is what makes a failure readable when two artifacts disagree
+    /// about their capabilities — the file name alone does not say which face
+    /// asked for a socket. Paths are deduplicated, so a Spore whose `[http]`
+    /// reuses its `[module]` is checked once.
+    #[must_use]
+    pub fn declared_modules(&self) -> Vec<(String, String)> {
+        let mut modules: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut push = |face: &str, path: &str| {
+            if seen.insert(path.to_owned()) {
+                modules.push((face.to_owned(), path.to_owned()));
+            }
+        };
+        if let Some(module) = &self.module {
+            push("module", &module.path);
+        }
+        for command in &self.commands {
+            push(&format!("command {:?}", command.name), &command.module);
+        }
+        if let Some(module) = self.http.as_ref().and_then(|http| http.module.as_deref()) {
+            push("[http]", module);
+        }
+        modules
     }
 
     /// Every file the package ships, relative to the package root.
@@ -1958,12 +2018,32 @@ pub fn imported_packages(bytes: &[u8]) -> Result<BTreeSet<String>> {
     Ok(packages)
 }
 
+/// WASI packages a component built from a normal language toolchain imports
+/// without asking.
+///
+/// They are not capabilities a Spore requests: the host's WASI profile decides
+/// what they mean for every Spore at once — no preopens, no inherited
+/// environment, no inherited stdio, clocks and randomness where the profile
+/// says. A manifest line for each of them would fill a listing with rows that
+/// say "the linker needed this", which is the noise a capability review cannot
+/// afford. Everything outside this set is declared, including the WASI packages
+/// that are real authority — `wasi:http`, `wasi:webgpu`, `wasi:audio`,
+/// `wasi:sockets`.
+pub const WASI_BASELINE: [&str; 5] = [
+    "wasi:cli",
+    "wasi:clocks",
+    "wasi:filesystem",
+    "wasi:io",
+    "wasi:random",
+];
+
 fn undeclared_packages(
     imported: &BTreeSet<String>,
     grants: &BTreeMap<String, String>,
 ) -> Vec<String> {
     imported
         .iter()
+        .filter(|package| !WASI_BASELINE.contains(&package.as_str()))
         .filter(|package| !grants.contains_key(package.as_str()))
         .cloned()
         .collect()
@@ -1975,22 +2055,22 @@ fn undeclared_packages(
 /// `soil:records` while the manifest lists only WASI fails here instead of at
 /// review time.
 fn check_declared_grants(root: &Path, manifest: &Manifest) -> Result<()> {
-    // A chrome-only Spore has no module, so there is nothing to import.
-    let Some(module) = &manifest.module else {
-        return Ok(());
-    };
-    let path = root.join(&module.path);
-    let bytes =
-        fs::read(&path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
-    let imported = imported_packages(&bytes)?;
-    let undeclared = undeclared_packages(&imported, &manifest.grants);
-    if !undeclared.is_empty() {
-        return Err(Error::Invalid(format!(
-            "{} imports {} but [grants] does not declare {}",
-            module.path,
-            undeclared.join(", "),
-            if undeclared.len() == 1 { "it" } else { "them" },
-        )));
+    // A chrome-only Spore names no module, so the loop is empty and there is
+    // nothing to import. Every artifact the manifest does name is checked: the
+    // rule is about what ships, not about which face ships it.
+    for (face, module) in manifest.declared_modules() {
+        let path = root.join(&module);
+        let bytes =
+            fs::read(&path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
+        let imported = imported_packages(&bytes)?;
+        let undeclared = undeclared_packages(&imported, &manifest.grants);
+        if !undeclared.is_empty() {
+            return Err(Error::Invalid(format!(
+                "{face} {module} imports {} but [grants] does not declare {}",
+                undeclared.join(", "),
+                if undeclared.len() == 1 { "it" } else { "them" },
+            )));
+        }
     }
     Ok(())
 }
@@ -3119,6 +3199,43 @@ mod http_tests {
             refused.is_err(),
             "a Spore must be able to answer on the name it claims"
         );
+    }
+
+    #[test]
+    fn the_endpoint_can_be_its_own_artifact() {
+        // A Spore that draws a window and answers on a name has two components.
+        // The event loop never sees an `incoming-handler`, and the gateway
+        // never instantiates a WebGPU import it has no device for.
+        let parsed = Manifest::parse(&manifest(&claim("module = \"bin/hello-api.wasm\"\n")))
+            .expect("a named http module parses");
+        let http = parsed.http.as_ref().expect("an [http] table");
+        assert_eq!(http.module.as_deref(), Some("bin/hello-api.wasm"));
+        assert!(
+            parsed
+                .declared_paths()
+                .contains(&std::path::PathBuf::from("bin/hello-api.wasm")),
+            "the endpoint ships with the package"
+        );
+        assert_eq!(
+            parsed.declared_modules(),
+            vec![
+                ("module".to_owned(), "module.wasm".to_owned()),
+                ("[http]".to_owned(), "bin/hello-api.wasm".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_http_module_that_could_not_be_a_component_is_refused() {
+        for bad in ["bin/api.lua", "../api.wasm", "/api.wasm"] {
+            let text = format!(
+                "[http]\nhosts = [\"contacts.myc\"]\nmodule = {bad:?}\nroutes = [{{ methods = [\"GET\"], path = \"/\" }}]\n"
+            );
+            assert!(
+                Manifest::parse(&manifest(&text)).is_err(),
+                "{bad:?} is not a component this package can ship"
+            );
+        }
     }
 
     #[test]
