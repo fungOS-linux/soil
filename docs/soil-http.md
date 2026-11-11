@@ -61,7 +61,9 @@ Errors are typed: `denied`, `invalid`, `over-budget`, `timeout`, `unavailable`,
 - no redirects
 - per-call body and deadline caps, plus host maximums
 - credential handles resolved by `CredentialProvider`; no secret bytes enter
-  wasm
+  wasm. A provider may resolve a header or a URL path segment. The guest uses
+  the literal `__CREDENTIAL__` marker in a path when the host should substitute
+  the value; the response's `final-url` is redacted back to the marker
 - `DirectTransport` using `ureq` with TLS verification
 
 The `CredentialProvider` trait is where **Geode** belongs: the Spore sends a
@@ -125,6 +127,21 @@ soil-http --allow https://api.spotify.com:443 \
   --bearer-env SPOTIFY_TOKEN \
   spores/spotify/module.wasm --device raspotify play
 ```
+
+For a path credential (Hue's v1 bridge key is the motivating case), point the
+host at the owner-only Geode broker and name a purpose:
+
+```sh
+soil-http --allow http://192.168.1.10:80 \
+  --geode-socket ~/.geode/geode.sock --geode-purpose hue.control \
+  spores/hue/module.wasm \
+  --bridge http://192.168.1.10 --credential geode://home/hue/bridge status
+```
+
+The guest URL contains `/api/__CREDENTIAL__/...`; the host leases the secret for
+one fetch, percent-encodes it as one path segment, substitutes it, and redacts
+the value from `final-url`. `geoded` is read-only over its socket; storing the
+key is the operator `--put` step.
 
 ## Next
 
