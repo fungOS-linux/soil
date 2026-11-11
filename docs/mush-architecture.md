@@ -25,7 +25,7 @@ FungOS-linux keeps three things outside this repository:
 | --- | --- |
 | [`fungos-vfs`](https://github.com/fungOS-linux/fungos-vfs) | the namespace and content store: `Vfs`, `FileEntry` (including `mode`), sync, worktree primitives |
 | [`bob`](https://github.com/FuturePresentLabs/bob) | the build plane: which lane a target goes to, per-agent `CARGO_HOME`, sccache, the fleet pool |
-| `mycelium` | identity, consent and reachability — not wired into mush yet |
+| `mycelium` | identity and reachability. mush takes a principal string and uses it for the fetch policy, but does **not** verify it; the verifier (`crates/soil-principal-host`, a Mycelium CLI caller) exists and is not linked into mush. The `soil:mycelium` contract — directory plus remote session with host-key verification — is defined in `wit/` and has no host implementation yet. |
 
 So: **mush lives in `soil`**. It reads the namespace from `fungos-vfs` and asks
 `bob` where a build runs; it owns neither.
@@ -146,3 +146,9 @@ convention.
   files; every `git status` pays it once.
 - **Indexed listings do not carry the mode yet** (the VFS entry does); the
   authoritative answer is the VFS, not `ls -l` from the index.
+- **Identity is a label, not an attestation.** `--principal` is passed to the
+  Spore as an argument, and the fetch policy reads `MUSH_PRINCIPAL` /
+  `MUSH_GROUPS` from the host environment. A guest cannot set that environment,
+  so it is a real boundary for the guest — but nobody verifies the claim. Wiring
+  `crates/soil-principal-host` (which verifies a Mycelium principal) is the next
+  step, not something mush does today.
