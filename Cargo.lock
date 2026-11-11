@@ -7535,6 +7535,7 @@ dependencies = [
  "anyhow",
  "pollster",
  "sha2 0.10.9",
+ "soil-spore",
  "wasi-webgpu-wasmtime",
  "wasmtime",
  "wasmtime-wasi",

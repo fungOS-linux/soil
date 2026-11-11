@@ -167,6 +167,109 @@ impl CatalogHost for NoCatalog {
     }
 }
 
+/// The host's installed-Spore catalogue, read from a directory tree.
+///
+/// The host decides where Spores live and this answers with what is there. A
+/// tree whose manifest does not parse is skipped rather than fatal: one broken
+/// Spore must not empty a launcher or a storefront. `launch` is deliberately
+/// unfinished — starting a window is the host's business, and a capture host
+/// has nowhere to put one.
+pub struct InstallCatalog {
+    root: std::path::PathBuf,
+}
+
+impl InstallCatalog {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
+impl CatalogHost for InstallCatalog {
+    fn entries(&mut self) -> Result<Vec<CatalogEntry>, CatalogError> {
+        let read = std::fs::read_dir(&self.root).map_err(|_| CatalogError::Io)?;
+        let mut found = Vec::new();
+        for entry in read.flatten() {
+            let dir = entry.path();
+            if !dir.join("spore.toml").is_file() {
+                continue;
+            }
+            let Ok(manifest) = soil_spore::Manifest::load(&dir) else {
+                continue;
+            };
+            let surfaces = if manifest.surfaces.is_empty() {
+                manifest
+                    .launch
+                    .surfaces
+                    .iter()
+                    .filter_map(|kind| surface_kind(kind))
+                    .map(|kind| CatalogSurface {
+                        name: kind_name(kind).to_owned(),
+                        kind,
+                        entry: String::new(),
+                        requires: None,
+                    })
+                    .collect()
+            } else {
+                manifest
+                    .surfaces
+                    .iter()
+                    .filter_map(|surface| {
+                        Some(CatalogSurface {
+                            name: surface.name.clone(),
+                            kind: surface_kind(surface.kind.as_str())?,
+                            entry: surface
+                                .entry(manifest.ui.as_ref())
+                                .unwrap_or_default()
+                                .to_owned(),
+                            requires: surface.requires.clone(),
+                        })
+                    })
+                    .collect()
+            };
+            found.push(CatalogEntry {
+                id: manifest.spore.id.clone(),
+                title: title_case(&manifest.spore.name),
+                name: manifest.spore.name.clone(),
+                version: manifest.spore.version.clone(),
+                summary: manifest.spore.summary.clone(),
+                workspace: manifest.launch.canvas_module.clone(),
+                default_surface: manifest.launch.default.clone(),
+                surfaces,
+            });
+        }
+        found.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+        Ok(found)
+    }
+
+    fn launch(&mut self, _id: &str, _surface: &str) -> Result<CatalogLaunched, CatalogError> {
+        Err(CatalogError::Unsupported)
+    }
+}
+
+fn surface_kind(value: &str) -> Option<CatalogSurfaceKind> {
+    match value {
+        "canvas" => Some(CatalogSurfaceKind::Canvas),
+        "web" => Some(CatalogSurfaceKind::Web),
+        _ => None,
+    }
+}
+
+fn kind_name(kind: CatalogSurfaceKind) -> &'static str {
+    match kind {
+        CatalogSurfaceKind::Canvas => "canvas",
+        CatalogSurfaceKind::Web => "web",
+    }
+}
+
+/// `markdown` -> `Markdown`; anything already capitalised is left alone.
+fn title_case(name: &str) -> String {
+    let mut characters = name.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().chain(characters).collect(),
+        None => String::new(),
+    }
+}
+
 /// One terminal cell, in the plain shape the host's emulator publishes.
 #[derive(Clone, Debug, Default)]
 pub struct TerminalCell {
@@ -821,10 +924,23 @@ pub fn run_component_capture(
     width: u32,
     height: u32,
 ) -> Result<(u32, Option<CanvasFrame>)> {
+    run_component_capture_with(bytes, width, height, None)
+}
+
+/// Capture one frame with a host that can answer `soil:spore/catalog`.
+pub fn run_component_capture_with(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    catalog: Option<Box<dyn CatalogHost>>,
+) -> Result<(u32, Option<CanvasFrame>)> {
     let runtime = WebGpuRuntime::new()?;
     let capture = FrameCapture::new(width, height);
-    let status =
-        pollster::block_on(runtime.run_component_with_presenter(bytes, Box::new(capture.clone())))?;
+    let mut setup = HostSetup::capture(Box::new(capture.clone()));
+    if let Some(catalog) = catalog {
+        setup.catalog = catalog;
+    }
+    let status = pollster::block_on(runtime.run_component_with(bytes, setup))?;
     Ok((status, capture.take()))
 }
 
