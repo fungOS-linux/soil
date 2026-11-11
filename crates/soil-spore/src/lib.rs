@@ -2451,6 +2451,47 @@ pub fn verify_detached(public_key: &[u8], payload: &[u8], signature: &[u8]) -> R
     }
 }
 
+/// Sign an arbitrary payload with a detached, armored PGP signature.
+///
+/// The counterpart to [`verify_detached`]: a store operator signs delegations
+/// and revocations, and a publisher signs catalog entries, over canonical text
+/// rather than a package file. `home` selects the GnuPG home that holds the
+/// secret key and `key` names that key (fingerprint or user id). Soil never
+/// generates or stores a key, so an empty `home` means the caller's keyring.
+pub fn sign_detached(home: Option<&Path>, key: &str, payload: &[u8]) -> Result<String> {
+    let base = if Path::new("/tmp").is_dir() {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("soil-sign-")
+        .tempdir_in(&base)
+        .map_err(|error| Error::Tool(format!("temporary directory: {error}")))?;
+    let payload_path = dir.path().join("payload");
+    let signature_path = dir.path().join("signature.asc");
+    fs::write(&payload_path, payload).map_err(io_error)?;
+
+    let mut command = std::process::Command::new("gpg");
+    if let Some(home) = home {
+        command.arg("--homedir").arg(home);
+    }
+    command
+        .arg("--batch")
+        .arg("--yes")
+        .arg("--armor")
+        .arg("--detach-sign")
+        .arg("--local-user")
+        .arg(key)
+        .arg("--output")
+        .arg(&signature_path)
+        .arg(&payload_path);
+    run(command, "gpg --detach-sign")?;
+
+    fs::read_to_string(&signature_path)
+        .map_err(|error| Error::Io(format!("{}: {error}", signature_path.display())))
+}
+
 /// Verify a detached signature against a trusted keyring.
 pub fn verify_signature(
     package: &Path,

@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 use soil_store::index::{Entry, EntryKind, Index};
 use soil_store::plan::{Installed, plan};
+use soil_store::publish::{self, DelegationRequest, SignRequest};
 use soil_store::serve::Store;
 use soil_store::snapshot::{Source, build};
 use soil_store::{Error, Result};
@@ -46,6 +47,15 @@ fn run(args: Vec<String>) -> Result<()> {
 
     if matches!(command, "index") {
         return build_index(rest);
+    }
+    if matches!(command, "delegate") {
+        return delegate(rest);
+    }
+    if matches!(command, "sign") {
+        return sign_index(rest);
+    }
+    if matches!(command, "revoke") {
+        return revoke(rest);
     }
     if matches!(command, "verify") {
         let index_path = named(rest, "--index").ok_or_else(|| Error::Invalid(usage()))?;
@@ -228,6 +238,125 @@ fn entry_for(dir: &Path) -> Result<Entry> {
     })
 }
 
+/// `delegate`: the operator authorizes one publisher key.
+///
+/// The delegation is the only thing the operator signs for a publisher, so this
+/// is the whole start-of-trust path: no key copy-pasting, no hand-built payload.
+fn delegate(rest: &[String]) -> Result<()> {
+    let publisher = named(rest, "--publisher").ok_or_else(|| Error::Invalid(usage()))?;
+    let operator_key = named(rest, "--operator-key").ok_or_else(|| Error::Invalid(usage()))?;
+    let public_key = named(rest, "--public-key").map(PathBuf::from);
+    let fingerprint = named(rest, "--fingerprint");
+    let home = named(rest, "--gnupg-home").map(PathBuf::from);
+    let scope = named(rest, "--scope").unwrap_or_else(|| "spore".into());
+    let days = match named(rest, "--days") {
+        Some(value) => value
+            .parse::<u64>()
+            .map_err(|_| Error::Invalid("--days must be a whole number".into()))?,
+        None => 0,
+    };
+    let delegation = publish::delegate(DelegationRequest {
+        publisher: &publisher,
+        operator_key: &operator_key,
+        home: home.as_deref(),
+        scope: &scope,
+        days,
+        public_key: public_key.as_deref(),
+        fingerprint: fingerprint.as_deref(),
+    })?;
+    emit(rest, &delegation)
+}
+
+/// `sign`: bind entries to a publisher and reseal the checkpoint.
+fn sign_index(rest: &[String]) -> Result<()> {
+    let path = named(rest, "--index").ok_or_else(|| Error::Invalid(usage()))?;
+    let publisher = named(rest, "--publisher").ok_or_else(|| Error::Invalid(usage()))?;
+    let key = named(rest, "--key").ok_or_else(|| Error::Invalid(usage()))?;
+    let home = named(rest, "--gnupg-home").map(PathBuf::from);
+    let countersign = named(rest, "--countersign");
+    let mut index = Index::read(Path::new(&path))?;
+    let mut delegations = Vec::new();
+    for file in repeated(rest, "--delegation") {
+        let source = std::fs::read_to_string(&file)
+            .map_err(|error| Error::Io(format!("{file}: {error}")))?;
+        let delegation: soil_store::Delegation = serde_json::from_str(&source)
+            .map_err(|error| Error::Invalid(format!("{file}: {error}")))?;
+        delegations.push(delegation);
+    }
+    if !delegations.is_empty() {
+        publish::merge_delegations(&mut index, delegations);
+    }
+    let signed = publish::sign(
+        &mut index,
+        SignRequest {
+            publisher: &publisher,
+            key: &key,
+            home: home.as_deref(),
+            countersign: countersign.as_deref(),
+        },
+    )?;
+    index.validate()?;
+    eprintln!("soil-store: signed {signed} entries for {publisher}");
+    emit_or_write(rest, &path, &index)
+}
+
+/// `revoke`: withdraw one delegated key without rewriting the delegation.
+fn revoke(rest: &[String]) -> Result<()> {
+    let path = named(rest, "--index").ok_or_else(|| Error::Invalid(usage()))?;
+    let publisher = named(rest, "--publisher").ok_or_else(|| Error::Invalid(usage()))?;
+    let key = named(rest, "--key").ok_or_else(|| Error::Invalid(usage()))?;
+    let reason = named(rest, "--reason").ok_or_else(|| Error::Invalid(usage()))?;
+    let operator_key = named(rest, "--operator-key").ok_or_else(|| Error::Invalid(usage()))?;
+    let home = named(rest, "--gnupg-home").map(PathBuf::from);
+    let mut index = Index::read(Path::new(&path))?;
+    let revocation = publish::revoke(
+        &mut index,
+        &publisher,
+        &key,
+        &reason,
+        &operator_key,
+        home.as_deref(),
+    )?;
+    index.validate()?;
+    eprintln!(
+        "soil-store: revoked {} key {}",
+        revocation.publisher, revocation.fingerprint
+    );
+    emit_or_write(rest, &path, &index)
+}
+
+/// Print a value as JSON, or write it to `-o`.
+fn emit<T: serde::Serialize>(rest: &[String], value: &T) -> Result<()> {
+    let json =
+        serde_json::to_string_pretty(value).map_err(|error| Error::Json(error.to_string()))?;
+    match named(rest, "-o") {
+        Some(path) => std::fs::write(&path, format!("{json}\n"))
+            .map_err(|error| Error::Io(format!("{path}: {error}"))),
+        None => {
+            println!("{json}");
+            Ok(())
+        }
+    }
+}
+
+/// Replace the index in place with `--write`, otherwise print it.
+///
+/// Every write goes through a temporary file in the same directory, so a killed
+/// process leaves the previous index rather than half of the next one.
+fn emit_or_write(rest: &[String], path: &str, index: &Index) -> Result<()> {
+    if !flag(rest, "--write") {
+        return emit(rest, index);
+    }
+    let json =
+        serde_json::to_string_pretty(index).map_err(|error| Error::Json(error.to_string()))?;
+    let target = Path::new(path);
+    let temporary = target.with_extension("json.tmp");
+    std::fs::write(&temporary, format!("{json}\n"))
+        .map_err(|error| Error::Io(format!("{}: {error}", temporary.display())))?;
+    std::fs::rename(&temporary, target).map_err(|error| Error::Io(format!("{path}: {error}")))?;
+    Ok(())
+}
+
 fn packages(root: &Path) -> Result<Vec<PathBuf>> {
     let entries = std::fs::read_dir(root)
         .map_err(|error| Error::Io(format!("{}: {error}", root.display())))?;
@@ -265,7 +394,16 @@ fn scan(root: &Path, pins: &BTreeMap<String, String>) -> Result<Vec<Installed>> 
 }
 
 fn usage() -> String {
-    "usage: soil-store index    --spores-root DIR [--source NAME] [-o FILE]\n       soil-store verify   --index FILE --operator-key FILE\n       soil-store plan     --index FILE --spores-root DIR [--json] [--pin ID=LABEL]\n       soil-store snapshot --index FILE --spores-root DIR [-o FILE] [--source-name NAME] [--source-index CID]\n       soil-store serve    --index FILE --spores-root DIR [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]\n       soil-store --version".into()
+    "usage: soil-store index    --spores-root DIR [--source NAME] [-o FILE]\n       soil-store delegate --publisher PRINCIPAL --operator-key KEY (--public-key FILE | --fingerprint KEY)\n                           [--scope spore|*] [--days N] [--gnupg-home DIR] [-o FILE]\n       soil-store sign     --index FILE --publisher PRINCIPAL --key KEY [--delegation FILE]...\n                           [--countersign OPERATOR-KEY] [--gnupg-home DIR] [--write]\n       soil-store revoke   --index FILE --publisher PRINCIPAL --key KEY --reason TEXT\n                           --operator-key KEY [--gnupg-home DIR] [--write]\n       soil-store verify   --index FILE --operator-key FILE\n       soil-store plan     --index FILE --spores-root DIR [--json] [--pin ID=LABEL]\n       soil-store snapshot --index FILE --spores-root DIR [-o FILE] [--source-name NAME] [--source-index CID]\n       soil-store serve    --index FILE --spores-root DIR [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]\n       soil-store --version".into()
+}
+
+/// Every value given after a repeatable flag, in order.
+fn repeated(args: &[String], flag: &str) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(index, arg)| arg.as_str() == flag && args.get(index + 1).is_some())
+        .filter_map(|(index, _)| args.get(index + 1).cloned())
+        .collect()
 }
 
 fn named(args: &[String], flag: &str) -> Option<String> {

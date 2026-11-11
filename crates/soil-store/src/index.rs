@@ -30,6 +30,10 @@ pub struct Index {
     /// entry log's Merkle root; their own signatures are the authority.
     #[serde(default)]
     pub delegations: Vec<Delegation>,
+    /// Operator-signed withdrawals of a delegated key. Append-only, like the
+    /// entry log: revoking a key never rewrites the delegation that admitted it.
+    #[serde(default)]
+    pub revocations: Vec<Revocation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -121,6 +125,9 @@ pub struct Delegation {
 #[derive(Debug, Clone, Default)]
 pub struct Verified {
     pub delegations: BTreeMap<(String, String), Delegation>,
+    /// `(publisher, key)` pairs the operator withdrew. Their entries stay in the
+    /// log for history but are not installable and are absent from the catalog.
+    pub revoked: BTreeSet<(String, String)>,
 }
 
 impl Verified {
@@ -128,6 +135,34 @@ impl Verified {
         let publisher = entry.publisher.as_ref()?;
         let fingerprint = entry.publisher_key.as_ref()?.to_ascii_uppercase();
         self.delegations.get(&(publisher.clone(), fingerprint))
+    }
+}
+
+/// An operator's withdrawal of a delegated publisher key.
+///
+/// Revoking a lost device removes one key, not the publisher: the other
+/// delegations for the same principal keep signing. The record is signed by the
+/// same operator key as the delegation, so a mirror cannot revoke a rival.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Revocation {
+    pub publisher: String,
+    /// Uppercase hex, 40 or 64 characters.
+    pub fingerprint: String,
+    pub revoked_at: u64,
+    /// Why the key was withdrawn. Shown next to the affected packages.
+    pub reason: String,
+    /// Detached armored PGP signature by the store operator over
+    /// [`Revocation::payload`].
+    pub signature: String,
+}
+
+impl Revocation {
+    pub fn payload(&self) -> String {
+        format!(
+            "store-revocation 1\npublisher {}\nfingerprint {}\nrevoked-at {}\nreason {}\n",
+            self.publisher, self.fingerprint, self.revoked_at, self.reason,
+        )
     }
 }
 
@@ -298,6 +333,33 @@ impl Index {
                 )));
             }
         }
+        let mut revoked = BTreeSet::new();
+        for revocation in &self.revocations {
+            if revocation.publisher.trim().is_empty() {
+                return Err(Error::Invalid("revocation has no publisher".into()));
+            }
+            if !fingerprint(&revocation.fingerprint) {
+                return Err(Error::Invalid(format!(
+                    "{}: revocation fingerprint is not 40 or 64 hex",
+                    revocation.publisher
+                )));
+            }
+            if revocation.reason.trim().is_empty() {
+                return Err(Error::Invalid(format!(
+                    "{}: revocation has no reason",
+                    revocation.publisher
+                )));
+            }
+            if !revoked.insert((
+                revocation.publisher.clone(),
+                revocation.fingerprint.to_ascii_uppercase(),
+            )) {
+                return Err(Error::Invalid(format!(
+                    "{}: duplicate revocation for {}",
+                    revocation.publisher, revocation.fingerprint
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -326,6 +388,25 @@ impl Index {
 
         let now = now_unix_s();
         let mut verified = Verified::default();
+        let mut revoked = BTreeSet::new();
+        for revocation in &self.revocations {
+            soil_spore::verify_detached(
+                operator_key,
+                revocation.payload().as_bytes(),
+                revocation.signature.as_bytes(),
+            )
+            .map_err(|error| {
+                Error::Invalid(format!(
+                    "{} revocation signature: {error}",
+                    revocation.publisher
+                ))
+            })?;
+            revoked.insert((
+                revocation.publisher.clone(),
+                revocation.fingerprint.to_ascii_uppercase(),
+            ));
+        }
+        verified.revoked = revoked.clone();
         for delegation in &self.delegations {
             soil_spore::verify_detached(
                 operator_key,
@@ -354,6 +435,12 @@ impl Index {
                     delegation.publisher, delegation.scope
                 )));
             }
+            // A withdrawn key stops speaking for its publisher. Its entries stay
+            // in the log, so verification skips them instead of failing the whole
+            // index: one lost device must not brick every other package.
+            if revoked.contains(&key) {
+                continue;
+            }
             verified.delegations.insert(key, delegation.clone());
         }
 
@@ -370,6 +457,9 @@ impl Index {
                     entry.spore_id
                 )));
             };
+            if revoked.contains(&(publisher.clone(), fingerprint.to_ascii_uppercase())) {
+                continue;
+            }
             let delegation = verified
                 .delegations
                 .get(&(publisher.clone(), fingerprint.to_ascii_uppercase()))
@@ -391,14 +481,31 @@ impl Index {
         Ok(verified)
     }
 
-    /// The newest entry per Spore, after applying `yank`s.
+    /// The newest entry per Spore, after applying `yank`s and dropping packages
+    /// whose publisher key the operator has since withdrawn.
     ///
     /// Later entries win. A yanked package is removed from the catalog rather
     /// than tombstoned here; the log keeps the history, the catalog answers
-    /// "what can be installed now".
+    /// "what can be installed now". Revocations are honoured from the record
+    /// itself, unverified, because a revocation can only remove.
     pub fn catalog(&self) -> BTreeMap<String, Entry> {
+        let revoked: BTreeSet<(String, String)> = self
+            .revocations
+            .iter()
+            .map(|revocation| {
+                (
+                    revocation.publisher.clone(),
+                    revocation.fingerprint.to_ascii_uppercase(),
+                )
+            })
+            .collect();
         let mut catalog = BTreeMap::new();
         for entry in &self.entries {
+            if let (Some(publisher), Some(key)) = (&entry.publisher, &entry.publisher_key)
+                && revoked.contains(&(publisher.clone(), key.to_ascii_uppercase()))
+            {
+                continue;
+            }
             match entry.kind {
                 EntryKind::Add | EntryKind::Update => {
                     catalog.insert(entry.spore_id.clone(), entry.clone());
@@ -464,6 +571,7 @@ impl Index {
             },
             entries,
             delegations,
+            revocations: Vec::new(),
         }
     }
 }
@@ -645,6 +753,33 @@ mod tests {
         let mut undelegated = index.clone();
         undelegated.delegations.clear();
         assert!(undelegated.verify(&operator_public).is_err());
+
+        // Revocation is an explicit record, and one lost key must not fail the
+        // index: the entries stay in the log but leave the catalog.
+        let mut revoked_record = Revocation {
+            publisher: "mycelium:publisher".into(),
+            fingerprint: verified.delegations.keys().next().unwrap().1.clone(),
+            revoked_at: 1,
+            reason: "laptop lost".into(),
+            signature: String::new(),
+        };
+        revoked_record.signature = sign(home.path(), &operator_fp, &revoked_record.payload());
+        let mut revoked = index.clone();
+        revoked.revocations.push(revoked_record);
+        let still_valid = revoked
+            .verify(&operator_public)
+            .expect("a revocation is valid");
+        assert_eq!(still_valid.delegations.len(), 0);
+        assert_eq!(still_valid.revoked.len(), 1);
+        assert!(
+            revoked.catalog().is_empty(),
+            "revoked entries are not offered"
+        );
+
+        // A revocation a mirror invented does not verify.
+        let mut forged = revoked.clone();
+        forged.revocations[0].reason = "rewarded by a rival".into();
+        assert!(forged.verify(&operator_public).is_err());
     }
 
     #[test]

@@ -381,6 +381,12 @@ Revoking a lost device removes that delegation, not the publisher. A single
 non-exportable key cannot be shared across a fleet; hardware-backed signing is a
 per-device key that either signs directly or attests the software key.
 
+Revocation is its own record, not an edit to the delegation:
+
+```text
+revocation = (publisher, key_fingerprint, revoked_at, reason, operator_signature)
+```
+
 ### The index on disk
 
 `soil-store` reads this shape, and a publisher writes it:
@@ -412,6 +418,15 @@ per-device key that either signs directly or attests the software key.
       "scope": "spore",
       "issued_at": 1793833200,
       "expires_at": 0,
+      "signature": "…"
+    }
+  ],
+  "revocations": [
+    {
+      "publisher": "mycelium:fungos/release",
+      "fingerprint": "<PGP fingerprint>",
+      "revoked_at": 1793919600,
+      "reason": "laptop lost",
       "signature": "…"
     }
   ]
@@ -446,6 +461,12 @@ right, and it runs on a reviewer's laptop with no network:
 
 ```sh
 soil-store index    --spores-root spores/ -o index.json [--source fungos]
+soil-store delegate --publisher mycelium:fungos/release --operator-key KEY \
+                    (--public-key publisher.asc | --fingerprint KEY) [--days 365] -o delegation.json
+soil-store sign     --index index.json --delegation delegation.json \
+                    --publisher mycelium:fungos/release --key KEY [--countersign OPERATOR-KEY] --write
+soil-store revoke   --index index.json --publisher mycelium:fungos/release --key KEY \
+                    --reason "laptop lost" --operator-key OPERATOR-KEY --write
 soil-store verify   --index index.json --operator-key operator.asc
 soil-store plan     --index index.json --spores-root ~/.local/share/fungos/spores [--json]
 soil-store snapshot --index index.json --spores-root ~/.local/share/fungos/spores -o store.snapshot.lua
@@ -454,9 +475,22 @@ soil-store serve    --index index.json --spores-root ~/.local/share/fungos/spore
 
 `index` seals a fresh log from a package tree: it numbers the entries, folds them
 into the checkpoint root, and addresses each tar by the CID of the bytes it would
-hand back. The checkpoint it writes is unsigned — signing `(seq, root, source)`
-with the store principal is the publisher's step and is not wired up yet, which
-is why the storefront says "no signed index" rather than implying otherwise.
+hand back. Its output is deliberately unsigned — `delegate` and `sign` are the
+steps that make it a source.
+
+`delegate` is the operator's one signature per publisher key: it covers the
+publisher principal, the key fingerprint, the key itself (by digest), the scope
+and the validity window, and it is the only thing a publisher needs from the
+store. `sign` binds entries to that key and reseals the checkpoint; `--countersign`
+adds the operator's optional checkpoint signature for freshness. `revoke`
+withdraws one key without rewriting the delegation that admitted it: the record
+is append-only and operator-signed, so a mirror cannot revoke a rival and a lost
+device does not revoke the publisher.
+
+Verification order is checkpoint root, then delegations, then entries, then — at
+install — the package tar and its PGP sidecar. A revoked key's entries stay in
+the log for history but are skipped by `verify` and dropped from `catalog()`: one
+lost device must not brick every other package.
 
 `serve` is the loopback presenter: it reads the index and the install root once,
 answers `/`, `/updates`, `/spore/<id>`, `/api/plan` and `/api/index`, and never

@@ -21,10 +21,11 @@ use std::fmt;
 pub mod cid;
 pub mod index;
 pub mod plan;
+pub mod publish;
 pub mod serve;
 pub mod snapshot;
 
-pub use index::{Checkpoint, Delegation, Entry, EntryKind, Index, SCHEMA, Verified};
+pub use index::{Checkpoint, Delegation, Entry, EntryKind, Index, Revocation, SCHEMA, Verified};
 pub use plan::{Class, Installed, Plan, Update, plan};
 pub use snapshot::{Snapshot, Source, build as build_snapshot, to_lua};
 
@@ -34,6 +35,8 @@ pub enum Error {
     Json(String),
     Invalid(String),
     Package(String),
+    /// An external tool (gpg) was missing or failed.
+    Tool(String),
 }
 
 impl fmt::Display for Error {
@@ -43,6 +46,7 @@ impl fmt::Display for Error {
             Self::Json(message) => write!(f, "json: {message}"),
             Self::Invalid(message) => write!(f, "invalid: {message}"),
             Self::Package(message) => write!(f, "package: {message}"),
+            Self::Tool(message) => write!(f, "tool: {message}"),
         }
     }
 }
