@@ -1,0 +1,122 @@
+// Durable, schema-tagged records with a change feed and peer sync.
+//
+// Records are the storage layer for Spores that need queryable state (mail and
+// chat metadata, contacts, CRM snapshots) without inventing a second database.
+// The host owns durability, revisions, tombstones, and sync. A Spore owns the
+// schema and the meaning of `body`.
+//
+// Grants are separate: read, write, and sync. A read-only Spore cannot mutate
+// or export the store.
+package soil:records@0.1.0;
+
+interface records {
+  /// A record address. `collection` is a Spore-defined namespace
+  /// (`email.message`, `chat.message`, `contact`); `id` is stable within it.
+  record key {
+    collection: string,
+    id: string,
+  }
+
+  /// One stored record. `body` is opaque to the host (JSON, CBOR, or a Spore
+  /// schema); `schema` names the body contract.
+  ///
+  /// Local `upsert` ignores `revision` and `origin` and assigns both. Remote
+  /// `apply` uses them for last-writer-wins:
+  ///   higher `revision` wins; equal revision is broken by lexicographic
+  ///   `origin`; a `deleted` entry is a tombstone.
+  record entry {
+    key: key,
+    schema: string,
+    revision: u64,
+    updated-at-ms: u64,
+    origin: string,
+    deleted: bool,
+    body: list<u8>,
+  }
+
+  record page {
+    entries: list<entry>,
+    /// Opaque cursor for the next page, or none at the end.
+    next: option<string>,
+  }
+
+  record apply-result {
+    applied: u32,
+    /// Older or equal revisions that lost the last-writer-wins comparison.
+    skipped: u32,
+  }
+
+  /// The exact revision/origin tuple returned by a local write.
+  record version {
+    revision: u64,
+    origin: string,
+  }
+
+  /// Result of a conditional write. On conflict `entry` is the current
+  /// authoritative entry, so the caller can re-read and retry.
+  record cas-result {
+    applied: bool,
+    entry: entry,
+  }
+
+  enum error {
+    /// The requested grant was not linked for this Spore.
+    denied,
+    /// No such record.
+    not-found,
+    /// The record, page, or body exceeds the host/caller budget.
+    over-budget,
+    /// Key, schema, cursor, or body is malformed.
+    invalid,
+    /// The caller's cursor predates a compaction.
+    stale,
+    /// The host store failed.
+    io,
+    /// This host has no records backend.
+    unsupported,
+  }
+
+  /// Read one record.
+  get: func(key: key) -> result<entry, error>;
+
+  /// Scan one collection in revision order. A cursor from a previous page is
+  /// valid until the host reports `stale`.
+  scan: func(collection: string, cursor: option<string>, limit: u32) -> result<page, error>;
+
+  /// Create or replace a local record. The host assigns `revision` and
+  /// `origin`; the returned entry is authoritative.
+  upsert: func(entry: entry) -> result<entry, error>;
+
+  /// Conditional create/replace/delete.
+  ///
+  /// `expected = none` means create only if there is no live record.
+  /// `expected = some(version)` requires the current live record to match
+  /// exactly. On a mismatch the host returns `applied = false` and the
+  /// current entry; it never overwrites the winner. A missing record with an
+  /// expected version returns `not-found`.
+  compare-and-swap: func(
+    key: key,
+    expected: option<version>,
+    entry: entry,
+  ) -> result<cas-result, error>;
+
+  /// Write a tombstone. The record remains visible to `changes` until the
+  /// host's tombstone retention expires.
+  delete: func(key: key) -> result<_, error>;
+
+  /// Export changes after `since`, ordered by `(revision, origin)`. This is the
+  /// sync producer side; pass the result to `apply` on the peer.
+  changes: func(since: option<string>, limit: u32) -> result<page, error>;
+
+  /// Merge remote changes with last-writer-wins. This never calls back into
+  /// the network; the Spore or host transports the page.
+  apply: func(entries: list<entry>) -> result<apply-result, error>;
+}
+
+world records-host {
+  import records;
+}
+
+world guest {
+  import records;
+}

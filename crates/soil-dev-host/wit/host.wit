@@ -1,0 +1,16 @@
+// Desktop development composition: BLE + Records + Unibus + monotonic time.
+//
+// The guest world is the common shape of the PineTime and JARVIS telemetry
+// Spores. Records and Unibus are linked from their canonical host adapters;
+// this world only generates the BLE and time import traits the dev host owns.
+package soil:dev-host@0.1.0;
+
+world runner {
+  import soil:ble/ble@1.0.0;
+  import soil:records/records@0.1.0;
+  import soil:unibus/bus@0.1.0;
+  import soil:time/time@1.0.0;
+
+  export run: func(args: list<string>) -> result<_, string>;
+  export snapshot: func() -> result<list<u8>, string>;
+}

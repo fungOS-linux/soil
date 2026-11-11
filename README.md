@@ -83,6 +83,9 @@ runs the [COLMI ring Spore](https://github.com/ajmwagar/spores/tree/main/spores/
 against a real radio on desktop. `SOIL_BLE_SIM=1` swaps the radio for
 [`crates/soil-ble-sim`](crates/soil-ble-sim), a deterministic virtual
 PineTime/Ring/OMI GATT backend with scripted faults and golden replays.
+[`crates/soil-dev-host`](crates/soil-dev-host) composes BLE with Records, an
+in-memory Unibus, and monotonic time so the first device Spores can run end to
+end on a laptop before the S22/fungOS-mobile radio path is ready.
 
 Canvas is the cross-platform owner; Spores never submit UI trees.
 [`crates/soil-runtime`](crates/soil-runtime) is the S22 reference host (wasmtime
