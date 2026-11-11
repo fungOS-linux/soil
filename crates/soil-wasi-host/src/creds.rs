@@ -514,6 +514,12 @@ use base64::Engine as _;
 #[derive(Debug)]
 pub struct GeodeCredentials {
     socket: PathBuf,
+    /// Prefix a guest's plain name to a `geode://<realm>/<account>/` reference.
+    ///
+    /// A guest names a credential; only the host knows where it lives. Keeping
+    /// the prefix out of the guest is what stops a Spore addressing another
+    /// realm by spelling its reference.
+    prefix: String,
     purpose: String,
     ttl_ms: u64,
     leased: Mutex<BTreeMap<String, Entry>>,
@@ -525,9 +531,15 @@ impl GeodeCredentials {
     ///
     /// The purpose is chosen by the host, never by the guest: a credential
     /// minted to verify a webhook must not be able to sign one.
-    pub fn new(socket: impl Into<PathBuf>, purpose: impl Into<String>, ttl: Duration) -> Self {
+    pub fn new(
+        socket: impl Into<PathBuf>,
+        prefix: impl Into<String>,
+        purpose: impl Into<String>,
+        ttl: Duration,
+    ) -> Self {
         Self {
             socket: socket.into(),
+            prefix: prefix.into(),
             purpose: purpose.into(),
             ttl_ms: ttl.as_millis().min(u128::from(u64::MAX)) as u64,
             leased: Mutex::new(BTreeMap::new()),
@@ -541,7 +553,7 @@ impl GeodeCredentials {
     ) -> std::result::Result<(Vec<u8>, Option<u64>), CredentialError> {
         let request = serde_json::json!({
             "op": "lease",
-            "reference": reference,
+            "reference": format!("{}{reference}", self.prefix),
             "purpose": self.purpose,
             "ttl_ms": self.ttl_ms,
         });
@@ -686,7 +698,12 @@ mod geode_tests {
             "secret_b64": secret,
             "expires_at": now_ms() / 1000 + 60,
         }));
-        let credentials = GeodeCredentials::new(&socket, "verify", Duration::from_secs(60));
+        let credentials = GeodeCredentials::new(
+            &socket,
+            "geode://fungos/agora/",
+            "verify",
+            Duration::from_secs(60),
+        );
 
         let handle = credentials
             .resolve("confluence.webhook/smoke")
@@ -712,7 +729,10 @@ mod geode_tests {
         let request: serde_json::Value =
             serde_json::from_str(&server.join().expect("server")).expect("json request");
         assert_eq!(request["op"], "lease");
-        assert_eq!(request["reference"], "confluence.webhook/smoke");
+        assert_eq!(
+            request["reference"],
+            "geode://fungos/agora/confluence.webhook/smoke"
+        );
         assert_eq!(request["purpose"], "verify", "the host picks the purpose");
         assert_eq!(request["ttl_ms"], 60_000);
         let _ = std::fs::remove_file(socket);
@@ -724,7 +744,12 @@ mod geode_tests {
             "ok": false,
             "error": "purpose not allowed for confluence.webhook/smoke",
         }));
-        let credentials = GeodeCredentials::new(&socket, "sign", Duration::from_secs(60));
+        let credentials = GeodeCredentials::new(
+            &socket,
+            "geode://fungos/agora/",
+            "sign",
+            Duration::from_secs(60),
+        );
         assert_eq!(
             credentials.resolve("confluence.webhook/smoke").unwrap_err(),
             CredentialError::Denied
@@ -733,7 +758,12 @@ mod geode_tests {
         let _ = std::fs::remove_file(&socket);
 
         let absent = std::env::temp_dir().join("soil-geode-does-not-exist.sock");
-        let credentials = GeodeCredentials::new(absent, "verify", Duration::from_secs(60));
+        let credentials = GeodeCredentials::new(
+            absent,
+            "geode://fungos/agora/",
+            "verify",
+            Duration::from_secs(60),
+        );
         assert_eq!(
             credentials.resolve("anything").unwrap_err(),
             CredentialError::Unavailable
@@ -748,7 +778,12 @@ mod geode_tests {
             "secret_b64": secret,
             "expires_at": 1,
         }));
-        let credentials = GeodeCredentials::new(&socket, "verify", Duration::from_secs(60));
+        let credentials = GeodeCredentials::new(
+            &socket,
+            "geode://fungos/agora/",
+            "verify",
+            Duration::from_secs(60),
+        );
         let handle = credentials.resolve("hook").expect("lease");
         assert_eq!(
             credentials

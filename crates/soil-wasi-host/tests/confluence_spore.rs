@@ -259,7 +259,10 @@ async fn a_geode_lease_verifies_a_delivery() {
             }
             let request: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(request["op"], "lease", "the adapter speaks the lease op");
-            assert_eq!(request["reference"], CREDENTIAL);
+            assert_eq!(
+                request["reference"],
+                format!("geode://fungos/agora/{CREDENTIAL}")
+            );
             assert_eq!(request["purpose"], "verify", "the host picks the purpose");
             let reply = serde_json::json!({
                 "ok": true,
@@ -272,6 +275,7 @@ async fn a_geode_lease_verifies_a_delivery() {
 
     let credentials: Arc<dyn CredentialProvider> = Arc::new(GeodeCredentials::new(
         &socket,
+        "geode://fungos/agora/",
         "verify",
         std::time::Duration::from_secs(60),
     ));
