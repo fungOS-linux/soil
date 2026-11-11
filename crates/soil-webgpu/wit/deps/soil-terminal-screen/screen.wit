@@ -28,6 +28,25 @@ interface screen {
     generation: u64,
   }
 
+  /// One shell the host is running. A terminal shows them as tabs; the Spore
+  /// never owns a process, so the list comes from the host.
+  record session {
+    id: u32,
+    /// A label for the tab: the emulator's title once the shell sets one,
+    /// otherwise what the session runs ("zsh", "mush").
+    title: string,
+    active: bool,
+  }
+
+  /// Start another shell and make it the one `snapshot` and `write` act on.
+  /// `command` is a program line, or a login shell when absent.
+  open-session: func(command: option<string>) -> result<u32, string>;
+  /// Every session the host is running, in the order the tabs should show them.
+  sessions: func() -> result<list<session>, string>;
+  /// Point `snapshot`, `write`, `scroll`, `resize` and `wait` at a session.
+  select-session: func(id: u32) -> result<_, string>;
+  close-session: func(id: u32) -> result<_, string>;
+
   snapshot: func() -> result<grid, string>;
   /// Block until the grid changes or the timeout expires, and answer the
   /// generation that is current when it returns. A renderer waits on this

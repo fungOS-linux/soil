@@ -23,7 +23,7 @@ use soil_webgpu::{
     CatalogSurface, CatalogSurfaceKind, CursorHost, CursorStyle, HostSetup, InputEvent, InputKey,
     PointerButton, WebGpuRuntime,
 };
-use terminal::PtyTerminal;
+use terminal::Terminals;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -229,6 +229,8 @@ struct App {
     /// spinning the event loop for the whole start-up.
     splashed: std::time::Instant,
     spores: PathBuf,
+    /// What runs on the terminal's pty: a login shell when absent.
+    command: Option<String>,
     modifiers: ModifiersState,
     started: bool,
 }
@@ -271,6 +273,7 @@ impl App {
         let (width, height) = *extent.lock().expect("surface extent poisoned");
         eprintln!("canvas-winit: starting component at {width}x{height}");
         let module = self.module.clone();
+        let command = self.command.clone();
         let tx = self.tx.clone();
         let input = self.input.clone();
         let spores = self.spores.clone();
@@ -294,7 +297,7 @@ impl App {
                         input,
                         interactive: true,
                         catalog: Box::new(catalog),
-                        terminal: Box::new(PtyTerminal::new(80, 24)),
+                        terminal: Box::new(Terminals::new(80, 24, command)),
                         cursor: Some(Box::new(WindowCursor(window))),
                     },
                 ))?;
@@ -820,6 +823,7 @@ fn main() -> Result<()> {
     let mut frames = None;
     let mut key = None;
     let mut keys = None;
+    let mut command = None;
     let mut pointer = None;
     let mut click = None;
     let mut spores = None;
@@ -841,6 +845,9 @@ fn main() -> Result<()> {
             }
             "--key" => key = Some(args.next().context("--key needs a key name")?),
             "--keys" => keys = Some(args.next().context("--keys needs text")?),
+            "--command" => {
+                command = Some(args.next().context("--command needs a command line")?)
+            }
             "--pointer" => pointer = Some(point(args.next().context("--pointer needs X,Y")?)?),
             "--click" => click = Some(point(args.next().context("--click needs X,Y")?)?),
             "--spores" => {
@@ -850,7 +857,7 @@ fn main() -> Result<()> {
             }
             value if module.is_none() => module = Some(PathBuf::from(value)),
             _ => anyhow::bail!(
-                "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--pointer X,Y] [--click X,Y] [--spores DIR]"
+                "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--spores DIR]"
             ),
         }
     }
@@ -867,7 +874,7 @@ fn main() -> Result<()> {
                 .context("locate the bundle Resources directory")?;
             if !candidate.is_file() {
                 anyhow::bail!(
-                    "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--pointer X,Y] [--click X,Y] [--spores DIR]"
+                    "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--spores DIR]"
                 );
             }
             candidate
@@ -947,6 +954,7 @@ fn main() -> Result<()> {
         opened: std::time::Instant::now(),
         splashed: std::time::Instant::now(),
         modifiers: ModifiersState::default(),
+        command,
         spores: spores.unwrap_or_else(|| {
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)

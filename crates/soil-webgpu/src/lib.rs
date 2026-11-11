@@ -181,6 +181,14 @@ pub struct TerminalCell {
     pub wide_tail: bool,
 }
 
+/// One shell the host is running. The Spore draws these as tabs.
+#[derive(Clone, Debug)]
+pub struct TerminalSession {
+    pub id: u32,
+    pub title: String,
+    pub active: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct TerminalSnapshot {
     pub cols: u32,
@@ -194,6 +202,24 @@ pub struct TerminalSnapshot {
 /// The host's live terminal. The Spore asks for a snapshot and sends keys;
 /// it never owns a PTY, a shell, or an emulator.
 pub trait TerminalHost: Send {
+    /// One shell the host is running, as a tab strip needs it.
+    fn sessions(&mut self) -> Result<Vec<TerminalSession>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Start a shell and make it the active one.
+    fn open_session(&mut self, _command: Option<String>) -> Result<u32, String> {
+        Err("this host cannot open sessions".into())
+    }
+
+    fn select_session(&mut self, _id: u32) -> Result<(), String> {
+        Err("this host cannot select sessions".into())
+    }
+
+    fn close_session(&mut self, _id: u32) -> Result<(), String> {
+        Err("this host cannot close sessions".into())
+    }
+
     fn snapshot(&mut self) -> Result<TerminalSnapshot, String>;
     fn write(&mut self, bytes: &[u8]) -> Result<(), String>;
     fn resize(&mut self, cols: u32, rows: u32) -> Result<(), String>;
@@ -502,6 +528,33 @@ fn catalog_error(error: CatalogError) -> soil::spore::catalog::Error {
 }
 
 impl soil::terminal_screen::screen::Host for WebGpuHost {
+    fn sessions(
+        &mut self,
+    ) -> std::result::Result<Vec<soil::terminal_screen::screen::Session>, String> {
+        Ok(self
+            .terminal
+            .sessions()?
+            .into_iter()
+            .map(|session| soil::terminal_screen::screen::Session {
+                id: session.id,
+                title: session.title,
+                active: session.active,
+            })
+            .collect())
+    }
+
+    fn open_session(&mut self, command: Option<String>) -> std::result::Result<u32, String> {
+        self.terminal.open_session(command)
+    }
+
+    fn select_session(&mut self, id: u32) -> std::result::Result<(), String> {
+        self.terminal.select_session(id)
+    }
+
+    fn close_session(&mut self, id: u32) -> std::result::Result<(), String> {
+        self.terminal.close_session(id)
+    }
+
     fn snapshot(&mut self) -> std::result::Result<soil::terminal_screen::screen::Grid, String> {
         let snapshot = self.terminal.snapshot()?;
         Ok(soil::terminal_screen::screen::Grid {
