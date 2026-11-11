@@ -169,21 +169,27 @@ impl Control {
 }
 
 /// Run a whole command line, chaining on `&&`, `||` and `;`.
-pub fn run_line(runtime: &mut Runtime, root: &Path, line: &str) -> Result<i32> {
+pub fn run_line(
+    runtime: &mut Runtime,
+    root: &Path,
+    store: Option<&Path>,
+    line: &str,
+) -> Result<i32> {
     let mut terminal = Terminal;
     let control = Control::new(std::sync::Arc::new(Default::default())).with_budget(runtime.budget());
-    run_line_with(&mut terminal, runtime, root, line, &control)
+    run_line_with(&mut terminal, runtime, root, store, line, &control)
 }
 
 /// Run a command line and return what it printed, for the service daemon.
 pub fn run_line_captured(
     runtime: &mut Runtime,
     root: &Path,
+    store: Option<&Path>,
     line: &str,
     control: &Control,
 ) -> Result<(i32, String, String)> {
     let mut capture = Capture::default();
-    let status = run_line_with(&mut capture, runtime, root, line, control)?;
+    let status = run_line_with(&mut capture, runtime, root, store, line, control)?;
     Ok((status, capture.out, capture.err))
 }
 
@@ -191,6 +197,7 @@ fn run_line_with(
     output: &mut dyn Output,
     runtime: &mut Runtime,
     root: &Path,
+    store: Option<&Path>,
     line: &str,
     control: &Control,
 ) -> Result<i32> {
@@ -204,7 +211,7 @@ fn run_line_with(
         if !should_run {
             continue;
         }
-        status = run_one(output, runtime, root, &command, control)?;
+        status = run_one(output, runtime, root, store, &command, control)?;
     }
     Ok(status)
 }
@@ -213,6 +220,7 @@ fn run_one(
     output: &mut dyn Output,
     runtime: &mut Runtime,
     root: &Path,
+    store: Option<&Path>,
     command: &str,
     control: &Control,
 ) -> Result<i32> {
@@ -234,7 +242,7 @@ fn run_one(
         // The Spore owns `cd`; the host program runs on the overlay, so ask
         // where the shell is before starting it.
         let cwd = spore_cwd(runtime);
-        return run_host(output, root, &words[0], &words[1..], &cwd, control);
+        return run_host(output, root, &words[0], &words[1..], &cwd, control, store);
     }
     run_in_spore(output, runtime, command)
 }
@@ -276,10 +284,11 @@ fn run_host(
     args: &[String],
     cwd: &str,
     control: &Control,
+    store: Option<&Path>,
 ) -> Result<i32> {
     use crate::outcome::{CANCELLED_STATUS, TIMEOUT_STATUS};
 
-    let overlay = Overlay::materialize(root)
+    let overlay = Overlay::materialize(root, store)
         .with_context(|| format!("materialize a workspace for {program}"))?;
     // bob owns the build plane; mush decides who is asking. A command that is
     // not a build gets nothing extra, and a host without bob gets nothing at
@@ -388,7 +397,7 @@ fn run_host(
         output.stderr(&String::from_utf8_lossy(&bytes));
     }
     overlay
-        .apply(root)
+        .apply(root, store)
         .with_context(|| format!("apply what {program} changed"))?;
     Ok(status)
 }

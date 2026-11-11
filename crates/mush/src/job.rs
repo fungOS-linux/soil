@@ -177,7 +177,12 @@ impl Jobs {
     ///
     /// One worker, one engine: Mush serialises commands today, and a single
     /// owner keeps the VFS and records view consistent without locking them.
-    pub fn start(runtime: Runtime, root: PathBuf, default_threshold: Option<Duration>) -> Self {
+    pub fn start(
+        runtime: Runtime,
+        root: PathBuf,
+        default_threshold: Option<Duration>,
+        store: Option<PathBuf>,
+    ) -> Self {
         let shared = Arc::new(Shared {
             inner: Mutex::new(Inner::default()),
             changed: Condvar::new(),
@@ -210,7 +215,8 @@ impl Jobs {
                 }
                 let mut control = worker_control.clone();
                 control.set_budget(budget.or(worker_control_budget));
-                let executed = run_command(&mut runtime, &root, &command, shell, &control);
+                let executed =
+                    run_command(&mut runtime, &root, store.as_deref(), &command, shell, &control);
                 worker_shared.inner.lock().expect("job lock").running = None;
                 worker_shared.finish(&id, command, executed);
             }
@@ -391,12 +397,13 @@ impl Shared {
 fn run_command(
     runtime: &mut Runtime,
     root: &Path,
+    store: Option<&Path>,
     command: &str,
     shell: bool,
     control: &crate::shell::Control,
 ) -> Executed {
     if shell {
-        return match crate::shell::run_line_captured(runtime, root, command, control) {
+        return match crate::shell::run_line_captured(runtime, root, store, command, control) {
             Ok((status, output, stderr)) => Executed {
                 output,
                 stderr,

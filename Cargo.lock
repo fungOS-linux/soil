@@ -2437,7 +2437,7 @@ dependencies = [
 [[package]]
 name = "fungos-vfs"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=a41aaceeef21b24739900d7ef65b434afe24a706#a41aaceeef21b24739900d7ef65b434afe24a706"
+source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af#8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af"
 dependencies = [
  "anyhow",
  "blake3",

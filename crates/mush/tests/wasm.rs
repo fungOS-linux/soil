@@ -15,8 +15,17 @@ fn mush_command() -> Command {
 }
 
 
+/// The spore under test.
+///
+/// `spores/` is a symlink to the public spores submodule, which a remote build
+/// session does not have: bob records a symlink and never follows it. A caller
+/// that has built the module elsewhere (a builder, CI) names it here rather than
+/// rewriting the tree under the sync.
 fn module() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spores/mush/module.wasm")
+    match std::env::var_os("MUSH_TEST_WASM") {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spores/mush/module.wasm"),
+    }
 }
 
 /// One `--command` line, with the exit status the shell reported.

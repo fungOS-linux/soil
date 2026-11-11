@@ -201,6 +201,7 @@ impl Host {
         root: &std::path::Path,
         command_root: PathBuf,
         records: Option<RecordsBinding>,
+        store: Option<&std::path::Path>,
     ) -> Result<Self> {
         // Commands and Spores are siblings under the fungOS data directory;
         // `--command-root` and `FUNGOS_COMMAND_ROOT` therefore move both.
@@ -209,7 +210,7 @@ impl Host {
             .or_else(|| command_root.parent().map(|parent| parent.join("spores")))
             .unwrap_or_else(|| PathBuf::from("spores"));
         Ok(Self {
-            vfs: VfsHost::open(root)?,
+            vfs: VfsHost::open_with_role_and_store(root, fungos_vfs::NodeRole::Full, store)?,
             wasi: WasiCtxBuilder::new().inherit_stdio().build(),
             table: ResourceTable::new(),
             commands: CommandHost::new(command_root, records)?,
@@ -398,6 +399,7 @@ impl Runtime {
         principal: Option<&str>,
         desktop: Option<&desktop::Desktop>,
         budget: Option<std::time::Duration>,
+        store: Option<&std::path::Path>,
     ) -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
@@ -413,7 +415,7 @@ impl Runtime {
         soil::net::net::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         soil::http::http::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         let component = Component::new(&engine, wasm)?;
-        let host = Host::new(root, command_root, records)?;
+        let host = Host::new(root, command_root, records, store)?;
         let mut store = Store::new(&engine, host);
         // An epoch-interrupted engine starts at deadline 0, which traps on the
         // first tick. Disarm start-up; each command arms its own timer.
@@ -581,6 +583,11 @@ fn apply_login_env() {
 
 /// `-l`, `-i`, `-lc`, `-lic`: a flag that carries a command is the one that
 /// decides whether we are a shell or a REPL.
+///
+/// `shell_command` only matches the stand-alone forms, so a terminal that
+/// launches `mush -lic CMD` still falls through to a script path. Kept and
+/// tested so the fix is one call site, not a rediscovery.
+#[cfg(test)]
 fn has_shell_command_flag(args: &[String]) -> bool {
     args.iter().any(|arg| {
         arg.starts_with('-')
@@ -671,7 +678,7 @@ fn run() -> Result<()> {
         args.remove(0);
         shell_mode = true;
     }
-    let mut shell_command = take_option(&mut args, "-c").or_else(|| take_option(&mut args, "-lc"));
+    let shell_command = take_option(&mut args, "-c").or_else(|| take_option(&mut args, "-lc"));
     if shell_command.is_some() {
         shell_mode = true;
     }
@@ -759,19 +766,6 @@ fn run() -> Result<()> {
         )
     };
 
-    // `mush sh` (and a bare `mush -c CMD`) is the POSIX-ish entry point: one
-    // command line, VFS commands through the Spore, allowlisted host programs
-    // through the overlay bridge, and session state that outlives the process
-    // because a terminal spawns a fresh shell for every tool call. The flags are
-    // parsed later, once every other option has been consumed: `--wasm X sh -c`
-    // must not be mistaken for a shell flag.
-    let shell_requested = if args.first().map(String::as_str) == Some("sh") {
-        args.remove(0);
-        true
-    } else {
-        args.first().map(String::as_str) == Some("-c") || has_shell_command_flag(&args)
-    };
-
     // A pure `-l` / `-i` flag carries no command, so what follows it may still be
     // a script path. Drop the flags, keep the path.
     while let Some(flag) = args.first() {
@@ -784,18 +778,31 @@ fn run() -> Result<()> {
         args.remove(0);
     }
 
+    // Content is shared by every root on this host unless a store is named.
+    // Tests and services name one so they cannot leak into the machine's store
+    // or into each other. Parsed before dispatch: `run op` and `run host` open
+    // the VFS too.
+    let store = take_option(&mut args, "--store")
+        .or_else(|| std::env::var("MUSH_VFS_STORE").ok())
+        .map(|value| config::expand_home(&value));
+
     if args.first().map(String::as_str) == Some("run")
         && args.get(1).map(String::as_str) == Some("host")
     {
         args.drain(0..2);
-        return run_host(&root, args);
+        return run_host(&root, args, store.as_deref());
     }
 
     if args.first().map(String::as_str) == Some("run")
         && args.get(1).map(String::as_str) == Some("op")
     {
         args.drain(0..2);
-        return run_operator(&root, args);
+        return run_operator(&root, args, store.as_deref());
+    }
+
+    if args.first().map(String::as_str) == Some("build") {
+        args.remove(0);
+        return run_build(&root, args, store.as_deref());
     }
 
     // Worktree and tree records are their own subcommand; they never start the
@@ -819,6 +826,7 @@ fn run() -> Result<()> {
             state_root,
             worktree_book,
             worktree_collection,
+            store.as_deref(),
         );
     }
     let wasm = take_option(&mut args, "--wasm")
@@ -977,7 +985,7 @@ fn run() -> Result<()> {
     // already went to the daemon above; this is the human-at-a-prompt path.
     if shell_mode && shell_command.is_none() {
         let shell_args = parse_shell_args(&mut args)?;
-        return run_shell(&root, &bytes, &term, command_root, records, shell_args);
+        return run_shell(&root, &bytes, &term, command_root, records, store.as_deref(), shell_args);
     }
 
     let interactive_command_root = command_root.clone();
@@ -990,13 +998,19 @@ fn run() -> Result<()> {
         principal.as_deref(),
         desktop.as_ref(),
         budget,
+        store.as_deref(),
     )?;
 
     if serve {
         let socket = socket
             .as_deref()
             .context("mush --serve needs --socket PATH or a config socket")?;
-        let jobs = std::sync::Arc::new(job::Jobs::start(runtime, root.clone(), background_after));
+        let jobs = std::sync::Arc::new(job::Jobs::start(
+            runtime,
+            root.clone(),
+            background_after,
+            store.clone(),
+        ));
         return service::serve(socket, std::sync::Arc::clone(&jobs), idle_timeout);
     }
 
@@ -1006,13 +1020,18 @@ fn run() -> Result<()> {
         if configured_token.is_none() {
             eprintln!("mush: mcp bearer token {mcp_token}");
         }
-        let jobs = std::sync::Arc::new(job::Jobs::start(runtime, root.clone(), background_after));
+        let jobs = std::sync::Arc::new(job::Jobs::start(
+            runtime,
+            root.clone(),
+            background_after,
+            store.clone(),
+        ));
         return mcp_server::serve(server, &mcp_token, std::sync::Arc::clone(&jobs));
     }
 
     if shell_mode {
         let line = shell_command.expect("an interactive shell returned above");
-        return finish(shell::run_line(&mut runtime, &root, &line)?);
+        return finish(shell::run_line(&mut runtime, &root, store.as_deref(), &line)?);
     }
 
     if let Some(command) = command {
@@ -1941,7 +1960,13 @@ fn split_words(line: &str) -> Vec<String> {
     words
 }
 
-fn execute_one(runtime: &mut Runtime, root: &Path, session: &Session, line: &str) -> Result<i32> {
+fn execute_one(
+    runtime: &mut Runtime,
+    root: &Path,
+    session: &Session,
+    store: Option<&Path>,
+    line: &str,
+) -> Result<i32> {
     let line = line.trim();
     if line.is_empty() {
         return Ok(0);
@@ -1968,7 +1993,7 @@ fn execute_one(runtime: &mut Runtime, root: &Path, session: &Session, line: &str
                 ];
                 args.push("--".into());
                 args.extend(words);
-                return run_host_status(root, args);
+                return run_host_status(root, args, store);
             }
             // Everything else belongs to the Spore: it owns the VFS and knows
             // which names are builtins, installed wasm commands, or genuinely
@@ -1986,7 +2011,13 @@ fn execute_one(runtime: &mut Runtime, root: &Path, session: &Session, line: &str
     Ok(response.status)
 }
 
-fn execute_line(runtime: &mut Runtime, root: &Path, session: &Session, line: &str) -> Result<i32> {
+fn execute_line(
+    runtime: &mut Runtime,
+    root: &Path,
+    session: &Session,
+    store: Option<&Path>,
+    line: &str,
+) -> Result<i32> {
     let mut status = 0;
     for (connector, command) in split_commands(line) {
         let should_run = match connector {
@@ -1997,7 +2028,7 @@ fn execute_line(runtime: &mut Runtime, root: &Path, session: &Session, line: &st
         if !should_run || command.is_empty() {
             continue;
         }
-        status = execute_one(runtime, root, session, &command)?;
+        status = execute_one(runtime, root, session, store, &command)?;
     }
     Ok(status)
 }
@@ -2008,14 +2039,16 @@ fn run_shell(
     term: &str,
     command_root: PathBuf,
     records: Option<RecordsBinding>,
+    store: Option<&Path>,
     args: ShellArgs,
 ) -> Result<()> {
     let key = session_key(args.session, root);
     let mut session = Session::load(root, &key);
-    let mut runtime = Runtime::open(root, wasm, term, command_root, records, None, None, None)?;
+    let mut runtime =
+        Runtime::open(root, wasm, term, command_root, records, None, None, None, store)?;
     session.restore(&mut runtime)?;
     let status = match args.command {
-        Some(command) => execute_line(&mut runtime, root, &session, &command)?,
+        Some(command) => execute_line(&mut runtime, root, &session, store, &command)?,
         None => {
             let stdin = io::stdin();
             let mut status = 0;
@@ -2024,7 +2057,7 @@ fn run_shell(
                 if line.trim() == "exit" {
                     break;
                 }
-                status = execute_line(&mut runtime, root, &session, &line)?;
+                status = execute_line(&mut runtime, root, &session, store, &line)?;
             }
             status
         }
@@ -2041,8 +2074,8 @@ fn run_shell(
 // once, in `shell::HOST_ALLOWLIST`. A second list here is how the interactive
 // shell and the daemon drifted apart: `rg`, `sed` and `gh` were reachable over
 // MCP and refused at a prompt.
-fn run_host(root: &Path, args: Vec<String>) -> Result<()> {
-    let status = run_host_status(root, args)?;
+fn run_host(root: &Path, args: Vec<String>, store: Option<&Path>) -> Result<()> {
+    let status = run_host_status(root, args, store)?;
     if status != 0 {
         std::process::exit(status);
     }
@@ -2051,7 +2084,7 @@ fn run_host(root: &Path, args: Vec<String>) -> Result<()> {
 
 /// The status-returning form, so a shell can chain `&&` and `||` without
 /// exiting the process.
-fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
+fn run_host_status(root: &Path, mut args: Vec<String>, store: Option<&Path>) -> Result<i32> {
     let passthrough = args
         .iter()
         .position(|arg| arg == "--")
@@ -2079,7 +2112,7 @@ fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
         );
     }
 
-    let overlay = overlay::Overlay::materialize(root)?;
+    let overlay = overlay::Overlay::materialize(root, store)?;
     let workspace = overlay.path().to_path_buf();
     let build = build::Build::prepare(&cmd[0], &session_key(None, root));
     let build_program = build.as_ref().map(|build| build.program(&cmd[0]));
@@ -2112,6 +2145,15 @@ fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
         "TERM",
         "TMPDIR",
         "RUSTUP_HOME",
+        // A build that leaves this machine: bob's transport needs to reach the
+        // builder, and `fpl-bob remote` is a host program like any other.
+        "BOB_SSH",
+        "BOB_POOL",
+        "BOB_NO_DNS_ROUTE",
+        "FPL_BOB_LINUX_HOST",
+        "FPL_BOB_LINUX_POOL",
+        "FPL_BOB_MAC_HOST",
+        "SSH_AUTH_SOCK",
     ] {
         if let Ok(value) = std::env::var(var) {
             command.env(var, value);
@@ -2141,7 +2183,7 @@ fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
     if no_apply {
         eprintln!("mush: overlay discarded ({})", changes.len());
     } else {
-        let report = overlay.apply(root)?;
+        let report = overlay.apply(root, store)?;
         eprintln!(
             "mush: applied {} written, {} deleted, {} directories",
             report.written, report.deleted, report.directories
@@ -2154,7 +2196,7 @@ fn run_host_status(root: &Path, mut args: Vec<String>) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
-fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
+fn run_operator(root: &Path, mut args: Vec<String>, store: Option<&Path>) -> Result<()> {
     let passthrough = args
         .iter()
         .position(|arg| arg == "--")
@@ -2228,7 +2270,7 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     } else {
         None
     };
-    let overlay = overlay::Overlay::materialize(root)?;
+    let overlay = overlay::Overlay::materialize(root, store)?;
     let workspace = overlay.path().to_path_buf();
     eprintln!("mush: overlay {}", workspace.display());
 
@@ -2270,7 +2312,7 @@ fn run_operator(root: &Path, mut args: Vec<String>) -> Result<()> {
     if no_apply {
         eprintln!("mush: overlay discarded ({})", changes.len());
     } else {
-        let report = overlay.apply(root)?;
+        let report = overlay.apply(root, store)?;
         eprintln!(
             "mush: applied {} written, {} deleted, {} directories",
             report.written, report.deleted, report.directories
@@ -2296,6 +2338,137 @@ fn take_option(args: &mut Vec<String>, name: &str) -> Option<String> {
     Some(value)
 }
 
+/// A stable remote-session name for one worktree.
+///
+/// The overlay is a fresh temp directory every run, so bob's default session
+/// name (derived from the directory) would be new every time and every build
+/// would be cold. The session belongs to the *worktree*, not to this process.
+fn build_session(root: &Path) -> String {
+    let base = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "root".into());
+    let base = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in root.to_string_lossy().bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
+    format!("mush-{base}-{:08x}", hash as u32)
+}
+
+/// The argv handed to the host bridge for `mush build`.
+///
+/// Pure so the shape is testable: bob runs at the overlay root (it ships the
+/// whole tree), and `--cwd` moves only the *command*, via `sh -c 'cd "$0" &&
+/// exec "$@"'` — no string is ever re-parsed as shell.
+fn build_argv(
+    session: &str,
+    detach: bool,
+    wait: bool,
+    host: Option<&str>,
+    pool: Option<&str>,
+    cwd: &str,
+    cmd: &[String],
+) -> Vec<String> {
+    let mut argv = vec![
+        "fpl-bob".to_string(),
+        "remote".to_string(),
+        "--session".to_string(),
+        session.to_string(),
+        // Source mutations travel back through the overlay diff; a foreign
+        // target/ must not, and bob decides that per host.
+        "--back".to_string(),
+        String::new(),
+    ];
+    if let Some(host) = host {
+        argv.push("--host".into());
+        argv.push(host.into());
+    }
+    if let Some(pool) = pool {
+        argv.push("--pool".into());
+        argv.push(pool.into());
+    }
+    if detach {
+        argv.push("--detach".into());
+    }
+    if wait {
+        argv.push("--wait".into());
+    }
+    argv.push("--".into());
+    if cwd.is_empty() {
+        argv.extend(cmd.iter().cloned());
+    } else {
+        argv.push("sh".into());
+        argv.push("-c".into());
+        argv.push("cd \"$0\" && exec \"$@\"".into());
+        argv.push(cwd.into());
+        argv.extend(cmd.iter().cloned());
+    }
+    argv
+}
+
+/// Run a build through bob, from inside the VFS.
+///
+/// The spore asks; the host decides where. A Spore has no sockets, so it cannot
+/// reach a builder even if it wanted to — and it must not hold the transport's
+/// credentials. This is the narrow seam between the two: the worktree view goes
+/// in, source mutations come back through the overlay, and the exit status is
+/// the build's.
+fn run_build(root: &Path, mut args: Vec<String>, store: Option<&Path>) -> Result<()> {
+    let detach = take_flag(&mut args, "--detach");
+    let wait = take_flag(&mut args, "--wait");
+    let host = take_option(&mut args, "--host");
+    let pool = take_option(&mut args, "--pool");
+    let cwd = take_option(&mut args, "--cwd").unwrap_or_default();
+    let cmd = match args.iter().position(|arg| arg == "--") {
+        Some(index) => args.split_off(index + 1),
+        None => Vec::new(),
+    };
+    if cmd.is_empty() {
+        anyhow::bail!(
+            "usage: mush build [--detach] [--wait] [--host H | --pool P] [--cwd DIR] -- COMMAND"
+        );
+    }
+    let argv = build_argv(
+        &build_session(root),
+        detach,
+        wait,
+        host.as_deref(),
+        pool.as_deref(),
+        &cwd,
+        &cmd,
+    );
+    // Detaching means nothing comes back: the overlay is gone before the build
+    // finishes. Say so rather than silently dropping the result.
+    if detach {
+        eprintln!("mush: detached; source changes will not be applied to the VFS");
+    }
+    let mut host_args = vec!["--".to_string()];
+    host_args.extend(argv);
+    let status = run_host_status(root, host_args, store)?;
+    if status != 0 {
+        std::process::exit(status);
+    }
+    Ok(())
+}
+
+fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
+    let Some(index) = args.iter().position(|arg| arg == name) else {
+        return false;
+    };
+    args.remove(index);
+    true
+}
+
 fn expand_home(value: &str) -> PathBuf {
     if value == "~" {
         return PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
@@ -2309,6 +2482,59 @@ fn expand_home(value: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_argv_moves_only_the_command_when_a_cwd_is_named() {
+        let argv = build_argv(
+            "mush-soil-1234",
+            false,
+            false,
+            Some("agora-one"),
+            None,
+            "crates/app",
+            &["cargo".into(), "test".into()],
+        );
+        assert_eq!(argv[0], "fpl-bob");
+        assert_eq!(argv[1], "remote");
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--session", "mush-soil-1234"])
+        );
+        assert!(argv.windows(2).any(|w| w == ["--host", "agora-one"]));
+        // bob ships the whole tree, so it runs at the root; the cwd only moves
+        // the command, and it is passed as argv rather than as shell text.
+        let sep = argv.iter().position(|a| a == "--").expect("separator");
+        assert_eq!(
+            &argv[sep + 1..sep + 4],
+            &["sh", "-c", "cd \"$0\" && exec \"$@\""]
+        );
+        assert_eq!(&argv[sep + 4..], &["crates/app", "cargo", "test"]);
+    }
+
+    #[test]
+    fn build_argv_passes_the_command_through_without_a_cwd() {
+        let argv = build_argv("s", true, true, None, Some("bob"), "", &["cargo".into()]);
+        let sep = argv.iter().position(|a| a == "--").unwrap();
+        assert_eq!(&argv[sep + 1..], &["cargo"]);
+        assert!(argv.contains(&"--detach".to_string()));
+        assert!(argv.contains(&"--wait".to_string()));
+        assert!(argv.windows(2).any(|w| w == ["--pool", "bob"]));
+        // Build output never travels back.
+        assert!(argv.windows(2).any(|w| w == ["--back", ""]));
+    }
+
+    #[test]
+    fn build_session_belongs_to_the_worktree_not_the_overlay() {
+        let a = build_session(Path::new("/src/soil/.delta/worktrees/x/soil"));
+        let b = build_session(Path::new("/src/soil/.delta/worktrees/x/soil"));
+        assert_eq!(a, b);
+        assert!(a.starts_with("mush-soil-"), "{a}");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+        assert_ne!(a, build_session(Path::new("/src/other/soil")));
+    }
 
     #[test]
     fn shell_splits_commands_without_breaking_quotes() {
