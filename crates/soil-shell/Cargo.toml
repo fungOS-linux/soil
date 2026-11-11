@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "bcd2bc682662467d1371a2c9f8436e08934132d9" }
+fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "a41aaceeef21b24739900d7ef65b434afe24a706" }
 soil-vfs-host = { path = "../soil-vfs-host" }
 # Hosting any `.spore`: the launcher is the generic one, so it links the host
 # instead of re-implementing it per product.
