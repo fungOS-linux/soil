@@ -949,10 +949,18 @@ impl Manifest {
             // A Spore without a module still has to do something. Any entrypoint
             // counts, and Lua is one of them: the host JITs `[ui] entry`, so a
             // Lua-only Spore is a program, not a second-class attachment to a
-            // wasm build. `chrome` counts because a host draws the region.
-            None if self.ui.is_none() && self.chrome.is_none() => {
+            // wasm build. `chrome` counts because a host draws the region, and a
+            // declared surface counts because a page is an entrypoint too: a
+            // web-only Spore is a program the host presents in a browser view.
+            None if self.ui.is_none()
+                && self.chrome.is_none()
+                && !self
+                    .surfaces
+                    .iter()
+                    .any(|surface| surface.entry(self.ui.as_ref()).is_some()) =>
+            {
                 return Err(Error::Invalid(
-                    "a Spore needs an entrypoint: a module, a Lua UI, or a chrome region".into(),
+                    "a Spore needs an entrypoint: a module, a Lua UI, a chrome region, or a declared surface".into(),
                 ));
             }
             None => {}
@@ -3223,5 +3231,33 @@ mod pack_tests {
             refreshed,
             "and it describes the tree it was written for"
         );
+    }
+
+    const PAGE: &str = "schema = 1\n[spore]\nid = \"dev.fungos.store\"\nname = \"store\"\nversion = \"0.2.0\"\n\
+        license = \"MIT\"\nsummary = \"a page\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n\
+        [system]\nrole = \"store\"\n";
+
+    #[test]
+    fn a_web_surface_is_an_entrypoint() {
+        // A storefront is a page: no module, no Lua view, no chrome region. The
+        // host presents it in a browser view, which is why the surface counts as
+        // the program rather than an attachment to one.
+        let page = Manifest::parse(&format!(
+            "{PAGE}[[surfaces]]\nname = \"store\"\nkind = \"web\"\n[launch]\ndefault = \"store\"\nsurfaces = [\"web\"]\n"
+        ))
+        .expect("a web surface is an entrypoint");
+        assert_eq!(
+            page.surface("store")
+                .and_then(|surface| surface.entry(None)),
+            Some("web/index.html"),
+            "the conventional artifact needs no `entry`"
+        );
+
+        // Nothing to present is still an error, and it names every way out.
+        let empty = Manifest::parse(&format!(
+            "{PAGE}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n"
+        ));
+        let message = empty.expect_err("no entrypoint").to_string();
+        assert!(message.contains("declared surface"), "{message}");
     }
 }

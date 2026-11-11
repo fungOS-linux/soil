@@ -138,7 +138,9 @@ Validation is strict because a package is executable content:
 - `[[surfaces]]` declares a view the package ships: a `web` or `canvas` kind, an
   optional entry point that defaults to `web/index.html` or the package's own
   `[ui] entry`, and an optional engine requirement. Declaring none is the
-  behaviour every manifest had before surfaces existed.
+  behaviour every manifest had before surfaces existed. A declared surface is
+  an **entrypoint**: a page is a program, so a web-only Spore needs no module,
+  Lua view or chrome region to be valid.
 
 ## Skills
 
