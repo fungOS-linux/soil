@@ -54,8 +54,9 @@ This is a development composition, not the production daemon:
 
 - one guest per process;
 - the Unibus is in-memory and dies with the process;
-- `soil:time` is process-relative, so records from different dev-host runs are
-  not a single monotonic timeline;
+- `soil:time` uses a dev-only epoch persisted as
+  `<records-dir>/time-origin-ms`, so consecutive runs share one forward-moving
+  timeline. Production `soil:time` remains process-relative.
 - the simulator's 50 ms pacing is a convenience, not a real sensor rate.
 
 The next step beyond this host is a long-lived device supervisor that owns the

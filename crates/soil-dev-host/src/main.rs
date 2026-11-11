@@ -5,8 +5,9 @@
 //! canonical host adapters. It exists so a device Spore can run end to end
 //! against the simulator (or a real radio with `--real`) on a laptop.
 
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use soil_ble_host::ble as ble_host;
@@ -38,6 +39,9 @@ struct DevHost {
     wasi: WasiHost,
     bus: Arc<MemoryBus>,
     start: Instant,
+    /// Dev-only stable epoch. Records written by consecutive dev-host runs must
+    /// be comparable; a bare `Instant` resets every process.
+    time_origin_ms: u64,
 }
 
 impl WasiView for DevHost {
@@ -119,7 +123,7 @@ impl bus::Host for DevHost {
 
 impl soil::time::time::Host for DevHost {
     fn monotonic_ms(&mut self) -> std::result::Result<u64, soil::time::time::Error> {
-        Ok(elapsed_ms(self.start))
+        Ok(self.now_ms())
     }
 
     fn tick(
@@ -130,7 +134,14 @@ impl soil::time::time::Host for DevHost {
         if wait > 0 {
             std::thread::sleep(Duration::from_millis(u64::from(wait)));
         }
-        Ok(Some(elapsed_ms(self.start)))
+        Ok(Some(self.now_ms()))
+    }
+}
+
+impl DevHost {
+    fn now_ms(&self) -> u64 {
+        self.time_origin_ms
+            .saturating_add(u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 }
 
@@ -248,8 +259,25 @@ impl soil::ble::ble::Host for DevHost {
     }
 }
 
-fn elapsed_ms(start: Instant) -> u64 {
-    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+/// Persist the dev host's epoch in the records directory. Each run starts at
+/// the later of the stored value and the current wall time, so records from
+/// consecutive runs share one forward-moving timeline. This is a development
+/// concession, not the production `soil:time` contract.
+fn load_or_create_origin(path: &Path) -> Result<u64> {
+    let persisted = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let value = persisted.max(wall);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(path, value.to_string()).with_context(|| format!("write {}", path.display()))?;
+    Ok(value)
 }
 
 fn io_error(error: anyhow::Error) -> BleError {
@@ -319,6 +347,7 @@ fn main() -> Result<()> {
         ],
     )
     .with_context(|| format!("open records {records_dir}"))?;
+    let time_origin_ms = load_or_create_origin(&Path::new(&records_dir).join("time-origin-ms"))?;
     let bus = Arc::new(MemoryBus::default());
     let wasi = WasiHostBuilder::new(WasiHostPolicy::default())
         .inherit_stdio(true)
@@ -335,6 +364,7 @@ fn main() -> Result<()> {
         wasi,
         bus,
         start: Instant::now(),
+        time_origin_ms,
     };
 
     let engine = Engine::default();
