@@ -659,6 +659,7 @@ impl Shell {
             "write" => self.write(args).map(|_| 0),
             "append" => self.append(args).map(|_| 0),
             "touch" => self.touch(args).map(|_| 0),
+            "chmod" => self.chmod(args).map(|_| 0),
             "head" => self.head(args).map(|_| 0),
             "tail" => self.tail(args).map(|_| 0),
             "grep" => self.grep(args).map(|_| 0),
@@ -714,7 +715,7 @@ impl Shell {
             Err(_) => (Vec::new(), None),
         };
         bytes.extend_from_slice(data);
-        vfs_mut::write(&path, &bytes, media_type(&path), version)
+        vfs_mut::write(&path, &bytes, media_type(&path), version, None)
             .map_err(|error| format!("redirect {}: {error:?}", self.display(&path)))?;
         Ok(())
     }
@@ -864,7 +865,7 @@ impl Shell {
         } else {
             Vec::new()
         };
-        let result = vfs_mut::write(&path, &bytes, media_type(&path), None)
+        let result = vfs_mut::write(&path, &bytes, media_type(&path), None, None)
             .map_err(|error| format!("write {}: {error:?}", self.display(&path)))?;
         self.out.push_str(&format!(
             "wrote {} v{} {}\n",
@@ -891,7 +892,7 @@ impl Shell {
             bytes.extend_from_slice(args[1..].join(" ").as_bytes());
             bytes.push(b'\n');
         }
-        let result = vfs_mut::write(&path, &bytes, media_type(&path), version)
+        let result = vfs_mut::write(&path, &bytes, media_type(&path), version, None)
             .map_err(|error| format!("append {}: {error:?}", self.display(&path)))?;
         self.out.push_str(&format!(
             "appended {} v{} {}\n",
@@ -914,8 +915,34 @@ impl Shell {
                 }
                 continue;
             }
-            vfs_mut::write(&path, b"", media_type(&path), None)
+            vfs_mut::write(&path, b"", media_type(&path), None, None)
                 .map_err(|error| format!("touch {}: {error:?}", self.display(&path)))?;
+        }
+        Ok(())
+    }
+
+    /// `chmod 755 FILE`, `chmod +x FILE`, `chmod -x FILE`.
+    ///
+    /// A mode is carried by the namespace, so it survives the overlay: a script
+    /// marked executable here is executable after materialization.
+    fn chmod(&mut self, args: &[String]) -> Result<(), String> {
+        let Some(spec) = args.first() else {
+            return Err("chmod MODE PATH...".into());
+        };
+        if args.len() < 2 {
+            return Err("chmod MODE PATH...".into());
+        }
+        for arg in &args[1..] {
+            let path = self.resolve(arg)?;
+            let entry = vfs::stat(&path)
+                .map_err(|error| format!("chmod {}: {error:?}", self.display(&path)))?;
+            if entry.kind == Kind::Directory {
+                return Err(format!("chmod: {} is a directory", self.display(&path)));
+            }
+            let mode = apply_mode(entry.mode, spec)?;
+            let result = vfs_mut::chmod(&path, mode)
+                .map_err(|error| format!("chmod {}: {error:?}", self.display(&path)))?;
+            self.out.push_str(&format!("{} {:o}\n", self.display(&path), result.mode));
         }
         Ok(())
     }
@@ -1173,6 +1200,7 @@ impl Shell {
                 replaced.as_bytes(),
                 media_type(&path),
                 Some(entry.version),
+                None,
             )
             .map_err(|error| format!("sub {}: {error:?}", self.display(&path)))?;
             self.out
@@ -1459,7 +1487,7 @@ impl Shell {
         action: &str,
     ) -> Result<(), String> {
         let rendered = json_render(document, original);
-        let result = vfs_mut::write(path, rendered.as_bytes(), media_type(path), Some(version))
+        let result = vfs_mut::write(path, rendered.as_bytes(), media_type(path), Some(version), None)
             .map_err(|error| format!("json {action} {}: {error:?}", self.display(path)))?;
         self.out
             .push_str(&format!("{}: {action} (v{})\n", self.display(path), result.version));
@@ -1558,7 +1586,7 @@ impl Shell {
         bytes.extend_from_slice(&response.body);
         if let Some(target) = output {
             let path = self.resolve(target)?;
-            let result = vfs_mut::write(&path, &bytes, media_type(&path), None)
+            let result = vfs_mut::write(&path, &bytes, media_type(&path), None, None)
                 .map_err(|error| format!("fetch {}: {error:?}", self.display(&path)))?;
             self.out.push_str(&format!(
                 "wrote {} ({} bytes) v{}\n",
@@ -1760,7 +1788,7 @@ impl Shell {
             self.copy_tree(&from, &to)?;
         } else {
             let bytes = self.read_file(&from)?;
-            let result = vfs_mut::write(&to, &bytes, media_type(&to), None).map_err(|error| {
+            let result = vfs_mut::write(&to, &bytes, media_type(&to), None, None).map_err(|error| {
                 format!(
                     "cp {} {}: {error:?}",
                     self.display(&from),
@@ -1797,7 +1825,7 @@ impl Shell {
                     self.copy_tree(&entry.path, &target)?;
                 } else {
                     let bytes = self.read_file(&entry.path)?;
-                    vfs_mut::write(&target, &bytes, media_type(&target), None)
+                    vfs_mut::write(&target, &bytes, media_type(&target), None, None)
                         .map_err(|error| format!("cp {}: {error:?}", self.display(&target)))?;
                 }
             }
@@ -2803,6 +2831,39 @@ fn net_error(error: &net_abi::Error) -> &'static str {
         net_abi::Error::Invalid => "invalid name",
         net_abi::Error::Unreachable => "nothing accepted the connection",
     }
+}
+
+/// The mode a `chmod` argument asks for.
+///
+/// `755`, `+x`, `-x`. Anything else is refused rather than guessed: a mode the
+/// user did not ask for is worse than an error.
+fn apply_mode(current: u32, spec: &str) -> Result<u32, String> {
+    if let Some(rest) = spec.strip_prefix('+') {
+        return bit_mask(rest).map(|mask| current | mask);
+    }
+    if let Some(rest) = spec.strip_prefix('-') {
+        return bit_mask(rest).map(|mask| current & !mask);
+    }
+    u32::from_str_radix(spec, 8)
+        .map(|mode| mode & 0o7777)
+        .map_err(|_| format!("chmod: invalid mode {spec:?}"))
+}
+
+/// The permission bits `r`, `w`, `x` name, applied to every class.
+fn bit_mask(spec: &str) -> Result<u32, String> {
+    if spec.is_empty() {
+        return Err("chmod: empty permission list".into());
+    }
+    let mut mask = 0;
+    for c in spec.chars() {
+        mask |= match c {
+            'r' => 0o444,
+            'w' => 0o222,
+            'x' => 0o111,
+            _ => return Err(format!("chmod: unknown permission {c:?}")),
+        };
+    }
+    Ok(mask)
 }
 
 fn media_type(path: &str) -> &'static str {

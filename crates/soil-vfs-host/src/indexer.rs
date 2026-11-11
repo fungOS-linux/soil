@@ -165,6 +165,7 @@ impl SqliteIndex {
                         },
                         pinned: row.get::<_, i64>(6)? != 0,
                         updated_at_ms: row.get(7)?,
+                        mode: crate::NEW_FILE_MODE,
                     },
                     kind: if kind == "dir" {
                         NodeKind::Directory
@@ -725,6 +726,7 @@ fn build_nodes(
                 hydration: Hydration::Present,
                 pinned: false,
                 updated_at_ms: 0,
+                mode: crate::NEW_FILE_MODE,
             },
             kind: NodeKind::Directory,
             child_count: 0,
@@ -769,6 +771,7 @@ fn build_nodes(
                 hydration: Hydration::Present,
                 pinned: false,
                 updated_at_ms: 0,
+                mode: crate::NEW_FILE_MODE,
             },
             kind: NodeKind::Directory,
             child_count: 0,
@@ -824,6 +827,7 @@ fn add_ancestors(nodes: &mut BTreeMap<String, Node>, path: &str) {
                 hydration: Hydration::Present,
                 pinned: false,
                 updated_at_ms: 0,
+                mode: crate::NEW_FILE_MODE,
             },
             kind: NodeKind::Directory,
             child_count: 0,

@@ -690,13 +690,16 @@ fn run_worktree(state: &mut State, args: &mut Vec<String>) -> Result<()> {
             // Fail before moving bytes if this device has never mounted the
             // worktree: there would be nothing to reconcile against.
             state.load_worktree_state(&args[0])?;
-            let outcomes = pull_over_ssh(&mut state.vfs, &from, &remote_root, &remote_bin, 500)?;
+            let (outcomes, _transfer) =
+                pull_over_ssh(&mut state.vfs, &from, &remote_root, &remote_bin, 500)?;
             let mut applied = 0;
             let mut duplicate = 0;
             let mut diverged = 0;
             for outcome in &outcomes {
                 match outcome {
-                    ApplyOutcome::Applied => applied += 1,
+                    // A whole-state replacement landed, which is as much an
+                    // applied transfer as a delta is.
+                    ApplyOutcome::Applied | ApplyOutcome::Snapshot => applied += 1,
                     ApplyOutcome::Duplicate => duplicate += 1,
                     ApplyOutcome::Diverged => diverged += 1,
                 }

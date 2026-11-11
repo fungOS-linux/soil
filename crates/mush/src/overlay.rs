@@ -18,6 +18,10 @@ use fungos_vfs::{Expect, Vfs};
 use ignore::WalkBuilder;
 use tempfile::TempDir;
 
+/// What a file is when the VFS did not say: readable, not executable.
+/// Matches the default `fungos-vfs` gives a path nobody has written.
+const NEW_FILE_MODE: u32 = 0o644;
+
 const IGNORED: &[&str] = &[
     ".operator/",
     ".cache/",
@@ -63,6 +67,16 @@ pub struct Overlay {
 struct Snapshot {
     bytes: Vec<u8>,
     stamp: FileStamp,
+    /// Permission bits the VFS carried. A build output that is a program must
+    /// come back out of the namespace as one, and a `chmod` in the overlay has
+    /// to be visible as a change even when the bytes are identical.
+    mode: u32,
+}
+
+/// One file in the overlay as it stands now.
+struct CurrentFile {
+    bytes: Vec<u8>,
+    mode: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -123,6 +137,7 @@ impl Overlay {
                     .with_context(|| format!("create overlay directory {}", parent.display()))?;
             }
             fs::write(&target, &bytes).with_context(|| format!("write overlay {}", entry.path))?;
+            set_file_mode(&target, entry.mode)?;
             written.insert(entry.path.clone(), bytes);
         }
         for path in vfs.directories("")? {
@@ -159,18 +174,20 @@ impl Overlay {
         Ok(self.changes(&self.current_files()?))
     }
 
-    fn changes(&self, current: &BTreeMap<String, Vec<u8>>) -> Vec<Change> {
+    fn changes(&self, current: &BTreeMap<String, CurrentFile>) -> Vec<Change> {
         let mut changes = Vec::new();
-        for (path, bytes) in current {
+        for (path, file) in current {
             match self.original.get(path) {
                 None => changes.push(Change {
                     path: path.clone(),
                     kind: ChangeKind::Added,
                 }),
-                Some(snapshot) if &snapshot.bytes != bytes => changes.push(Change {
-                    path: path.clone(),
-                    kind: ChangeKind::Modified,
-                }),
+                Some(snapshot) if &snapshot.bytes != &file.bytes || snapshot.mode != file.mode => {
+                    changes.push(Change {
+                        path: path.clone(),
+                        kind: ChangeKind::Modified,
+                    })
+                }
                 Some(_) => {}
             }
         }
@@ -197,11 +214,21 @@ impl Overlay {
         for change in &changes {
             match change.kind {
                 ChangeKind::Added | ChangeKind::Modified => {
-                    let bytes = current
+                    let file = current
                         .get(&change.path)
                         .with_context(|| format!("overlay lost {}", change.path))?;
                     let media = media_type(&change.path);
-                    vfs.put(&change.path, bytes, media, Expect::Any)?;
+                    // Only the mode moved: write the entry, not a new version of
+                    // bytes nobody changed.
+                    let mode_only = self
+                        .original
+                        .get(&change.path)
+                        .is_some_and(|snapshot| snapshot.bytes == file.bytes);
+                    if mode_only {
+                        vfs.set_mode(&change.path, file.mode)?;
+                    } else {
+                        vfs.put_with_mode(&change.path, &file.bytes, media, file.mode, Expect::Any)?;
+                    }
                     written += 1;
                 }
                 ChangeKind::Deleted => {
@@ -240,7 +267,7 @@ impl Overlay {
         })
     }
 
-    fn current_files(&self) -> Result<BTreeMap<String, Vec<u8>>> {
+    fn current_files(&self) -> Result<BTreeMap<String, CurrentFile>> {
         let mut out = BTreeMap::new();
         for entry in walker(self.path())? {
             let entry = entry?;
@@ -251,17 +278,16 @@ impl Overlay {
             if ignored(&relative) {
                 continue;
             }
-            let stamp = entry.metadata().ok().map(|metadata| FileStamp::of(&metadata));
-            match self.original.get(&relative) {
+            let metadata = entry.metadata().ok();
+            let stamp = metadata.as_ref().map(FileStamp::of);
+            let bytes = match self.original.get(&relative) {
                 // Same size and mtime: these are the bytes we materialized, so
                 // there is nothing to read.
-                Some(snapshot) if stamp == Some(snapshot.stamp) => {
-                    out.insert(relative, snapshot.bytes.clone());
-                }
-                _ => {
-                    out.insert(relative, fs::read(entry.path())?);
-                }
-            }
+                Some(snapshot) if stamp == Some(snapshot.stamp) => snapshot.bytes.clone(),
+                _ => fs::read(entry.path())?,
+            };
+            let mode = metadata.as_ref().map(file_mode).unwrap_or(NEW_FILE_MODE);
+            out.insert(relative, CurrentFile { bytes, mode });
         }
         Ok(out)
     }
@@ -340,7 +366,19 @@ fn snapshot(
                 size: 0,
                 mtime: None,
             });
-        files.insert(relative, Snapshot { bytes, stamp });
+        let mode = entry
+            .metadata()
+            .as_ref()
+            .map(file_mode)
+            .unwrap_or(NEW_FILE_MODE);
+        files.insert(
+            relative,
+            Snapshot {
+                bytes,
+                stamp,
+                mode,
+            },
+        );
     }
     Ok((files, dirs))
 }
@@ -351,6 +389,34 @@ fn relative(root: &Path, path: &Path) -> Result<String> {
         .with_context(|| format!("strip {}", path.display()))?
         .to_string_lossy()
         .replace('\\', "/"))
+}
+
+/// Permission bits of a materialized file.
+#[cfg(unix)]
+fn file_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o7777
+}
+
+#[cfg(not(unix))]
+fn file_mode(_metadata: &fs::Metadata) -> u32 {
+    NEW_FILE_MODE
+}
+
+/// Give a materialized file the mode the namespace remembers.
+///
+/// A build that produces an executable writes it through this path; without it
+/// the VFS hands back a file nobody can run.
+#[cfg(unix)]
+fn set_file_mode(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("set mode on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_file_mode(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
 }
 
 fn current_dir_exists(root: &Path, relative: &str) -> bool {

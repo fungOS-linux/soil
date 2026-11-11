@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "bcd2bc682662467d1371a2c9f8436e08934132d9" }
+fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af" }
 soil-vfs-host = { path = "../soil-vfs-host" }
 serde_json = "1"
 

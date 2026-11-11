@@ -347,8 +347,14 @@ impl vfs_mut::Host for Host {
         data: Vec<u8>,
         media_type: String,
         expected_version: Option<u64>,
+        mode: Option<u32>,
     ) -> Result<vfs_mut::WriteResult, vfs_mut::Error> {
-        self.vfs.write(path, data, media_type, expected_version)
+        self.vfs
+            .write(path, data, media_type, expected_version, mode)
+    }
+
+    fn chmod(&mut self, path: String, mode: u32) -> Result<vfs_mut::WriteResult, vfs_mut::Error> {
+        self.vfs.chmod(path, mode)
     }
 
     fn remove(&mut self, path: String) -> Result<(), vfs_mut::Error> {

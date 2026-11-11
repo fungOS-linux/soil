@@ -46,6 +46,9 @@ pub struct Build {
     vars: Vec<(String, String)>,
     cargo: Option<PathBuf>,
     bin_dir: Option<PathBuf>,
+    /// The session the build belongs to. Stable across the throwaway overlays
+    /// mush materializes, which is what lets a remote builder keep its target.
+    agent: String,
 }
 
 impl Build {
@@ -54,7 +57,10 @@ impl Build {
         if !BUILD_PROGRAMS.contains(&program) {
             return None;
         }
-        resolve(agent)
+        resolve(agent).map(|mut build| {
+            build.agent = agent.to_string();
+            build
+        })
     }
 
     /// The program to spawn. `cargo` becomes bob's shim, which is what keeps
@@ -80,6 +86,13 @@ impl Build {
             path.push(":");
             path.push(current_env(command, "PATH").unwrap_or_default());
             command.env("PATH", path);
+        }
+        // A remote build lives in a named workspace on the builder. mush
+        // materializes a fresh overlay per command, so a name derived from the
+        // working directory would be new every time and the remote target
+        // would never be warm. The session is the stable thing mush knows.
+        if !self.agent.is_empty() && current_env(command, "BOB_REMOTE_SESSION").is_none() {
+            command.env("BOB_REMOTE_SESSION", &self.agent);
         }
         // The overlay is a fresh path on every run, so rustc would hash a
         // different source prefix each time and the cache would never hit.
@@ -260,6 +273,26 @@ mod tests {
         assert_eq!(
             current_env(&command, "SCCACHE_BASEDIRS"),
             Some(OsString::from("/src:/tmp:/overlay"))
+        );
+    }
+
+    #[test]
+    fn apply_names_the_remote_session() {
+        let mut build = parse("CARGO_HOME=/h\nBOB_BIN_DIR=/bob\nBOB_CARGO=/bob/bob-cargo\n").unwrap();
+        build.agent = "root-abc".into();
+        let mut command = Command::new("cargo");
+        build.apply(&mut command, Path::new("/overlay"));
+        assert_eq!(
+            current_env(&command, "BOB_REMOTE_SESSION"),
+            Some(OsString::from("root-abc"))
+        );
+        // An explicit session is the caller's to choose.
+        let mut command = Command::new("cargo");
+        command.env("BOB_REMOTE_SESSION", "mine");
+        build.apply(&mut command, Path::new("/overlay"));
+        assert_eq!(
+            current_env(&command, "BOB_REMOTE_SESSION"),
+            Some(OsString::from("mine"))
         );
     }
 

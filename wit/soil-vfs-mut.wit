@@ -24,16 +24,27 @@ interface vfs-mut {
     version: u64,
     content-id: string,
     size: u64,
+    /// The entry's permission bits after the write, so a caller can see that a
+    /// replace preserved them.
+    mode: u32,
   }
 
   /// Create or replace one file. `expected-version` is the optimistic
-  /// concurrency check; `none` means create/replace unconditionally.
+  /// concurrency check; `none` means create/replace unconditionally. `mode`
+  /// names the permission bits for a caller that has a real file to describe
+  /// (the overlay applying a build); `none` keeps the current mode, or `0o644`
+  /// for a path that did not exist.
   write: func(
     path: string,
     data: list<u8>,
     media-type: string,
     expected-version: option<u64>,
+    mode: option<u32>,
   ) -> result<write-result, error>;
+
+  /// Change permission bits without touching content. A mode belongs to the
+  /// entry, not to a version of the bytes, so this adds no version.
+  chmod: func(path: string, mode: u32) -> result<write-result, error>;
 
   /// Unlink a namespace entry. Content and history are retained.
   remove: func(path: string) -> result<_, error>;

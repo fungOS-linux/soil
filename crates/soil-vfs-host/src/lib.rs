@@ -9,7 +9,7 @@ mod indexer;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use fungos_vfs::{Hydration, NodeRole, Vfs, VfsError, normalize_path};
+use fungos_vfs::{Expect, Hydration, NodeRole, Vfs, VfsError, normalize_path};
 use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit", world: "host" });
@@ -47,6 +47,10 @@ impl fungos_vfs::Hydrator for DynHydrator {
         self.0.fetch(path, &content_id.to_string(), size)
     }
 }
+
+/// What a file is when the caller did not say: readable, not executable.
+/// Mirrors the default `fungos-vfs` applies to a path nobody has written.
+pub const NEW_FILE_MODE: u32 = 0o644;
 
 #[derive(Clone)]
 pub struct VfsHost {
@@ -266,10 +270,16 @@ fn vfs_error(error: VfsError) -> vfs::Error {
         VfsError::Io(_) | VfsError::Sql(_) | VfsError::Transport(_) => vfs::Error::Io,
         VfsError::InvalidContentId(_)
         | VfsError::Conflict { .. }
+        | VfsError::Fenced { .. }
+        | VfsError::SnapshotRefused { .. }
         | VfsError::AlreadyExists(_)
         | VfsError::NotEmpty(_)
         | VfsError::Leased { .. } => vfs::Error::Io,
         VfsError::RoleMismatch { .. } => vfs::Error::Denied,
+        VfsError::Config(_)
+        | VfsError::NoDataDirectory
+        | VfsError::CorruptMeta { .. }
+        | VfsError::GenerationExhausted => vfs::Error::Io,
     }
 }
 
@@ -378,6 +388,7 @@ fn to_entry(node: &Node) -> vfs::Entry {
         },
         pinned: node.entry.pinned,
         updated_at_ms: node.entry.updated_at_ms.max(0) as u64,
+        mode: node.entry.mode,
         child_count: node.child_count,
     }
 }
@@ -449,15 +460,36 @@ impl vfs_mut_api::Host for VfsHost {
         data: Vec<u8>,
         media_type: String,
         expected_version: Option<u64>,
+        mode: Option<u32>,
     ) -> Result<vfs_mut_api::WriteResult, vfs_mut_api::Error> {
         if data.len() > MAX_MUTATION_BYTES || media_type.trim().is_empty() {
             return Err(vfs_mut_api::Error::OverBudget);
         }
         let entry = {
+            let mut vfs = self.vfs.lock().expect("vfs poisoned");
+            let expect = expected_version
+                .map(Expect::Version)
+                .unwrap_or(Expect::Any);
+            match mode {
+                Some(mode) => vfs.put_with_mode(&path, &data, &media_type, mode, expect),
+                None => vfs.put(&path, &data, &media_type, expect),
+            }
+            .map_err(mutation_error)?
+        };
+        self.refresh_after_mutation()?;
+        Ok(write_result(entry))
+    }
+
+    fn chmod(
+        &mut self,
+        path: String,
+        mode: u32,
+    ) -> Result<vfs_mut_api::WriteResult, vfs_mut_api::Error> {
+        let entry = {
             self.vfs
                 .lock()
                 .expect("vfs poisoned")
-                .put(&path, &data, &media_type, expected_version)
+                .set_mode(&path, mode)
                 .map_err(mutation_error)?
         };
         self.refresh_after_mutation()?;
@@ -520,6 +552,7 @@ fn write_result(entry: fungos_vfs::FileEntry) -> vfs_mut_api::WriteResult {
         version: entry.version,
         content_id: entry.content_id.to_string(),
         size: entry.size,
+        mode: entry.mode,
     }
 }
 
@@ -532,9 +565,17 @@ fn mutation_error(error: VfsError) -> vfs_mut_api::Error {
         VfsError::InvalidPath(_) | VfsError::InvalidContentId(_) => vfs_mut_api::Error::Invalid,
         VfsError::ReadOnly | VfsError::RoleMismatch { .. } => vfs_mut_api::Error::Denied,
         VfsError::Leased { .. } => vfs_mut_api::Error::Conflict,
-        VfsError::NotHydrated(_) | VfsError::Transport(_) | VfsError::Io(_) | VfsError::Sql(_) => {
-            vfs_mut_api::Error::Io
+        VfsError::Fenced { .. } | VfsError::SnapshotRefused { .. } => {
+            vfs_mut_api::Error::Conflict
         }
+        VfsError::NotHydrated(_)
+        | VfsError::Transport(_)
+        | VfsError::Io(_)
+        | VfsError::Sql(_)
+        | VfsError::Config(_)
+        | VfsError::NoDataDirectory
+        | VfsError::CorruptMeta { .. }
+        | VfsError::GenerationExhausted => vfs_mut_api::Error::Io,
     }
 }
 
