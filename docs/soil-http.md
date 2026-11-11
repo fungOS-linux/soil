@@ -51,7 +51,7 @@ Errors are typed: `denied`, `invalid`, `over-budget`, `timeout`, `unavailable`,
 
 ## Host policy
 
-`crates/soil-http-host` currently provides:
+`crates/soil-host` currently provides:
 
 - origin allowlist (`scheme://host:port`)
 - `get`, `head`, `post`, `put`, `patch` and `delete`; a body on a read is
@@ -96,11 +96,11 @@ host can either allow direct fetch or deny the origin; that is host policy.
 
 ```sh
 # direct transport + a real guest component
-cd crates/soil-http-host/fixtures/get
+cd crates/soil-host/fixtures/get
 cargo build --target wasm32-wasip2 --release
 cd ../../..
 target/debug/soil-http --allow http://127.0.0.1:8891 \
-  crates/soil-http-host/fixtures/get/target/wasm32-wasip2/release/soil_http_get.wasm \
+  crates/soil-host/fixtures/get/target/wasm32-wasip2/release/soil_http_get.wasm \
   http://127.0.0.1:8891/feed.txt
 ```
 

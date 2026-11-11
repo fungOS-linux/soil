@@ -2437,7 +2437,7 @@ dependencies = [
 [[package]]
 name = "fungos-vfs"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=a41aaceeef21b24739900d7ef65b434afe24a706#a41aaceeef21b24739900d7ef65b434afe24a706"
+source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af#8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4165,16 +4165,16 @@ dependencies = [
  "anyhow",
  "fungos-vfs",
  "ignore",
+ "libc",
  "rand 0.9.5",
  "rustyline",
  "serde",
  "serde_json",
  "soil-command",
+ "soil-host",
  "soil-inference",
- "soil-records-host",
  "soil-scrub",
  "soil-spore",
- "soil-vfs-host",
  "tempfile",
  "tiny_http",
  "ureq 2.12.1",
@@ -6856,7 +6856,7 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
- "soil-records-host",
+ "soil-host",
  "soil-spore",
  "tempfile",
  "toml 0.8.23",
@@ -6983,11 +6983,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "soil-http-host"
+name = "soil-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "clap",
+ "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-vfs",
+ "model2vec-rs",
+ "regex",
+ "rusqlite",
+ "serde_json",
  "tempfile",
+ "tiny_http",
  "ureq 2.12.1",
  "url",
  "wasmtime",
@@ -7170,20 +7179,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "soil-records-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
- "serde_json",
- "tempfile",
- "tiny_http",
- "wasmtime",
- "wasmtime-wasi",
-]
-
-[[package]]
 name = "soil-runtime"
 version = "0.1.0"
 dependencies = [
@@ -7322,9 +7317,9 @@ dependencies = [
  "plist",
  "serde",
  "serde_json",
+ "soil-host",
  "soil-marbles",
  "soil-spore",
- "soil-vfs-host",
  "tempfile",
  "wasmtime",
 ]
@@ -7337,9 +7332,8 @@ dependencies = [
  "fungos-vfs",
  "http",
  "serde_json",
- "soil-http-host",
+ "soil-host",
  "soil-spore",
- "soil-vfs-host",
  "soil-wasi-host",
  "soil-web-bridge",
  "tempfile",
@@ -7450,22 +7444,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "soil-vfs-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "fungos-vfs",
- "model2vec-rs",
- "regex",
- "rusqlite",
- "serde_json",
- "tempfile",
- "ureq 2.12.1",
- "wasmtime",
-]
-
-[[package]]
 name = "soil-vt"
 version = "0.1.0"
 dependencies = [
@@ -7489,8 +7467,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "soil-http-host",
- "soil-records-host",
+ "soil-host",
  "tempfile",
  "tokio",
  "tracing",
@@ -7512,8 +7489,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "soil-http-host",
- "soil-records-host",
+ "soil-host",
  "soil-spore",
  "tempfile",
  "tungstenite",

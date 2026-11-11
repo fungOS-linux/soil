@@ -260,7 +260,7 @@ async fn serve(spore: Spore, run: Run) -> Result<()> {
     // falls back to this process's own socket when none did.
     let mut _bridge_server = None;
     if let Some(listen) = run.bridge {
-        let policy = soil_http_host::HttpPolicy::new(
+        let policy = soil_host::http_host::HttpPolicy::new(
             run.allow_origins.iter().cloned(),
             8 * 1024 * 1024,
             Duration::from_secs(30),
@@ -294,9 +294,9 @@ async fn serve(spore: Spore, run: Run) -> Result<()> {
                 println!("soil: no page offered soil:http; fetches use this process's network");
             }
         }
-        let transport = Arc::new(soil_http_host::PreferProvider::new(
+        let transport = Arc::new(soil_host::http_host::PreferProvider::new(
             Arc::new(soil_web_bridge::SessionTransport::new(bridge)),
-            Arc::new(soil_http_host::DirectTransport),
+            Arc::new(soil_host::http_host::DirectTransport),
         ));
         builder = builder.with_http(soil_wasi_host::HttpCapability::new(policy, transport));
         _bridge_server = Some(server);

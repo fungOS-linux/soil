@@ -11,13 +11,13 @@ anyhow = "1"
 fungos-records.workspace = true
 soil-spore = { path = "../soil-spore" }
 soil-marbles = { path = "../soil-marbles" }
-soil-vfs-host = { path = "../soil-vfs-host" }
+soil-host = { path = "../soil-host" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 plist = "1"
 wasmtime = { version = "50", features = ["anyhow"] }
 
 [dev-dependencies]
-fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "a41aaceeef21b24739900d7ef65b434afe24a706" }
+fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af" }
 serde_json = "1"
 tempfile = "3"

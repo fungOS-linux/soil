@@ -18,7 +18,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
-use soil_http_host::{HttpTransport, TransportError, TransportRequest, TransportResponse};
+use soil_host::http_host::{HttpTransport, TransportError, TransportRequest, TransportResponse};
 
 use crate::protocol::Code;
 use crate::server::Bridge;

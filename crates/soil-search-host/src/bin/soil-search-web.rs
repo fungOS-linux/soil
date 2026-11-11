@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use soil_search_host::api::Host as _;
 use soil_search_host::mention_api::Host as _;
 use soil_search_host::{LauncherConfig, SearchService, api, applications};
-use soil_vfs_host::VfsHost;
+use soil_host::vfs_host::VfsHost;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8790";
 const MAX_PAGE: u32 = 128;

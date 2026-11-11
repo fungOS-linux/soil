@@ -9,19 +9,26 @@ Desktop binding adds project mounts, a records scope, and a stable identity. See
 [Desktops](desktop.md).
 
 ```sh
-mush --root ~/fungos-node \
-  --wasm spores/mush/module.wasm
+mush --root ~/fungos-node
 ```
 
-The Spore imports exactly three capabilities:
+The Spore imports six capabilities:
 
 ```text
 soil:vfs       read, stat, list
 soil:index     browse, search, KNN
-soil:vfs-mut   write, remove, mkdir, rmdir, rename
+soil:vfs-mut   write, remove, mkdir, rmdir, rename, chmod
+soil:command   virtual PATH to installed wasm commands
+soil:http      one request, origin allowlisted, credentials injected host-side
+soil:net       resolve a name, probe a TCP port
 ```
 
-It has no host filesystem, `PATH` lookup, subprocess, or network access.
+It has no host filesystem, host `PATH` or subprocess. The virtual `PATH`
+resolves only installed wasm command packages; the two network grants are the
+only way out, and both are host-policied.
+
+Where the pieces live — host, Spore, VFS host, the `fungos-vfs` and `bob`
+repositories — is [docs/mush-architecture.md](mush-architecture.md).
 
 ## Shell state
 
@@ -57,6 +64,221 @@ mkdir notes
 
 The file is VFS content, not a host dotfile.
 
+## Install the host shell
+
+The host binary embeds `spores/mush/module.wasm`, so it does not need a sidecar
+file at runtime:
+
+```sh
+cargo build -p mush --release
+install -m755 target/release/mush ~/.local/bin/mush
+```
+
+Then:
+
+```sh
+mush --root ~/fungos-node
+```
+
+This installs the **host** launcher named `mush`. It does not create
+`/bin/mush` inside the VFS, and it does not turn the host process into a
+container. The Spore remains the sandboxed part.
+
+## Config and doctor
+
+Mush reads `~/.config/fungos/mush/config.toml` unless `--config PATH` or
+`MUSH_CONFIG` overrides it. CLI flags win over environment variables, which
+win over the config file.
+
+```toml
+root = "~/fungos-node"
+command_root = "~/.local/share/fungos/commands"
+records_root = "~/.local/share/fungos/records"
+records_book = "personal/avery/marbles"
+records_collection = "marbles"
+principal = "mycelium:agent:ajmwagar/codex-1"
+socket = "~/.local/share/fungos/mush.sock"
+desktop = "acme"
+```
+
+```sh
+mush doctor
+```
+
+`doctor` reports the effective VFS root, command root, records binding, Spore
+source, principal, Desktop, and service socket. Missing roots are errors, not
+silent fallbacks.
+
+## Desktop
+
+`mush desktop` manages the local registry in `~/.config/fungos/desktops/`:
+
+```sh
+mush desktop create acme --name Acme --theme ocean
+mush desktop list
+mush desktop show acme
+mush --desktop acme
+```
+
+A Desktop selects a VFS root under `~/.local/share/fungos/desktops/<id>`.
+That root can later grow project worktree mounts; today it is a namespace with
+`projects/`, `notes/`, and `scratch/` directories. See [Desktops](desktop.md).
+
+A Desktop also records `mount`, where this device projects it for host tools
+(default `~/mnt/<id>`). The root is the store; the mount is a filesystem view of
+it, and they are separate because a Desktop follows a principal across machines
+while each device projects it somewhere different.
+
+### Origin
+
+`mush origin` answers "which Desktop owns this caller?" from the only two hints
+a Delta agent has: `DELTA_CURRENT_THREAD_ID` and a working directory shaped like
+`<repo>/.delta/worktrees/<id>/<repo>`.
+
+```sh
+mush origin                 # human-readable
+mush origin --json          # machine-readable
+mush origin --cwd PATH      # resolve somewhere else
+```
+
+```text
+cwd: /src/soil/.delta/worktrees/abc123/soil
+thread: ksQQ...
+delta worktree: abc123
+repo: soil
+desktop: personal
+vfs root: /Users/me/.local/share/fungos/desktops/personal
+mount: /Users/me/mnt/personal [mounted]
+project: /Users/me/mnt/personal/projects/soil
+status: ready
+```
+
+`status` is honest about what is actually there:
+
+| `status` | Meaning | Exit |
+|---|---|---|
+| `ready` | The projection is mounted and the project exists under it | 0 |
+| `not-mounted` | A Desktop matched, but nothing is mounted at its path | 2 |
+| `no-project` | The projection is mounted, but this repository is not under it | 2 |
+| `unregistered` | No Desktop claims this repository or path | 3 |
+
+Resolution never invents a mount. Handing back a path where nothing is mounted
+would send an agent's writes into an empty directory that looks exactly like
+success, so `not-mounted` is a distinct, non-zero answer.
+
+When no `--root`, `--desktop`, `MUSH_DESKTOP`, or `desktop` config names a
+Desktop, `mush` selects the one its origin resolves to and says so on stderr.
+A caller that wants the default root or a specific Desktop passes one
+explicitly, which always wins.
+
+## Service mode
+
+`mush --serve` binds a `0600` Unix socket and accepts one JSON command request
+per connection. It refuses to replace an existing socket and checks the peer
+UID against the service account. See
+[service accounts](mush-service-accounts.md) for the `ajmwagar-agents` layout.
+
+Use the client from another process:
+
+```sh
+mush request 'mb ready --json'
+mush request --json 'pwd'
+```
+
+`mush request` prints the command output and exits with the command's shell
+status. `--json` returns the full service envelope, including `status`, `exit`
+and `output`.
+
+### One-shot commands use it automatically
+
+Compiling the Spore costs about 13 seconds of CPU. Paying that for a single
+`pwd` is what makes `mush sh -c` unusable as an agent's shell, so a one-shot
+command (`sh -c`, `--command`) forwards to a daemon for its VFS root instead:
+
+```sh
+mush --desktop personal sh -c 'pwd'   # 11s: starts the daemon, compiles once
+mush --desktop personal sh -c 'pwd'   # 25ms
+```
+
+- The socket is per VFS root, under `~/.local/share/fungos/mush/run/`, so two
+  Desktops never share a command engine. `--socket` overrides the path.
+- The daemon detaches into its own process group, so the terminal that started
+  it can hang up without taking it down.
+- It stops after 30 minutes idle (`--idle-timeout`) and removes its socket.
+- The caller's `--timeout` becomes the daemon's background threshold: a command
+  you would wait 15 minutes for is not handed back as a job id after 60s.
+- `--no-daemon` (or `MUSH_NO_DAEMON=1`) runs in-process. Tests use it, because
+  a daemon started by a test outlives the test and holds the records store.
+- Requests are served one connection per thread, so `mush jobs` and
+  `mush cancel JOB` reach a daemon that is busy. `cancel` drops queued work and
+  traps a running guest through the same epoch the deadline uses.
+  A host program (`git`, `cargo`, `awk`) is an OS process rather than guest
+  code, so it is spawned, polled, and killed on cancel — and `--timeout` now
+  interrupts it the same way it interrupts the guest (exit 124 for a deadline,
+  130 for a cancel, with the reason on stderr).
+
+For Operator, use the MCP endpoint:
+
+```sh
+mush mcp --foreground --listen 127.0.0.1:0
+```
+
+It exposes `mcp__mush__mush_exec` over loopback HTTP. See
+[Operator integration](mush-operator.md).
+
+## MCP server
+
+An agent that does not use the Pi extension can drive the same daemon over MCP:
+
+```sh
+mush mcp --root DIR --listen 127.0.0.1:PORT --mcp-token "$MUSH_MCP_TOKEN" --foreground
+```
+
+`POST /mcp` with `Authorization: Bearer …`. The endpoint is loopback by default
+and refuses every request without the token; one server serves one root. The
+tools are `mush_exec`, `mush_job` and `mush_cancel`. A command that outlives its
+background threshold returns `state=background` with a job id and keeps running
+in the daemon — poll it, do not re-run it. Job state is in memory, so a daemon
+restart drops the record and kills the child. The tool contract is written out
+in [integrations/pi/README.md](../integrations/pi/README.md#mcp-for-muse).
+
+## Deadlines and servers
+
+A command runs inside the Spore, so nothing outside it can see progress. A
+command that never returns -- `while true; do :; done`, or `read` on a stdin
+that never closes -- would park the caller forever with no output and no exit
+status. That is the worst failure available to an agent harness, so it is
+prevented by contract rather than by hope.
+
+Every non-interactive command runs with a deadline:
+
+```text
+mush --command 'loop'                 default 120s
+mush --timeout 600 --command 'mb ...' longer budget
+mush --timeout 0 --command 'x'        deadline disabled
+mush request --timeout 30 'mb ready'  client bound and daemon budget
+```
+
+`MUSH_TIMEOUT` sets the same value in seconds. An interactive session has no
+deadline, because there the human is the clock.
+
+The deadline is enforced with Wasmtime epoch interruption, so the Spore is
+actually stopped rather than abandoned. The caller sees:
+
+```text
+mush: command exceeded 30s and was interrupted
+mush: hint: raise it with --timeout SECONDS, or split the work into steps that finish
+```
+
+with shell status `124` and, over the service or MCP envelope, `state`
+`"timeout"` and `blocking` `true`.
+
+Servers are the other way a Mush invocation can hold a process open. `mush
+--serve` and `mush mcp` do not return, so they refuse to start when stdin is not
+a terminal unless `--foreground` says a supervisor owns the process. A server
+started from a tool call is indistinguishable from a hung tool call; refusing
+converts that into one clear line the harness can act on.
+
 ## Interactive editing
 
 When stdin is a terminal, Mush uses `rustyline`:
@@ -65,12 +287,52 @@ When stdin is a terminal, Mush uses `rustyline`:
 ↑ / ↓        previous / next command
 Ctrl-R       reverse history search
 Ctrl-S       forward history search
+Tab          complete command names and VFS paths
 Ctrl-A / E   line start / end
 Ctrl-W       delete previous word
 Alt-B / F    move by word
 ```
 
-History is stored at `<vfs-root>/.fungos/mush-history` by default:
+Tab completes the first word against builtins plus installed command packages,
+and completes VFS paths everywhere else, relative to the shell's current
+directory. Completion runs in the host because only the host can see the
+command packages; the shell's `cd` stays in the Spore, so the host refreshes its
+idea of the directory at start-up and after every `cd`.
+
+### Themed prompts
+
+`PS1` is enough for a static prompt. For anything richer, point Mush at a prompt
+renderer and it uses its stdout as the prompt:
+
+```toml
+# ~/.config/fungos/mush/config.toml
+prompt_command = "starship prompt --status $MUSH_STATUS --cmd-duration $MUSH_DURATION_MS"
+```
+
+`MUSH_STATUS`, `MUSH_DURATION_MS`, `MUSH_CWD`, and `MUSH_HOST_CWD` are exported
+for the command, along with `STARSHIP_SHELL=mush`. [Starship](https://starship.rs)
+needs no adapter beyond that line; any script that prints a prompt works the
+same way. If the command fails or prints nothing, Mush falls back to the Spore's
+own prompt rather than leaving the session without one.
+
+When the Desktop is projected on this device, the command also runs **inside
+that projection**, so a renderer that inspects a directory reads real files
+rather than the VFS path it cannot open. That is what lets a Git segment report a
+branch when the projected project is a Git checkout, and leaves it empty when it
+is not. `MUSH_CWD` stays the VFS path; `MUSH_HOST_CWD` is where it maps to here.
+
+Note that Spaceship is a Zsh theme -- it is shell code, so it cannot be a Mush
+prompt renderer. Starship's presets cover the same look without depending on a
+shell Mush does not have.
+
+The renderer runs in the host, not the Spore, because the Spore has no process
+and no network. A themed prompt therefore describes the VFS (directory, status,
+duration, time) rather than a Git branch -- the VFS has no repository state to
+read.
+
+History is stored at `~/.local/state/fungos/mush/history`, a stable per-user
+path. History that lived inside the VFS root would be empty every time the root
+changed, which leaves Ctrl-R with nothing to search.
 
 ```sh
 mush --root ~/fungos-node --history ~/.local/state/mush/history
@@ -78,6 +340,25 @@ mush --root ~/fungos-node --history ~/.local/state/mush/history
 
 `MUSH_HISTORY` overrides the path. Non-interactive input still uses a plain
 line loop.
+
+### No job control
+
+Ctrl-Z, `fg`, `bg` and `&` do not exist here, and cannot: they are operations on
+child processes, and Mush runs every command in-process inside the Spore. Ctrl-Z
+prints a one-line explanation instead of suspending, because stopping the shell
+mid-read would leave the terminal in raw mode with nothing to resume.
+
+Backgrounding exists at a different layer. A daemon call that outlives its
+threshold keeps running and hands the caller a job id:
+
+```sh
+mush request --background-after 600 'mb ready --json'
+# command still running after 600s; check it with `mush job j1`
+mush jobs
+mush job j1
+```
+
+That is the receipt an agent needs; it is not shell job control.
 
 ## Agent overlay
 
@@ -125,6 +406,83 @@ is currently a materialized host directory, not a live FUSE mount. Operator is
 still a native process; this slice gives it VFS-derived workspace content and
 overlay apply/discard semantics, not yet a host filesystem sandbox.
 
+## Shell syntax
+
+```sh
+cmd1 | cmd2        # pipe stdout to stdin
+cmd1 ; cmd2        # sequence
+cmd1 && cmd2       # run cmd2 only if cmd1 succeeds
+cmd1 || cmd2       # run cmd2 only if cmd1 fails
+cmd < PATH         # stdin from a VFS file
+cmd > PATH         # stdout to a VFS file
+cmd >> PATH        # append stdout to a VFS file
+cmd 2> PATH        # stderr to a VFS file
+cmd 2>> PATH       # append stderr to a VFS file
+cmd 2>&1           # merge stderr into stdout
+*.txt, docs/*.md   # glob VFS paths; quoted globs stay literal
+$(cmd)             # command substitution
+# comment          # rest of the line
+$?                 # previous status
+$0, $1, $#, $@     # script name, arguments, count, all arguments
+```
+
+Control flow:
+
+```sh
+if test -f docs/a.txt; then echo file; else echo missing; fi
+for x in a b; do echo item-$x; done
+while false; do echo never; done
+for x in a b c; do
+  if test "$x" = b; then continue; fi
+  echo "$x"
+done
+```
+
+`break` and `continue` apply to the nearest enclosing loop.
+
+`test` / `[` supports `-e`, `-f`, `-d`, `-s`, `-r`, `-w`, `-x`,
+`-z`, `-n`, string `=`/`!=`, numeric `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`,
+and `!`, `-a`, `-o`. `read` consumes one line from piped stdin.
+
+`tgrep` uses the `soil:index` regex candidate index, then reads matching VFS
+files for line-level output. This is an indexed `tgrep`-style command, not yet
+a literal trigram postings implementation. It supports `-i`, `-s`, `-F`, `-w`, `-v`, `-l`,
+`-c`, `-o`, `-n`/`-N`, `-H`/`-I`, `-m N`, `-g GLOB`, `-e PATTERN`,
+`--no-index`, and `-q`.
+
+`cat`, `grep`, `head`, `tail` and `wc` read piped stdin when no path is given.
+`printf` supports `%s`, `%d`, `%i`, `%b`, `%%`, and the usual backslash escapes.
+
+## Diff and JSON
+
+`diff LEFT RIGHT` is a line-level unified diff computed inside the Spore: no
+overlay, no host process, and both buffers are read through `soil:vfs`. It
+exits 0 when the files match, 1 when they differ, and 2 when a side cannot be
+read — so errors go to stderr and never look like a difference. `-U N` sets
+the context (default 3), `-q` prints only whether they differ, a NUL near the
+start of either side reports a binary difference, and a missing final newline
+prints `\ No newline at end of file` because it is content. Diffs larger than
+1,000,000 line pairs (the LCS table is bounded) degrade to "every line
+replaced" instead of allocating without limit.
+
+`json` reads and edits documents with dot/bracket paths: `a.b[0]`, a bare
+numeric segment as an index, and `["a.b"]` for a key that contains a dot.
+`get` prints strings raw (`-j` keeps the JSON encoding) and everything else as
+compact JSON. `set`, `del` and `merge` read the file version, mutate, and write
+back through the same versioned `vfs::write` path as `write` and `sub`, so a
+concurrent edit fails the write instead of being clobbered.
+
+Editing rules, so a rewrite stays reviewable:
+
+- `set` replaces a value and creates only the final segment; a missing parent
+  path is an error. An array index equal to the length appends.
+- `merge` is deep for objects and replaces everything else, arrays included.
+- Key order is preserved, and the file keeps its own indentation (2, 4, tabs,
+  or compact) and whether it ended with a newline. Everything else is
+  normalized by `serde_json`.
+- `json pretty` never writes; `json set FILE PATH -` reads the value from
+  stdin, so `json get a.json x | json set b.json y -` works without escapes.
+
 ## Commands
 
 ```text
@@ -134,22 +492,42 @@ cd [DIR|-]
 ls [-l] [DIR]
 mkdir DIR...
 rmdir DIR...
-cat PATH
+cat [PATH...]
 write PATH [TEXT...]
 append PATH [TEXT...]
 touch PATH...
-head [-n N] PATH
-tail [-n N] PATH
-grep [-i] PATTERN PATH...
-wc [-l|-c] PATH...
+chmod MODE PATH...
+head [-n N] [PATH]
+tail [-n N] [PATH]
+grep [-i] PATTERN [PATH...]
+tgrep [OPTIONS] PATTERN [PATH...]
+wc [-l|-c] [PATH...]
 stat PATH
 tree [DIR]
+find [ROOT] [PATTERN] [-name GLOB] [-type f|d] [-maxdepth N]
+sub PATTERN REPLACEMENT PATH...
+diff [-q] [-U N] LEFT RIGHT
+json get [-j] FILE [PATH]
+json set FILE PATH JSON|-
+json del FILE PATH
+json merge TARGET SOURCE...
+json pretty [--indent N] [FILE|-]
+fetch URL [-X METHOD] [-H 'Name: value'] [-d DATA] [-i] [-o FILE]
+dig NAME [A|AAAA]
+ping NAME [--port N]
 rm [-r] PATH...
 mv FROM TO
 cp [-r] FROM TO
 search QUERY
-source SCRIPT
+commands
+which COMMAND
+source SCRIPT [ARG...]
 echo TEXT
+printf FORMAT [ARG...]
+test EXPR
+read [-r] [VAR]
+break
+continue
 export KEY=VALUE
 unset KEY...
 env
@@ -157,6 +535,30 @@ set [KEY=VALUE]
 man NAME
 exit
 ```
+
+### File modes
+
+A namespace that can hold a built binary has to remember that it is executable,
+or every materialization hands back a file nobody can run.
+
+```text
+chmod +x script.sh
+chmod 755 script.sh
+chmod -x script.sh
+```
+
+`+x` / `-x` add or drop the execute bits on top of the current mode; an octal
+number replaces them. Only files are handled (no `u+x`, no directories), and an
+argument that is neither an octal mode nor `+`/`-` with `r`/`w`/`x` is refused
+rather than guessed.
+
+The mode lives on the VFS entry, not on a version of the bytes: it survives a
+rewrite, materializes into the overlay, and `chmod` adds no history entry. A
+host command that produces an executable passes its mode back through the
+overlay, so a built program stays a program.
+
+The derived index does not carry the mode yet, so a `stat` answered from the
+index reports the default; the VFS entry is authoritative.
 
 ## Spore identity reads
 
@@ -170,6 +572,45 @@ command root), or `MUSH_SPORE_ROOT` when set. `man` works with no display and no
 network: the page is generated from the installed manifest and the body ships
 inside the package.
 
+## Network verbs
+
+`fetch URL` is one bounded HTTP request through `soil:http`: the host owns the
+origin allowlist, TLS, header rules, body caps and the deadline, and the guest
+only names a URL. `-X`, `-H 'Name: value'`, `-d DATA` (which implies POST),
+`-i` (status line and headers) and `-o FILE` (write through the VFS, byte for
+byte) cover the useful surface. A 4xx/5xx exits 1 so an error page is not
+mistaken for a result.
+
+The allowlist comes from the caller's groups:
+
+```toml
+# ~/.config/fungos/mush/config.toml
+groups = agents                 # MUSH_GROUPS adds to these
+group.agents.fetch = "https://api.github.com"
+group.build-fleet.fetch = "https://internal.example"
+```
+
+A principal in several groups gets the union. With no groups configured,
+`MUSH_HTTP_ALLOW` (comma-separated origins) is the fallback; with neither, the
+answer is **nothing** — a shell that can fetch anything is ambient authority with
+extra steps. `mush doctor` prints the resolved answer: `access: <principal>
+groups=… fetch=…`.
+
+Credentials never enter the guest. `fetch --credential HANDLE` names an opaque
+handle; the host injects the header from its own `MUSH_HTTP_TOKEN_<HANDLE>`
+environment. A Geode adapter replaces that store without the Spore changing, and
+the guest cannot read the token, ask what it is, or send `authorization`
+directly (the header allowlist refuses it).
+
+## Names and reachability
+
+`dig NAME [A|AAAA]` and `ping NAME [--port N]` go through `soil:net`, a host
+capability with two verbs: resolve a name, and open and close a TCP session to
+prove a service is up. The guest never holds a socket, and `<node>.<site>.myc`
+is answered by the mesh resolver, so an agent can check what it is about to talk
+to. `ping` exits 0 when something answered and 1 when nothing did; it is a
+connect, not ICMP, because raw sockets are a privilege a guest should not have.
+
 ## Editing and inspection
 
 `write` replaces a file; `append` reads the current version and writes a new
@@ -179,6 +620,14 @@ path. `mkdir -p`, `cp -r` and `find` are implemented over `soil:vfs` /
 `soil:vfs-mut`. `touch`, `head`, `tail`,
 `grep`, `wc`, `stat`, `tree` and recursive `rm -r` are implemented entirely over
 `soil:vfs` / `soil:vfs-mut`. There is still no host `$EDITOR` or process spawn.
+
+`sed -i 's/pat/rep/g' FILE...` is answered by `sub` when the script is one where
+sed and the Spore's regex agree: `g` present, no backslashes, none of
+`+ ? | ( ) { }` in either half, and no `&` or `$` in the replacement. Everything
+else — `-i.bak`, a second script, a form without `g` — runs the real `sed`
+against the overlay, so a form the bridge does not recognise is never silently
+approximated. `sub` compiles its pattern in multi-line mode, so `^` and `$` mean
+the start and end of a line, as they do in sed.
 
 ## Git
 
@@ -296,10 +745,12 @@ mush run host --no-apply -- cargo fmt --check
 ```
 
 The environment starts empty and is rebuilt from a small allowlist (`PATH`,
-`HOME`, `TMPDIR`, the Rust and sccache variables, `BOB_AGENT_KEY`). Add more
-with `--allow-env NAME`. The command must be a bare name on the allowlist
+`HOME`, `USER`, `TMPDIR`, `RUSTUP_HOME`), then handed to bob when the program is
+one that builds. Add more with `--allow-env NAME`. The command must be a bare
+name on the allowlist
 (`cargo`, `rustc`, `cc`, `clang`, `clang++`, `c++`, `git`, `make`, `cmake`,
-`ninja`, `pkg-config`); shells and paths such as `./cargo` are rejected.
+`ninja`, `pkg-config`, and the build plane's own `fpl bob` / `bob-cargo`);
+shells and paths such as `./cargo` are rejected.
 
 Exit status is preserved. `--no-apply` discards the overlay instead of writing
 changes back, and `--keep` prints the overlay path for inspection.
@@ -308,37 +759,255 @@ This is a policy boundary, not a sandbox: an allowed program runs as the user
 and can read their home. It exists so a host toolchain can operate on the VFS
 view without handing the agent's secrets to it.
 
-## Builds that leave the machine
+### Builds go through bob
 
-A Spore has no sockets — the WASI context is built with stdio only — so a Spore
-cannot reach a builder even if it wanted to, and it must never hold the
-transport's credentials. `mush build` is the narrow seam: the worktree view goes
-out, source mutations come back through the overlay, and the exit status is the
-build's.
+A build inside mush is a build on the machine, and the machine has one Mac. bob
+is what keeps that from meaning one build at a time: it picks the lane for a
+target triple, owns the per-agent `CARGO_HOME` that holds cargo's package-cache
+lock, and wraps rustc in a fail-open sccache shim.
+
+mush asks bob for that environment rather than inheriting it:
 
 ```sh
-mush build -- cargo test -p mush
-mush build --cwd crates/app -- cargo test
-mush build --pool bob -- cargo build --release
-mush build --detach -- cargo test        # bob prints a job id; nothing is applied
+fpl bob env --key <session> --target-dir   # KEY=VALUE: the same facts the
+                                           # shell env file exports
 ```
 
-It runs `fpl-bob remote` on the host with a session name derived from the
-worktree, not from the overlay, so a warm remote target survives across runs.
-`--back` is empty: build output never travels back, and bob decides per host
-whether a `target/` is usable at all. `--detach` skips the apply step, because
-the overlay is gone before the build finishes — wait with `bob job wait <id>`
-and fetch with `bob job fetch <id>`.
+and applies it to every host process whose program is a build (`cargo`,
+`rustc`, a C compiler, `make`, `cmake`, `zig`, `go`, `npm`, ...). Three
+consequences are worth knowing:
 
-The host forwards only what a build needs: the Rust and sccache variables,
-`BOB_AGENT_KEY`, `BOB_SSH`/`BOB_POOL`, and `SSH_AUTH_SOCK`. Everything else is
-still `--allow-env` opt-in.
+- **`cargo` runs as `bob-cargo`.** The shim is what routes a lane and places the
+  per-agent `CARGO_HOME`; no exported variable does either for a child process.
+  `FPL_BOB_LOCAL=1` is the escape hatch, and bob passes it through.
+- **`CARGO_TARGET_DIR` outlives the overlay.** The overlay is a fresh directory
+  per command, so a `target/` inside it would be thrown away and every build
+  would start cold. bob points it at `~/.cache/bob/targets/<agent>`.
+- **The overlay joins `SCCACHE_BASEDIRS`.** Each run's overlay has a different
+  path; without normalizing it into the hash, the cached unit changes every
+  time and the cache never hits.
+
+No bob, a bob too old to know `env`, or a failed probe leaves the command
+running with the plain environment: uncached and serialized, but working.
+`mush doctor` prints what the next build will use.
 
 ## Host boundary
-
-`mush` opens the VFS root, links the three grants, and calls the Spore one line
-at a time. The Spore returns output, prompt, and exit state. The current host is
+`mush` opens the VFS root, links the grants, and calls the Spore one line at a
+time. The Spore returns output, prompt, and exit state. The current host is
 line-oriented; `soil:terminal` cell-grid rendering remains the next frontend.
+
+The host also owns command-package lookup. A command runs in a nested Wasmtime
+WASI instance with explicit args, piped stdin, the VFS cwd, no inherited host
+environment, and only the capabilities configured by the host.
+
+That boundary is what makes `mush` a safe execution layer and what stops it
+from replacing an agent's shell: there is no host process, no `PATH`, and no
+network. Measure the gap rather than assume it:
+
+```sh
+scripts/mush-agent-parity.sh
+```
+
+The probe runs the same command lines through the host shell and through Mush
+over equivalent content, and reports completions per class. It is only
+meaningful alongside honest exit statuses -- a shell that reports success for a
+command it could not run appears to pass every toolchain step.
+
+## The host bridge
+
+The Spore has no host process. That is the boundary that makes it safe, and it
+is also what stops it from being an agent's shell: `git` and `cargo` live on the
+other side of it.
+
+`mush sh` crosses that boundary for a short list of programs. The VFS is
+materialized into an overlay, the program runs there, and its changes are
+applied back:
+
+```sh
+mush sh -c 'git status && cargo test'
+mush sh -c 'rg TODO src'
+```
+
+The allowlist is compilers, version control, and text tools:
+
+```text
+cargo rustc cc clang clang++ c++ git make cmake ninja pkg-config
+rg sed awk diff jq true false test
+```
+
+These run with the user's full privileges and only the overlay as their working
+directory -- they can still read `$HOME`. Anything that carries credentials or
+reaches the network (`gh`, `ssh`, `curl`, `python3`) is therefore **not** in the
+list: adding one is a boundary decision, not a convenience. A bare program name
+only is accepted, so `./cargo` cannot smuggle in code from the overlay itself.
+
+Pipelines and redirection are handed to the Spore, which owns that parsing; a
+simple command whose program is allowlisted goes to the host. Screenshots of the
+gap: `scripts/mush-agent-parity.sh`.
+
+## What is in a Desktop
+
+An agent should ask the Desktop what it contains rather than being handed a
+hand-written list in every session.
+
+```sh
+mush projects                 # this directory's Desktop
+mush projects --desktop acme
+mush projects --json
+```
+
+```text
+project                  source    branch         state   remote
+missing-repo             missing   -              -       
+plain-dir                found     -              -       
+repo-a                   declared  master         dirty   [marbles]
+```
+
+`source` is the difference between the declared list and what is on disk:
+
+| source | meaning |
+|---|---|
+| `declared` | named in the Desktop config and present |
+| `missing` | named in the config, nothing on the projection |
+| `found` | on the projection, not named in the config |
+
+Branch, dirtiness, and remote come from the host `git` in the projection, so
+this describes what you can actually work on. A project without `.git` reports
+`-` rather than a guess, which is how the current NFS projection behaves: its
+projects are directories, not checkouts.
+
+`[marbles]` marks a project carrying a `.marbles` or `.marbles-local` directory.
+
+Not in this slice yet: joining `mush worktree` records per project, and
+resolving the marbles project id through `mb` rather than a marker directory.
+
+### Remote discovery
+
+```sh
+mush projects --remote            # GitHub plus the Gitea mirror, deduped
+mush projects --claim NAME...     # group repositories into this Desktop
+```
+
+`--remote` asks `gh repo list` for every repository the authenticated account
+can see, and the Gitea mirror when the machine is pointed at one:
+
+```sh
+export GITEA_URL=https://gitea.example
+export GITEA_TOKEN=...            # repo read scope
+export GITEA_USER=...             # optional; defaults to the token's user
+```
+
+Hosts are merged on the lowercased repository name, so a mirror is one project
+with two hosts, not two projects:
+
+```text
+project                  source    branch   state   hosts        remote
+fungos-vfs               declared  -        -       github+gitea
+soil                     -         -        -       github
+ajmwagar.github.io       -         -        -       github       [archived]
+```
+
+Without `GITEA_URL`/`GITEA_TOKEN` the mirror is simply absent -- that is a
+configuration state, not an error.
+
+`--claim` writes names into the Desktop's `projects` list. It declares, it does
+not clone: a claimed repository that is not on the projection reports `missing`
+until something materializes it, which keeps the declaration honest.
+
+### Materializing a project
+
+```sh
+mush project add NAME --desktop acme                 # claim + shallow clone
+mush project add NAME --desktop acme --worktree w1   # plus a CoW worktree
+```
+
+The clone is `--depth 1` on purpose: a starting point for work, not an archive.
+The worktree is a copy-on-write copy of that clone:
+
+| platform | primitive | cost |
+|---|---|---|
+| macOS / APFS | `cp -c` (clonefile) | near zero |
+| Linux / btrfs, xfs | `cp --reflink=auto` | near zero |
+| other, and NFS | plain copy | full size |
+
+That last row matters: a Desktop projected over NFS gets a real copy, not a
+reflink, so the worktree costs what the tree costs. The command says which
+primitive it used rather than implying CoW everywhere.
+
+Verified on APFS: shallow clone, `clonefile` worktree, and the base clone of a
+small repository at 144K.
+
+### Resolving a worktree
+
+`mush origin` now reads the Desktop worktree shape as well:
+
+```sh
+cd ~/mnt/personal/worktrees/agent-1/addict
+mush origin
+```
+
+```text
+worktree: agent-1
+marble project: agent
+repo: addict
+desktop: personal
+mount: /Users/me/mnt/personal [mounted]
+project: /Users/me/mnt/personal/projects/addict
+```
+
+`worktree` is the label of the tree the agent is inside, `repo` is what it is a
+tree of, and `marble project` comes from the `.marbles/project.toml` nearest the
+working directory. Together with `thread` (from `DELTA_CURRENT_THREAD_ID`) that
+is the identity of a working agent: who, on what, in which tree.
+
+The thread <-> marble link is not resolved here yet; it needs the claim record,
+not the filesystem.
+
+### Who a host command is running as
+
+Every host program started by `mush sh` receives the caller's identity in its
+environment, so a tool can record *which* agent did something instead of leaving
+the link to be reconstructed later:
+
+| variable | meaning |
+|---|---|
+| `MUSH_THREAD_ID` | the Delta thread that owns this session |
+| `MUSH_WORKTREE` | the worktree label (`agent-1`) |
+| `MUSH_PROJECT` | the project the tree is of |
+| `MUSH_MARBLE_PROJECT` | marbles project slug from `.marbles/project.toml` |
+| `MUSH_DESKTOP` | the Desktop that owns the tree |
+
+Unset variables are omitted rather than empty: a consumer cannot tell which
+half of a half-known identity is a guess.
+
+This is the contract behind "jump to the agent working this marble" --
+`mb claim` can record the thread id it was handed, and `mb show` can then print
+a `delta://thread/...` link. The marbles side is not wired yet.
+
+## Troubleshooting
+
+Start with `mush doctor`: it prints the user, config, access, build plan, VFS
+root, command root, records binding, spore, principal, desktop and socket.
+
+- **`not allowlisted`** — the program is not in `HOST_ALLOWLIST`
+  (`crates/mush/src/shell.rs`). That list is the single copy of the policy; add
+  there instead of special-casing a call site.
+- **`command not found` at the prompt** — a name neither the Spore nor the host
+  owns. `which NAME` reports what the Spore thinks; `mush doctor` shows the
+  command root.
+- **`materialize a workspace: No such file or directory`** — an inherited
+  `TMPDIR` names a directory that no longer exists (a per-turn agent scratch
+  dir). The overlay falls back to `/tmp`; if this error still appears, the
+  fallback could not be created either, which is usually a full disk.
+- **`No space left on device`** — check the worktree `target/` directories and
+  bob's caches (`~/.cache/bob/agents`, `~/.cache/bob/targets`,
+  `~/.cache/sccache`). `fpl bob prune --apply` clears the bob-owned ones.
+- **A command hangs, or the daemon is stale** — `pkill -f "mush --serve"`, then
+  remove `~/.local/share/fungos/mush/run/*.sock`. The next call starts a fresh
+  daemon; session state is on disk, background jobs are not.
+- **`bob: remote rustc identity probe failed`** — the builder has no toolchain
+  on a non-interactive `PATH`. The remote script sources
+  `~/.config/sccache/env`; run `fpl bob setup` on that builder.
 
 ## Shell integration
 

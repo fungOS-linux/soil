@@ -8,8 +8,8 @@ use std::{
 
 use anyhow::Result;
 use http_body_util::BodyExt;
-use soil_http_host::HttpTransport;
-use soil_records_host::{RecordsBookHost, records};
+use soil_host::http_host::HttpTransport;
+use soil_host::records_host::{RecordsBookHost, records};
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
@@ -31,12 +31,12 @@ use crate::{
 /// differs. That is what lets a Spore reach the network through a browser
 /// instead of this process's socket.
 pub struct HttpCapability {
-    pub(crate) policy: soil_http_host::HttpPolicy,
+    pub(crate) policy: soil_host::http_host::HttpPolicy,
     pub(crate) transport: Arc<dyn HttpTransport>,
 }
 
 impl HttpCapability {
-    pub fn new(policy: soil_http_host::HttpPolicy, transport: Arc<dyn HttpTransport>) -> Self {
+    pub fn new(policy: soil_host::http_host::HttpPolicy, transport: Arc<dyn HttpTransport>) -> Self {
         Self { policy, transport }
     }
 }
@@ -213,17 +213,17 @@ pub struct WasiHost {
     soil_http: Option<Arc<HttpCapability>>,
 }
 
-impl soil_http_host::api::Host for WasiHost {
+impl soil_host::http_host::api::Host for WasiHost {
     fn fetch(
         &mut self,
-        request: soil_http_host::api::Request,
-    ) -> Result<soil_http_host::api::Response, soil_http_host::api::Error> {
+        request: soil_host::http_host::api::Request,
+    ) -> Result<soil_host::http_host::api::Response, soil_host::http_host::api::Error> {
         let Some(capability) = self.soil_http.as_ref() else {
-            return Err(soil_http_host::api::Error::Unsupported);
+            return Err(soil_host::http_host::api::Error::Unsupported);
         };
-        soil_http_host::fetch(
+        soil_host::http_host::fetch(
             &capability.policy,
-            &soil_http_host::NoCredentials,
+            &soil_host::http_host::NoCredentials,
             capability.transport.as_ref(),
             request,
         )

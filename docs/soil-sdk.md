@@ -150,7 +150,7 @@ impl soil_sdk::records::Record for Contact {
 }
 ```
 
-`crates/soil-records-host` exposes one `fungos-records` book as this collection.
+`crates/soil-host` exposes one `fungos-records` book as this collection.
 Local CRUD, `changes`, and revision/origin `apply` are available; native
 `records.sync.*` remains the peer transport.
 

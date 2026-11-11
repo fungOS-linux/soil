@@ -190,11 +190,11 @@ fn search(root: &Path, args: Vec<String>) -> Result<()> {
     if query.trim().is_empty() {
         bail!("usage: soil search QUERY");
     }
-    let mut host = soil_vfs_host::VfsHost::open(root)?;
-    use soil_vfs_host::index::Host as _;
-    let page = host.search(soil_vfs_host::index::Query {
+    let mut host = soil_host::vfs_host::VfsHost::open(root)?;
+    use soil_host::vfs_host::index::Host as _;
+    let page = host.search(soil_host::vfs_host::index::Query {
         text: query,
-        mode: Some(soil_vfs_host::index::Mode::Fuzzy),
+        mode: Some(soil_host::vfs_host::index::Mode::Fuzzy),
         parent: None,
         media_type_prefix: None,
         offset: 0,
