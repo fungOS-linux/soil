@@ -23,6 +23,7 @@ hyper = { version = "1", default-features = false, features = ["http1", "server"
 ipnet = "2"
 sha2 = "0.10"
 soil-records-host = { path = "../soil-records-host" }
+tempfile = "3"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 url = "2"
 wasmtime = { version = "50", default-features = false, features = [

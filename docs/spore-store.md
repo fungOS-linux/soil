@@ -258,23 +258,24 @@ principal = "mycelium:ajm/lab"
 index = "ipfs://bafy…"
 ```
 
-A source is an **append-only signed index**, addressed by CID, with a signed
-checkpoint and no trusted service in the request path. The index lists
-`(seq, add|update|yank, spore_id, version, package_digest, listing_cid)`; each
-entry is signed by the source principal, and Mycelium supplies the key that
-principal names. The client verifies the checkpoint, then the entries, then the
-package before installing it. A store's origin can be offline: the index is a CID
-and can be mirrored like any other content.
+A source is an **append-only signed index**, addressed by CID, with no trusted
+service in the request path. The index lists `(seq, add|update|yank, spore_id,
+version, package_digest, listing_cid)`; each entry is signed by the publisher's
+key. The store operator does not re-sign the catalog: it signs a **delegation**
+that authorizes a publisher key for a principal, and the client verifies that
+delegation, then the entry, then the package before installing it. A store's
+origin can be offline: the index is a CID and can be mirrored like any other
+content.
 
-Adding a source is adding a key and an origin — the apt `sources.list` shape,
-reviewed with a fingerprint on screen. Sources are ordered; when two sources
+Adding a source is adding an operator key and an origin — the apt `sources.list`
+shape, reviewed with a fingerprint on screen. Sources are ordered; when two sources
 offer different digests for the same version, the higher-priority source wins and
 the row is marked as a disagreement, never merged silently.
 
 What a source does **not** carry:
 
-- Package trust. A publisher's signature travels with the tar; a store is a
-  distributor, not a certificate authority.
+- Package trust. A publisher's signature travels with the tar; the store
+  delegates the publisher key, it does not sign the package.
 - Reviews of another store's catalog. Ratings are per source, because they are
   that community's judgement; the *attestations* behind a review are portable, so
   a store may import a review only with its attestation and says when it did.
@@ -287,8 +288,8 @@ before it, is an ordinary edit to the source list.
 ### Internal fleet stores
 
 Most fleets will run their own store, and that is the expected shape rather than
-a workaround. An internal store is a source like any other whose principal is a
-fleet role and whose origin is a fleet node:
+a workaround. An internal store is a source like any other whose operator
+principal is a fleet role and whose origin is a fleet node:
 
 ```toml
 [[source]]
@@ -326,13 +327,15 @@ A source's catalog is an append-only log, not a document that is rewritten on
 every change:
 
 ```text
-entry      = (seq, add|update|yank, spore_id, version, digest, listing_cid, signature)
-checkpoint = (seq, root over entries, signature)
+entry      = (seq, add|update|yank, spore_id, version, digest, listing_cid, publisher_signature)
+delegation = (publisher, publisher_key_fingerprint, publisher_public_key,
+              scope, issued_at, expires_at, operator_signature)
+checkpoint = (seq, root over entries, optional operator countersignature)
 ```
 
 The bytes at the source's `index` CID are a checkpoint plus the entries up to it.
-A client needs the checkpoint and the store principal's key; everything else is
-optional.
+A client needs the checkpoint, the source operator's key, and the delegations for
+the publishers it is about to install; everything else is optional.
 
 - **The API is a presenter.** `https://store.myc/api/…` exists for search,
   categories, ranking, pagination and any query a client does not want to run
@@ -364,11 +367,19 @@ add CDC when a package exceeds roughly 10 MB **and** successive versions share
 large unshifted regions. If it lands, it is a per-package chunk manifest declared
 in `[catalog]`, not a change to the index format.
 
-Signatures follow the same rule: entries are signed individually so a store does
-not re-sign its whole catalog because one row changed, and the checkpoint is
-signed separately so a client can tell a complete prefix from a truncated one
-and can detect a fork. Package signatures stay the publisher's and are
-independent of the store's.
+Signatures follow the same rule: the store operator signs **publisher keys**, not
+catalog revisions. A key is delegated once (and rotated or revoked as an explicit
+record), so a publisher can append an entry without a store round-trip or a new
+operator signature. Entries carry the publisher's signature and name the key that
+signed them. The checkpoint stays a Merkle root for truncation and fork detection;
+an operator may countersign it periodically, but that is freshness, not the hot
+path. Package signatures stay the publisher's and are independent of the
+delegation.
+
+A publisher may have several delegated keys — one per device is the normal shape.
+Revoking a lost device removes that delegation, not the publisher. A single
+non-exportable key cannot be shared across a fleet; hardware-backed signing is a
+per-device key that either signs directly or attests the software key.
 
 ### The index on disk
 
@@ -487,15 +498,17 @@ Stored as `soil:records` schemas so the store is a client of the same storage
 as everything else:
 
 ```text
-fungos.store.entry@1      seq, kind, spore_id, version, digest, listing_cid, signature
-fungos.store.checkpoint@1 seq, root, signature
+fungos.store.entry@1      seq, kind, spore_id, version, digest, listing_cid, publisher_signature
+fungos.store.checkpoint@1 seq, root, countersignature?
+fungos.store.delegation@1 publisher, publisher_key_fingerprint, publisher_public_key,
+                          scope, issued_at, expires_at, operator_signature
 fungos.store.listing@1    spore_id, version, digest, category[], keywords[],
                           icon, screenshots[], record, status, reviewed_by
 fungos.store.review@1     spore_id, version, digest, principal, rating, body,
                           created_at, hidden_reason
 fungos.store.attest@1     digest, principal, nonce, at, signature
 fungos.store.pending@1    digest, class, reason, available_since, policy
-fungos.store.source@1     name, origin, principal, index, priority, scope
+fungos.store.source@1     name, origin, principal, operator_key, index, priority, scope
 fungos.store.feature@1    category, digest, starts_at, ends_at
 fungos.store.installed@1  digest, pinned, policy, previous_digest, source
 ```
@@ -511,4 +524,5 @@ ranges such as `>=0.1 <0.2`; they are never the key.
 - No server-side ranking beyond the review prior; there is no advertising
   surface to optimise for.
 - No publisher accounts beyond Mycelium principals.
-- No store-side key handling. Signing and revocation stay in Mycelium.
+- No store-side key generation. The operator key is a Mycelium principal;
+  delegations are records it signs, and revocation stays in Mycelium.

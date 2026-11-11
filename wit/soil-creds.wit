@@ -45,6 +45,14 @@ interface creds {
   /// `ok(false)`, not an error; errors describe the credential or request.
   verify: func(handle: handle, algorithm: algorithm, message: list<u8>, signature: list<u8>)
     -> result<bool, error>;
+
+  /// Sign with a PGP key. Kept separate from `algorithm` so a guest built
+  /// against the two-variant enum keeps its ABI when PGP is added.
+  sign-pgp: func(handle: handle, message: list<u8>) -> result<list<u8>, error>;
+
+  /// Verify a detached PGP signature.
+  verify-pgp: func(handle: handle, message: list<u8>, signature: list<u8>)
+    -> result<bool, error>;
 }
 
 world guest {

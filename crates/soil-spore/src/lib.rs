@@ -2230,6 +2230,67 @@ pub fn sign(package: &Path, signature: &Path, key: Option<&str>) -> Result<()> {
     run(command, "gpg --detach-sign")
 }
 
+/// Sign a package through a running Geode broker.
+///
+/// `principal` is the Geode account label, not the raw OIDC subject: the
+/// reference is `geode://principal/<label>/pgp`. The `geode-pgp` client leases
+/// the key from `geoded` and returns only the detached signature; Soil never
+/// sees key material.
+///
+/// `socket` defaults to `GEODE_SOCKET` or `$HOME/.geode/geode.sock` in the
+/// client. `fingerprint` is optional because the client can read it from the
+/// leased key.
+pub fn sign_principal(
+    package: &Path,
+    signature: &Path,
+    principal: &str,
+    socket: Option<&Path>,
+    fingerprint: Option<&str>,
+) -> Result<()> {
+    validate_geode_label(principal)?;
+    let reference = format!("geode://principal/{principal}/pgp");
+    let mut command = std::process::Command::new("geode-pgp");
+    command
+        .arg("sign")
+        .arg("--reference")
+        .arg(&reference)
+        .arg("--purpose")
+        .arg("spore.package.sign")
+        .arg("--message")
+        .arg(package);
+    if let Some(socket) = socket {
+        command.arg("--socket").arg(socket);
+    }
+    if let Some(fingerprint) = fingerprint {
+        command.arg("--fingerprint").arg(fingerprint);
+    }
+    let output = command
+        .output()
+        .map_err(|error| Error::Tool(format!("geode-pgp: {error}")))?;
+    if !output.status.success() {
+        return Err(Error::Signature(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    std::fs::write(signature, output.stdout)
+        .map_err(|error| Error::Io(format!("{}: {error}", signature.display())))
+}
+
+fn validate_geode_label(label: &str) -> Result<()> {
+    let mut bytes = label.bytes();
+    let starts_well = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric());
+    let rest_well =
+        bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if label.is_empty() || label.len() > 64 || !starts_well || !rest_well {
+        return Err(Error::Invalid(
+            "--principal must be a Geode label: 1..=64 letters, digits, `.`, `_` or `-`".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Verify a detached signature against a trusted keyring.
 pub fn verify_signature(
     package: &Path,

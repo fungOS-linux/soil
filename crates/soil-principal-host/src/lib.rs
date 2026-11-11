@@ -193,8 +193,17 @@ impl PrincipalProvider for StaticPrincipalProvider {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SigningKey {
+    pub algorithm: String,
+    pub fingerprint: String,
+    pub reference: String,
+    pub generation: u64,
+}
+
 pub struct PrincipalHost {
     provider: Arc<dyn PrincipalProvider>,
+    signing_key: Option<SigningKey>,
 }
 
 #[cfg(feature = "mycelium")]
@@ -324,11 +333,24 @@ impl PrincipalHost {
     {
         Self {
             provider: Arc::new(provider),
+            signing_key: None,
         }
     }
 
     pub fn from_shared(provider: Arc<dyn PrincipalProvider>) -> Self {
-        Self { provider }
+        Self {
+            provider,
+            signing_key: None,
+        }
+    }
+
+    /// Attach the principal's non-secret signing-key projection.
+    ///
+    /// The host remains the owner of the key; this is only the public identity
+    /// a verifier or store names.
+    pub fn with_signing_key(mut self, signing_key: SigningKey) -> Self {
+        self.signing_key = Some(signing_key);
+        self
     }
 }
 
@@ -414,6 +436,15 @@ impl api::Host for PrincipalHost {
             generation: principal.generation,
         })
     }
+
+    fn signing_key(&mut self) -> Result<Option<api::SigningKeyInfo>, api::Error> {
+        Ok(self.signing_key.as_ref().map(|key| api::SigningKeyInfo {
+            algorithm: key.algorithm.clone(),
+            fingerprint: key.fingerprint.clone(),
+            reference: key.reference.clone(),
+            generation: key.generation,
+        }))
+    }
 }
 
 pub fn add_to_linker<T>(linker: &mut Linker<T>) -> anyhow::Result<()>
@@ -447,6 +478,37 @@ fn now_unix_s() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod signing_key_tests {
+    use super::*;
+
+    #[test]
+    fn signing_key_is_a_non_secret_projection() {
+        let principal = Principal {
+            actor: "mycelium:alice".into(),
+            kind: PrincipalKind::Human,
+            display_name: None,
+            device: Some("studio".into()),
+            teams: Vec::new(),
+            roles: Vec::new(),
+            generation: 3,
+        };
+        let mut host = PrincipalHost::new(StaticPrincipalProvider::new(principal))
+            .with_signing_key(SigningKey {
+                algorithm: "pgp".into(),
+                fingerprint: "0123456789ABCDEF0123456789ABCDEF01234567".into(),
+                reference: "geode://principal/alice/pgp".into(),
+                generation: 3,
+            });
+        let key = <PrincipalHost as api::Host>::signing_key(&mut host)
+            .expect("signing key projection")
+            .expect("configured key");
+        assert_eq!(key.algorithm, "pgp");
+        assert_eq!(key.reference, "geode://principal/alice/pgp");
+        assert_eq!(key.generation, 3);
+    }
 }
 
 #[cfg(test)]

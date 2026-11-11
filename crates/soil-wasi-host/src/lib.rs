@@ -25,8 +25,8 @@ pub mod unibus;
 
 pub use context::HttpContext;
 pub use creds::{
-    Algorithm, CredentialError, CredentialProvider, GeodeCredentials, ResolvedHandle,
-    StaticCredentials,
+    Algorithm, CredentialError, CredentialProvider, GeodeCredentials, GeodePgpCredentials,
+    ResolvedHandle, StaticCredentials,
 };
 pub use gateway::{
     GatewayRoute, GatewayVhost, HttpGateway, HttpGatewayBuilder, IngressError, OriginAuth,
