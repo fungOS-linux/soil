@@ -12,17 +12,23 @@ Desktop binding adds project mounts, a records scope, and a stable identity. See
 mush --root ~/fungos-node
 ```
 
-The Spore imports four capabilities:
+The Spore imports six capabilities:
 
 ```text
 soil:vfs       read, stat, list
 soil:index     browse, search, KNN
-soil:vfs-mut   write, remove, mkdir, rmdir, rename
+soil:vfs-mut   write, remove, mkdir, rmdir, rename, chmod
 soil:command   virtual PATH to installed wasm commands
+soil:http      one request, origin allowlisted, credentials injected host-side
+soil:net       resolve a name, probe a TCP port
 ```
 
-It has no host filesystem, host `PATH`, subprocess, or network access. The
-virtual `PATH` resolves only installed wasm command packages.
+It has no host filesystem, host `PATH` or subprocess. The virtual `PATH`
+resolves only installed wasm command packages; the two network grants are the
+only way out, and both are host-policied.
+
+Where the pieces live — host, Spore, VFS host, the `fungos-vfs` and `bob`
+repositories — is [docs/mush-architecture.md](mush-architecture.md).
 
 ## Shell state
 
@@ -219,6 +225,22 @@ mush mcp --foreground --listen 127.0.0.1:0
 
 It exposes `mcp__mush__mush_exec` over loopback HTTP. See
 [Operator integration](mush-operator.md).
+
+## MCP server
+
+An agent that does not use the Pi extension can drive the same daemon over MCP:
+
+```sh
+mush mcp --root DIR --listen 127.0.0.1:PORT --mcp-token "$MUSH_MCP_TOKEN" --foreground
+```
+
+`POST /mcp` with `Authorization: Bearer …`. The endpoint is loopback by default
+and refuses every request without the token; one server serves one root. The
+tools are `mush_exec`, `mush_job` and `mush_cancel`. A command that outlives its
+background threshold returns `state=background` with a job id and keeps running
+in the daemon — poll it, do not re-run it. Job state is in memory, so a daemon
+restart drops the record and kills the child. The tool contract is written out
+in [integrations/pi/README.md](../integrations/pi/README.md#mcp-for-muse).
 
 ## Deadlines and servers
 
@@ -474,6 +496,7 @@ cat [PATH...]
 write PATH [TEXT...]
 append PATH [TEXT...]
 touch PATH...
+chmod MODE PATH...
 head [-n N] [PATH]
 tail [-n N] [PATH]
 grep [-i] PATTERN [PATH...]
@@ -512,6 +535,30 @@ set [KEY=VALUE]
 man NAME
 exit
 ```
+
+### File modes
+
+A namespace that can hold a built binary has to remember that it is executable,
+or every materialization hands back a file nobody can run.
+
+```text
+chmod +x script.sh
+chmod 755 script.sh
+chmod -x script.sh
+```
+
+`+x` / `-x` add or drop the execute bits on top of the current mode; an octal
+number replaces them. Only files are handled (no `u+x`, no directories), and an
+argument that is neither an octal mode nor `+`/`-` with `r`/`w`/`x` is refused
+rather than guessed.
+
+The mode lives on the VFS entry, not on a version of the bytes: it survives a
+rewrite, materializes into the overlay, and `chmod` adds no history entry. A
+host command that produces an executable passes its mode back through the
+overlay, so a built program stays a program.
+
+The derived index does not carry the mode yet, so a `stat` answered from the
+index reports the default; the VFS entry is authoritative.
 
 ## Spore identity reads
 
@@ -936,6 +983,31 @@ half of a half-known identity is a guess.
 This is the contract behind "jump to the agent working this marble" --
 `mb claim` can record the thread id it was handed, and `mb show` can then print
 a `delta://thread/...` link. The marbles side is not wired yet.
+
+## Troubleshooting
+
+Start with `mush doctor`: it prints the user, config, access, build plan, VFS
+root, command root, records binding, spore, principal, desktop and socket.
+
+- **`not allowlisted`** — the program is not in `HOST_ALLOWLIST`
+  (`crates/mush/src/shell.rs`). That list is the single copy of the policy; add
+  there instead of special-casing a call site.
+- **`command not found` at the prompt** — a name neither the Spore nor the host
+  owns. `which NAME` reports what the Spore thinks; `mush doctor` shows the
+  command root.
+- **`materialize a workspace: No such file or directory`** — an inherited
+  `TMPDIR` names a directory that no longer exists (a per-turn agent scratch
+  dir). The overlay falls back to `/tmp`; if this error still appears, the
+  fallback could not be created either, which is usually a full disk.
+- **`No space left on device`** — check the worktree `target/` directories and
+  bob's caches (`~/.cache/bob/agents`, `~/.cache/bob/targets`,
+  `~/.cache/sccache`). `fpl bob prune --apply` clears the bob-owned ones.
+- **A command hangs, or the daemon is stale** — `pkill -f "mush --serve"`, then
+  remove `~/.local/share/fungos/mush/run/*.sock`. The next call starts a fresh
+  daemon; session state is on disk, background jobs are not.
+- **`bob: remote rustc identity probe failed`** — the builder has no toolchain
+  on a non-interactive `PATH`. The remote script sources
+  `~/.config/sccache/env`; run `fpl bob setup` on that builder.
 
 ## Shell integration
 

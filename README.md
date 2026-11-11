@@ -229,4 +229,14 @@ Operator inference profiles and `unibus-mcp`/DCP routes resolve from one Soil co
 
 ## Mush
 
-`mush` is now a Wasm Spore over `soil:vfs`, `soil:index`, and `soil:vfs-mut`: no host PATH, no subprocesses, workspace-relative paths, `.mushrc`, `PWD`/`OLDPWD`, `TERM`, `mkdir`, `rmdir`, and `rm` as namespace unlink. See [Mush](docs/mush.md).
+`mush` is a shell over one VFS workspace. The command engine is a Wasm Spore
+over `soil:vfs`, `soil:index`, `soil:vfs-mut`, `soil:command`, `soil:http` and
+`soil:net`; the native host owns the workspace, the grants, the daemon and the
+overlay. Allowlisted host programs (`git`, `cargo`, `gh`, `fpl bob`) run against
+a materialized overlay, and builds route to the fleet through
+[`bob`](https://github.com/FuturePresentLabs/bob).
+
+- [Mush](docs/mush.md) — the shell: syntax, commands, config, doctor.
+- [Mush architecture](docs/mush-architecture.md) — where the pieces live,
+  repository by repository, and how a line is routed.
+- [Mush operator](docs/mush-operator.md) — running it for other people.
