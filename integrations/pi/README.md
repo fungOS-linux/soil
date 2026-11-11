@@ -43,6 +43,36 @@ set, which is why `tryAutoEnable` runs on use rather than at load.
 | `vfs_diff` | the Spore's unified diff; differences are a result, not an error |
 | `vfs_json` | `json get/set/del/merge/pretty` with dot/bracket paths |
 
+## MCP (for muse)
+
+The same daemon is also an MCP server, which is how a non-Pi agent uses the
+same workspace:
+
+```sh
+mush mcp --root DIR --listen 127.0.0.1:PORT --mcp-token "$MUSH_MCP_TOKEN" --foreground
+```
+
+The endpoint is loopback by default and always requires the bearer token; the
+token is generated when none is given (`--mcp-token` or `MUSH_MCP_TOKEN`).
+One server serves one root, and that root is the workspace every call sees.
+
+| tool | contract |
+| --- | --- |
+| `mush_exec` | one command line. Returns `state=ok` with output and exit status, `state=timeout` when the daemon deadline fired, or `state=background` with a job id when the command outlived its background threshold. |
+| `mush_job` | `{job}` checks one job; omit `job` to list. Poll this after `state=background` — do not re-run the command. |
+| `mush_cancel` | `{job}` stops one: queued work is dropped, running work is interrupted (guest or host program). |
+
+A `state=background` result means the command is **still running** in the
+daemon; its output is not in the tool result, and closing the connection does
+not stop it. The job ends when the command does, when `mush_cancel` is called,
+or when the daemon exits — job state is in memory, so a daemon restart drops
+the record (and kills the child).
+
+VFS commands run in the guest. Allowlisted host programs (`git`, `cargo`,
+`gh`, `fpl bob`, ...) run against a materialized overlay of the VFS and apply
+their source changes back; build output is ignored in both directions, and
+builds go through bob's fleet policy.
+
 ## Test harness
 
 ```sh
