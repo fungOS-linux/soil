@@ -75,7 +75,7 @@ impl soil::ble::ble::Host for State {
                 handle: i as u32 + 1,
                 name: d.name,
                 rssi: d.rssi,
-                ring_id: None,
+                device_id: None,
             })
             .collect())
     }
@@ -87,7 +87,7 @@ impl soil::ble::ble::Host for State {
             .ok_or(BleError::NotFound)?;
         let id = self.devices.get(index).cloned().ok_or(BleError::NotFound)?;
 
-        // The radio is exclusive: refuse to fight another host for the ring.
+        // The radio is exclusive: refuse to fight another host for the device.
         let lease = self
             .session
             .claim(&id, &self.host_id, LEASE_TTL_MS)
@@ -229,7 +229,7 @@ fn main() -> Result<()> {
 
     let mut linker = Linker::<State>::new(&engine);
     // The guest is a wasip2 component (std pulls in wasi:io/cli), so WASI must
-    // be present even though the ring protocol itself never touches it.
+    // be present even though the device protocol itself never touches it.
     wasmtime_wasi::p2::add_to_linker_sync::<State>(&mut linker)
         .map_err(anyhow::Error::from)
         .context("link wasi:cli")?;

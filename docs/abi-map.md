@@ -268,7 +268,7 @@ Any unsupported row is a named denial, not an empty success.
 3. **Next, highest value:** build a small read-only file-browser Spore on the
    now-implemented `soil:vfs`/`soil:index` host adapter, then wire
    `soil:canvas-input` into the S22/Fire TV hosts,
-   finish the BLE gaps (signed lease, DIS `ring-id`, Unibus publish, Android
+   finish the BLE gaps (signed lease, DIS `device-id`, Unibus publish, Android
    JNI), then the host adapters and denial fixtures for `time` and `storage`,
    then `api`, `mic`, `camera`. `audio` waits for a concrete Spore that plays
    something.

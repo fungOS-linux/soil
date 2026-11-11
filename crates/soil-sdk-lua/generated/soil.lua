@@ -144,7 +144,7 @@ end
 M.soil.ble.types = M.soil.ble.types or {}
 M.soil.ble.types.types = M.soil.ble.types.types or {}
 M.soil.ble.types.types.Characteristic = { fields = { { name = "uuid", type = "string" }, { name = "readable", type = "bool" }, { name = "writable", type = "bool" }, { name = "notifiable", type = "bool" } } }
-M.soil.ble.types.types.Device = { fields = { { name = "handle", type = "device-handle" }, { name = "name", type = "option<string>" }, { name = "rssi", type = "option<s16>" }, { name = "ring-id", type = "option<string>" } } }
+M.soil.ble.types.types.Device = { fields = { { name = "handle", type = "device-handle" }, { name = "name", type = "option<string>" }, { name = "rssi", type = "option<s16>" }, { name = "device-id", type = "option<string>" } } }
 M.soil.ble.types.types.DeviceHandle = { type = "u32" }
 M.soil.ble.types.types.Event = { NOTIFICATION = "notification", DISCONNECTED = "disconnected" }
 M.soil.ble.types.types.Notification = { fields = { { name = "char-uuid", type = "string" }, { name = "data", type = "list<u8>" } } }
