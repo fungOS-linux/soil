@@ -271,10 +271,27 @@ prints the page, and `markdown --version` prints the identity line. Both are
 reads of installed metadata, not a launch, so they work in a session with no
 display.
 
+## Host install
+
+`soil-install` is the host authority, separate from the store presenter:
+
+```sh
+soil-install install <file.spore> --root DIR [--keyring FILE] [--key FP]
+soil-install rollback --id ID --root DIR
+soil-install status --root DIR [--json]
+soil-install apply --index FILE --root DIR --packages DIR [--keyring FILE] [--write]
+```
+
+`install` verifies the tar and optional publisher signature, caches the tar by
+digest, unpacks into staging, and swaps the installed directory. `rollback`
+reinstalls the one previous digest. `apply` uses `soil-store plan` and applies
+only `live` and `restart`; `consent`, `system` and `hold` are reported, never
+applied. A write requires a keyring unless `--allow-unsigned-dev` is explicit.
+
 ## Not implemented
 
-- The host install capability. `soil-store` builds the signed catalog and
-  `spores/store` renders it; `soil:spore.install` is specified, not granted.
+- The store Spore's `soil:spore.install` capability. `soil-install` is the host
+  CLI; granting that capability to `spores/store` is still a separate step.
 - Publishing to IPFS or a mirror set. `pack` produces the bytes; pinning them is
   the publisher's step.
 - Revocation. Mycelium owns that record; a package carries no revocation state.
