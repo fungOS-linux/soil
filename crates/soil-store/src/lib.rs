@@ -24,12 +24,14 @@ pub mod listing;
 pub mod media;
 pub mod plan;
 pub mod publish;
+pub mod review;
 pub mod serve;
 pub mod snapshot;
 
 pub use index::{Checkpoint, Delegation, Entry, EntryKind, Index, Revocation, SCHEMA, Verified};
 pub use listing::{Listing, Shot};
 pub use plan::{Class, Installed, Plan, Update, plan};
+pub use review::Reviews;
 pub use snapshot::{Snapshot, Source, build as build_snapshot, to_lua};
 
 #[derive(Debug)]

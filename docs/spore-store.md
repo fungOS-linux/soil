@@ -490,6 +490,31 @@ stays as the long spelling), so a link copied out of the store opens the same
 listing anywhere the same store is reachable — including a browser projection
 of a Spore's own view.
 
+## Reviews on disk
+
+Reviews belong to the store operator, not the publisher: they are claims others
+made about a build, and the store is the thing that keeps and moderates them.
+
+```text
+review  = (spore_id, version, digest, principal, rating 1..=5, body, created_at)
+hide    = (digest, principal, reason, hidden_at)
+```
+
+`soil-store review add|hide|list --reviews FILE [--write]` maintains that file
+and `serve --reviews FILE` publishes it. Two rules are worth stating because
+they are what stop a rating from lying:
+
+- **A review is keyed by digest.** `GET /api/reviews?digest=…` returns the
+  aggregate for that build and, separately, the aggregate across every version
+  of the Spore. A review of `0.1.0` never silently becomes a review of `0.2.0`.
+- **Hiding is a record with a reason.** The review stays in the file and stops
+  counting, so moderation changes the aggregate without erasing what was said.
+
+The displayed score is the mean pulled toward a prior — the mean of reviews of
+*other* builds, or 3.0 when the store has none — with a weight of 20. A build's
+own ratings never set the centre they are pulled toward, so one five-star review
+reads as "one person liked it" rather than "perfect".
+
 ## The planner
 
 `soil-store` is the crate that answers the two questions a storefront has to get

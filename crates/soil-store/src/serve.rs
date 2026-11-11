@@ -30,6 +30,8 @@ pub struct Store {
     pub packages: Option<std::path::PathBuf>,
     /// Where the bytes behind an `ipfs://` link live, named by their CID.
     pub media: Option<std::path::PathBuf>,
+    /// The operator's review file, read once at startup.
+    pub reviews: Option<crate::Reviews>,
 }
 
 impl Store {
@@ -45,6 +47,7 @@ impl Store {
             index: index.cloned(),
             packages: None,
             media: None,
+            reviews: None,
         }
     }
 
@@ -58,6 +61,12 @@ impl Store {
     /// Serve artwork and listings from `dir`, keyed by CID.
     pub fn with_media(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.media = Some(dir.into());
+        self
+    }
+
+    /// Serve the operator's reviews.
+    pub fn with_reviews(mut self, reviews: crate::Reviews) -> Self {
+        self.reviews = Some(reviews);
         self
     }
 
@@ -79,6 +88,10 @@ impl Store {
 
     /// One catalog row, as an agent reads it.
     pub fn row(&self, entry: &Entry) -> serde_json::Value {
+        let ratings = self
+            .reviews
+            .as_ref()
+            .map(|reviews| reviews.aggregate(&entry.digest, &entry.spore_id));
         serde_json::json!({
             "id": entry.spore_id,
             "version": entry.version,
@@ -91,6 +104,7 @@ impl Store {
             "grants": entry.grants,
             "listing": entry.listing,
             "document": self.listing(entry),
+            "ratings": ratings,
             "url": format!("/s/{}", entry.spore_id),
         })
     }
@@ -386,8 +400,37 @@ impl Store {
             format!("<section><h2>Screenshots</h2><div class=\"shots\">{gallery}</div></section>")
         };
 
+        // A rating is a claim about a digest, so the heading says which one:
+        // "4.6 of this build" and "4.2 across all versions" are two facts.
+        let review_section = match (entry, self.reviews.as_ref()) {
+            (Some(entry), Some(reviews)) => {
+                let aggregate = reviews.aggregate(&entry.digest, &entry.spore_id);
+                let mut items = String::new();
+                for review in reviews.visible(&entry.digest) {
+                    items.push_str(&format!(
+                        r#"<li><span class="stars">{}</span><strong>{}</strong><p>{}</p></li>"#,
+                        "★".repeat(usize::from(review.rating)),
+                        escape(&review.principal),
+                        escape(&review.body),
+                    ));
+                }
+                if items.is_empty() {
+                    "<section><h2>Reviews</h2><p class=\"subtle\">No reviews of this build yet.</p></section>".to_owned()
+                } else {
+                    format!(
+                        "<section><h2>Reviews <span class=\"subtle\">★ {weighted:.1} · {count} of this build · {all:.1} across all versions ({total})</span></h2><ul class=\"reviews\">{items}</ul></section>",
+                        weighted = aggregate.current.weighted,
+                        count = aggregate.current.count,
+                        all = aggregate.all.weighted,
+                        total = aggregate.all.count,
+                    )
+                }
+            }
+            _ => String::new(),
+        };
+
         Some(format!(
-            r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{name} · Spore Store</title><style>{css}</style></head><body><header><div><p><a href="/">← Store</a></p><h1>{name} <span class="version">{version}</span></h1><p class="subtle">{publisher} · {license} · {id}</p></div></header><main><section><p class="summary">{description}</p>{update}{gallery}<h2>What it can reach</h2><ul class="grants">{grants}</ul></section><section><h2>Manual</h2><pre class="manual">{manual}</pre></section></main><footer>Rendered from the package manifest and the active catalog; the manual ships inside the package.</footer></body></html>"#,
+            r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{name} · Spore Store</title><style>{css}</style></head><body><header><div><p><a href="/">← Store</a></p><h1>{name} <span class="version">{version}</span></h1><p class="subtle">{publisher} · {license} · {id}</p></div></header><main><section><p class="summary">{description}</p>{update}{gallery}{reviews}<h2>What it can reach</h2><ul class="grants">{grants}</ul></section><section><h2>Manual</h2><pre class="manual">{manual}</pre></section></main><footer>Rendered from the package manifest and the active catalog; the manual ships inside the package.</footer></body></html>"#,
             css = CSS,
             name = escape(&name),
             version = escape(&version),
@@ -397,6 +440,7 @@ impl Store {
             description = escape(&description),
             update = update,
             gallery = gallery,
+            reviews = review_section,
             grants = grants,
             manual = manual,
         ))
@@ -494,6 +538,35 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
                     .into_bytes(),
                 JSON,
             )
+        }
+        ("GET", "/api/reviews") => {
+            let requested = param(query, "digest").unwrap_or_default();
+            match (
+                store.reviews.as_ref(),
+                store
+                    .catalog
+                    .values()
+                    .find(|entry| entry.digest == requested),
+            ) {
+                (Some(reviews), Some(entry)) => (
+                    "200 OK",
+                    serde_json::json!({
+                        "digest": requested,
+                        "spore_id": entry.spore_id,
+                        "ratings": reviews.aggregate(&requested, &entry.spore_id),
+                        "reviews": reviews.visible(&requested),
+                    })
+                    .to_string()
+                    .into_bytes(),
+                    JSON,
+                ),
+                (None, _) => ("404 Not Found", b"no reviews here\n".to_vec(), TEXT),
+                (Some(_), None) => (
+                    "404 Not Found",
+                    b"no such package in this catalog\n".to_vec(),
+                    TEXT,
+                ),
+            }
         }
         ("GET", "/api/search") => {
             let text = param(query, "q").unwrap_or_default();

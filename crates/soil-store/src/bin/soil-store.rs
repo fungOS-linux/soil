@@ -54,6 +54,9 @@ fn run(args: Vec<String>) -> Result<()> {
     if matches!(command, "search") {
         return search(rest);
     }
+    if matches!(command, "review") {
+        return review(rest);
+    }
     if matches!(command, "add") {
         return add_media(rest);
     }
@@ -154,6 +157,9 @@ fn run(args: Vec<String>) -> Result<()> {
             if let Some(media) = named(rest, "--media") {
                 store = store.with_media(media);
             }
+            if let Some(reviews) = named(rest, "--reviews") {
+                store = store.with_reviews(soil_store::Reviews::read(Path::new(&reviews))?);
+            }
             let listener = soil_store::serve::bind(&addr)?;
             match listener.local_addr() {
                 Ok(address) => eprintln!("soil-store: http://{address}/ on {addr}"),
@@ -253,6 +259,74 @@ fn entry_for(dir: &Path) -> Result<Entry> {
         publisher_key: None,
         signature: String::new(),
     })
+}
+
+/// `review`: the operator's review file.
+///
+/// The store holds the claims; it does not invent them. `add` appends what a
+/// signed-in principal said about one digest, `hide` records why a review stops
+/// counting, and `list` is what the operator reads before deciding.
+fn review(rest: &[String]) -> Result<()> {
+    let path = named(rest, "--reviews").ok_or_else(|| Error::Invalid(usage()))?;
+    let mut reviews = soil_store::Reviews::read(Path::new(&path))?;
+    match positional(rest).as_deref() {
+        Some("add") => {
+            let rating = named(rest, "--rating")
+                .ok_or_else(|| Error::Invalid(usage()))?
+                .parse::<u8>()
+                .map_err(|_| Error::Invalid("--rating must be 1..=5".into()))?;
+            reviews.add(soil_store::review::Review {
+                spore_id: named(rest, "--spore").ok_or_else(|| Error::Invalid(usage()))?,
+                version: named(rest, "--version").ok_or_else(|| Error::Invalid(usage()))?,
+                digest: named(rest, "--digest").ok_or_else(|| Error::Invalid(usage()))?,
+                principal: named(rest, "--principal").ok_or_else(|| Error::Invalid(usage()))?,
+                rating,
+                body: named(rest, "--body").unwrap_or_default(),
+                created_at: now_unix_s(),
+            })?;
+        }
+        Some("hide") => reviews.hide(soil_store::review::Hidden {
+            digest: named(rest, "--digest").ok_or_else(|| Error::Invalid(usage()))?,
+            principal: named(rest, "--principal").ok_or_else(|| Error::Invalid(usage()))?,
+            reason: named(rest, "--reason").ok_or_else(|| Error::Invalid(usage()))?,
+            hidden_at: now_unix_s(),
+        })?,
+        Some("list") => {
+            let digest = named(rest, "--digest");
+            let rows: Vec<_> = match &digest {
+                Some(digest) => reviews.visible(digest),
+                None => reviews.reviews.iter().collect(),
+            };
+            if flag(rest, "--json") {
+                println!(
+                    "{}",
+                    serde_json::json!({ "total": rows.len(), "reviews": rows })
+                );
+            } else {
+                for row in rows {
+                    println!(
+                        "{}★ {:<24} {} {}  {}",
+                        row.rating, row.principal, row.spore_id, row.version, row.body
+                    );
+                }
+            }
+            return Ok(());
+        }
+        _ => return Err(Error::Invalid(usage())),
+    }
+    if flag(rest, "--write") {
+        reviews.write(Path::new(&path))?;
+        eprintln!("soil-store: {} reviews → {path}", reviews.reviews.len());
+        return Ok(());
+    }
+    emit(rest, &reviews)
+}
+
+fn now_unix_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 /// `search`: the same answer the store's `/api/search` gives.
@@ -495,6 +569,8 @@ fn usage() -> String {
     "usage: soil-store index    --spores-root DIR [--source NAME] [-o FILE]
        soil-store listing  DIR [--media DIR] [-o FILE]
        soil-store search   QUERY --index FILE --spores-root DIR [--media DIR] [--packages DIR] [--category NAME] [--json]
+       soil-store review   add|hide|list --reviews FILE [--spore ID] [--version V] [--digest D] [--principal P]
+                           [--rating 1-5] [--body TEXT] [--reason TEXT] [--write] [--json]
        soil-store add      --media DIR FILE...
        soil-store delegate --publisher PRINCIPAL --operator-key KEY (--public-key FILE | --fingerprint KEY)
                            [--scope spore|*] [--days N] [--gnupg-home DIR] [-o FILE]
@@ -505,7 +581,7 @@ fn usage() -> String {
        soil-store verify   --index FILE --operator-key FILE
        soil-store plan     --index FILE --spores-root DIR [--json] [--pin ID=LABEL]
        soil-store snapshot --index FILE --spores-root DIR [-o FILE] [--source-name NAME] [--source-index CID]
-       soil-store serve    --index FILE --spores-root DIR [--packages DIR] [--media DIR] [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]
+       soil-store serve    --index FILE --spores-root DIR [--packages DIR] [--media DIR] [--reviews FILE] [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]
        soil-store --version"
         .into()
 }
