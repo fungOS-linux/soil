@@ -199,6 +199,10 @@ pub trait TerminalHost: Send {
     fn resize(&mut self, cols: u32, rows: u32) -> Result<(), String>;
     /// Move through scrollback. Negative is towards history.
     fn scroll(&mut self, delta: i32) -> Result<(), String>;
+
+    /// Wait until the grid moves past `after` or `timeout_ms` passes, and answer
+    /// the generation that is current then.
+    fn wait(&mut self, after: u64, timeout_ms: u32) -> Result<u64, String>;
 }
 
 struct NoTerminal;
@@ -217,6 +221,10 @@ impl TerminalHost for NoTerminal {
     }
 
     fn scroll(&mut self, _delta: i32) -> Result<(), String> {
+        Err("no terminal session attached".into())
+    }
+
+    fn wait(&mut self, _after: u64, _timeout_ms: u32) -> Result<u64, String> {
         Err("no terminal session attached".into())
     }
 }
@@ -529,6 +537,10 @@ impl soil::terminal_screen::screen::Host for WebGpuHost {
         self.terminal.scroll(delta)
     }
 
+    fn wait(&mut self, after: u64, timeout_ms: u32) -> std::result::Result<u64, String> {
+        self.terminal.wait(after, timeout_ms)
+    }
+
     fn resize(&mut self, cols: u32, rows: u32) -> std::result::Result<(), String> {
         self.terminal.resize(cols, rows)
     }
@@ -573,6 +585,9 @@ impl WasiWebGpuCtxView for WebGpuHost {
 pub struct WebGpuRuntime {
     engine: Engine,
     linker: Linker<WebGpuHost>,
+    /// Where compiled components are cached. Compiling a Spore takes tens of
+    /// seconds; deserializing one that has not changed takes milliseconds.
+    component_cache: Option<std::path::PathBuf>,
 }
 
 impl WebGpuRuntime {
@@ -606,7 +621,64 @@ impl WebGpuRuntime {
         soil::terminal_screen::screen::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:terminal-screen")?;
-        Ok(Self { engine, linker })
+        Ok(Self {
+            engine,
+            linker,
+            component_cache: None,
+        })
+    }
+
+    /// Keep compiled components in `directory`, named by the module's digest.
+    /// A Spore that has not changed starts from the cache instead of being
+    /// compiled again.
+    pub fn with_component_cache(mut self, directory: impl Into<std::path::PathBuf>) -> Self {
+        self.component_cache = Some(directory.into());
+        self
+    }
+
+    /// Compile a component, or reuse the cached compilation of the same bytes.
+    fn component(&self, bytes: &[u8]) -> Result<Component> {
+        let cache_path = self.component_cache.as_ref().map(|directory| {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(bytes);
+            let mut name = String::with_capacity(digest.len() * 2 + 8);
+            for byte in digest {
+                use std::fmt::Write as _;
+                let _ = write!(name, "{byte:02x}");
+            }
+            directory.join(format!("{name}.cwasm"))
+        });
+        if let Some(path) = &cache_path
+            && let Ok(serialized) = std::fs::read(path)
+        {
+            // The file is ours: it is named by the digest of the module it was
+            // compiled from, so a mismatch means a stale cache, not a bad actor.
+            match unsafe { Component::deserialize(&self.engine, &serialized) } {
+                Ok(component) => return Ok(component),
+                Err(error) => {
+                    eprintln!("soil-webgpu: cached component unusable ({error}); compiling");
+                }
+            }
+        }
+        let component = Component::new(&self.engine, bytes)
+            .map_err(anyhow::Error::from)
+            .context("compile WebGPU component")?;
+        if let Some(path) = &cache_path {
+            if let Some(directory) = path.parent() {
+                let _ = std::fs::create_dir_all(directory);
+            }
+            match component.serialize() {
+                Ok(serialized) => {
+                    if let Err(error) = std::fs::write(path, serialized) {
+                        eprintln!("soil-webgpu: could not cache component: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("soil-webgpu: component cannot be serialized: {error}");
+                }
+            }
+        }
+        Ok(component)
     }
 
     pub fn engine(&self) -> &Engine {
@@ -638,9 +710,7 @@ impl WebGpuRuntime {
 
     /// Run one guest against a fully specified host.
     pub async fn run_component_with(&self, bytes: &[u8], setup: HostSetup) -> Result<u32> {
-        let component = Component::new(&self.engine, bytes)
-            .map_err(anyhow::Error::from)
-            .context("compile WebGPU component")?;
+        let component = self.component(bytes)?;
         let mut store = Store::new(&self.engine, WebGpuHost::new(setup)?);
         let instance = Runner::instantiate_async(&mut store, &component, &self.linker)
             .await

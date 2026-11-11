@@ -67,15 +67,17 @@ fn main() -> Result<()> {
         let _ = std::fs::remove_file(&socket);
     }
 
-    let listener = UnixListener::bind(&socket)
-        .with_context(|| format!("bind {}", socket.display()))?;
+    let listener =
+        UnixListener::bind(&socket).with_context(|| format!("bind {}", socket.display()))?;
     println!("soil-termd: {}", socket.display());
 
     let daemon = Arc::new(Daemon::new(cols, rows));
     let reaper = Arc::clone(&daemon);
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(30));
-        reaper.reap();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(30));
+            reaper.reap();
+        }
     });
 
     for stream in listener.incoming() {
@@ -142,7 +144,10 @@ impl Daemon {
             pty,
             last_active: Mutex::new(Instant::now()),
         });
-        self.sessions.lock().unwrap().insert(id, Arc::clone(&session));
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(id, Arc::clone(&session));
         Ok(session)
     }
 
@@ -151,7 +156,10 @@ impl Daemon {
     }
 
     fn close(&self, id: u64) -> bool {
-        self.sessions.lock().map(|mut s| s.remove(&id).is_some()).unwrap_or(false)
+        self.sessions
+            .lock()
+            .map(|mut s| s.remove(&id).is_some())
+            .unwrap_or(false)
     }
 
     /// A session with no traffic for half an hour is a shell nobody is using.
@@ -165,7 +173,11 @@ impl Daemon {
                     .values()
                     .filter(|session| {
                         session.target_kind() != "mush"
-                            && session.last_active.lock().map(|t| t.elapsed() > REAP_AFTER).unwrap_or(false)
+                            && session
+                                .last_active
+                                .lock()
+                                .map(|t| t.elapsed() > REAP_AFTER)
+                                .unwrap_or(false)
                     })
                     .map(|session| session.id)
                     .collect()
@@ -179,7 +191,11 @@ impl Daemon {
 
 impl Session {
     fn target_kind(&self) -> &'static str {
-        if self.target.starts_with("mush:") { "mush" } else { "other" }
+        if self.target.starts_with("mush:") {
+            "mush"
+        } else {
+            "other"
+        }
     }
 
     fn touch(&self) {
@@ -204,22 +220,31 @@ fn serve(mut stream: UnixStream, daemon: &Daemon) -> Result<()> {
     // the connection open waiting for the answer it has not been sent yet.
     let mut request = String::new();
     let mut reader = BufReader::new(stream.try_clone()?);
-    reader.by_ref().take(MAX_REQUEST as u64).read_line(&mut request)?;
+    reader
+        .by_ref()
+        .take(MAX_REQUEST as u64)
+        .read_line(&mut request)?;
 
     let value: Value = match serde_json::from_str(request.trim()) {
         Ok(value) => value,
         Err(error) => {
-            return reply(&mut stream, json!({ "error": format!("bad request: {error}") }));
+            return reply(
+                &mut stream,
+                json!({ "error": format!("bad request: {error}") }),
+            );
         }
     };
     let op = value.get("op").and_then(Value::as_str).unwrap_or_default();
     let id = value.get("id").and_then(Value::as_u64);
 
     match op {
-        "health" => reply(&mut stream, json!({
-            "ok": true,
-            "sessions": daemon.sessions.lock().map(|s| s.len()).unwrap_or(0),
-        })),
+        "health" => reply(
+            &mut stream,
+            json!({
+                "ok": true,
+                "sessions": daemon.sessions.lock().map(|s| s.len()).unwrap_or(0),
+            }),
+        ),
         "list" => {
             let sessions: Vec<Value> = daemon
                 .sessions
@@ -229,12 +254,21 @@ fn serve(mut stream: UnixStream, daemon: &Daemon) -> Result<()> {
             reply(&mut stream, json!({ "sessions": sessions }))
         }
         "open" => {
-            let label = value.get("label").and_then(Value::as_str).unwrap_or("session");
+            let label = value
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("session");
             let target = value.get("target").and_then(Value::as_str).unwrap_or(label);
             let argv: Vec<String> = value
                 .get("argv")
                 .and_then(Value::as_array)
-                .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default();
             match daemon.open(label, target, &argv) {
                 Ok(session) => reply(&mut stream, session.json()),
@@ -246,7 +280,13 @@ fn serve(mut stream: UnixStream, daemon: &Daemon) -> Result<()> {
                 let bytes: Vec<u8> = value
                     .get("data")
                     .and_then(Value::as_array)
-                    .map(|items| items.iter().filter_map(|item| item.as_u64()).map(|byte| byte as u8).collect())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_u64())
+                            .map(|byte| byte as u8)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 session.touch();
                 session.host.scroll_to_bottom();
@@ -287,7 +327,10 @@ fn serve(mut stream: UnixStream, daemon: &Daemon) -> Result<()> {
             Some(id) => reply(&mut stream, json!({ "ok": daemon.close(id) })),
             None => reply(&mut stream, json!({ "error": "close needs an id" })),
         },
-        other => reply(&mut stream, json!({ "error": format!("unknown op {other}") })),
+        other => reply(
+            &mut stream,
+            json!({ "error": format!("unknown op {other}") }),
+        ),
     }
 }
 
@@ -310,7 +353,9 @@ fn lua(snapshot: &Snapshot) -> String {
         lua_string(&snapshot.title)
     ));
     if let Some((x, y)) = snapshot.cursor {
-        out.push_str(&format!("  cursor = {{ x = {x}, y = {y}, visible = true }},\n"));
+        out.push_str(&format!(
+            "  cursor = {{ x = {x}, y = {y}, visible = true }},\n"
+        ));
     }
     if let Some(scroll) = snapshot.scroll {
         out.push_str(&format!(
@@ -322,7 +367,8 @@ fn lua(snapshot: &Snapshot) -> String {
     for y in 0..snapshot.rows {
         let mut runs: Vec<String> = Vec::new();
         let mut current: Option<(String, Option<String>, Option<String>, u8)> = None;
-        let flush = |run: Option<(String, Option<String>, Option<String>, u8)>, runs: &mut Vec<String>| {
+        let flush = |run: Option<(String, Option<String>, Option<String>, u8)>,
+                     runs: &mut Vec<String>| {
             if let Some((text, fg, bg, flags)) = run {
                 runs.push(format!(
                     "{{ {}, {}, {}, {} }}",
@@ -334,19 +380,35 @@ fn lua(snapshot: &Snapshot) -> String {
             }
         };
         for x in 0..snapshot.cols {
-            let Some(cell) = snapshot.cell(x, y) else { break };
+            let Some(cell) = snapshot.cell(x, y) else {
+                break;
+            };
             if cell.wide_tail {
                 continue;
             }
-            let text = if cell.text.is_empty() { " ".to_string() } else { cell.text.clone() };
+            let text = if cell.text.is_empty() {
+                " ".to_string()
+            } else {
+                cell.text.clone()
+            };
             let fg = cell.fg.map(hex);
             let bg = cell.bg.map(hex);
             let mut flags = 0u8;
-            if cell.bold { flags |= 1; }
-            if cell.italic { flags |= 2; }
-            if cell.underline { flags |= 4; }
-            if cell.faint { flags |= 8; }
-            if cell.inverse { flags |= 16; }
+            if cell.bold {
+                flags |= 1;
+            }
+            if cell.italic {
+                flags |= 2;
+            }
+            if cell.underline {
+                flags |= 4;
+            }
+            if cell.faint {
+                flags |= 8;
+            }
+            if cell.inverse {
+                flags |= 16;
+            }
             match &mut current {
                 Some((run_text, run_fg, run_bg, run_flags))
                     if *run_fg == fg && *run_bg == bg && *run_flags == flags =>
@@ -360,7 +422,10 @@ fn lua(snapshot: &Snapshot) -> String {
             }
         }
         flush(current.take(), &mut runs);
-        out.push_str(&format!("    {{ y = {y}, runs = {{ {} }} }},\n", runs.join(", ")));
+        out.push_str(&format!(
+            "    {{ y = {y}, runs = {{ {} }} }},\n",
+            runs.join(", ")
+        ));
     }
     out.push_str("  },\n}\n");
     out
@@ -380,7 +445,9 @@ fn lua_string(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\{:03}", c as u32)),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\{:03}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -419,16 +486,18 @@ impl Pty {
         {
             let host = host.clone();
             let exited = Arc::clone(&exited);
-            thread::Builder::new().name("soil-termd-pty".into()).spawn(move || {
-                let mut buffer = [0u8; 8192];
-                loop {
-                    match reader.read(&mut buffer) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => host.write(&buffer[..n]),
+            thread::Builder::new()
+                .name("soil-termd-pty".into())
+                .spawn(move || {
+                    let mut buffer = [0u8; 8192];
+                    loop {
+                        match reader.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => host.write(&buffer[..n]),
+                        }
                     }
-                }
-                exited.store(true, Ordering::Release);
-            })?;
+                    exited.store(true, Ordering::Release);
+                })?;
         }
         Ok(Self {
             master: Mutex::new(pair.master),
@@ -447,7 +516,12 @@ impl Pty {
 
     fn resize(&self, cols: u16, rows: u16) {
         if let Ok(master) = self.master.lock() {
-            let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            let _ = master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
         }
     }
 

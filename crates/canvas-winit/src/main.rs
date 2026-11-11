@@ -125,21 +125,52 @@ impl CatalogHost for SporeCatalog {
             .as_ref()
             .ok_or(CatalogError::Unsupported)?;
         let path = installed.root.join(&module.path);
-        let mut child =
-            std::process::Command::new(std::env::current_exe().map_err(|_| CatalogError::Io)?)
-                .arg(&path)
-                .spawn()
-                .map_err(|_| CatalogError::Io)?;
-        // Reap the child without blocking the launcher's event loop.
+        let executable = std::env::current_exe().map_err(|_| CatalogError::Io)?;
+        let mut command = launch_command(&executable, &path);
+        let mut child = command.spawn().map_err(|_| CatalogError::Io)?;
+        // Reap the child without blocking the launcher's event loop. Launch
+        // Services hands the window to another process, so there is often
+        // nothing to wait for; `open` exits as soon as the app is running.
         std::thread::spawn(move || {
             let _ = child.wait();
         });
         Ok(CatalogLaunched {
             id: id.to_owned(),
             surface: surface.to_owned(),
-            target: format!("canvas-winit {}", path.display()),
+            target: format!("fungOS {}", path.display()),
         })
     }
+}
+
+/// How one Spore opens another.
+///
+/// A bundled app is started through Launch Services: it gets its own activation
+/// and its own session, so its window becomes key and its clicks and keys reach
+/// it. A binary run from a shell has no bundle to launch, so it re-executes
+/// itself — with a null stdin and stdout, because a Spore that inherits its
+/// parent's terminal inherits the wrong tty along with it.
+fn launch_command(executable: &std::path::Path, module: &std::path::Path) -> std::process::Command {
+    if let Some(bundle) = bundle_root(executable) {
+        let mut command = std::process::Command::new("/usr/bin/open");
+        command.arg("-n").arg(bundle).arg("--args").arg(module);
+        return command;
+    }
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg(module)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+/// The `.app` an executable lives in, if it lives in one.
+fn bundle_root(executable: &std::path::Path) -> Option<&std::path::Path> {
+    executable.ancestors().find(|ancestor| {
+        ancestor
+            .extension()
+            .is_some_and(|extension| extension == "app")
+    })
 }
 
 struct FramePresenter {
@@ -192,6 +223,11 @@ struct App {
     scale: f32,
     /// Surface extent shared with the presenter; the window owns it.
     extent: Arc<Mutex<(u32, u32)>>,
+    /// When the window opened, so the splash animation has a clock.
+    opened: std::time::Instant,
+    /// When the splash last painted, so it runs at a steady rate instead of
+    /// spinning the event loop for the whole start-up.
+    splashed: std::time::Instant,
     spores: PathBuf,
     modifiers: ModifiersState,
     started: bool,
@@ -242,7 +278,9 @@ impl App {
             let result = (|| -> Result<()> {
                 let bytes =
                     std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
-                let runtime = WebGpuRuntime::new()?;
+                // A Spore that has not changed should not be compiled again:
+                // the first start is seconds, every one after it is a read.
+                let runtime = WebGpuRuntime::new()?.with_component_cache(component_cache(&module));
                 let catalog = SporeCatalog::new(&spores)
                     .map_err(|error| anyhow::anyhow!("catalog: {error:?}"))?;
                 let status = pollster::block_on(runtime.run_component_with(
@@ -286,7 +324,13 @@ impl App {
         }
     }
 
-    fn paint_splash(&mut self, (width, height): (u32, u32)) {
+    /// What the window shows until the Spore's first frame arrives.
+    ///
+    /// Starting a Spore is not instant: a component compiles, a wgpu device
+    /// comes up, and text shaping loads fonts. The mark breathes through that
+    /// wait with a lissajous pair the way the fungus draws itself, so the pause
+    /// reads as starting rather than as hung.
+    fn paint_splash(&mut self, (width, height): (u32, u32), phase: f32) {
         let Some(surface) = self.surface.as_mut() else {
             return;
         };
@@ -299,26 +343,57 @@ impl App {
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
-        buffer.fill(0x0c10_15);
-        let logo = image::load_from_memory(include_bytes!("../assets/fungos.png"))
-            .ok()
-            .map(|image| image.to_rgba8());
-        if let Some(logo) = logo {
-            let side = 256.min(width.get()).min(height.get());
+        let (width_px, height_px) = (width.get(), height.get());
+        buffer.fill(BACKGROUND);
+        draw_lissajous(
+            &mut buffer,
+            width_px,
+            height_px,
+            phase,
+            SplashCurve {
+                a: 3.0,
+                b: 2.0,
+                delta: std::f32::consts::FRAC_PI_2,
+                radius: 0.42,
+                color: ACCENT_CURVE,
+            },
+        );
+        draw_lissajous(
+            &mut buffer,
+            width_px,
+            height_px,
+            phase,
+            SplashCurve {
+                a: 5.0,
+                b: 4.0,
+                delta: 0.0,
+                radius: 0.30,
+                color: ACCENT_GLOW,
+            },
+        );
+        if let Some(logo) = logo_mark() {
+            let side = 220.min(width_px).min(height_px);
             let scaled =
-                image::imageops::resize(&logo, side, side, image::imageops::FilterType::Lanczos3);
-            let left = (width.get() - side) / 2;
-            let top = (height.get() - side) / 2;
+                image::imageops::resize(logo, side, side, image::imageops::FilterType::Lanczos3);
+            let left = (width_px - side) / 2;
+            let top = (height_px - side) / 2;
             for (x, y, pixel) in scaled.enumerate_pixels() {
-                let Some(destination) =
-                    buffer.get_mut(((top + y) * width.get() + left + x) as usize)
+                // The mark is an app, not a picture: mask it to the same
+                // rounded square the Dock icon uses, so the window and the Dock
+                // show one shape at every size.
+                let coverage = squircle_coverage(x, y, side);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let Some(destination) = buffer.get_mut(((top + y) * width_px + left + x) as usize)
                 else {
                     continue;
                 };
-                let alpha = u32::from(pixel[3]);
-                if alpha == 0 {
+                let alpha = u32::from(pixel[3]) as f32 * coverage;
+                if alpha <= 0.0 {
                     continue;
                 }
+                let alpha = alpha.round() as u32;
                 let blend = |foreground: u8, background: u8| {
                     ((u32::from(foreground) * alpha + u32::from(background) * (255 - alpha)) / 255)
                         as u8
@@ -446,7 +521,7 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.context = Some(context);
         self.surface = Some(surface);
-        self.paint_splash((physical.width, physical.height));
+        self.paint_splash((physical.width, physical.height), 0.0);
         self.start_component(self.window.as_ref().unwrap().clone());
     }
 
@@ -460,7 +535,18 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
                 self.take_frames(event_loop);
-                self.paint();
+                if self.frame.is_some() {
+                    self.paint();
+                } else if let Some(window) = &self.window {
+                    // Thirty frames a second is enough for a slow curve and
+                    // leaves the machine to compile the Spore.
+                    if self.splashed.elapsed() >= std::time::Duration::from_millis(33) {
+                        self.splashed = std::time::Instant::now();
+                        let size = window.inner_size();
+                        let phase = self.opened.elapsed().as_secs_f32();
+                        self.paint_splash((size.width, size.height), phase);
+                    }
+                }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
@@ -533,12 +619,29 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let before = self.frames_seen;
         self.take_frames(event_loop);
-        if self.frames_seen > before
-            && let Some(window) = &self.window
+        if let Some(window) = &self.window
+            && (self.frames_seen > before || self.frame.is_none())
         {
+            // Before the first frame the splash is the only thing on screen, so
+            // it keeps its own clock; afterwards a redraw means a new frame.
             window.request_redraw();
         }
     }
+}
+
+/// Where compiled Spores are kept. Outside the bundle, because a cache is not
+/// part of what was installed, and keyed by module digest so a new build is a
+/// new file rather than a stale hit.
+fn component_cache(module: &std::path::Path) -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let base = match home {
+        Some(home) => home.join("Library/Caches/dev.fungos.launcher"),
+        None => module
+            .parent()
+            .map(|parent| parent.join(".components"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".components")),
+    };
+    base
 }
 
 /// What the window calls itself.
@@ -586,6 +689,79 @@ fn point(value: String) -> Result<(f32, f32)> {
         x.trim().parse().context("X is not a number")?,
         y.trim().parse().context("Y is not a number")?,
     ))
+}
+
+/// The colour a window sits on before its Spore draws anything.
+const BACKGROUND: u32 = 0x0c10_15;
+/// The two hues the mark draws itself with: the fungal line and its glow.
+const ACCENT_CURVE: (f32, f32, f32) = (0.60, 0.80, 0.52);
+const ACCENT_GLOW: (f32, f32, f32) = (0.36, 0.55, 0.46);
+
+/// One parametric curve: x = sin(a·t + δ), y = sin(b·t).
+struct SplashCurve {
+    a: f32,
+    b: f32,
+    delta: f32,
+    /// Fraction of the short side the figure spans.
+    radius: f32,
+    color: (f32, f32, f32),
+}
+
+fn draw_lissajous(buffer: &mut [u32], width: u32, height: u32, phase: f32, curve: SplashCurve) {
+    let (half_w, half_h) = (width as f32 / 2.0, height as f32 / 2.0);
+    let radius = curve.radius * width.min(height) as f32;
+    let steps = 2400;
+    for step in 0..steps {
+        let t = step as f32 / steps as f32 * std::f32::consts::TAU + phase;
+        let x = half_w + radius * (curve.a * t + curve.delta).sin();
+        let y = half_h + radius * (curve.b * t).sin();
+        // A 2x2 splat with a soft centre reads as a thin glowing line without a
+        // rasteriser; the splash only has to hold a window for a few seconds.
+        for (dx, dy, weight) in [(0i32, 0i32, 1.0f32), (1, 0, 0.5), (0, 1, 0.5), (1, 1, 0.25)] {
+            let px = x as i32 + dx;
+            let py = y as i32 + dy;
+            if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+                continue;
+            }
+            let Some(pixel) = buffer.get_mut((py as u32 * width + px as u32) as usize) else {
+                continue;
+            };
+            let add = |channel: u32, value: f32| {
+                let current = channel as f32 / 255.0;
+                ((current + value * weight * 0.12).min(1.0) * 255.0) as u32
+            };
+            let r = add((*pixel >> 16) & 0xff, curve.color.0);
+            let g = add((*pixel >> 8) & 0xff, curve.color.1);
+            let b = add(*pixel & 0xff, curve.color.2);
+            *pixel = (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
+/// The mark, decoded once: the splash redraws many times while a Spore starts.
+fn logo_mark() -> Option<&'static image::RgbaImage> {
+    static MARK: std::sync::OnceLock<Option<image::RgbaImage>> = std::sync::OnceLock::new();
+    MARK.get_or_init(|| {
+        image::load_from_memory(include_bytes!("../assets/fungos.png"))
+            .ok()
+            .map(|image| image.to_rgba8())
+    })
+    .as_ref()
+}
+
+/// Coverage of the rounded square an app icon is cut to, 0 outside and 1 well
+/// inside. A superellipse would be more faithful to macOS; a rounded rect is
+/// what every icon looks like at the sizes this draws.
+fn squircle_coverage(x: u32, y: u32, side: u32) -> f32 {
+    let side = side as f32;
+    let radius = side * 0.2237;
+    let half = side / 2.0;
+    let px = x as f32 + 0.5 - half;
+    let py = y as f32 + 0.5 - half;
+    let qx = (px.abs() - (half - radius)).max(0.0);
+    let qy = (py.abs() - (half - radius)).max(0.0);
+    let distance = (qx * qx + qy * qy).sqrt() - radius;
+    (0.5 - distance).clamp(0.0, 1.0)
 }
 
 fn pointer_button(button: MouseButton) -> Option<PointerButton> {
@@ -643,6 +819,7 @@ fn main() -> Result<()> {
     let mut capture = None;
     let mut frames = None;
     let mut key = None;
+    let mut keys = None;
     let mut pointer = None;
     let mut click = None;
     let mut spores = None;
@@ -663,6 +840,7 @@ fn main() -> Result<()> {
                 );
             }
             "--key" => key = Some(args.next().context("--key needs a key name")?),
+            "--keys" => keys = Some(args.next().context("--keys needs text")?),
             "--pointer" => pointer = Some(point(args.next().context("--pointer needs X,Y")?)?),
             "--click" => click = Some(point(args.next().context("--click needs X,Y")?)?),
             "--spores" => {
@@ -711,6 +889,21 @@ fn main() -> Result<()> {
                 meta: false,
             }));
     }
+    if let Some(text) = keys {
+        let mut queue = input.lock().expect("input queue poisoned");
+        for character in text.chars() {
+            let character = character.to_string();
+            queue.push_back(InputEvent::Key(InputKey {
+                key: character.clone(),
+                text: Some(character),
+                pressed: true,
+                shift: false,
+                control: false,
+                alt: false,
+                meta: false,
+            }));
+        }
+    }
     if let Some((x, y)) = pointer {
         input
             .lock()
@@ -751,6 +944,8 @@ fn main() -> Result<()> {
         pointer: (0.0, 0.0),
         scale: 1.0,
         extent: Arc::new(Mutex::new((LOGICAL_SIZE.0 as u32, LOGICAL_SIZE.1 as u32))),
+        opened: std::time::Instant::now(),
+        splashed: std::time::Instant::now(),
         modifiers: ModifiersState::default(),
         spores: spores.unwrap_or_else(|| {
             let home = std::env::var_os("HOME")

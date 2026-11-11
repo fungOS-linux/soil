@@ -3,7 +3,10 @@
 //! The Spore never sees a file descriptor or a process. It asks for a
 //! snapshot, renders the cells, and sends keys back; this type owns the rest.
 
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    sync::{Arc, Mutex},
+};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use soil_webgpu::{TerminalCell, TerminalHost, TerminalSnapshot};
@@ -11,7 +14,9 @@ use soil_webgpu::{TerminalCell, TerminalHost, TerminalSnapshot};
 struct State {
     host: soil_vt::Host,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// Shared with the reader thread, which writes the emulator's answers back
+    /// as soon as the program's line has been parsed.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
     _reader: std::thread::JoinHandle<()>,
 }
@@ -19,9 +24,6 @@ struct State {
 pub struct PtyTerminal {
     cols: u16,
     rows: u16,
-    /// The grid generation the last snapshot reported, so replies the emulator
-    /// queued while parsing that output go back to the program once.
-    seen: u64,
     state: Option<State>,
 }
 
@@ -30,7 +32,6 @@ impl PtyTerminal {
         Self {
             cols,
             rows,
-            seen: 0,
             state: None,
         }
     }
@@ -74,17 +75,32 @@ impl State {
             .master
             .try_clone_reader()
             .map_err(|error| format!("pty reader: {error}"))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|error| format!("pty writer: {error}"))?;
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
+            pair.master
+                .take_writer()
+                .map_err(|error| format!("pty writer: {error}"))?,
+        ));
+        let replies = Arc::clone(&writer);
         let emulator = host.clone();
         let reader = std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
-                    Ok(read) => emulator.write(&buffer[..read]),
+                    Ok(read) => {
+                        emulator.write(&buffer[..read]);
+                        // A reply answers a question the program asked, so it
+                        // goes back before the program's next line is read:
+                        // delaying it to the next frame lands it after the
+                        // prompt and the shell echoes it as text.
+                        let answers = emulator.drain_responses();
+                        if !answers.is_empty()
+                            && let Ok(mut replies) = replies.lock()
+                        {
+                            let _ = replies.write_all(&answers);
+                            let _ = replies.flush();
+                        }
+                    }
                 }
             }
         });
@@ -100,21 +116,9 @@ impl State {
 
 impl TerminalHost for PtyTerminal {
     fn snapshot(&mut self) -> Result<TerminalSnapshot, String> {
-        let seen = self.seen;
         let state = self.ensure()?;
         let snapshot = state.host.snapshot();
         let generation = state.host.generation();
-        if generation != seen && generation != 0 {
-            // Device status reports and mode queries are answers, not output.
-            // A program that asked one waits for it, so they go straight back
-            // down the same pty the program is reading.
-            let responses = state.host.drain_responses();
-            if !responses.is_empty() {
-                let _ = state.writer.write_all(&responses);
-                let _ = state.writer.flush();
-            }
-        }
-        self.seen = generation;
         Ok(TerminalSnapshot {
             cols: u32::from(snapshot.cols),
             rows: u32::from(snapshot.rows),
@@ -137,9 +141,10 @@ impl TerminalHost for PtyTerminal {
                     wide_tail: cell.wide_tail,
                 })
                 .collect(),
+            // soil-vt reports (column, row); the boundary type says (row, column).
             cursor: snapshot
                 .cursor
-                .map(|(row, col)| (u32::from(row), u32::from(col))),
+                .map(|(column, row)| (u32::from(row), u32::from(column))),
             title: snapshot.title.clone(),
             generation,
         })
@@ -147,11 +152,26 @@ impl TerminalHost for PtyTerminal {
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
         let state = self.ensure()?;
-        state
-            .writer
+        let mut writer = state.writer.lock().map_err(|_| "pty writer poisoned")?;
+        writer
             .write_all(bytes)
-            .and_then(|_| state.writer.flush())
+            .and_then(|_| writer.flush())
             .map_err(|error| format!("pty write: {error}"))
+    }
+
+    fn wait(&mut self, after: u64, timeout_ms: u32) -> Result<u64, String> {
+        let state = self.ensure()?;
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
+        loop {
+            let generation = state.host.generation();
+            // A millisecond is below what a person can see and keeps the
+            // component thread responsive to a key that arrives mid-wait.
+            if generation != after || std::time::Instant::now() >= deadline {
+                return Ok(generation);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     fn scroll(&mut self, delta: i32) -> Result<(), String> {

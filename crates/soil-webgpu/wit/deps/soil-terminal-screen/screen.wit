@@ -29,6 +29,11 @@ interface screen {
   }
 
   snapshot: func() -> result<grid, string>;
+  /// Block until the grid changes or the timeout expires, and answer the
+  /// generation that is current when it returns. A renderer waits on this
+  /// instead of polling, so a keystroke's echo is drawn the moment the
+  /// emulator publishes it rather than on the next tick.
+  wait: func(after: u64, timeout-ms: u32) -> result<u64, string>;
   write: func(bytes: list<u8>) -> result<_, string>;
   /// Move the viewport through scrollback. Negative is towards history;
   /// the next snapshot already reflects the move, so a Spore never tracks
