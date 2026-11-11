@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 soil-spore = { path = "../soil-spore" }
+ureq = "2"
 anyhow = "1"
 wasi-webgpu-wasmtime = { git = "https://github.com/fungOS-linux/wasi-gfx-runtime", rev = "9624cae" }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }

@@ -7367,15 +7367,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "soil-spore-host"
-version = "0.1.0"
-dependencies = [
- "soil-install",
- "soil-spore",
- "tempfile",
-]
-
-[[package]]
 name = "soil-store"
 version = "0.1.0"
 dependencies = [
@@ -7536,6 +7527,7 @@ dependencies = [
  "pollster",
  "sha2 0.10.9",
  "soil-spore",
+ "ureq 2.12.1",
  "wasi-webgpu-wasmtime",
  "wasmtime",
  "wasmtime-wasi",
