@@ -6861,6 +6861,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-desktop"
+version = "0.1.0"
+
+[[package]]
 name = "soil-dfm-viz"
 version = "0.1.0"
 dependencies = [
