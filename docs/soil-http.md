@@ -141,7 +141,8 @@ soil-http --allow http://192.168.1.10:80 \
 The guest URL contains `/api/__CREDENTIAL__/...`; the host leases the secret for
 one fetch, percent-encodes it as one path segment, substitutes it, and redacts
 the value from `final-url`. `geoded` is read-only over its socket; storing the
-key is the operator `--put` step.
+key is the operator `--put` step, followed by a broker restart so it reloads the
+store.
 
 ## Next
 
