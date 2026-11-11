@@ -2298,6 +2298,96 @@ fn validate_geode_label(label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Verify a detached armored signature over an arbitrary payload.
+///
+/// This is the catalog/delegation counterpart to [`verify_signature`], which is
+/// tied to a package file. The public key is imported into a temporary GnuPG
+/// home for one verification and then removed. A missing `gpg` fails closed.
+pub fn verify_detached(public_key: &[u8], payload: &[u8], signature: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let base = if Path::new("/tmp").is_dir() {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let home = tempfile::Builder::new()
+        .prefix("soil-pgp-")
+        .tempdir_in(&base)
+        .map_err(|error| Error::Tool(format!("temporary GnuPG home: {error}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700))
+            .map_err(|error| Error::Tool(format!("protect GnuPG home: {error}")))?;
+    }
+
+    let import = {
+        let mut command = Command::new("gpg");
+        command
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--batch", "--no-tty", "--import"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|error| Error::Tool(format!("gpg: {error}")))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Tool("gpg import has no stdin".into()))?
+            .write_all(public_key)
+            .map_err(|error| Error::Tool(format!("gpg import: {error}")))?;
+        child
+            .wait_with_output()
+            .map_err(|error| Error::Tool(format!("gpg import: {error}")))?
+    };
+    if !import.status.success() {
+        return Err(Error::Signature(format!(
+            "could not import public key: {}",
+            String::from_utf8_lossy(&import.stderr).trim()
+        )));
+    }
+
+    let signature_path = home.path().join("signature.asc");
+    let payload_path = home.path().join("payload");
+    fs::write(&signature_path, signature)
+        .map_err(|error| Error::Io(format!("{}: {error}", signature_path.display())))?;
+    fs::write(&payload_path, payload)
+        .map_err(|error| Error::Io(format!("{}: {error}", payload_path.display())))?;
+
+    let verified = {
+        let mut command = Command::new("gpg");
+        command
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--batch", "--no-tty", "--verify"])
+            .arg(&signature_path)
+            .arg(&payload_path);
+        let output = command
+            .output()
+            .map_err(|error| Error::Tool(format!("gpg verify: {error}")))?;
+        let _ = Command::new("gpgconf")
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--kill", "all"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        output
+    };
+    if verified.status.success() {
+        Ok(())
+    } else {
+        Err(Error::Signature(
+            String::from_utf8_lossy(&verified.stderr).trim().to_owned(),
+        ))
+    }
+}
+
 /// Verify a detached signature against a trusted keyring.
 pub fn verify_signature(
     package: &Path,

@@ -400,6 +400,18 @@ per-device key that either signs directly or attests the software key.
       "ui": "<digest over ui/**/*.lua>",
       "grants": ["soil:canvas", "soil:storage"],
       "system": null, "publisher": "mycelium:fungos/release",
+      "publisher_key": "<PGP fingerprint>",
+      "signature": "…"
+    }
+  ],
+  "delegations": [
+    {
+      "publisher": "mycelium:fungos/release",
+      "fingerprint": "<PGP fingerprint>",
+      "public_key": "-----BEGIN PGP PUBLIC KEY BLOCK-----…",
+      "scope": "spore",
+      "issued_at": 1793833200,
+      "expires_at": 0,
       "signature": "…"
     }
   ]
@@ -417,9 +429,10 @@ The index and the packages are signed and content-addressed, which is what lets
 Mycelium carry them. A node that has an index advertises the checkpoint the way
 it advertises a service lease; a peer fetches `after=<seq>` and the tars it does
 not have. The bytes can come from any peer, because nothing is trusted on the
-strength of who handed it over: entries carry the source signature, packages
-carry the publisher signature, and both are verified against the digest the
-client already had.
+strength of who handed it over: entries carry the publisher's signature,
+delegations carry the operator's signature, packages carry the publisher's
+signature, and all three are verified against the digest the client already
+had.
 
 That makes a fleet store a *policy*, not a different transport: point the fleet
 at its own index, and the mesh that already moves releases moves the catalog and
@@ -433,6 +446,7 @@ right, and it runs on a reviewer's laptop with no network:
 
 ```sh
 soil-store index    --spores-root spores/ -o index.json [--source fungos]
+soil-store verify   --index index.json --operator-key operator.asc
 soil-store plan     --index index.json --spores-root ~/.local/share/fungos/spores [--json]
 soil-store snapshot --index index.json --spores-root ~/.local/share/fungos/spores -o store.snapshot.lua
 soil-store serve    --index index.json --spores-root ~/.local/share/fungos/spores [--addr 127.0.0.1:8800]
@@ -506,7 +520,8 @@ Stored as `soil:records` schemas so the store is a client of the same storage
 as everything else:
 
 ```text
-fungos.store.entry@1      seq, kind, spore_id, version, digest, listing_cid, publisher_signature
+fungos.store.entry@1      seq, kind, spore_id, version, digest, listing_cid,
+                          publisher, publisher_key, publisher_signature
 fungos.store.checkpoint@1 seq, root, countersignature?
 fungos.store.delegation@1 publisher, publisher_key_fingerprint, publisher_public_key,
                           scope, issued_at, expires_at, operator_signature

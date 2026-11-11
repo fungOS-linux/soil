@@ -279,14 +279,18 @@ display.
 soil-install install <file.spore> --root DIR [--keyring FILE] [--key FP]
 soil-install rollback --id ID --root DIR
 soil-install status --root DIR [--json]
-soil-install apply --index FILE --root DIR --packages DIR [--keyring FILE] [--write]
+soil-install apply --index FILE --root DIR --packages DIR --operator-key FILE [--write]
 ```
 
 `install` verifies the tar and optional publisher signature, caches the tar by
 digest, unpacks into staging, and swaps the installed directory. `rollback`
-reinstalls the one previous digest. `apply` uses `soil-store plan` and applies
-only `live` and `restart`; `consent`, `system` and `hold` are reported, never
-applied. A write requires a keyring unless `--allow-unsigned-dev` is explicit.
+reinstalls the one previous digest. `apply` first calls `soil-store verify`: the
+checkpoint must match the entries, every delegation must be signed by the
+operator key, every entry must name a delegated publisher key and carry that
+publisher's signature, and the package sidecar must match the delegated key.
+It then uses `soil-store plan` and applies only `live` and `restart`; `consent`,
+`system` and `hold` are reported, never applied. `--allow-unsigned-dev` bypasses
+the index chain and is for local development only.
 
 ## Not implemented
 

@@ -46,6 +46,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
                     keyring: keyring.as_deref(),
                     key: named(rest, "--key"),
                     publisher: named(rest, "--publisher"),
+                    public_key: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -109,13 +110,13 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let index = PathBuf::from(required(rest, "--index")?);
             let root = PathBuf::from(required(rest, "--root")?);
             let packages = PathBuf::from(required(rest, "--packages")?);
-            let keyring = named(rest, "--keyring").map(PathBuf::from);
+            let operator_key = PathBuf::from(required(rest, "--operator-key")?);
             let outcomes = apply(
                 &root,
                 ApplyOptions {
                     index: &index,
                     packages: &packages,
-                    keyring: keyring.as_deref(),
+                    operator_key: &operator_key,
                     write: flag(rest, "--write"),
                     allow_unsigned_dev: flag(rest, "--allow-unsigned-dev"),
                 },
@@ -144,7 +145,7 @@ fn usage() -> &'static str {
     "soil-install install <package.spore> --root DIR [--keyring FILE] [--key FP] [--publisher P] [--json]\n\
      soil-install rollback --id ID --root DIR [--json]\n\
      soil-install status --root DIR [--json]\n\
-     soil-install apply --index FILE --root DIR --packages DIR [--keyring FILE] [--write] [--allow-unsigned-dev] [--json]\n\
+     soil-install apply --index FILE --root DIR --packages DIR --operator-key FILE [--write] [--allow-unsigned-dev] [--json]\n\
      soil-install --version"
 }
 

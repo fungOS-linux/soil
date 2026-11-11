@@ -24,7 +24,7 @@ pub mod plan;
 pub mod serve;
 pub mod snapshot;
 
-pub use index::{Checkpoint, Entry, EntryKind, Index, SCHEMA};
+pub use index::{Checkpoint, Delegation, Entry, EntryKind, Index, SCHEMA, Verified};
 pub use plan::{Class, Installed, Plan, Update, plan};
 pub use snapshot::{Snapshot, Source, build as build_snapshot, to_lua};
 

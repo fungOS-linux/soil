@@ -47,6 +47,20 @@ fn run(args: Vec<String>) -> Result<()> {
     if matches!(command, "index") {
         return build_index(rest);
     }
+    if matches!(command, "verify") {
+        let index_path = named(rest, "--index").ok_or_else(|| Error::Invalid(usage()))?;
+        let operator = named(rest, "--operator-key").ok_or_else(|| Error::Invalid(usage()))?;
+        let index = Index::read(Path::new(&index_path))?;
+        let key =
+            std::fs::read(&operator).map_err(|error| Error::Io(format!("{operator}: {error}")))?;
+        let verified = index.verify(&key)?;
+        println!(
+            "ok {} entries {} delegations",
+            index.entries.len(),
+            verified.delegations.len()
+        );
+        return Ok(());
+    }
 
     let index_path = named(rest, "--index").ok_or_else(|| Error::Invalid(usage()))?;
     let spores_root = named(rest, "--spores-root").ok_or_else(|| Error::Invalid(usage()))?;
@@ -143,7 +157,12 @@ fn source(rest: &[String], index: &Index) -> Source {
         name: named(rest, "--source-name").unwrap_or_else(|| index.source.clone()),
         index: named(rest, "--source-index")
             .unwrap_or_else(|| format!("ipfs://{}", index.checkpoint.root)),
-        verified: !index.checkpoint.signature.trim().is_empty(),
+        verified: !index.checkpoint.signature.trim().is_empty()
+            || !index.delegations.is_empty()
+            || index
+                .entries
+                .iter()
+                .any(|entry| !entry.signature.trim().is_empty()),
     }
 }
 
@@ -204,6 +223,7 @@ fn entry_for(dir: &Path) -> Result<Entry> {
         grants: manifest.grants.keys().cloned().collect(),
         system: manifest.system.as_ref().map(|system| system.role.clone()),
         publisher: None,
+        publisher_key: None,
         signature: String::new(),
     })
 }
@@ -245,7 +265,7 @@ fn scan(root: &Path, pins: &BTreeMap<String, String>) -> Result<Vec<Installed>> 
 }
 
 fn usage() -> String {
-    "usage: soil-store index    --spores-root DIR [--source NAME] [-o FILE]\n       soil-store plan     --index FILE --spores-root DIR [--json] [--pin ID=LABEL]\n       soil-store snapshot --index FILE --spores-root DIR [-o FILE] [--source-name NAME] [--source-index CID]\n       soil-store serve    --index FILE --spores-root DIR [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]\n       soil-store --version".into()
+    "usage: soil-store index    --spores-root DIR [--source NAME] [-o FILE]\n       soil-store verify   --index FILE --operator-key FILE\n       soil-store plan     --index FILE --spores-root DIR [--json] [--pin ID=LABEL]\n       soil-store snapshot --index FILE --spores-root DIR [-o FILE] [--source-name NAME] [--source-index CID]\n       soil-store serve    --index FILE --spores-root DIR [--addr HOST:PORT] [--pin ID=LABEL] [--source-name NAME]\n       soil-store --version".into()
 }
 
 fn named(args: &[String], flag: &str) -> Option<String> {

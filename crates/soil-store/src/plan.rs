@@ -308,6 +308,7 @@ mod tests {
             grants: grants.iter().map(|grant| (*grant).to_owned()).collect(),
             system: None,
             publisher: Some("fungos".into()),
+            publisher_key: None,
             signature: String::new(),
         }
     }

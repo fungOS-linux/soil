@@ -59,6 +59,9 @@ pub struct InstallOptions<'a> {
     pub keyring: Option<&'a Path>,
     pub key: Option<&'a str>,
     pub publisher: Option<&'a str>,
+    /// A delegated publisher public key. When present, it replaces the local
+    /// keyring for this package's sidecar signature.
+    pub public_key: Option<&'a [u8]>,
 }
 
 /// Install a verified package, replacing the current directory only after the
@@ -71,7 +74,12 @@ pub fn install(
     let bytes =
         fs::read(package).map_err(|error| Error::Io(format!("{}: {error}", package.display())))?;
     let (manifest, lock) = soil_spore::verify(&bytes)?;
-    if options.keyring.is_some() || options.key.is_some() {
+    if let Some(public_key) = options.public_key {
+        let signature = signature_path(package);
+        let signature_bytes = fs::read(&signature)
+            .map_err(|error| Error::Io(format!("{}: {error}", signature.display())))?;
+        soil_spore::verify_detached(public_key, &bytes, &signature_bytes)?;
+    } else if options.keyring.is_some() || options.key.is_some() {
         let signature = signature_path(package);
         soil_spore::verify_signature(package, &signature, options.keyring, options.key)?;
     }
@@ -227,7 +235,9 @@ pub fn status(root: &Path) -> Result<Vec<InstalledState>, Error> {
 pub struct ApplyOptions<'a> {
     pub index: &'a Path,
     pub packages: &'a Path,
-    pub keyring: Option<&'a Path>,
+    /// Armored store-operator public key. Every delegation must verify against
+    /// it, and every applied package must match the delegated publisher key.
+    pub operator_key: &'a Path,
     pub write: bool,
     pub allow_unsigned_dev: bool,
 }
@@ -245,12 +255,14 @@ pub struct ApplyOutcome {
 /// Apply the updates the planner classifies as `live` or `restart`.
 /// `consent`, `system` and `hold` are reported and never applied.
 pub fn apply(root: &Path, options: ApplyOptions<'_>) -> Result<Vec<ApplyOutcome>, Error> {
-    if options.write && options.keyring.is_none() && !options.allow_unsigned_dev {
-        return Err(Error::Invalid(
-            "apply --write needs --keyring or explicit --allow-unsigned-dev".into(),
-        ));
-    }
+    let operator_key = fs::read(options.operator_key)
+        .map_err(|error| Error::Io(format!("{}: {error}", options.operator_key.display())))?;
     let index = soil_store::Index::read(options.index)?;
+    let verified = if options.allow_unsigned_dev {
+        None
+    } else {
+        Some(index.verify(&operator_key)?)
+    };
     let catalog = index.catalog();
     let installed = scan_installed(root)?;
     let plan = soil_store::plan(&installed, &catalog);
@@ -301,13 +313,35 @@ pub fn apply(root: &Path, options: ApplyOptions<'_>) -> Result<Vec<ApplyOutcome>
             continue;
         }
         let entry = catalog.get(&update.spore_id);
+        if verified.is_some() && entry.is_none() {
+            return Err(Error::Invalid(format!(
+                "{}: update has no catalog entry",
+                update.spore_id
+            )));
+        }
+        let public_key = match (&verified, entry) {
+            (Some(verified), Some(entry)) => Some(
+                verified
+                    .for_entry(entry)
+                    .ok_or_else(|| {
+                        Error::Invalid(format!(
+                            "{}: update entry is not delegated",
+                            update.spore_id
+                        ))
+                    })?
+                    .public_key
+                    .as_bytes(),
+            ),
+            _ => None,
+        };
         let state = install(
             &package,
             root,
             InstallOptions {
-                keyring: options.keyring,
+                keyring: None,
                 key: None,
                 publisher: entry.and_then(|entry| entry.publisher.as_deref()),
+                public_key,
             },
         )?;
         outcomes.push(ApplyOutcome {
@@ -532,19 +566,34 @@ surfaces = ["canvas"]
             grants: vec!["soil:canvas".into()],
             system: None,
             publisher: Some("mycelium:test".into()),
+            publisher_key: None,
             signature: String::new(),
         };
         entry.seq = 1;
         let index = soil_store::Index::seal("test", vec![entry]);
         let index_path = temp.path().join("index.json");
         std::fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+        let operator_key = temp.path().join("operator.asc");
+        std::fs::write(&operator_key, b"unsigned dev").unwrap();
+
+        let refused = apply(
+            &root,
+            ApplyOptions {
+                index: &index_path,
+                packages: &packages,
+                operator_key: &operator_key,
+                write: true,
+                allow_unsigned_dev: false,
+            },
+        );
+        assert!(refused.is_err(), "unsigned index must not install");
 
         let outcomes = apply(
             &root,
             ApplyOptions {
                 index: &index_path,
                 packages: &packages,
-                keyring: None,
+                operator_key: &operator_key,
                 write: true,
                 allow_unsigned_dev: true,
             },
