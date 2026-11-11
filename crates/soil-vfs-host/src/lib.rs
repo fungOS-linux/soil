@@ -9,7 +9,7 @@ mod indexer;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use fungos_vfs::{Hydration, NodeRole, Vfs, VfsError, normalize_path};
+use fungos_vfs::{Expect, Hydration, NodeRole, Vfs, VfsError, normalize_path};
 use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit", world: "host" });
@@ -71,6 +71,23 @@ impl VfsHost {
         Self::open_with_role_and_index(root, role, index_path)
     }
 
+    /// Open against an explicit content store.
+    ///
+    /// `None` means the machine-wide store every root on this host shares. A
+    /// test, a service or a sandbox passes its own: content is the part of the
+    /// VFS that is *not* per-root, so two processes sharing one store can see
+    /// each other's writes, and a test that leaks into it is a test that can
+    /// fail only when it runs next to another one.
+    pub fn open_with_role_and_store(
+        root: impl AsRef<std::path::Path>,
+        role: NodeRole,
+        store: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
+        let root = root.as_ref();
+        let index_path = root.join(".fungos/soil-index.sqlite3");
+        Self::open_with_store(root, role, index_path, store)
+    }
+
     /// Open with an explicit derived-index database. The database is a cache and
     /// can be deleted at any time; it must not live inside `records`.
     pub fn open_with_index(
@@ -85,7 +102,17 @@ impl VfsHost {
         role: NodeRole,
         index_path: impl AsRef<std::path::Path>,
     ) -> anyhow::Result<Self> {
-        let mut vfs = Vfs::open_with_role(root, role).context("open fungos-vfs")?;
+        Self::open_with_store(root, role, index_path, None)
+    }
+
+    /// The full form: root, role, index location and content store.
+    pub fn open_with_store(
+        root: impl AsRef<std::path::Path>,
+        role: NodeRole,
+        index_path: impl AsRef<std::path::Path>,
+        store: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
+        let mut vfs = Vfs::open_with(root, role, store).context("open fungos-vfs")?;
         let mut index = SqliteIndex::open(index_path).context("open soil index")?;
         index.refresh(&mut vfs).context("refresh soil index")?;
         Ok(Self {
@@ -270,6 +297,15 @@ fn vfs_error(error: VfsError) -> vfs::Error {
         | VfsError::NotEmpty(_)
         | VfsError::Leased { .. } => vfs::Error::Io,
         VfsError::RoleMismatch { .. } => vfs::Error::Denied,
+        // A fenced write, a refused snapshot, missing configuration and a
+        // corrupt store are all "this could not be done here", not "the path
+        // does not exist". The ABI has no finer vocabulary, so they are Io.
+        VfsError::Fenced { .. }
+        | VfsError::SnapshotRefused { .. }
+        | VfsError::Config(_)
+        | VfsError::NoDataDirectory
+        | VfsError::CorruptMeta { .. }
+        | VfsError::GenerationExhausted => vfs::Error::Io,
     }
 }
 
@@ -453,11 +489,18 @@ impl vfs_mut_api::Host for VfsHost {
         if data.len() > MAX_MUTATION_BYTES || media_type.trim().is_empty() {
             return Err(vfs_mut_api::Error::OverBudget);
         }
+        // The VFS distinguishes "overwrite" from "replace this version" and
+        // "replace a head holding this content"; the ABI's Option<u64> only
+        // ever expressed the first two.
+        let expect = match expected_version {
+            Some(version) => Expect::Version(version),
+            None => Expect::Any,
+        };
         let entry = {
             self.vfs
                 .lock()
                 .expect("vfs poisoned")
-                .put(&path, &data, &media_type, expected_version)
+                .put(&path, &data, &media_type, expect)
                 .map_err(mutation_error)?
         };
         self.refresh_after_mutation()?;
@@ -532,9 +575,17 @@ fn mutation_error(error: VfsError) -> vfs_mut_api::Error {
         VfsError::InvalidPath(_) | VfsError::InvalidContentId(_) => vfs_mut_api::Error::Invalid,
         VfsError::ReadOnly | VfsError::RoleMismatch { .. } => vfs_mut_api::Error::Denied,
         VfsError::Leased { .. } => vfs_mut_api::Error::Conflict,
-        VfsError::NotHydrated(_) | VfsError::Transport(_) | VfsError::Io(_) | VfsError::Sql(_) => {
-            vfs_mut_api::Error::Io
-        }
+        // Both mean "somebody else's state moved under you": a fresh read and a
+        // retry can succeed, which is what Conflict tells the caller.
+        VfsError::Fenced { .. } | VfsError::SnapshotRefused { .. } => vfs_mut_api::Error::Conflict,
+        VfsError::NotHydrated(_)
+        | VfsError::Transport(_)
+        | VfsError::Config(_)
+        | VfsError::NoDataDirectory
+        | VfsError::CorruptMeta { .. }
+        | VfsError::GenerationExhausted
+        | VfsError::Io(_)
+        | VfsError::Sql(_) => vfs_mut_api::Error::Io,
     }
 }
 
