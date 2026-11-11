@@ -125,6 +125,18 @@ pub fn parse(args: &[String]) -> Result<(PathBuf, Run)> {
 
 /// Run a Spore until the listener closes.
 pub fn run(args: &[String]) -> Result<()> {
+    // A host that cannot say what it is doing is a host nobody can operate. The
+    // default is `info` for the host crates, so a plain launch is not silent; an
+    // operator can widen or narrow it with `RUST_LOG`, exactly as they can for
+    // every other soil service.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,soil_wasi_host=info")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let (path, run) = parse(args)?;
     let root = Spore::resolve(&path)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -266,10 +278,11 @@ async fn serve(spore: Spore, run: Run) -> Result<()> {
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("bind {listen}"))?;
-    eprintln!(
-        "soil: {} listening on {listen} for {}",
-        spore.manifest.spore.id,
-        claimed.hosts.join(",")
+    tracing::info!(
+        addr = %listen,
+        spore = %spore.manifest.spore.id,
+        hosts = %claimed.hosts.join(","),
+        "spore listening"
     );
     Arc::new(gateway).serve(listener).await
 }
@@ -408,9 +421,9 @@ fn overrides() -> BTreeMap<String, String> {
         return BTreeMap::new();
     };
     let Ok(value) = text.parse::<toml::Value>() else {
-        eprintln!(
-            "soil: {} is not valid TOML; ignoring host overrides",
-            path.display()
+        tracing::warn!(
+            path = %path.display(),
+            "host override file is not valid TOML; ignoring it"
         );
         return BTreeMap::new();
     };
