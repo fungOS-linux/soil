@@ -57,3 +57,14 @@ interface admin {
   /// Every hook the caller may see. Never includes secrets.
   hooks: func() -> result<list<hook>, error>;
 }
+
+/// The embedder's view of the contract.
+///
+/// A host binds this world to *provide* the capability; a guest names the
+/// interface in its own world. The world exists because an interface alone
+/// cannot be bound: `wasmtime::component::bindgen!` and `wit-bindgen` both
+/// name a world, so without one the CLI and the console would each invent
+/// their own glue for the same three functions.
+world admin-host {
+  import admin;
+}
