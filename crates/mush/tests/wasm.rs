@@ -348,6 +348,18 @@ fn wasm_spore_supports_control_flow_test_read_and_script_args() {
 }
 
 #[test]
+fn wasm_spore_supports_arithmetic_and_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let (status, out, err) = run(
+        dir.path(),
+        "i=2; echo $((i + 3)); echo $(( (1 + 2) * 3 )); echo $((i < 3)); echo $((i % 2 == 0)); \
+         case \"$i\" in 2) echo two ;; *) echo other ;; esac",
+    );
+    assert_eq!(status, 0, "{err}");
+    assert_eq!(out, "5\n9\n1\n1\ntwo\n");
+}
+
+#[test]
 fn wasm_spore_supports_loop_control_and_stderr_redirection() {
     let dir = tempfile::tempdir().unwrap();
     let output = mush_command()

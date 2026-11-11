@@ -583,11 +583,6 @@ fn apply_login_env() {
 
 /// `-l`, `-i`, `-lc`, `-lic`: a flag that carries a command is the one that
 /// decides whether we are a shell or a REPL.
-///
-/// `shell_command` only matches the stand-alone forms, so a terminal that
-/// launches `mush -lic CMD` still falls through to a script path. Kept and
-/// tested so the fix is one call site, not a rediscovery.
-#[cfg(test)]
 fn has_shell_command_flag(args: &[String]) -> bool {
     args.iter().any(|arg| {
         arg.starts_with('-')
@@ -678,7 +673,22 @@ fn run() -> Result<()> {
         args.remove(0);
         shell_mode = true;
     }
-    let shell_command = take_option(&mut args, "-c").or_else(|| take_option(&mut args, "-lc"));
+    let mut shell_command = take_option(&mut args, "-c").or_else(|| take_option(&mut args, "-lc"));
+    // A terminal launches a login shell as `-lic CMD` (and `-lc CMD` packs the
+    // flag into one word). The flag loop above only drops the pure `-l`/`-i`
+    // forms, so a combined flag survives it and carries the command.
+    if shell_command.is_none()
+        && args
+            .first()
+            .is_some_and(|arg| has_shell_command_flag(std::slice::from_ref(arg)))
+    {
+        args.remove(0);
+        shell_command = if args.is_empty() {
+            None
+        } else {
+            Some(args.remove(0))
+        };
+    }
     if shell_command.is_some() {
         shell_mode = true;
     }
