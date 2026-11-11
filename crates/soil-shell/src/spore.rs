@@ -34,6 +34,8 @@ pub struct Run {
     /// `geoded`'s socket. When set, the Spore resolves credentials through a
     /// lease instead of anything in this process.
     pub geode_socket: Option<PathBuf>,
+    /// `geode://<realm>/<account>/`, prefixed to whatever name a Spore asks for.
+    pub geode_prefix: String,
     pub geode_purpose: String,
     pub geode_ttl_secs: u64,
 }
@@ -55,6 +57,7 @@ pub fn parse(args: &[String]) -> Result<(PathBuf, Run)> {
         trusted_terminators: Vec::new(),
         state: None,
         geode_socket: None,
+        geode_prefix: "geode://local/default/".into(),
         // Verification is what an ingress does with a credential; signing is a
         // separate capability and must be asked for explicitly.
         geode_purpose: "verify".into(),
@@ -98,6 +101,10 @@ pub fn parse(args: &[String]) -> Result<(PathBuf, Run)> {
             }
             "--geode-socket" => {
                 run.geode_socket = Some(PathBuf::from(value(index + 1)?));
+                index += 2;
+            }
+            "--geode-prefix" => {
+                run.geode_prefix = value(index + 1)?;
                 index += 2;
             }
             "--geode-purpose" => {
@@ -202,6 +209,7 @@ async fn serve(spore: Spore, run: Run) -> Result<()> {
     if let Some(socket) = &run.geode_socket {
         builder = builder.credential_provider(Arc::new(GeodeCredentials::new(
             socket,
+            run.geode_prefix.clone(),
             run.geode_purpose.clone(),
             Duration::from_secs(run.geode_ttl_secs),
         )));
