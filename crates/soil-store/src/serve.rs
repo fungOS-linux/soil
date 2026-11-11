@@ -77,6 +77,78 @@ impl Store {
         address.strip_prefix("ipfs://").unwrap_or(address)
     }
 
+    /// One catalog row, as an agent reads it.
+    pub fn row(&self, entry: &Entry) -> serde_json::Value {
+        serde_json::json!({
+            "id": entry.spore_id,
+            "version": entry.version,
+            "digest": entry.digest,
+            "package": entry.package,
+            "signature": format!("/signature/{}", entry.digest),
+            "publisher": entry.publisher,
+            "publisher_key": entry.publisher_key,
+            "system": entry.system,
+            "grants": entry.grants,
+            "listing": entry.listing,
+            "document": self.listing(entry),
+            "url": format!("/s/{}", entry.spore_id),
+        })
+    }
+
+    /// The catalog rows matching a query, over the same text the page shows.
+    ///
+    /// The search belongs to the store, not to a client: a Spore view, a
+    /// browser and an agent have to agree about what matches a word, and the
+    /// only way that survives a second client is one implementation of the
+    /// answer. Every word must match; a category is a filter, not a query.
+    pub fn search(&self, query: &str, category: Option<&str>) -> Vec<&Entry> {
+        let needle = query.trim().to_lowercase();
+        let mut rows: Vec<&Entry> = self
+            .catalog
+            .values()
+            .filter(|entry| {
+                let listing = self.listing(entry);
+                if let Some(category) = category {
+                    let named = listing.as_ref().is_some_and(|listing| {
+                        listing.categories.iter().any(|value| value == category)
+                    });
+                    if !named {
+                        return false;
+                    }
+                }
+                if needle.is_empty() {
+                    return true;
+                }
+                let listing = listing.as_ref();
+                let mut fields = vec![
+                    entry.spore_id.to_lowercase(),
+                    entry.version.to_lowercase(),
+                    entry.publisher.clone().unwrap_or_default().to_lowercase(),
+                    entry.grants.join(" ").to_lowercase(),
+                ];
+                if let Some(listing) = listing {
+                    fields.push(listing.name.to_lowercase());
+                    fields.push(listing.summary.to_lowercase());
+                    fields.push(
+                        listing
+                            .description
+                            .clone()
+                            .unwrap_or_default()
+                            .to_lowercase(),
+                    );
+                    fields.push(listing.categories.join(" ").to_lowercase());
+                    fields.push(listing.keywords.join(" ").to_lowercase());
+                }
+                let haystack = fields.join(" ");
+                needle
+                    .split_whitespace()
+                    .all(|word| haystack.contains(word))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.spore_id.cmp(&b.spore_id));
+        rows
+    }
+
     /// The tar for a digest the active catalog lists, if this store has it.
     pub fn package(&self, digest: &str) -> Option<Vec<u8>> {
         self.artifact(digest, "spore")
@@ -351,7 +423,12 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
     let mut parts = request.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or("/");
-    let path = target.split('?').next().unwrap_or(target);
+    // Shareable links carry the query: `?q=` is the store's search, not the
+    // client's, so the same URL opens the same results in a browser and a Spore.
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (target, None),
+    };
     let mut line = String::new();
     loop {
         line.clear();
@@ -408,22 +485,7 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
             let rows: Vec<_> = store
                 .catalog
                 .values()
-                .map(|entry| {
-                    let listing = store.listing(entry);
-                    serde_json::json!({
-                        "id": entry.spore_id,
-                        "version": entry.version,
-                        "digest": entry.digest,
-                        "package": entry.package,
-                        "signature": format!("/signature/{}", entry.digest),
-                        "publisher": entry.publisher,
-                        "publisher_key": entry.publisher_key,
-                        "system": entry.system,
-                        "grants": entry.grants,
-                        "listing": entry.listing,
-                        "document": listing,
-                    })
-                })
+                .map(|entry| store.row(entry))
                 .collect();
             (
                 "200 OK",
@@ -432,6 +494,22 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
                     .into_bytes(),
                 JSON,
             )
+        }
+        ("GET", "/api/search") => {
+            let text = param(query, "q").unwrap_or_default();
+            let category = param(query, "category");
+            let rows: Vec<_> = store
+                .search(&text, category.as_deref())
+                .into_iter()
+                .map(|entry| store.row(entry))
+                .collect();
+            let body = serde_json::json!({
+                "query": text,
+                "category": category,
+                "total": rows.len(),
+                "entries": rows,
+            });
+            ("200 OK", body.to_string().into_bytes(), JSON)
         }
         ("GET", other) if other.starts_with("/media/") => {
             let address = &other[7..];
@@ -447,8 +525,12 @@ fn answer(mut stream: TcpStream, store: &Store) -> std::io::Result<()> {
                 ),
             }
         }
-        ("GET", other) if other.starts_with("/spore/") => {
-            let id = &other[7..];
+        ("GET", other) if other.starts_with("/spore/") || other.starts_with("/s/") => {
+            let id = if let Some(id) = other.strip_prefix("/spore/") {
+                id
+            } else {
+                &other[3..]
+            };
             match store.spore_page(id) {
                 Some(page) => ("200 OK", page.into_bytes(), HTML),
                 None => ("404 Not Found", b"no such Spore\n".to_vec(), TEXT),
@@ -493,6 +575,48 @@ const JSON: &str = "application/json";
 const TEXT: &str = "text/plain; charset=utf-8";
 const SPORE: &str = "application/vnd.fungos.spore";
 const PGP: &str = "application/pgp-signature";
+
+/// One query parameter, percent-decoded.
+fn param(query: Option<&str>, name: &str) -> Option<String> {
+    let query = query?;
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| decode(value))
+    })
+}
+
+/// `%20` and `+` mean a space in a query string; everything else stands.
+fn decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hex = &value[index + 1..index + 3];
+                match u8::from_str_radix(hex, 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        index += 3;
+                    }
+                    Err(_) => {
+                        out.push(b'%');
+                        index += 1;
+                    }
+                }
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
 
 /// What an `ipfs://` blob is, from its first bytes.
 ///
@@ -667,6 +791,123 @@ mod tests {
             store(None).package(&listed),
             None,
             "a listing-only store serves no bytes"
+        );
+    }
+
+    /// A listing document, as a publisher would store it.
+    fn listing(id: &str, summary: &str, categories: &[&str], keywords: &[&str]) -> crate::Listing {
+        crate::Listing {
+            schema: crate::listing::LISTING_SCHEMA.into(),
+            spore_id: id.into(),
+            version: "0.1.0".into(),
+            digest: "a".repeat(64),
+            name: id.into(),
+            summary: summary.into(),
+            description: None,
+            license: "MIT".into(),
+            homepage: None,
+            categories: categories.iter().map(|value| (*value).to_owned()).collect(),
+            keywords: keywords.iter().map(|value| (*value).to_owned()).collect(),
+            icon: None,
+            screenshots: Vec::new(),
+            badge: None,
+            color: None,
+            system: None,
+            grants: Vec::new(),
+        }
+    }
+
+    fn store_with(entries: Vec<Entry>, media: &std::path::Path) -> Store {
+        let index = Index {
+            schema: SCHEMA,
+            source: "test".into(),
+            checkpoint: Checkpoint {
+                seq: entries.len() as u64,
+                root: Index::root(&entries),
+                signature: String::new(),
+            },
+            entries,
+            delegations: Vec::new(),
+            revocations: Vec::new(),
+        };
+        let source = Source {
+            name: "test".into(),
+            index: "unsigned".into(),
+            verified: false,
+        };
+        Store::new(Some(&index), Vec::new(), source).with_media(media)
+    }
+
+    #[test]
+    fn search_matches_prose_and_filters_by_category() {
+        let media = tempfile::tempdir().unwrap();
+        let mut entries = Vec::new();
+        for (id, summary, categories, keywords) in [
+            (
+                "dev.fungos.editor",
+                "A markdown editor with a live preview",
+                &["productivity"][..],
+                &["markdown", "writing"][..],
+            ),
+            (
+                "dev.fungos.graph",
+                "Plot a dataframe without leaving the shell",
+                &["science"][..],
+                &["charts", "dataframe"][..],
+            ),
+        ] {
+            let document = listing(id, summary, categories, keywords);
+            let bytes = serde_json::to_vec(&document).unwrap();
+            let address = crate::media::add(media.path(), &bytes).unwrap();
+            entries.push(Entry {
+                seq: entries.len() as u64 + 1,
+                kind: EntryKind::Add,
+                spore_id: id.into(),
+                version: "0.1.0".into(),
+                digest: "a".repeat(64),
+                package: CID.into(),
+                listing: Some(address),
+                module: None,
+                ui: None,
+                grants: Vec::new(),
+                system: None,
+                publisher: None,
+                publisher_key: None,
+                signature: String::new(),
+            });
+        }
+        let store = store_with(entries, media.path());
+
+        let ids = |rows: Vec<&Entry>| {
+            rows.iter()
+                .map(|row| row.spore_id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(store.search("markdown", None)),
+            vec!["dev.fungos.editor"],
+            "a keyword in the listing is searchable"
+        );
+        assert_eq!(
+            ids(store.search("plot dataframe", None)),
+            vec!["dev.fungos.graph"],
+            "every word has to match"
+        );
+        assert_eq!(
+            ids(store.search("shell", None)),
+            vec!["dev.fungos.graph"],
+            "the summary is part of the text"
+        );
+        assert_eq!(
+            ids(store.search("", Some("science"))),
+            vec!["dev.fungos.graph"],
+            "a category filters without a query"
+        );
+        assert!(store.search("markdown", Some("science")).is_empty());
+        assert_eq!(
+            store.search("", None).len(),
+            2,
+            "no query is the whole catalog"
         );
     }
 }

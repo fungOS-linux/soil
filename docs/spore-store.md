@@ -482,6 +482,14 @@ the resolved listing document. An agent that can read JSON can browse the store
 without a UI, and `GET /package/<digest>` + `GET /signature/<digest>` are the
 same two requests an install makes.
 
+`/api/search?q=…&category=…` answers from one implementation, and every word has
+to match. That is deliberate: a Spore view, a browser and an agent that rank
+differently are three stores, and a shareable link has to reopen the same
+result. `/s/<spore-id>` is the shareable form of a package page (`/spore/<id>`
+stays as the long spelling), so a link copied out of the store opens the same
+listing anywhere the same store is reachable — including a browser projection
+of a Spore's own view.
+
 ## The planner
 
 `soil-store` is the crate that answers the two questions a storefront has to get

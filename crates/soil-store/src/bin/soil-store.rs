@@ -51,6 +51,9 @@ fn run(args: Vec<String>) -> Result<()> {
     if matches!(command, "listing") {
         return build_listing(rest);
     }
+    if matches!(command, "search") {
+        return search(rest);
+    }
     if matches!(command, "add") {
         return add_media(rest);
     }
@@ -252,6 +255,51 @@ fn entry_for(dir: &Path) -> Result<Entry> {
     })
 }
 
+/// `search`: the same answer the store's `/api/search` gives.
+///
+/// A CLI and a page that rank differently are two stores; the query lives in one
+/// function, and this is a thin way to call it.
+fn search(rest: &[String]) -> Result<()> {
+    let index_path = named(rest, "--index").ok_or_else(|| Error::Invalid(usage()))?;
+    let spores_root = named(rest, "--spores-root").ok_or_else(|| Error::Invalid(usage()))?;
+    let index = Index::read(Path::new(&index_path))?;
+    let installed = scan(Path::new(&spores_root), &pairs(rest, "--pin")?)?;
+    let mut store = Store::new(Some(&index), installed, source(rest, &index));
+    if let Some(packages) = named(rest, "--packages") {
+        store = store.with_packages(packages);
+    }
+    if let Some(media) = named(rest, "--media") {
+        store = store.with_media(media);
+    }
+    let query = positional(rest).unwrap_or_default();
+    let category = named(rest, "--category");
+    let rows: Vec<_> = store
+        .search(&query, category.as_deref())
+        .into_iter()
+        .map(|entry| store.row(entry))
+        .collect();
+    if flag(rest, "--json") {
+        println!(
+            "{}",
+            serde_json::json!({ "query": query, "category": category, "total": rows.len(), "entries": rows })
+        );
+        return Ok(());
+    }
+    for row in &rows {
+        println!(
+            "{:<32} {:<8} {}",
+            row["id"].as_str().unwrap_or_default(),
+            row["version"].as_str().unwrap_or_default(),
+            row["document"]["summary"]
+                .as_str()
+                .or_else(|| row["listing"].as_str())
+                .unwrap_or("")
+        );
+    }
+    eprintln!("{} match(es)", rows.len());
+    Ok(())
+}
+
 /// `listing`: the document a storefront and an agent both read.
 ///
 /// The bytes are addressed, so the same listing is one CID: write it into the
@@ -446,6 +494,7 @@ fn scan(root: &Path, pins: &BTreeMap<String, String>) -> Result<Vec<Installed>> 
 fn usage() -> String {
     "usage: soil-store index    --spores-root DIR [--source NAME] [-o FILE]
        soil-store listing  DIR [--media DIR] [-o FILE]
+       soil-store search   QUERY --index FILE --spores-root DIR [--media DIR] [--packages DIR] [--category NAME] [--json]
        soil-store add      --media DIR FILE...
        soil-store delegate --publisher PRINCIPAL --operator-key KEY (--public-key FILE | --fingerprint KEY)
                            [--scope spore|*] [--days N] [--gnupg-home DIR] [-o FILE]
