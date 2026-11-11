@@ -165,6 +165,28 @@ missing sample never becomes a normal reading.
 Raw motion at 25 Hz is a local buffer format, not a durable signal. Store
 activity counts, downsampled axes, or a bounded window.
 
+`body.sleep.v1` is a completed-night host model. Its value carries the stage
+timeline, not one instantaneous stage:
+
+```json
+{
+  "start": 1794352740000,
+  "end": 1794381540000,
+  "stages": [
+    {"stage": "awake", "start": 1794352740000, "end": 1794353940000},
+    {"stage": "light", "start": 1794353940000, "end": 1794359340000},
+    {"stage": "deep",  "start": 1794359340000, "end": 1794364140000},
+    {"stage": "rem",   "start": 1794364140000, "end": 1794367140000}
+  ]
+}
+```
+
+`observed_at` is the session end. The consumer selects one source for the whole
+night; stages are never averaged or stitched across devices. Ring physiology is
+primary, watch is fallback, and the greater stage coverage breaks a tie. A
+completed session remains usable through `sleep_max_age_ms` (12 h by default)
+and is marked stale rather than silently treated as current after that.
+
 ## Fusion and precedence
 
 Each signal has a written precedence policy. It is not inferred at read time
