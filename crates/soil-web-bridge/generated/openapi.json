@@ -1039,6 +1039,65 @@
         "summary": "One WIT call"
       }
     },
+    "/v1/provider/call": {
+      "post": {
+        "description": "Node-side door. The host asks a session that volunteered an interface — `soil:http` answered with the page's own `fetch` — to do the work, with a deadline. Not for pages: a page uses the session frames.",
+        "operationId": "providerCall",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "function": {
+                    "type": "string"
+                  },
+                  "package": {
+                    "description": "A package the Spore's [grants] name and a session registered.",
+                    "type": "string"
+                  },
+                  "params": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "timeoutMs": {
+                    "default": 10000,
+                    "maximum": 60000,
+                    "minimum": 50,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "package",
+                  "function"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The provider's result, or `timeout`/`unavailable`"
+          },
+          "400": {
+            "description": "Malformed provider call"
+          },
+          "401": {
+            "description": "No token, or a token that does not match"
+          }
+        },
+        "summary": "Call an interface a session provides"
+      }
+    },
     "/v1/session": {
       "get": {
         "description": "Upgrade to a WebSocket. The host sends a ready event, answers the same call envelopes, and pushes changed events. Frames are text JSON with the same version.",

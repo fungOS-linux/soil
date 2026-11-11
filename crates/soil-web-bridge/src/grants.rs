@@ -71,6 +71,15 @@ impl GrantSet {
         }
     }
 
+    /// Does this Spore declare *any* grant for `package`?
+    ///
+    /// Used for provider registration: a page offering to implement `soil:http`
+    /// is only interesting if the Spore asked for `soil:http` in the first place.
+    /// A sub-capability grant (`soil:http.fetch`) counts.
+    pub fn covers(&self, package: &str) -> bool {
+        self.scopes.contains_key(package)
+    }
+
     /// Is `package` allowed to use `capability`?
     ///
     /// A bare package grant allows every capability in it. A dotted grant

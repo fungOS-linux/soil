@@ -74,6 +74,35 @@ pub fn document(api: &Api) -> Value {
                     },
                 },
             },
+            "/v1/provider/call": {
+                "post": {
+                    "operationId": "providerCall",
+                    "summary": "Call an interface a session provides",
+                    "description": "Node-side door. The host asks a session that volunteered an interface — `soil:http` answered with the page's own `fetch` — to do the work, with a deadline. Not for pages: a page uses the session frames.",
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["package", "function"],
+                            "properties": {
+                                "package": { "type": "string", "description": "A package the Spore's [grants] name and a session registered." },
+                                "function": { "type": "string" },
+                                "params": { "type": "object", "additionalProperties": true },
+                                "timeoutMs": { "type": "integer", "minimum": 50, "maximum": 60000, "default": 10000 },
+                            },
+                        } } },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "The provider's result, or `timeout`/`unavailable`",
+                            "content": { "application/json": { "schema": { "type": "object" } } },
+                        },
+                        "400": { "description": "Malformed provider call" },
+                        "401": { "description": "No token, or a token that does not match" },
+                    },
+                },
+            },
             "/v1/session": {
                 "get": {
                     "operationId": "session",

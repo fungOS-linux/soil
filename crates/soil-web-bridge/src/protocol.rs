@@ -34,6 +34,38 @@ pub struct Request {
     pub call: Call,
 }
 
+/// A session offering to implement interfaces for the node.
+///
+/// This is the reverse direction: the page is not asking the host for a
+/// capability, it is volunteering one. The host only accepts a package the
+/// Spore's `[grants]` already names, and it answers with a result so a provider
+/// knows it is registered before the first call arrives.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provide {
+    pub id: String,
+    pub packages: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProvideRequest {
+    pub v: u32,
+    pub provide: Provide,
+}
+
+/// Anything a client may send: a call, or a provider registration.
+///
+/// Untagged because the two frames are told apart by their key, and each inner
+/// struct denies unknown fields — so a `provide` frame cannot be read as a call
+/// with a missing field, and an unknown extra field fails both.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Frame {
+    Call(Request),
+    Provide(ProvideRequest),
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Call {
@@ -85,6 +117,11 @@ pub enum Code {
     Stale,
     Io,
     Unsupported,
+    /// `soil:http` says a request exceeded its deadline; the bridge says it for
+    /// a provider that did not answer in time.
+    Timeout,
+    /// No session provides this interface, or the provider went away.
+    Unavailable,
 }
 
 impl CallError {
@@ -117,6 +154,14 @@ impl CallError {
 
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(Code::NotFound, message)
+    }
+
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::new(Code::Timeout, message)
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(Code::Unavailable, message)
     }
 }
 
@@ -166,6 +211,44 @@ impl Request {
     }
 }
 
+impl Provide {
+    pub const MAX_PACKAGES: usize = 8;
+
+    pub fn validate(&self) -> Result<(), CallError> {
+        if !ident(&self.id, MAX_ID_BYTES) {
+            return Err(CallError::invalid(
+                "provide id must be 1-128 bytes of [a-z0-9._:-]",
+            ));
+        }
+        if self.packages.is_empty() || self.packages.len() > Self::MAX_PACKAGES {
+            return Err(CallError::invalid(format!(
+                "provide needs 1-{} packages",
+                Self::MAX_PACKAGES
+            )));
+        }
+        for package in &self.packages {
+            if !ident(package, MAX_INTERFACE_BYTES) || !package.contains(':') {
+                return Err(CallError::invalid(format!(
+                    "{package:?} is not a WIT package name such as soil:http"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ProvideRequest {
+    pub fn validate(&self) -> Result<(), CallError> {
+        if self.v != VERSION {
+            return Err(CallError::invalid(format!(
+                "protocol version {} is not {VERSION}",
+                self.v
+            )));
+        }
+        self.provide.validate()
+    }
+}
+
 impl Call {
     pub fn validate(&self) -> Result<(), CallError> {
         if !ident(&self.id, MAX_ID_BYTES) {
@@ -199,6 +282,22 @@ fn ident(value: &str, max: usize) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._:-".contains(&b))
+}
+
+/// Anything a client may send on a session: a call, a provider registration, or
+/// the answer to a call the host made. The last one is why the session cannot
+/// assume every inbound frame is a request — and why a late answer to a call
+/// that already timed out is ignored rather than treated as an error.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Inbound {
+    Frame(Frame),
+    Response(Response),
+}
+
+/// Tell a provider to stop working on a call the host has given up on.
+pub fn cancel_frame(id: &str) -> String {
+    serde_json::json!({ "v": VERSION, "cancel": { "id": id } }).to_string()
 }
 
 #[cfg(test)]

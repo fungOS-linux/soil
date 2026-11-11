@@ -25,15 +25,19 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use serde::Deserialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tungstenite::Message;
 
 use crate::Registry;
 use crate::grants::GrantSet;
-use crate::protocol::{CallError, Event, EventFrame, Outcome, Request, Response, VERSION};
+use crate::protocol::{
+    self, Call, CallError, Event, EventFrame, Frame, Inbound, Outcome, Request, Response, VERSION,
+};
 
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -44,6 +48,11 @@ const MAX_SESSIONS: usize = 64;
 /// Per-session backlog. A subscriber that falls this far behind loses events
 /// rather than blocking a writer; `changed` is a notification, not a delivery.
 const EVENT_CHANNEL: usize = 64;
+/// Outbound calls queued behind the one a session is already running.
+const PROVIDER_QUEUE: usize = 8;
+const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 10_000;
+const MIN_PROVIDER_TIMEOUT: Duration = Duration::from_millis(50);
+const MAX_PROVIDER_TIMEOUT: Duration = Duration::from_secs(60);
 
 type Subscribers = Arc<Mutex<Vec<(u64, mpsc::SyncSender<Event>)>>>;
 const PAGE: &str = include_str!("page.html");
@@ -163,6 +172,12 @@ pub struct Bridge {
     auth: Auth,
     bus: EventBus,
     sessions: AtomicUsize,
+    /// package -> (session id, call queue). One provider per package.
+    providers: Providers,
+    session_seq: AtomicU64,
+    /// Outbound call ids are `~n`; `~` is outside the client id alphabet, so a
+    /// page can never mint an id that collides with the host's.
+    server_calls: AtomicU64,
 }
 
 impl Bridge {
@@ -174,6 +189,60 @@ impl Bridge {
             auth: Auth::default(),
             bus: EventBus::default(),
             sessions: AtomicUsize::new(0),
+            providers: Providers::default(),
+            session_seq: AtomicU64::new(1),
+            server_calls: AtomicU64::new(1),
+        }
+    }
+
+    /// Call into a session that volunteered to implement `package`.
+    ///
+    /// Synchronous, bounded, and cancellable: the caller waits, the session
+    /// thread enforces the same deadline, and a result that arrives after the
+    /// deadline is dropped by id. This is the direction a Spore needs when the
+    /// node has no network but the browser does.
+    pub fn call_provider(
+        &self,
+        package: &str,
+        function: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, CallError> {
+        let timeout = timeout.clamp(MIN_PROVIDER_TIMEOUT, MAX_PROVIDER_TIMEOUT);
+        let sender = self
+            .providers
+            .lock()
+            .map_err(|_| CallError::io("the provider table is poisoned"))?
+            .get(package)
+            .map(|(_, sender)| sender.clone());
+        let Some(sender) = sender else {
+            return Err(CallError::unavailable(format!(
+                "no session provides {package}"
+            )));
+        };
+
+        let id = format!("~{}", self.server_calls.fetch_add(1, Ordering::Relaxed));
+        let (reply, answer) = mpsc::sync_channel(1);
+        sender
+            .try_send(ProviderCall {
+                id,
+                package: package.to_owned(),
+                function: function.to_owned(),
+                params,
+                deadline: Instant::now() + timeout,
+                reply,
+            })
+            .map_err(|_| {
+                CallError::unavailable(format!("the {package} provider is busy with another call"))
+            })?;
+
+        // Wait a little past the session's own deadline so its more specific
+        // timeout wins the race.
+        match answer.recv_timeout(timeout + Duration::from_millis(250)) {
+            Ok(result) => result,
+            Err(_) => Err(CallError::timeout(format!(
+                "{package}.{function} did not answer in time"
+            ))),
         }
     }
 
@@ -190,8 +259,19 @@ impl Bridge {
         &self.grants
     }
 
-    pub fn serve(self, bind: SocketAddr) -> anyhow::Result<Server> {
+    pub fn serve(self: Arc<Self>, bind: SocketAddr) -> anyhow::Result<Server> {
         serve(self, bind)
+    }
+
+    /// Is a live session answering for `package`?
+    ///
+    /// A transport asks this before spending a call, so "no provider" is an
+    /// `Unsupported` rather than a timeout.
+    pub fn provides(&self, package: &str) -> bool {
+        self.providers
+            .lock()
+            .map(|providers| providers.contains_key(package))
+            .unwrap_or(false)
     }
 
     fn dispatch(&self, request: &Request) -> (Response, Vec<Event>) {
@@ -227,12 +307,11 @@ impl Drop for Server {
     }
 }
 
-pub fn serve(bridge: Bridge, bind: SocketAddr) -> anyhow::Result<Server> {
+pub fn serve(bridge: Arc<Bridge>, bind: SocketAddr) -> anyhow::Result<Server> {
     let listener = TcpListener::bind(bind).with_context(|| format!("bind {bind}"))?;
     let addr = listener.local_addr()?;
     listener.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));
-    let bridge = Arc::new(bridge);
     let thread_stop = stop.clone();
     let handle = thread::spawn(move || {
         while !thread_stop.load(Ordering::Relaxed) {
@@ -356,6 +435,7 @@ fn handle_connection(bridge: Arc<Bridge>, mut stream: TcpStream, peer: SocketAdd
         ),
         ("OPTIONS", _) => respond(&mut stream, 204, "No Content", "text/plain", b"", cors),
         ("POST", "/v1/call") => handle_call(&bridge, &mut stream, &body, cors),
+        ("POST", "/v1/provider/call") => handle_provider_call(&bridge, &mut stream, &body, cors),
         ("GET", "/v1/session") => handle_session(&bridge, stream, buffer, &head),
         _ => respond(
             &mut stream,
@@ -418,6 +498,45 @@ fn handle_call(bridge: &Bridge, stream: &mut TcpStream, body: &[u8], cors: Optio
         "OK",
         &response.id,
         &response.result,
+        cors,
+    );
+}
+
+fn handle_provider_call(
+    bridge: &Bridge,
+    stream: &mut TcpStream,
+    body: &[u8],
+    cors: Option<String>,
+) {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct ProviderRequest {
+        package: String,
+        function: String,
+        #[serde(default)]
+        params: Value,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    }
+
+    let result = match serde_json::from_slice::<ProviderRequest>(body) {
+        Ok(request) => bridge.call_provider(
+            &request.package,
+            &request.function,
+            request.params,
+            Duration::from_millis(request.timeout_ms.unwrap_or(DEFAULT_PROVIDER_TIMEOUT_MS)),
+        ),
+        Err(error) => Err(CallError::invalid(format!("not a provider call: {error}"))),
+    };
+    respond_json(
+        stream,
+        200,
+        "OK",
+        "",
+        &match result {
+            Ok(value) => Outcome::Ok(value),
+            Err(error) => Outcome::Err(error),
+        },
         cors,
     );
 }
@@ -492,79 +611,328 @@ fn handle_session(bridge: &Bridge, stream: TcpStream, buffer: Vec<u8>, head: &He
     bridge.sessions.fetch_add(1, Ordering::Relaxed);
     let _guard = SessionGuard(&bridge.sessions);
 
-    let (sender, receiver) = mpsc::sync_channel(EVENT_CHANNEL);
-    let subscription = bridge.bus.subscribe(sender);
-    let ready = EventFrame {
-        v: VERSION,
-        event: Event::Ready {
-            spore: bridge.spore.clone(),
-            grants: bridge.grants.declared(),
-            interfaces: bridge.registry.describe(),
-        },
-    };
-    if send_event(&mut socket, &ready).is_err() {
-        return;
-    }
+    let session_id = bridge.session_seq.fetch_add(1, Ordering::Relaxed);
+    let (event_tx, events) = mpsc::sync_channel(EVENT_CHANNEL);
+    let subscription = bridge.bus.subscribe(event_tx);
+    let (provider_tx, provider_rx) = mpsc::sync_channel(PROVIDER_QUEUE);
 
-    loop {
-        while let Ok(event) = receiver.try_recv() {
-            if send_event(&mut socket, &EventFrame { v: VERSION, event }).is_err() {
+    Session {
+        bridge,
+        socket,
+        events,
+        provider_rx,
+        provider_tx,
+        registration: Registration {
+            bridge,
+            session: session_id,
+            packages: Vec::new(),
+        },
+    }
+    .serve();
+    drop(subscription);
+}
+
+/// One outbound call waiting on a session thread.
+///
+/// The reply channel is what makes the host's call synchronous: the caller
+/// blocks on it with its own timeout, and the session thread enforces the same
+/// deadline. Whichever fires first, a late answer is dropped by id.
+struct ProviderCall {
+    id: String,
+    package: String,
+    function: String,
+    params: Value,
+    deadline: Instant,
+    reply: mpsc::SyncSender<Result<Value, CallError>>,
+}
+
+type Providers = Arc<Mutex<BTreeMap<String, (u64, mpsc::SyncSender<ProviderCall>)>>>;
+
+/// What a session has registered, removed when the session ends.
+struct Registration<'a> {
+    bridge: &'a Bridge,
+    session: u64,
+    packages: Vec<String>,
+}
+
+impl Registration<'_> {
+    /// Register packages this session will answer for.
+    ///
+    /// Two rules, both from the manifest: the Spore must have asked for the
+    /// package, and one session answers per package. Silently replacing a live
+    /// provider would break the caller's expectation that its next call lands
+    /// where the last one did.
+    fn register(
+        &mut self,
+        packages: Vec<String>,
+        sender: &mpsc::SyncSender<ProviderCall>,
+    ) -> Result<Vec<String>, CallError> {
+        let mut accepted = Vec::new();
+        for package in packages {
+            if !self.bridge.grants.covers(&package) {
+                return Err(CallError::denied(format!(
+                    "{package} is not granted for this Spore"
+                )));
+            }
+            if !self.packages.contains(&package) {
+                let mut providers = self
+                    .bridge
+                    .providers
+                    .lock()
+                    .map_err(|_| CallError::io("provider table is poisoned"))?;
+                if let Some((holder, _)) = providers.get(&package)
+                    && *holder != self.session
+                {
+                    return Err(CallError::denied(format!(
+                        "{package} is already provided by another session"
+                    )));
+                }
+                providers.insert(package.clone(), (self.session, sender.clone()));
+                self.packages.push(package.clone());
+            }
+            accepted.push(package);
+        }
+        Ok(accepted)
+    }
+}
+
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        let Ok(mut providers) = self.bridge.providers.lock() else {
+            return;
+        };
+        for package in &self.packages {
+            if providers
+                .get(package)
+                .is_some_and(|(holder, _)| *holder == self.session)
+            {
+                providers.remove(package);
+            }
+        }
+    }
+}
+
+struct Session<'a> {
+    bridge: &'a Bridge,
+    socket: tungstenite::WebSocket<PrefixedStream>,
+    events: mpsc::Receiver<Event>,
+    provider_rx: mpsc::Receiver<ProviderCall>,
+    provider_tx: mpsc::SyncSender<ProviderCall>,
+    registration: Registration<'a>,
+}
+
+impl Session<'_> {
+    fn serve(mut self) {
+        let ready = EventFrame {
+            v: VERSION,
+            event: Event::Ready {
+                spore: self.bridge.spore.clone(),
+                grants: self.bridge.grants.declared(),
+                interfaces: self.bridge.registry.describe(),
+            },
+        };
+        if self.send_event(&ready).is_err() {
+            return;
+        }
+
+        loop {
+            if self.pump_events().is_err() {
                 return;
             }
-        }
 
-        match socket.read() {
-            Ok(Message::Text(text)) => {
-                let response = match serde_json::from_str::<Request>(text.as_str()) {
-                    Ok(request) => match request.validate() {
-                        Ok(()) => {
-                            let (response, events) = bridge.dispatch(&request);
-                            for event in events {
-                                bridge.bus.publish(event);
+            // A provider call is handled inline: the session thread owns the
+            // socket, and a call in flight has to keep reading to see its own
+            // answer. One call at a time per session is the price of that
+            // simplicity, and it is written down in the README.
+            if let Ok(call) = self.provider_rx.try_recv()
+                && self.run_provider_call(call).is_err()
+            {
+                return;
+            }
+
+            match self.socket.read() {
+                Ok(Message::Text(text)) => {
+                    let inbound = serde_json::from_str::<Inbound>(text.as_str());
+                    match inbound {
+                        Ok(inbound) => {
+                            if self.handle(inbound).is_err() {
+                                return;
                             }
-                            response
                         }
-                        Err(error) => Response {
-                            v: VERSION,
-                            id: request.call.id,
-                            result: Outcome::Err(error),
-                        },
-                    },
-                    Err(error) => Response {
-                        v: VERSION,
-                        id: String::new(),
-                        result: Outcome::Err(CallError::invalid(format!(
-                            "not a bridge request: {error}"
-                        ))),
-                    },
-                };
-                if socket
-                    .send(Message::text(match serde_json::to_string(&response) {
-                        Ok(text) => text,
-                        Err(_) => return,
-                    }))
-                    .is_err()
-                {
-                    return;
+                        Err(error) => {
+                            let response = Response {
+                                v: VERSION,
+                                id: String::new(),
+                                result: Outcome::Err(CallError::invalid(format!(
+                                    "not a bridge frame: {error}"
+                                ))),
+                            };
+                            if self.send_response(&response).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                Ok(Message::Close(_)) => break,
+                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                Ok(Message::Binary(_)) | Ok(Message::Frame(_)) => break,
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => {
+                    eprintln!("soil-web-bridge: session ended: {error}");
+                    break;
                 }
             }
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-            Ok(Message::Binary(_)) | Ok(Message::Frame(_)) => break,
-            Err(tungstenite::Error::Io(error))
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            Err(error) => {
-                eprintln!("soil-web-bridge: session ended: {error}");
-                break;
+        }
+
+        let _ = self.socket.close(None);
+    }
+
+    fn pump_events(&mut self) -> Result<(), ()> {
+        while let Ok(event) = self.events.try_recv() {
+            self.send_event(&EventFrame { v: VERSION, event })?;
+        }
+        Ok(())
+    }
+
+    fn send_event(&mut self, frame: &EventFrame) -> Result<(), ()> {
+        let text = serde_json::to_string(frame).map_err(|_| ())?;
+        self.socket.send(Message::text(text)).map_err(|_| ())
+    }
+
+    fn send_response(&mut self, response: &Response) -> Result<(), ()> {
+        let text = serde_json::to_string(response).map_err(|_| ())?;
+        self.socket.send(Message::text(text)).map_err(|_| ())
+    }
+
+    fn handle(&mut self, inbound: Inbound) -> Result<(), ()> {
+        match inbound {
+            Inbound::Frame(Frame::Call(request)) => {
+                let response = match request.validate() {
+                    Ok(()) => {
+                        let (response, events) = self.bridge.dispatch(&request);
+                        for event in events {
+                            self.bridge.bus.publish(event);
+                        }
+                        response
+                    }
+                    Err(error) => Response {
+                        v: VERSION,
+                        id: request.call.id,
+                        result: Outcome::Err(error),
+                    },
+                };
+                self.send_response(&response)
             }
+            Inbound::Frame(Frame::Provide(request)) => {
+                let result = match request.validate() {
+                    Ok(()) => self
+                        .registration
+                        .register(request.provide.packages, &self.provider_tx)
+                        .map(|packages| serde_json::json!({ "packages": packages })),
+                    Err(error) => Err(error),
+                };
+                self.send_response(&Response {
+                    v: VERSION,
+                    id: request.provide.id,
+                    result: match result {
+                        Ok(value) => Outcome::Ok(value),
+                        Err(error) => Outcome::Err(error),
+                    },
+                })
+            }
+            // A late answer to a call the host already gave up on.
+            Inbound::Response(_) => Ok(()),
         }
     }
 
-    drop(subscription);
-    let _ = socket.close(None);
+    fn run_provider_call(&mut self, call: ProviderCall) -> Result<(), ()> {
+        let request = Request {
+            v: VERSION,
+            call: Call {
+                id: call.id.clone(),
+                interface: call.package.clone(),
+                function: call.function.clone(),
+                params: call.params,
+            },
+        };
+        let text = match serde_json::to_string(&request) {
+            Ok(text) => text,
+            Err(_) => {
+                let _ = call
+                    .reply
+                    .send(Err(CallError::io("could not encode the call")));
+                return Ok(());
+            }
+        };
+        if self.socket.send(Message::text(text)).is_err() {
+            let _ = call
+                .reply
+                .send(Err(CallError::unavailable("provider session ended")));
+            return Err(());
+        }
+
+        loop {
+            if Instant::now() >= call.deadline {
+                let _ = self
+                    .socket
+                    .send(Message::text(protocol::cancel_frame(&call.id)));
+                let _ = call.reply.send(Err(CallError::timeout(format!(
+                    "{} did not answer in time",
+                    call.package
+                ))));
+                return Ok(());
+            }
+            if self.pump_events().is_err() {
+                let _ = call
+                    .reply
+                    .send(Err(CallError::unavailable("provider session ended")));
+                return Err(());
+            }
+            match self.socket.read() {
+                Ok(Message::Text(text)) => match serde_json::from_str::<Inbound>(text.as_str()) {
+                    Ok(Inbound::Response(response)) if response.id == call.id => {
+                        let reply = match response.result {
+                            Outcome::Ok(value) => Ok(value),
+                            Outcome::Err(error) => Err(error),
+                        };
+                        let _ = call.reply.send(reply);
+                        return Ok(());
+                    }
+                    Ok(inbound) => {
+                        if self.handle(inbound).is_err() {
+                            let _ = call
+                                .reply
+                                .send(Err(CallError::unavailable("provider session ended")));
+                            return Err(());
+                        }
+                    }
+                    Err(_) => {}
+                },
+                Ok(Message::Close(_)) | Ok(Message::Binary(_)) | Ok(Message::Frame(_)) => {
+                    let _ = call
+                        .reply
+                        .send(Err(CallError::unavailable("provider session ended")));
+                    return Err(());
+                }
+                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => {
+                    let _ = call
+                        .reply
+                        .send(Err(CallError::unavailable("provider session ended")));
+                    return Err(());
+                }
+            }
+        }
+    }
 }
 
 struct SessionGuard<'a>(&'a AtomicUsize);
@@ -573,14 +941,6 @@ impl Drop for SessionGuard<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
-}
-
-fn send_event<S: Read + Write>(
-    socket: &mut tungstenite::WebSocket<S>,
-    frame: &EventFrame,
-) -> Result<(), ()> {
-    let text = serde_json::to_string(frame).map_err(|_| ())?;
-    socket.send(Message::text(text)).map_err(|_| ())
 }
 
 /// A stream that replays bytes already read while parsing the request head, and

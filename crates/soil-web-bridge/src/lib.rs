@@ -35,11 +35,16 @@ pub mod grants;
 pub mod protocol;
 pub mod records;
 pub mod server;
+pub mod transport;
 
 pub use grants::GrantSet;
-pub use protocol::{Call, CallError, Code, Event, Outcome, Request, Response, VERSION};
+pub use protocol::{
+    Call, CallError, Code, Event, Frame, Outcome, Provide, ProvideRequest, Request, Response,
+    VERSION,
+};
 pub use records::RecordsCapability;
 pub use server::{Auth, Bridge, Server, serve};
+pub use transport::SessionTransport;
 
 use std::collections::BTreeMap;
 

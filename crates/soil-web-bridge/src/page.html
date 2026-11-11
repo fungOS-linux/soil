@@ -79,6 +79,19 @@
   <p id="error"></p>
 </main>
 
+<main class="panel" style="margin-top: 14px">
+  <div class="bar">
+    <button id="provide">Offer soil:http</button>
+    <span class="muted" id="provider">not offering</span>
+  </div>
+  <p class="muted" style="margin: 0">
+    Offering makes this page answer the node's <code>soil:http</code> calls with
+    <code>fetch</code> — its network, its cookies, its CORS rules. The node asked for
+    <code>soil:http</code> in the Spore's <code>[grants]</code>, so it is allowed to
+    accept the offer.
+  </p>
+</main>
+
 <script type="module">
 const token = new URLSearchParams(location.search).get('token');
 // The server owns the collection name; the page learns it from the session's
@@ -191,6 +204,84 @@ $('upsert').onsubmit = (event) => {
 
 let socket = null;
 let backoff = 500;
+const offers = new Set();
+const pendingFetches = new Map();
+
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function reply(id, result) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({ v: 1, id, result }));
+}
+
+// Answer an inbound `soil:http.fetch` with the page's own network. The host
+// gives up on a deadline and sends `cancel`; observing the abort signal is what
+// makes that cancellation real instead of a dropped result.
+async function answerHttp(call) {
+  const params = call.params ?? {};
+  const controller = new AbortController();
+  pendingFetches.set(call.id, controller);
+  try {
+    const response = await fetch(params.url, {
+      method: params.method ?? "GET",
+      headers: Object.fromEntries((params.headers ?? []).map((h) => [h.name, h.value])),
+      body: params.body ? base64ToBytes(params.body) : undefined,
+      signal: controller.signal,
+    });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    reply(call.id, {
+      ok: {
+        status: response.status,
+        finalUrl: response.url || params.url,
+        headers: [...response.headers].map(([name, value]) => ({ name, value })),
+        body: bytesToBase64(bytes),
+      },
+    });
+  } catch (error) {
+    reply(call.id, {
+      err: {
+        code: error.name === "AbortError" ? "timeout" : "unavailable",
+        message: String(error.message ?? error),
+      },
+    });
+  } finally {
+    pendingFetches.delete(call.id);
+  }
+}
+
+function handleCall(call) {
+  if (call.interface === "soil:http" && call.function === "fetch") {
+    void answerHttp(call);
+    return;
+  }
+  reply(call.id, {
+    err: {
+      code: "unsupported",
+      message: `this page does not provide ${call.interface}.${call.function}`,
+    },
+  });
+}
+
+$("provide").onclick = () => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    showError({ code: "unavailable", message: "no session to offer on" });
+    return;
+  }
+  const id = crypto.randomUUID();
+  offers.add(id);
+  socket.send(JSON.stringify({ v: 1, provide: { id, packages: ["soil:http"] } }));
+};
 
 function connect() {
   const url = new URL('/v1/session', location.href);
@@ -207,17 +298,35 @@ function connect() {
   socket.onmessage = (message) => {
     const frame = JSON.parse(message.data);
     if (frame.v !== 1) return;
-    if (frame.event.kind === 'ready') {
-      $('identity').textContent = frame.event.spore;
-      const grants = frame.event.grants;
-      if (grants.length) $('identity').title = grants.join('\n');
-      collection = frame.event.interfaces?.['soil:records']?.collection ?? null;
-      refresh();
+    if (frame.event) {
+      if (frame.event.kind === 'ready') {
+        $('identity').textContent = frame.event.spore;
+        const grants = frame.event.grants;
+        if (grants.length) $('identity').title = grants.join('\n');
+        collection = frame.event.interfaces?.['soil:records']?.collection ?? null;
+        refresh();
+      }
+      if (frame.event.kind === 'changed') {
+        // One notification, one re-read: the event names what moved so a client
+        // that missed any of them is still correct after a reconnect.
+        refresh();
+      }
+      return;
     }
-    if (frame.event.kind === 'changed') {
-      // One notification, one re-read: the event names what moved so a client
-      // that missed any of them is still correct after a reconnect.
-      refresh();
+    if (frame.call) {
+      handleCall(frame.call);
+      return;
+    }
+    if (frame.cancel) {
+      pendingFetches.get(frame.cancel.id)?.abort();
+      return;
+    }
+    if (frame.result && offers.delete(frame.id)) {
+      const refusal = frame.result.err;
+      $('provider').textContent = refusal
+        ? `refused: ${refusal.code} ${refusal.message}`
+        : `offering ${frame.result.ok.packages.join(', ')}`;
+      $('provider').dataset.live = refusal ? 'false' : 'true';
     }
   };
 

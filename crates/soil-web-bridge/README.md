@@ -128,12 +128,82 @@ with request bodies generated per WIT function. It cannot correlate a response t
 a request, which is exactly why the TypeScript is generated from the WIT rather
 than from the document.
 
+## Providers: the other direction
+
+A page is not only a consumer. It can volunteer an interface it implements, and
+the node can call it:
+
+```jsonc
+// page -> node, once per session
+{"v":1,"provide":{"id":"p1","packages":["soil:http"]}}
+{"v":1,"id":"p1","result":{"ok":{"packages":["soil:http"]}}}
+
+// node -> page, on the same socket
+{"v":1,"call":{"id":"~3","interface":"soil:http","function":"fetch","params":{…}}}
+{"v":1,"id":"~3","result":{"ok":{"status":200,"finalUrl":"…","headers":[…],"body":"<base64>"}}}
+
+// when the node gives up
+{"v":1,"cancel":{"id":"~3"}}
+```
+
+The rules, all of which fall out of the manifest:
+
+- **A session may only provide what the Spore asked for.** `[grants]` must name the
+  package; a page offering `soil:http` to a Spore that never declared it is
+  `denied`, not quietly accepted.
+- **One session answers per package.** A second offer is refused with the reason,
+  because silently swapping providers makes a caller's next request land
+  somewhere its last one did not.
+- **Host call ids are `~n`.** `~` is outside the id alphabet a page may use, so a
+  page cannot mint an id that collides with one the host is waiting on.
+- **Bounded and cancellable.** `POST /v1/provider/call` takes `timeoutMs` (50 ms…60 s,
+  default 10 s). The session thread enforces the same deadline, sends `cancel`, and
+  a result that arrives late is dropped by id.
+- **One call in flight per session.** The session thread owns the socket, so an
+  outbound call blocks further outbound calls until it answers. That is a real
+  limit, written here rather than discovered later.
+
+`POST /v1/provider/call` is the node-side door:
+
+```sh
+curl -s localhost:8795/v1/provider/call -H 'content-type: application/json' \
+  -d '{"package":"soil:http","function":"fetch","params":{"url":"https://example.com"},"timeoutMs":5000}'
+```
+
+The demo page's **Offer soil:http** button registers and answers with its own
+`fetch`, which means the node gets the *browser's* network — its cookies, its
+origin allowlist, its CORS — without the node opening a socket.
+
+### Wiring it into a host
+
+The bridge does not run Spores; it is the session side. A process that does both
+composes the two pieces, and `SessionTransport` is the adapter:
+
+```rust
+use std::sync::Arc;
+use soil_http_host::{DirectTransport, HttpHost, HttpPolicy, PreferProvider};
+use soil_web_bridge::{Bridge, SessionTransport};
+
+let bridge = Arc::new(bridge);
+let transport = Arc::new(PreferProvider::new(
+    Arc::new(SessionTransport::new(bridge.clone())),
+    Arc::new(DirectTransport),          // the node's own network, when nobody offers
+));
+let host = HttpHost::new(policy).with_transport(transport);
+```
+
+`PreferProvider` falls back **only** on `TransportError::Unsupported`, which is
+the transport's way of saying "not me". A provider that declines a URL returns
+`denied` and nobody routes around it: a fallback on failure would quietly
+overrule the page's own policy.
+
+That composition is tested here (`a_spore_fetch_goes_through_the_session…`) and
+in [`soil-http-host`](../soil-http-host/src/lib.rs); what does not exist yet is a
+binary that both serves the bridge and runs a Spore. Today that is two commands
+in two processes — which is exactly why the seam is a trait rather than a call.
+
 ## What is not here yet
 
-- **The other direction.** The envelope is direction-neutral on purpose: the same
-  `call` frame can travel node → browser when the *browser* implements an
-  interface (`soil:http` over `fetch`, `soil:audio` over `getUserMedia`). That
-  needs a provider role on the session, and it is the next slice.
 - **Pixels.** `soil:present` and `soil:surface-import` are a separate channel with
   their own congestion story. Nothing here should ever carry a frame.
 - **More than one interface per bridge.** The document and the client are

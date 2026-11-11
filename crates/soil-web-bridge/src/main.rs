@@ -12,6 +12,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, bail};
@@ -88,7 +89,7 @@ fn main() -> anyhow::Result<()> {
         auth = auth.allow_origin(origin.clone());
     }
 
-    let bridge = Bridge::new(spore.clone(), grants, registry).with_auth(auth);
+    let bridge = Arc::new(Bridge::new(spore.clone(), grants, registry).with_auth(auth));
     let server = bridge.serve(bind)?;
     let addr = server.addr();
 

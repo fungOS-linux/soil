@@ -8,6 +8,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -58,25 +59,29 @@ entry = "ui/view.lua"
 }
 
 fn start(grants: &[(&str, &str)]) -> (TempDir, Server) {
-    start_with(grants, Auth::loopback_only())
+    let (dir, _bridge, server) = start_with(grants, Auth::loopback_only());
+    (dir, server)
 }
 
-fn start_with(grants: &[(&str, &str)], auth: Auth) -> (TempDir, Server) {
+fn start_with(grants: &[(&str, &str)], auth: Auth) -> (TempDir, Arc<Bridge>, Server) {
     let dir = tempfile::tempdir().unwrap();
     let spore = fixture(dir.path(), grants);
     let grants = GrantSet::load(&spore).unwrap();
     let records =
         RecordsCapability::open(&dir.path().join("records"), "worklog", "worklog.event").unwrap();
-    let bridge = Bridge::new(
-        "dev.fungos.bridge-fixture",
-        grants,
-        Registry::new().with(records),
-    )
-    .with_auth(auth);
+    let bridge = Arc::new(
+        Bridge::new(
+            "dev.fungos.bridge-fixture",
+            grants,
+            Registry::new().with(records),
+        )
+        .with_auth(auth),
+    );
     let server = bridge
+        .clone()
         .serve("127.0.0.1:0".parse().unwrap())
         .expect("bind an ephemeral port");
-    (dir, server)
+    (dir, bridge, server)
 }
 
 fn call(id: &str, interface: &str, function: &str, params: Value) -> Value {
@@ -99,9 +104,13 @@ fn entry(id: &str, body: &str) -> Value {
 /// One request, one response. The server closes the connection, so reading to
 /// EOF is the whole protocol.
 fn post(addr: SocketAddr, body: &Value, token: Option<&str>) -> (u16, Value) {
+    post_to(addr, "/v1/call", body, token)
+}
+
+fn post_to(addr: SocketAddr, path: &str, body: &Value, token: Option<&str>) -> (u16, Value) {
     let payload = serde_json::to_vec(body).unwrap();
     let mut request = format!(
-        "POST /v1/call HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
         payload.len()
     );
     if let Some(token) = token {
@@ -411,8 +420,262 @@ fn the_change_feed_needs_the_sync_grant() {
 }
 
 #[test]
+fn a_session_can_provide_soil_http_and_answer_a_node_call() {
+    let (_dir, server) = start(&[READS, ("soil:http", "outbound fetch")]);
+    let addr = server.addr();
+
+    let mut browser = session(addr);
+    assert_eq!(next_frame(&mut browser)["event"]["kind"], "ready");
+
+    browser
+        .send(Message::text(
+            json!({ "v": 1, "provide": { "id": "p1", "packages": ["soil:http"] } }).to_string(),
+        ))
+        .unwrap();
+    let ack = next_frame(&mut browser);
+    assert_eq!(ack["id"], "p1", "{ack}");
+    assert_eq!(ack["result"]["ok"]["packages"][0], "soil:http");
+
+    // The node calls into the page while the page answers on this thread.
+    let caller = std::thread::spawn(move || {
+        post_to(
+            addr,
+            "/v1/provider/call",
+            &json!({
+                "package": "soil:http",
+                "function": "fetch",
+                "params": { "url": "https://example.com" },
+                "timeoutMs": 5000,
+            }),
+            None,
+        )
+    });
+
+    let call = next_frame(&mut browser);
+    assert_eq!(call["call"]["interface"], "soil:http");
+    assert_eq!(call["call"]["function"], "fetch");
+    let id = call["call"]["id"].as_str().unwrap();
+    assert!(
+        id.starts_with('~'),
+        "host ids must not collide with page ids"
+    );
+
+    browser
+        .send(Message::text(
+            json!({
+                "v": 1,
+                "id": id,
+                "result": { "ok": {
+                    "status": 200,
+                    "finalUrl": "https://example.com/",
+                    "headers": [],
+                    "body": BASE64.encode("hello from the browser"),
+                } },
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let (status, body) = caller.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["ok"]["status"], 200, "{body}");
+    let returned = body["result"]["ok"]["body"].as_str().unwrap();
+    assert_eq!(
+        String::from_utf8(BASE64.decode(returned).unwrap()).unwrap(),
+        "hello from the browser"
+    );
+}
+
+#[test]
+fn a_provider_that_never_answers_times_out_and_is_told_to_cancel() {
+    let (_dir, server) = start(&[("soil:http", "outbound fetch")]);
+    let addr = server.addr();
+
+    let mut browser = session(addr);
+    next_frame(&mut browser);
+    browser
+        .send(Message::text(
+            json!({ "v": 1, "provide": { "id": "p1", "packages": ["soil:http"] } }).to_string(),
+        ))
+        .unwrap();
+    assert!(next_frame(&mut browser)["result"]["ok"].is_object());
+
+    let caller = std::thread::spawn(move || {
+        post_to(
+            addr,
+            "/v1/provider/call",
+            &json!({
+                "package": "soil:http",
+                "function": "fetch",
+                "params": { "url": "https://example.com" },
+                "timeoutMs": 200,
+            }),
+            None,
+        )
+    });
+
+    let call = next_frame(&mut browser);
+    let called = call["call"]["id"].as_str().unwrap().to_owned();
+    // Deliberately do not answer. The host gives up and says so.
+    let cancel = next_frame(&mut browser);
+    assert_eq!(cancel["cancel"]["id"], called, "{cancel}");
+
+    let (status, body) = caller.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["err"]["code"], "timeout", "{body}");
+}
+
+#[test]
+fn a_session_cannot_provide_an_interface_the_spore_did_not_ask_for() {
+    let (_dir, server) = start(&[READS]);
+    let mut browser = session(server.addr());
+    next_frame(&mut browser);
+
+    browser
+        .send(Message::text(
+            json!({ "v": 1, "provide": { "id": "p1", "packages": ["soil:http"] } }).to_string(),
+        ))
+        .unwrap();
+    let ack = next_frame(&mut browser);
+    assert_eq!(ack["result"]["err"]["code"], "denied", "{ack}");
+    assert!(
+        ack["result"]["err"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("soil:http")
+    );
+}
+
+#[test]
+fn one_session_answers_per_package() {
+    let (_dir, server) = start(&[("soil:http", "outbound fetch")]);
+    let addr = server.addr();
+
+    let mut first = session(addr);
+    next_frame(&mut first);
+    first
+        .send(Message::text(
+            json!({ "v": 1, "provide": { "id": "a", "packages": ["soil:http"] } }).to_string(),
+        ))
+        .unwrap();
+    assert!(next_frame(&mut first)["result"]["ok"].is_object());
+
+    let mut second = session(addr);
+    next_frame(&mut second);
+    second
+        .send(Message::text(
+            json!({ "v": 1, "provide": { "id": "b", "packages": ["soil:http"] } }).to_string(),
+        ))
+        .unwrap();
+    let ack = next_frame(&mut second);
+    assert_eq!(ack["result"]["err"]["code"], "denied", "{ack}");
+    assert!(
+        ack["result"]["err"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("another session")
+    );
+}
+
+#[test]
+fn a_provider_call_with_no_provider_is_unavailable() {
+    let (_dir, server) = start(&[("soil:http", "outbound fetch")]);
+    let (status, body) = post_to(
+        server.addr(),
+        "/v1/provider/call",
+        &json!({ "package": "soil:http", "function": "fetch", "params": {} }),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["err"]["code"], "unavailable", "{body}");
+}
+
+#[test]
+fn a_spore_fetch_goes_through_the_session_when_one_is_offered() {
+    use soil_http_host::{HttpTransport, TransportError, TransportRequest};
+    use soil_web_bridge::SessionTransport;
+
+    let (_dir, bridge, server) =
+        start_with(&[("soil:http", "outbound fetch")], Auth::loopback_only());
+    let addr = server.addr();
+
+    let mut browser = session(addr);
+    next_frame(&mut browser);
+    browser
+        .send(Message::text(
+            json!({ "v": 1, "provide": { "id": "p1", "packages": ["soil:http"] } }).to_string(),
+        ))
+        .unwrap();
+    assert!(next_frame(&mut browser)["result"]["ok"].is_object());
+
+    let request = TransportRequest::from_parts(
+        "https://example.com/data",
+        "get",
+        vec![],
+        None,
+        Duration::from_secs(2),
+        1024,
+    )
+    .unwrap();
+    let transport = SessionTransport::new(bridge.clone());
+    let caller = std::thread::spawn(move || transport.fetch(&request));
+
+    // The page answers the fetch, so the Spore's transport call returns the
+    // page's response rather than the node's.
+    let call = next_frame(&mut browser);
+    assert_eq!(call["call"]["interface"], "soil:http");
+    assert_eq!(call["call"]["params"]["method"], "get");
+    assert_eq!(call["call"]["params"]["url"], "https://example.com/data");
+    let id = call["call"]["id"].as_str().unwrap().to_owned();
+    browser
+        .send(Message::text(
+            json!({
+                "v": 1,
+                "id": id,
+                "result": { "ok": {
+                    "status": 201,
+                    "finalUrl": "https://example.com/data",
+                    "headers": [{ "name": "content-type", "value": "application/json" }],
+                    "body": BASE64.encode("from the page"),
+                } },
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = caller.join().unwrap().expect("the page answered");
+    assert_eq!(response.status, 201);
+    assert_eq!(response.body, b"from the page");
+    assert_eq!(response.headers[0].0, "content-type");
+
+    // With the page gone the transport says "not me" — which is what lets a
+    // composed transport fall back to the node's own network.
+    drop(browser);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while bridge.provides("soil:http") {
+        assert!(Instant::now() < deadline, "the provider was never released");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let absent = TransportRequest::from_parts(
+        "https://example.com/data",
+        "get",
+        vec![],
+        None,
+        Duration::from_secs(2),
+        1024,
+    )
+    .unwrap();
+    assert_eq!(
+        SessionTransport::new(bridge.clone())
+            .fetch(&absent)
+            .unwrap_err(),
+        TransportError::Unsupported
+    );
+}
+
+#[test]
 fn a_configured_token_is_required_on_both_planes() {
-    let (_dir, server) = start_with(&[READS], Auth::with_token("s3cret"));
+    let (_dir, _bridge, server) = start_with(&[READS], Auth::with_token("s3cret"));
     let addr = server.addr();
     let scan = call(
         "1",
