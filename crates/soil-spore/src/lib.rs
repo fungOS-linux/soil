@@ -339,6 +339,14 @@ pub struct Presentation {
     /// Never a path: the fallback badge is what works with no network.
     #[serde(default)]
     pub icon: Option<String>,
+    /// The package's own mark, as a path inside the package.
+    ///
+    /// The difference from `icon` is where the bytes live: this one ships in
+    /// the package, so the lock covers it and a launcher draws it with no
+    /// network at all. `icon` stays the fetched, content-addressed form a store
+    /// may have and this machine may not.
+    #[serde(default)]
+    pub mark: Option<String>,
 }
 
 /// Categories a listing may claim. A fixed vocabulary is what makes browsing
@@ -850,6 +858,7 @@ impl Manifest {
                 "badge": presentation.badge,
                 "color": presentation.color,
                 "icon": presentation.icon,
+                "mark": presentation.mark,
             })),
             "catalog": self.catalog.as_ref().map(|catalog| serde_json::json!({
                 "categories": catalog.categories,
@@ -1271,6 +1280,14 @@ impl Manifest {
             if let Some(icon) = &presentation.icon {
                 reference(icon)?;
             }
+            if let Some(mark) = &presentation.mark {
+                safe_relative(mark)?;
+                if !(mark.ends_with(".svg") || mark.ends_with(".png")) {
+                    return Err(Error::Invalid(format!(
+                        "presentation.mark {mark:?} must be a .svg or .png inside the package"
+                    )));
+                }
+            }
         }
         if let Some(description) = &self.spore.description {
             if description.trim().is_empty() {
@@ -1403,6 +1420,9 @@ impl Manifest {
                     paths.push(source.clone());
                 }
             }
+        }
+        if let Some(mark) = self.presentation.as_ref().and_then(|value| value.mark.as_ref()) {
+            paths.push(mark.clone());
         }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
         paths.extend(self.skills.iter().map(|skill| skill.path.clone()));

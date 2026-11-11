@@ -680,3 +680,39 @@ fn display_title_reads_a_slug_as_words() {
     assert_eq!(soil_spore::display_title("store"), "Store");
     assert_eq!(soil_spore::display_title(""), "");
 }
+
+#[test]
+fn a_package_can_ship_its_own_mark() {
+    let with_mark = format!(
+        "{MANIFEST}\n[presentation]\nbadge = \"M\"\ncolor = \"#8b9dff\"\nmark = \"assets/icon.svg\"\n"
+    );
+    let manifest = Manifest::parse(&with_mark).expect("manifest parses");
+    manifest.validate().expect("a mark inside the package is valid");
+    assert_eq!(
+        manifest.presentation.as_ref().and_then(|mark| mark.mark.clone()),
+        Some("assets/icon.svg".into())
+    );
+    assert!(
+        manifest
+            .declared_paths()
+            .iter()
+            .any(|path| path.as_path() == Path::new("assets/icon.svg")),
+        "the mark ships in the package, so the lock has to cover it"
+    );
+
+    let escapes = format!(
+        "{MANIFEST}\n[presentation]\nbadge = \"M\"\ncolor = \"#8b9dff\"\nmark = \"../icon.svg\"\n"
+    );
+    assert!(
+        Manifest::parse(&escapes).is_err(),
+        "a mark may not leave the package"
+    );
+
+    let disguised = format!(
+        "{MANIFEST}\n[presentation]\nbadge = \"M\"\ncolor = \"#8b9dff\"\nmark = \"assets/icon.gif\"\n"
+    );
+    assert!(
+        Manifest::parse(&disguised).is_err(),
+        "a mark is an svg or a png, not whatever a renderer happens to sniff"
+    );
+}

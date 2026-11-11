@@ -219,10 +219,13 @@ pub fn render_info(manifest: &Manifest) -> String {
             rows.push(("manual", man.clone()));
         }
     }
-    if let Some(presentation) = &manifest.presentation
-        && let Some(icon) = &presentation.icon
-    {
-        rows.push(("icon", icon.clone()));
+    if let Some(presentation) = &manifest.presentation {
+        if let Some(mark) = &presentation.mark {
+            rows.push(("mark", mark.clone()));
+        }
+        if let Some(icon) = &presentation.icon {
+            rows.push(("icon", icon.clone()));
+        }
     }
     if let Some(catalog) = &manifest.catalog {
         rows.push(("categories", catalog.categories.join(", ")));
