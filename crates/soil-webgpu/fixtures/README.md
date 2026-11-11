@@ -14,10 +14,10 @@ cp crates/soil-webgpu/fixtures/hello-compute/target/wasm32-wasip2/release/soil_w
   crates/soil-webgpu/fixtures/hello-compute.wasm
 ```
 
-`wgpu-compute.wasm` is the real wgpu 29 drop-in fixture. It uses
+`wgpu-compute.wasm` is the real wgpu 30 drop-in fixture. It uses
 `wgpu_wasi_webgpu::instance()` and the ordinary wgpu API, but imports
 `wasi:webgpu@0.3.0-rc.2` and runs in Soil. See `wgpu-compute/README.md`.
 
-`wgpu-canvas.wasm` adds the presentation proof: it draws with wgpu 29 and
-calls `soil:canvas-gpu/surface.present` with a standard `wasi:webgpu`
-texture. See `wgpu-canvas/README.md`.
+`wgpu-test.wasm` adds the presentation proof: it draws with wgpu 30 and
+calls `soil:present/surface.present` with a standard `wasi:webgpu`
+texture. See `wgpu-test/README.md`.

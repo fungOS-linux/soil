@@ -10,6 +10,6 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-wgpu = { version = "29", default-features = false, features = ["wgsl"] }
-wgpu-wasi-webgpu = { git = "https://github.com/fungOS-linux/wgpu-wasi-webgpu", rev = "88938bb" }
+wgpu = { version = "30", default-features = false, features = ["wgsl"] }
+wgpu-wasi-webgpu = { git = "https://github.com/fungOS-linux/wgpu-wasi-webgpu", rev = "bec921356c366450408d5faee2d206b6a1b8061b" }
 wit-bindgen = "0.57"

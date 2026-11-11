@@ -35,7 +35,7 @@ pub struct CanvasFrame {
     pub rgba: Vec<u8>,
 }
 
-/// Host-side destination for a guest `soil:canvas-gpu` frame.
+/// Host-side destination for a guest `soil:present` frame.
 ///
 /// Canvas owns the actual window and final composition; this trait only lets
 /// the WebGPU host hand over a completed frame. It is never called from inside
@@ -86,7 +86,7 @@ impl CanvasGpuPresenter for FrameCapture {
 
     fn present(&mut self, frame: CanvasFrame) -> Result<()> {
         let mut slot = self.frame.lock().expect("frame capture poisoned");
-        anyhow::ensure!(slot.is_none(), "canvas present budget");
+        anyhow::ensure!(slot.is_none(), "present budget");
         *slot = Some(frame);
         Ok(())
     }
@@ -134,7 +134,7 @@ impl WasiView for WebGpuHost {
     }
 }
 
-impl soil::canvas_gpu::surface::Host for WebGpuHost {
+impl soil::present::surface::Host for WebGpuHost {
     fn size(&mut self) -> (u32, u32) {
         self.presenter.size()
     }
@@ -187,9 +187,9 @@ impl WebGpuRuntime {
         wasi_webgpu_wasmtime::add_to_linker(&mut linker)
             .map_err(anyhow::Error::from)
             .context("link wasi:webgpu")?;
-        soil::canvas_gpu::surface::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+        soil::present::surface::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
-            .context("link soil:canvas-gpu")?;
+            .context("link soil:present")?;
         Ok(Self { engine, linker })
     }
 

@@ -1,16 +1,16 @@
-//! Real wgpu 29 render pass -> `wasi:webgpu` -> `soil:canvas-gpu` -> Canvas frame.
+//! Real wgpu 30 render pass -> `wasi:webgpu` -> `soil:present` -> Canvas frame.
 //!
 //! Requires a native GPU adapter. Run with:
-//!   cargo test -p soil-webgpu --test wgpu_canvas -- --ignored --nocapture
+//!   cargo test -p soil-webgpu --test wgpu_test -- --ignored --nocapture
 
 #[test]
 #[ignore = "requires a native GPU adapter"]
-fn wgpu_29_triangle_reaches_canvas() {
-    let component = include_bytes!("../fixtures/wgpu-canvas.wasm");
+fn wgpu_30_triangle_reaches_compositor() {
+    let component = include_bytes!("../fixtures/wgpu-test.wasm");
     let (status, frame) =
         soil_webgpu::run_component_capture(component, 480, 640).expect("guest run");
-    assert_eq!(status, 0, "wgpu canvas guest reported failure");
-    let frame = frame.expect("canvas present");
+    assert_eq!(status, 0, "compositor guest reported failure");
+    let frame = frame.expect("compositor present");
     assert_eq!((frame.width, frame.height), (480, 640));
     assert_eq!(frame.rgba.len(), 480 * 640 * 4);
 

@@ -1,4 +1,4 @@
-//! A real wgpu 29 render pass presented to Canvas through `soil:canvas-gpu`.
+//! A real wgpu 30 render pass presented to Canvas through `soil:present`.
 //!
 //! The guest creates only a standard `wasi:webgpu` texture. It never receives
 //! a window, swapchain, or native handle; the host copies the texture into the
@@ -13,7 +13,7 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use soil::canvas_gpu::surface;
+use soil::present::surface;
 
 const SHADER: &str = r#"
 @vertex

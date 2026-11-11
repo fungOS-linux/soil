@@ -1,9 +1,14 @@
-# wgpu 29 compute fixture
+# wgpu 30 compute fixture
 
-`wgpu-compute.wasm` is a real wgpu 29 program built for `wasm32-wasip2`.
+`wgpu-compute.wasm` is a real wgpu 30 program built for `wasm32-wasip2`.
 It calls `wgpu_wasi_webgpu::instance()` and then ordinary wgpu APIs for a
 Collatz compute pass. The component imports `wasi:webgpu@0.3.0-rc.2`; Soil's
 `wasi-webgpu-wasmtime` host answers it.
+
+The guest backend is the `fungOS-linux/wgpu-wasi-webgpu` fork, branch `wgpu-30`
+(rev `bec9213`), patched to wgpu 30. The host is still wgpu-core 29;
+the WIT boundary is version-independent, and this fixture prints `webgpu: ok`
+against it.
 
 Regenerate:
 
