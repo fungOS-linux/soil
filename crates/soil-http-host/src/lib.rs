@@ -114,6 +114,56 @@ pub struct TransportRequest {
     pub max_bytes: usize,
 }
 
+impl TransportRequest {
+    /// The `soil:http` enum value (`get`, `post`, …).
+    ///
+    /// Not the HTTP verb: `ureq` wants `GET`, the WIT wants `get`, and a
+    /// transport that speaks the value rather than this crate's enum should not
+    /// have to name the generated type to read it.
+    pub fn method_name(&self) -> &'static str {
+        match self.method {
+            http::Method::Get => "get",
+            http::Method::Head => "head",
+            http::Method::Post => "post",
+            http::Method::Put => "put",
+            http::Method::Patch => "patch",
+            http::Method::Delete => "delete",
+        }
+    }
+
+    /// Build a request from the names a wire transport uses.
+    ///
+    /// The generated `Method` enum is not part of this crate's public surface,
+    /// so an out-of-tree transport (and its tests) needs a way in that does not
+    /// depend on it.
+    pub fn from_parts(
+        url: &str,
+        method: &str,
+        headers: Vec<(String, String)>,
+        body: Option<Vec<u8>>,
+        timeout: Duration,
+        max_bytes: usize,
+    ) -> Result<Self> {
+        let method = match method.to_ascii_lowercase().as_str() {
+            "get" => http::Method::Get,
+            "head" => http::Method::Head,
+            "post" => http::Method::Post,
+            "put" => http::Method::Put,
+            "patch" => http::Method::Patch,
+            "delete" => http::Method::Delete,
+            other => anyhow::bail!("{other:?} is not a soil:http method"),
+        };
+        Ok(Self {
+            url: Url::parse(url).with_context(|| format!("parse {url}"))?,
+            method,
+            headers,
+            body,
+            timeout,
+            max_bytes,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TransportResponse {
     pub status: u16,
@@ -124,11 +174,17 @@ pub struct TransportResponse {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportError {
+    /// The transport cannot serve this request at all, so a composed transport
+    /// may try another one. This is the only variant that means "not me"; every
+    /// other one is an answer.
+    Unsupported,
+    Denied,
+    OverBudget,
+    Timeout,
     Unavailable,
     Tls,
     Http,
     Io,
-    Unsupported,
 }
 
 /// A host-owned HTTP transport. Direct DNS/TLS is the first implementation.
@@ -139,6 +195,33 @@ pub enum TransportError {
 /// health. The Spore never selects the route.
 pub trait HttpTransport: Send + Sync {
     fn fetch(&self, request: &TransportRequest) -> Result<TransportResponse, TransportError>;
+}
+
+/// Prefer one transport, fall back to another when the first says it cannot
+/// serve the request.
+///
+/// The distinction is deliberate: [`TransportError::Unsupported`] means "not
+/// this transport", and everything else — including a timeout or a refusal — is
+/// an answer that must reach the caller. A fallback on *failure* would silently
+/// route around a provider that explicitly declined a URL.
+pub struct PreferProvider {
+    provider: Arc<dyn HttpTransport>,
+    fallback: Arc<dyn HttpTransport>,
+}
+
+impl PreferProvider {
+    pub fn new(provider: Arc<dyn HttpTransport>, fallback: Arc<dyn HttpTransport>) -> Self {
+        Self { provider, fallback }
+    }
+}
+
+impl HttpTransport for PreferProvider {
+    fn fetch(&self, request: &TransportRequest) -> Result<TransportResponse, TransportError> {
+        match self.provider.fetch(request) {
+            Err(TransportError::Unsupported) => self.fallback.fetch(request),
+            other => other,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -193,7 +276,7 @@ impl HttpTransport for DirectTransport {
                 .read_to_end(&mut body)
                 .map_err(|_| TransportError::Io)?;
             if body.len() > request.max_bytes {
-                return Err(TransportError::Unsupported);
+                return Err(TransportError::OverBudget);
             }
         }
         Ok(TransportResponse {
@@ -334,6 +417,9 @@ impl http::Host for HttpHost {
             .transport
             .fetch(&transport_request)
             .map_err(|error| match error {
+                TransportError::Denied => http::Error::Denied,
+                TransportError::OverBudget => http::Error::OverBudget,
+                TransportError::Timeout => http::Error::Timeout,
                 TransportError::Unavailable => http::Error::Unavailable,
                 TransportError::Tls => http::Error::Tls,
                 TransportError::Http => http::Error::Http,
@@ -568,6 +654,53 @@ mod tests {
         );
         assert!(request.contains(r#"{"on":true}"#), "{request}");
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn the_provider_is_preferred_and_only_unsupported_falls_back() {
+        struct Always(Result<TransportResponse, TransportError>);
+        impl HttpTransport for Always {
+            fn fetch(
+                &self,
+                _request: &TransportRequest,
+            ) -> Result<TransportResponse, TransportError> {
+                self.0.clone()
+            }
+        }
+
+        let request = TransportRequest {
+            url: Url::parse("https://example.com/").unwrap(),
+            method: http::Method::Get,
+            headers: vec![],
+            body: None,
+            timeout: Duration::from_secs(1),
+            max_bytes: 64,
+        };
+        let answer = |from: &'static str| {
+            Arc::new(Always(Ok(TransportResponse {
+                status: 200,
+                final_url: from.into(),
+                headers: vec![],
+                body: from.as_bytes().to_vec(),
+            }))) as Arc<dyn HttpTransport>
+        };
+
+        let prefer = PreferProvider::new(answer("page"), answer("node"));
+        assert_eq!(prefer.fetch(&request).unwrap().body, b"page");
+
+        let absent = PreferProvider::new(
+            Arc::new(Always(Err(TransportError::Unsupported))),
+            answer("node"),
+        );
+        assert_eq!(absent.fetch(&request).unwrap().body, b"node");
+
+        // A refusal is an answer, not an absence: it must reach the caller
+        // rather than quietly routing around the provider.
+        let denied = PreferProvider::new(
+            Arc::new(Always(Err(TransportError::Denied))),
+            answer("node"),
+        );
+        assert_eq!(denied.fetch(&request).unwrap_err(), TransportError::Denied);
     }
 
     #[test]
