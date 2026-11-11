@@ -94,6 +94,68 @@ impl CanvasGpuPresenter for FrameCapture {
     }
 }
 
+/// One installed Spore, in the plain shape a presenter supplies. The WIT
+/// records are built at the boundary; hosts do not depend on generated types.
+#[derive(Clone, Debug)]
+pub struct CatalogEntry {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub summary: String,
+    pub workspace: Option<String>,
+    pub default_surface: String,
+    pub surfaces: Vec<CatalogSurface>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CatalogSurface {
+    pub name: String,
+    pub kind: CatalogSurfaceKind,
+    pub entry: String,
+    pub requires: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogSurfaceKind {
+    Canvas,
+    Web,
+}
+
+#[derive(Clone, Debug)]
+pub struct CatalogLaunched {
+    pub id: String,
+    pub surface: String,
+    pub target: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogError {
+    Denied,
+    NotFound,
+    Invalid,
+    Unsupported,
+    Io,
+}
+
+/// The host's installed-Spore catalogue. `launch` is host-owned: the guest
+/// asks, the host starts the process or opens the window.
+pub trait CatalogHost: Send {
+    fn entries(&mut self) -> Result<Vec<CatalogEntry>, CatalogError>;
+    fn launch(&mut self, id: &str, surface: &str) -> Result<CatalogLaunched, CatalogError>;
+}
+
+struct NoCatalog;
+
+impl CatalogHost for NoCatalog {
+    fn entries(&mut self) -> Result<Vec<CatalogEntry>, CatalogError> {
+        Ok(Vec::new())
+    }
+
+    fn launch(&mut self, _id: &str, _surface: &str) -> Result<CatalogLaunched, CatalogError> {
+        Err(CatalogError::NotFound)
+    }
+}
+
 /// One normalized key waiting for the guest. The WIT type is built at the
 /// boundary; presenters only need this plain shape.
 #[derive(Clone, Debug)]
@@ -116,6 +178,7 @@ pub struct WebGpuHost {
     presenter: Box<dyn CanvasGpuPresenter>,
     input: Arc<Mutex<VecDeque<InputKey>>>,
     interactive: bool,
+    catalog: Box<dyn CatalogHost>,
 }
 
 impl WebGpuHost {
@@ -131,6 +194,15 @@ impl WebGpuHost {
         presenter: Box<dyn CanvasGpuPresenter>,
         input: Arc<Mutex<VecDeque<InputKey>>>,
         interactive: bool,
+    ) -> Result<Self> {
+        Self::with_presenter_input_catalog(presenter, input, interactive, Box::new(NoCatalog))
+    }
+
+    pub fn with_presenter_input_catalog(
+        presenter: Box<dyn CanvasGpuPresenter>,
+        input: Arc<Mutex<VecDeque<InputKey>>>,
+        interactive: bool,
+        catalog: Box<dyn CatalogHost>,
     ) -> Result<Self> {
         let descriptor = wgpu_types::InstanceDescriptor {
             backends: wgpu_types::Backends::all(),
@@ -148,6 +220,7 @@ impl WebGpuHost {
             presenter,
             input,
             interactive,
+            catalog,
         })
     }
 }
@@ -208,6 +281,61 @@ impl soil::present::surface::Host for WebGpuHost {
     }
 }
 
+impl soil::spore::catalog::Host for WebGpuHost {
+    fn entries(
+        &mut self,
+    ) -> std::result::Result<Vec<soil::spore::catalog::Entry>, soil::spore::catalog::Error> {
+        let entries = self.catalog.entries().map_err(catalog_error)?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| soil::spore::catalog::Entry {
+                id: entry.id,
+                name: entry.name,
+                version: entry.version,
+                summary: entry.summary,
+                workspace: entry.workspace,
+                default_surface: entry.default_surface,
+                surfaces: entry
+                    .surfaces
+                    .into_iter()
+                    .map(|surface| soil::spore::catalog::Surface {
+                        name: surface.name,
+                        kind: match surface.kind {
+                            CatalogSurfaceKind::Canvas => soil::spore::catalog::SurfaceKind::Canvas,
+                            CatalogSurfaceKind::Web => soil::spore::catalog::SurfaceKind::Web,
+                        },
+                        entry: surface.entry,
+                        requires: surface.requires,
+                    })
+                    .collect(),
+            })
+            .collect())
+    }
+
+    fn launch(
+        &mut self,
+        id: String,
+        surface: String,
+    ) -> std::result::Result<soil::spore::catalog::Launched, soil::spore::catalog::Error> {
+        let launched = self.catalog.launch(&id, &surface).map_err(catalog_error)?;
+        Ok(soil::spore::catalog::Launched {
+            id: launched.id,
+            surface: launched.surface,
+            target: launched.target,
+        })
+    }
+}
+
+fn catalog_error(error: CatalogError) -> soil::spore::catalog::Error {
+    match error {
+        CatalogError::Denied => soil::spore::catalog::Error::Denied,
+        CatalogError::NotFound => soil::spore::catalog::Error::NotFound,
+        CatalogError::Invalid => soil::spore::catalog::Error::Invalid,
+        CatalogError::Unsupported => soil::spore::catalog::Error::Unsupported,
+        CatalogError::Io => soil::spore::catalog::Error::Io,
+    }
+}
+
 impl WasiWebGpuCtxView for WebGpuHost {
     fn webgpu_ctx(&mut self) -> WasiWebGpuCtx<'_> {
         WasiWebGpuCtx {
@@ -247,6 +375,9 @@ impl WebGpuRuntime {
         soil::present::input::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:present input")?;
+        soil::spore::catalog::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+            .map_err(anyhow::Error::from)
+            .context("link soil:spore catalog")?;
         Ok(Self { engine, linker })
     }
 
@@ -288,12 +419,30 @@ impl WebGpuRuntime {
         input: Arc<Mutex<VecDeque<InputKey>>>,
         interactive: bool,
     ) -> Result<u32> {
+        self.run_component_with_presenter_input_catalog(
+            bytes,
+            presenter,
+            input,
+            interactive,
+            Box::new(NoCatalog),
+        )
+        .await
+    }
+
+    pub async fn run_component_with_presenter_input_catalog(
+        &self,
+        bytes: &[u8],
+        presenter: Box<dyn CanvasGpuPresenter>,
+        input: Arc<Mutex<VecDeque<InputKey>>>,
+        interactive: bool,
+        catalog: Box<dyn CatalogHost>,
+    ) -> Result<u32> {
         let component = Component::new(&self.engine, bytes)
             .map_err(anyhow::Error::from)
             .context("compile WebGPU component")?;
         let mut store = Store::new(
             &self.engine,
-            WebGpuHost::with_presenter_and_input(presenter, input, interactive)?,
+            WebGpuHost::with_presenter_input_catalog(presenter, input, interactive, catalog)?,
         );
         let instance = Runner::instantiate_async(&mut store, &component, &self.linker)
             .await

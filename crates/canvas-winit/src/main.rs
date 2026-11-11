@@ -14,7 +14,11 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use soil_webgpu::{CanvasFrame, CanvasGpuPresenter, InputKey, WebGpuRuntime};
+use soil_spore::Manifest;
+use soil_webgpu::{
+    CanvasFrame, CanvasGpuPresenter, CatalogEntry, CatalogError, CatalogHost, CatalogLaunched,
+    CatalogSurface, CatalogSurfaceKind, InputKey, WebGpuRuntime,
+};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -28,6 +32,104 @@ type SoftContext = softbuffer::Context<Arc<Window>>;
 type SoftSurface = softbuffer::Surface<Arc<Window>, Arc<Window>>;
 
 const LOGICAL_SIZE: (f64, f64) = (1000.0, 700.0);
+
+struct Installed {
+    root: PathBuf,
+    manifest: Manifest,
+}
+
+struct SporeCatalog {
+    installed: Vec<Installed>,
+}
+
+impl SporeCatalog {
+    fn new(root: &std::path::Path) -> Result<Self, CatalogError> {
+        let mut installed = Vec::new();
+        let Ok(directory) = std::fs::read_dir(root) else {
+            return Ok(Self { installed });
+        };
+        for entry in directory.flatten() {
+            if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let package = entry.path();
+            if !package.join("spore.toml").is_file() {
+                continue;
+            }
+            let manifest = Manifest::load(&package).map_err(|_| CatalogError::Invalid)?;
+            installed.push(Installed {
+                root: package,
+                manifest,
+            });
+        }
+        installed.sort_by(|left, right| left.manifest.spore.name.cmp(&right.manifest.spore.name));
+        Ok(Self { installed })
+    }
+}
+
+impl CatalogHost for SporeCatalog {
+    fn entries(&mut self) -> Result<Vec<CatalogEntry>, CatalogError> {
+        Ok(self
+            .installed
+            .iter()
+            .map(|installed| {
+                let manifest = &installed.manifest;
+                CatalogEntry {
+                    id: manifest.spore.id.clone(),
+                    name: manifest.spore.name.clone(),
+                    version: manifest.spore.version.clone(),
+                    summary: manifest.spore.summary.clone(),
+                    workspace: None,
+                    default_surface: manifest.launch.default.clone(),
+                    surfaces: manifest
+                        .surfaces
+                        .iter()
+                        .map(|surface| CatalogSurface {
+                            name: surface.name.clone(),
+                            kind: match surface.kind {
+                                soil_spore::SurfaceKind::Canvas => CatalogSurfaceKind::Canvas,
+                                soil_spore::SurfaceKind::Web => CatalogSurfaceKind::Web,
+                            },
+                            entry: surface
+                                .entry(manifest.ui.as_ref())
+                                .unwrap_or_default()
+                                .to_owned(),
+                            requires: surface.requires.clone(),
+                        })
+                        .collect(),
+                }
+            })
+            .collect())
+    }
+
+    fn launch(&mut self, id: &str, surface: &str) -> Result<CatalogLaunched, CatalogError> {
+        let installed = self
+            .installed
+            .iter()
+            .find(|installed| installed.manifest.spore.id == id)
+            .ok_or(CatalogError::NotFound)?;
+        let module = installed
+            .manifest
+            .module
+            .as_ref()
+            .ok_or(CatalogError::Unsupported)?;
+        let path = installed.root.join(&module.path);
+        let mut child =
+            std::process::Command::new(std::env::current_exe().map_err(|_| CatalogError::Io)?)
+                .arg(&path)
+                .spawn()
+                .map_err(|_| CatalogError::Io)?;
+        // Reap the child without blocking the launcher's event loop.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(CatalogLaunched {
+            id: id.to_owned(),
+            surface: surface.to_owned(),
+            target: format!("canvas-winit {}", path.display()),
+        })
+    }
+}
 
 struct FramePresenter {
     size: (u32, u32),
@@ -63,6 +165,7 @@ struct App {
     frames: usize,
     frames_seen: usize,
     input: Arc<Mutex<VecDeque<InputKey>>>,
+    spores: PathBuf,
     started: bool,
 }
 
@@ -76,17 +179,22 @@ impl App {
         let module = self.module.clone();
         let tx = self.tx.clone();
         let input = self.input.clone();
+        let spores = self.spores.clone();
         thread::spawn(move || {
             let result = (|| -> Result<()> {
                 let bytes =
                     std::fs::read(&module).with_context(|| format!("read {}", module.display()))?;
                 let runtime = WebGpuRuntime::new()?;
-                let status = pollster::block_on(runtime.run_component_with_presenter_and_input(
-                    &bytes,
-                    Box::new(FramePresenter { size, tx, window }),
-                    input,
-                    true,
-                ))?;
+                let catalog = SporeCatalog::new(&spores)
+                    .map_err(|error| anyhow::anyhow!("catalog: {error:?}"))?;
+                let status =
+                    pollster::block_on(runtime.run_component_with_presenter_input_catalog(
+                        &bytes,
+                        Box::new(FramePresenter { size, tx, window }),
+                        input,
+                        true,
+                        Box::new(catalog),
+                    ))?;
                 eprintln!("canvas-winit: guest returned {status}");
                 anyhow::ensure!(status == 0, "guest returned status {status}");
                 Ok(())
@@ -261,6 +369,7 @@ fn main() -> Result<()> {
     let mut capture = None;
     let mut frames = None;
     let mut key = None;
+    let mut spores = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -278,14 +387,19 @@ fn main() -> Result<()> {
                 );
             }
             "--key" => key = Some(args.next().context("--key needs a key name")?),
+            "--spores" => {
+                spores = Some(PathBuf::from(
+                    args.next().context("--spores needs a directory")?,
+                ));
+            }
             value if module.is_none() => module = Some(PathBuf::from(value)),
             _ => anyhow::bail!(
-                "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY]"
+                "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--spores DIR]"
             ),
         }
     }
     let module = module.context(
-        "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY]",
+        "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--spores DIR]",
     )?;
     let input = Arc::new(Mutex::new(VecDeque::new()));
     if let Some(key) = key {
@@ -316,6 +430,12 @@ fn main() -> Result<()> {
         frames: frames.unwrap_or(1),
         frames_seen: 0,
         input,
+        spores: spores.unwrap_or_else(|| {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            home.join("Library/Application Support/fungOS/spores")
+        }),
         started: false,
     };
     let event_loop = EventLoop::new()?;

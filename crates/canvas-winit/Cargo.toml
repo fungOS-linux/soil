@@ -14,5 +14,6 @@ path = "src/main.rs"
 anyhow = "1"
 pollster = "0.4"
 softbuffer = "0.4"
+soil-spore = { path = "../soil-spore" }
 soil-webgpu = { path = "../soil-webgpu" }
 winit = "0.30"
