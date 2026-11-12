@@ -112,6 +112,38 @@ impl Output for Capture {
     }
 }
 
+/// Sends output to a live sink while keeping the copy a job still has to report.
+///
+/// This is what makes the `bash -c` path work: the caller watches the command
+/// as it runs, and the job record ends up with the same text when it finishes.
+pub struct Tee {
+    live: Box<dyn Output + Send>,
+    pub captured: Capture,
+}
+
+impl Tee {
+    pub fn new(live: Box<dyn Output + Send>) -> Self {
+        Self {
+            live,
+            captured: Capture::default(),
+        }
+    }
+}
+
+impl Output for Tee {
+    fn stdout(&mut self, text: &str) {
+        self.live.stdout(text);
+        self.captured.out.push_str(text);
+    }
+    fn stderr(&mut self, text: &str) {
+        self.live.stderr(text);
+        self.captured.err.push_str(text);
+    }
+    fn inherits_stdio(&self) -> bool {
+        false
+    }
+}
+
 
 /// What a caller can do to a command that is already running.
 ///
@@ -193,7 +225,7 @@ pub fn run_line_captured(
     Ok((status, capture.out, capture.err))
 }
 
-fn run_line_with(
+pub(crate) fn run_line_with(
     output: &mut dyn Output,
     runtime: &mut Runtime,
     root: &Path,
