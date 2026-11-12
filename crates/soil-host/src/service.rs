@@ -79,10 +79,10 @@ impl HttpService {
         creds::add_to_linker(&mut linker)?;
         unibus::add_to_linker(&mut linker)?;
         if builder.has_records() {
-            soil_host::records_host::add_to_linker(&mut linker).context("link soil:records")?;
+            crate::records_host::add_to_linker(&mut linker).context("link soil:records")?;
         }
         if builder.has_http() {
-            soil_host::http_host::api::add_to_linker::<
+            crate::http_host::api::add_to_linker::<
                 super::host::WasiHost,
                 HasSelf<super::host::WasiHost>,
             >(&mut linker, |state| state)?;

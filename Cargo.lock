@@ -6875,7 +6875,7 @@ dependencies = [
  "http",
  "serde",
  "serde_json",
- "soil-wasi-host",
+ "soil-host",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -6987,20 +6987,36 @@ name = "soil-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "blake3",
+ "bytes",
  "clap",
+ "ed25519-dalek 2.2.0",
  "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
  "fungos-vfs",
+ "hmac",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "ipnet",
  "model2vec-rs",
  "regex",
  "rusqlite",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tiny_http",
+ "tokio",
+ "tracing",
+ "unibus",
+ "unibus-sdk",
  "ureq 2.12.1",
  "url",
  "wasmtime",
  "wasmtime-wasi",
+ "wasmtime-wasi-http",
 ]
 
 [[package]]
@@ -7334,7 +7350,6 @@ dependencies = [
  "serde_json",
  "soil-host",
  "soil-spore",
- "soil-wasi-host",
  "soil-web-bridge",
  "tempfile",
  "tokio",
@@ -7448,35 +7463,6 @@ name = "soil-vt"
 version = "0.1.0"
 dependencies = [
  "ghostty-vt",
-]
-
-[[package]]
-name = "soil-wasi-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bytes",
- "ed25519-dalek 2.2.0",
- "hmac",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "ipnet",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "soil-host",
- "tempfile",
- "tokio",
- "tracing",
- "unibus",
- "unibus-sdk",
- "url",
- "wasmtime",
- "wasmtime-wasi",
- "wasmtime-wasi-http",
 ]
 
 [[package]]

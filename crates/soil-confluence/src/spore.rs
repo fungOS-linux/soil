@@ -12,7 +12,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use soil_wasi_host::{Bus, BusError, BusReceipt};
+use soil_host::{Bus, BusError, BusReceipt};
 
 use crate::{ConfluenceEvent, EVENT_KIND, MAX_BODY};
 
@@ -88,8 +88,8 @@ fn dedupe(
 
 /// `soil:unibus` policy for `confluence.webhook.received.v1`.
 ///
-/// Wraps any inner [`Bus`] (a [`soil_wasi_host::UnibusBus`] in production,
-/// a [`soil_wasi_host::MemoryBus`] in tests) and adds tenant stamping plus
+/// Wraps any inner [`Bus`] (a [`soil_host::UnibusBus`] in production,
+/// a [`soil_host::MemoryBus`] in tests) and adds tenant stamping plus
 /// delivery deduplication. `soil:unibus` has no idempotency key, so the key
 /// is `provider` + `delivery_id` parsed from the body. `destination` must be
 /// empty: Confluence events are fan-out facts, not addressed to one peer.
@@ -160,7 +160,7 @@ impl Bus for ConfluenceBus {
         kinds: &[String],
         cursor: Option<&str>,
         limit: u32,
-    ) -> std::result::Result<soil_wasi_host::Page, BusError> {
+    ) -> std::result::Result<soil_host::Page, BusError> {
         // Observation is not Confluence policy: delegate so the same host can
         // serve observer Spores wired to the same inner bus.
         self.inner.poll(kinds, cursor, limit)
@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn confluence_bus_stamps_dedupes_and_delegates_poll() {
-        use soil_wasi_host::MemoryBus;
+        use soil_host::MemoryBus;
 
         let inner = Arc::new(MemoryBus::default());
         let bus = ConfluenceBus::new("tenant-a", inner.clone());
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn confluence_bus_rejects_other_kinds_and_destinations() {
-        use soil_wasi_host::MemoryBus;
+        use soil_host::MemoryBus;
 
         let bus = ConfluenceBus::new("tenant-a", Arc::new(MemoryBus::default()));
         assert_eq!(
@@ -236,18 +236,18 @@ mod tests {
 
     #[test]
     fn confluence_bus_rejects_missing_fields_and_inner_failures() {
-        use soil_wasi_host::MemoryBus;
+        use soil_host::MemoryBus;
 
         struct FailingBus;
 
-        impl soil_wasi_host::Bus for FailingBus {
+        impl soil_host::Bus for FailingBus {
             fn publish(
                 &self,
                 _kind: &str,
                 _body: &[u8],
                 _destination: Option<&str>,
                 _ttl_ms: u64,
-            ) -> std::result::Result<soil_wasi_host::BusReceipt, BusError> {
+            ) -> std::result::Result<soil_host::BusReceipt, BusError> {
                 Err(BusError::Unavailable)
             }
 
@@ -256,8 +256,8 @@ mod tests {
                 _kinds: &[String],
                 _cursor: Option<&str>,
                 _limit: u32,
-            ) -> std::result::Result<soil_wasi_host::Page, BusError> {
-                Ok(soil_wasi_host::Page {
+            ) -> std::result::Result<soil_host::Page, BusError> {
+                Ok(soil_host::Page {
                     frames: Vec::new(),
                     next: None,
                 })
