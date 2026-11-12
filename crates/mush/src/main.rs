@@ -422,6 +422,19 @@ impl Runtime {
         store.set_epoch_deadline(u64::MAX);
         let instance = Mush::instantiate(&mut store, &component, &linker)?;
         let mut args = vec![format!("--term={term}")];
+        // The agent's environment is the Spore's: `$GIT_*`, its own keys, and
+        // the rest of what it was started with are visible to VFS commands.
+        // `PATH`, `HOME`, `PWD`, `OLDPWD`, `SHELL`, `USER`, `LOGNAME` and `TERM`
+        // keep their VFS meaning, so they are not forwarded.
+        for (key, value) in std::env::vars() {
+            if matches!(
+                key.as_str(),
+                "PATH" | "HOME" | "PWD" | "OLDPWD" | "SHELL" | "USER" | "LOGNAME" | "TERM"
+            ) {
+                continue;
+            }
+            args.push(format!("--env={key}={value}"));
+        }
         if let Some(principal) = principal {
             args.push(format!("--principal={principal}"));
         }
@@ -2154,30 +2167,9 @@ fn run_host_status(root: &Path, mut args: Vec<String>, store: Option<&Path>) -> 
     );
     command.args(&cmd[1..]).current_dir(&dir);
     // Start empty: a host build needs its toolchain, not the agent's tokens.
-    // Anything beyond this list is opt-in via --allow-env.
-    command.env_clear();
-    for var in [
-        "PATH",
-        "HOME",
-        "USER",
-        "LANG",
-        "TERM",
-        "TMPDIR",
-        "RUSTUP_HOME",
-        // A build that leaves this machine: bob's transport needs to reach the
-        // builder, and `fpl-bob remote` is a host program like any other.
-        "BOB_SSH",
-        "BOB_POOL",
-        "BOB_NO_DNS_ROUTE",
-        "FPL_BOB_LINUX_HOST",
-        "FPL_BOB_LINUX_POOL",
-        "FPL_BOB_MAC_HOST",
-        "SSH_AUTH_SOCK",
-    ] {
-        if let Ok(value) = std::env::var(var) {
-            command.env(var, value);
-        }
-    }
+    // The list lives with the shell's overlay bridge so both paths answer the
+    // same question; anything beyond it is opt-in via --allow-env.
+    crate::shell::clear_and_seed(&mut command);
     for var in &extra_env {
         if let Ok(value) = std::env::var(var) {
             command.env(var, value);
