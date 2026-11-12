@@ -67,6 +67,17 @@ pub fn clear_and_seed(command: &mut std::process::Command) {
             command.env(key, value);
         }
     }
+    // The list above is the floor, not the whole policy: a profile that knows
+    // more about this caller (Geode, a Desktop, a CI image) names extra
+    // variables in `MUSH_HOST_ENV`. Values still come from the daemon's own
+    // environment, so nothing is invented — only admitted.
+    if let Ok(extra) = std::env::var("MUSH_HOST_ENV") {
+        for key in extra.split(',').map(str::trim).filter(|key| !key.is_empty()) {
+            if let Ok(value) = std::env::var(key) {
+                command.env(key, value);
+            }
+        }
+    }
 }
 
 pub const HOST_ALLOWLIST: &[&str] = &[
