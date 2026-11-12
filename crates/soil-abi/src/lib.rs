@@ -247,6 +247,18 @@ pub const CONTRACTS: &[Contract] = &[
         ],
     },
     Contract {
+        file: "wit/soil-agent.wit",
+        source: include_str!("../../../wit/soil-agent.wit"),
+        package: "soil:agent@0.1.0",
+        interfaces: &[
+            (
+                "observe",
+                &["agents", "get", "intent", "transcript", "subscribe"],
+            ),
+            ("control", &["respond", "send", "interrupt"]),
+        ],
+    },
+    Contract {
         file: "wit/soil-device.wit",
         source: include_str!("../../../wit/soil-device.wit"),
         package: "soil:device@0.1.0",

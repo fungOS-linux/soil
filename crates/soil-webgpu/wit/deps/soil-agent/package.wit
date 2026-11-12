@@ -1,0 +1,286 @@
+// Observe and answer software agents, whatever harness runs them.
+//
+// One normalized agent: what it is doing, what it needs from a person, and the
+// few actions a person may take. An adapter is a host concern -- Operator, Pi,
+// another harness -- and it translates native session events into these records
+// and answers back. A Spore sees facts, never a harness protocol, a credential,
+// a process handle or a filesystem path.
+//
+// The contract carries facts, not moods. Anything a view derives from them
+// (a creature's energy, a wall's ordering, a pulse's colour) belongs to the
+// view, so two views of the same agent cannot disagree about a fact the way two
+// copies of a derived field would.
+package soil:agent@0.1.0;
+
+interface types {
+  enum error {
+    /// The read or control grant was not linked.
+    denied,
+    /// No agent with that id is visible to this host.
+    not-found,
+    /// The adapter is not attached yet, or the harness is starting.
+    not-ready,
+    /// An id, prompt, answer, or page limit is malformed or outside bounds.
+    invalid,
+    /// The page, transcript, or answer exceeds the host's budget.
+    over-budget,
+    /// The prompt was already answered or withdrawn; the agent has moved on.
+    stale,
+    /// This harness cannot do that (an adapter with no interrupt channel).
+    unsupported,
+    /// The adapter or harness failed.
+    io,
+  }
+
+  /// Where an agent is in its turn.
+  ///
+  /// `needs-you` is the only phase that implies a non-empty `prompts` list, and
+  /// a non-empty `prompts` list always implies `needs-you`. An adapter that
+  /// cannot represent an approval natively still satisfies the invariant: it
+  /// synthesizes a prompt (for example from a terminal `blocked` report) and
+  /// resolves it when the answer reaches the harness by whatever channel that
+  /// harness has.
+  enum phase {
+    /// The adapter is attaching; nothing is known past identity yet.
+    connecting,
+    /// Ready, no turn in flight.
+    idle,
+    /// A model request is in flight.
+    thinking,
+    /// Tools are running inside the current turn.
+    working,
+    /// The agent cannot continue without a person.
+    needs-you,
+    /// The turn ended and the harness reported the work complete.
+    finished,
+    /// The turn ended in an error, a refusal, or a dead adapter.
+    failed,
+    /// Stopped on purpose: by a person, a budget, or a schedule.
+    paused,
+  }
+
+  /// The station vocabulary of an agent's timeline.
+  ///
+  /// Fixed here so that every harness and every view agree on what a lit Files
+  /// station means. The adapter classifies; the view only draws. `other` is for
+  /// work that fits no station, and takes its label from the harness.
+  enum activity-kind {
+    you,
+    model,
+    memory,
+    files,
+    shell,
+    network,
+    browser,
+    agent,
+    skill,
+    hook,
+    other,
+  }
+
+  enum status {
+    running,
+    ok,
+    failed,
+    blocked,
+  }
+
+  /// One thing that happened, at one station.
+  ///
+  /// `label` is a name, never content: a tool name, a harness step, two path
+  /// segments, a host. Folding neighbouring repeats into one row is a view
+  /// decision; the host reports what happened.
+  record activity {
+    kind: activity-kind,
+    label: string,
+    detail: option<string>,
+    status: status,
+    started-at-ms: u64,
+    finished-at-ms: option<u64>,
+  }
+
+  enum prompt-kind {
+    /// Open question; the answer is prose.
+    question,
+    /// Yes or no, about one action.
+    approval,
+    /// Pick one of `options`.
+    choice,
+  }
+
+  record choice {
+    id: string,
+    label: string,
+    detail: option<string>,
+    /// The option the person should think twice about: it publishes, deletes,
+    /// spends, or widens scope.
+    danger: bool,
+  }
+
+  /// One thing the agent cannot decide alone.
+  ///
+  /// A prompt is the only way an agent asks for a person. Everything that needs
+  /// a decision -- a permission request, a choice between approaches, a
+  /// terminal `blocked` report -- is normalized here, so a surface renders one
+  /// card shape instead of one per harness.
+  record prompt {
+    id: string,
+    kind: prompt-kind,
+    /// One line, the question itself, ready to render.
+    title: string,
+    /// Prose explanation, if the harness wrote one.
+    body: option<string>,
+    /// Preformatted evidence: the command, the diff, the failing test. Rendered
+    /// monospace and bounded by the host; never a credential.
+    details: option<string>,
+    /// What raised it: a tool name, a harness step. Not an authority claim.
+    origin: option<string>,
+    options: list<choice>,
+    /// The person may answer in their own words even when options are offered.
+    allows-text: bool,
+    asked-at-ms: u64,
+    /// The harness withdraws the prompt itself; this is the deadline the agent
+    /// stated, not a timer the surface enforces.
+    deadline-at-ms: option<u64>,
+  }
+
+  enum role {
+    user,
+    assistant,
+    tool,
+  }
+
+  record turn {
+    role: role,
+    text: string,
+    at-ms: u64,
+  }
+
+  record usage {
+    /// Prompt tokens in the last model request.
+    context-tokens: u64,
+    /// The model's window, or 0 when the adapter does not know it.
+    context-window: u64,
+    input-tokens: u64,
+    output-tokens: u64,
+    /// Completed assistant turns in this session.
+    turns: u32,
+  }
+
+  record goal {
+    text: string,
+    set-at-ms: u64,
+  }
+
+  record agent {
+    /// Stable for the life of the session, and unique within the host.
+    id: string,
+    /// Adapter identity: "operator", "pi". Never a name for a person.
+    harness: string,
+    /// The session's own name, as the harness reports it.
+    title: string,
+    /// Workspace root, if the harness has one. Host policy may redact this.
+    workspace: option<string>,
+    model: option<string>,
+    phase: phase,
+    /// What the agent is trying to accomplish now. Absent when the harness has
+    /// no notion of a goal and the last user message is the only evidence.
+    goal: option<goal>,
+    /// Oldest first, bounded by the host.
+    activity: list<activity>,
+    prompts: list<prompt>,
+    usage: usage,
+    /// Bumped by the host on every change, so a reader can drop a frame it has
+    /// already seen and a capture can name what it drew.
+    revision: u64,
+    started-at-ms: u64,
+    updated-at-ms: u64,
+  }
+
+  record response {
+    /// One of `prompt.options[].id`. Absent for a prose answer.
+    choice: option<string>,
+    text: option<string>,
+  }
+
+  /// What the host opened this surface for.
+  ///
+  /// A window dedicated to one agent gets its id; a wall that shows everything
+  /// gets none. `view` is a hint the Spore may ignore: views are the Spore's
+  /// vocabulary, not the contract's.
+  record binding {
+    agent: option<string>,
+    view: option<string>,
+  }
+}
+
+/// Read-only: what the agents are doing.
+interface observe {
+  use types.{agent, binding, error, turn};
+
+  record page {
+    /// Newest last.
+    turns: list<turn>,
+    /// Cursor for the next older page, or none at the oldest turn.
+    before: option<u64>,
+  }
+
+  /// The agents this host can see, in the host's own order: agents that need a
+  /// person first, then most recently active. A view may reorder; a surface
+  /// that only has room for one row should not have to.
+  agents: func() -> result<list<agent>, error>;
+
+  get: func(id: string) -> result<agent, error>;
+
+  /// The launch intent the host chose for this surface.
+  intent: func() -> binding;
+
+  /// Conversation text, newest page first. `limit` is bounded by the host; a
+  /// Spore asks again with `before` while the person scrolls back.
+  transcript: func(id: string, before: option<u64>, limit: u32) -> result<page, error>;
+
+  variant change {
+    upserted(agent),
+    removed(string),
+  }
+
+  resource subscription {
+    next: func(timeout-ms: u32) -> result<option<change>, error>;
+  }
+
+  /// One subscription per surface. Changes that happened before it opened are
+  /// not replayed: `agents` is the snapshot, the subscription is the delta.
+  subscribe: func() -> result<subscription, error>;
+}
+
+/// Control: the three things a person may do to an agent.
+///
+/// Deliberately not a general RPC to the harness. Starting sessions, editing
+/// configuration, and choosing models are separate authorities with separate
+/// grants; a surface that answers questions cannot also spawn processes.
+interface control {
+  use types.{error, response};
+
+  /// Answer one prompt. The prompt id makes this idempotent: answering a prompt
+  /// the agent already resolved is `stale`, not a second action.
+  respond: func(id: string, prompt-id: string, answer: response) -> result<_, error>;
+
+  /// Say something to the agent as the user. Refused with `invalid` while a
+  /// prompt is open: an answer is not a message, and treating it as one is how
+  /// two people answer the same question twice.
+  send: func(id: string, text: string) -> result<_, error>;
+
+  /// Ask the agent to stop the current turn. The agent stays observable and may
+  /// be sent another message afterwards.
+  interrupt: func(id: string) -> result<_, error>;
+}
+
+world guest {
+  import observe;
+  import control;
+}
+
+world agent-host {
+  import observe;
+  import control;
+}

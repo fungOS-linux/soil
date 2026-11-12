@@ -64,6 +64,7 @@ Principles:
 | [`soil:graph@0.1.0`](wit/soil-graph.wit) | `soil:graph` | read-only edge/reference queries over records |
 | [`soil:input@1.0.0`](wit/soil-input.wit) | — | shared normalized input types for Canvas, Terminal and imported surfaces |
 | [`soil:notify@1.1.0`](wit/soil-notify.wit) | `soil:notify`, `soil:notify/ringer` | WIT + host broker + notify Spore; ringer is an interface, not a package |
+| [`soil:agent@0.1.0`](wit/soil-agent.wit) | `soil:agent.observe`, `soil:agent.control` | WIT + fixture host; Operator and Pi adapters next |
 | [`fungos:actions@1.0.0`](wit/fungos-actions.wit) | exact action id/version grants | granted catalog + bounded invoke; Canvas uses the catalog projection |
 | [`soil:device@0.1.0`](wit/soil-device.wit) | `soil:device` | semantic battery/estimate/lid contracts; runtime uses core-Wasm lowering |
 | [`soil:ble@1.0.0`](wit/soil-ble.wit) | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | WIT + host + COLMI ring Spore |
