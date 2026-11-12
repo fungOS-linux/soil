@@ -1,16 +1,18 @@
 // Observe and answer software agents, whatever harness runs them.
 //
-// One normalized agent: what it is doing, what it needs from a person, and the
-// few actions a person may take. An adapter is a host concern -- Operator, Pi,
-// another harness -- and it translates native session events into these records
-// and answers back. A Spore sees facts, never a harness protocol, a credential,
-// a process handle or a filesystem path.
+// The subject is the set: every agent this surface may see, for one principal
+// or for a shared desktop. One control plane, one record per agent -- what it
+// is doing, what it needs from a person, and the few things a person may do.
+//
+// An adapter is a host concern (Operator, Pi, another harness): it translates
+// native session events into these records and answers back. A Spore sees
+// facts, never a harness protocol, a credential, a process handle or a path.
 //
 // The contract carries facts, not moods. Anything a view derives from them
 // (a creature's energy, a wall's ordering, a pulse's colour) belongs to the
 // view, so two views of the same agent cannot disagree about a fact the way two
 // copies of a derived field would.
-package soil:agent@0.1.0;
+package soil:agents@0.1.0;
 
 interface types {
   enum error {
@@ -172,6 +174,45 @@ interface types {
     set-at-ms: u64,
   }
 
+  /// Whose agents a surface is showing.
+  ///
+  /// Chosen by the host, never by the Spore: a surface bound to one principal
+  /// and a wall over a shared desktop are different authorities, and the grant
+  /// is what decides which one a caller gets.
+  enum scope-kind {
+    /// This machine, whoever owns the session running on it.
+    device,
+    /// One desktop session, which may carry agents belonging to several
+    /// people. The common case when a machine is shared or handed over.
+    desktop,
+    /// One principal's agents, wherever they are running.
+    principal,
+  }
+
+  record scope {
+    kind: scope-kind,
+    /// Stable id of the device, desktop, or actor. Compared by hosts; never
+    /// shown raw.
+    id: option<string>,
+    /// What a header shows when it names the scope: a desktop name, a person.
+    label: option<string>,
+    /// The person this surface belongs to, when the host knows one. A wall
+    /// uses it to mark the rows that belong to somebody else, which is the
+    /// question a shared desktop actually asks.
+    owner: option<owner>,
+  }
+
+  /// Who an agent belongs to.
+  ///
+  /// A projection, not an identity: an agent on a shared desktop may belong to
+  /// a person this host cannot attest, and a fabricated `soil:principal`
+  /// identity would be worse than an honest label. `actor` is stable and
+  /// comparable; `display-name` is for people.
+  record owner {
+    actor: string,
+    display-name: option<string>,
+  }
+
   record agent {
     /// Stable for the life of the session, and unique within the host.
     id: string,
@@ -186,6 +227,9 @@ interface types {
     /// What the agent is trying to accomplish now. Absent when the harness has
     /// no notion of a goal and the last user message is the only evidence.
     goal: option<goal>,
+    /// Who it belongs to. Present on a shared desktop; a `principal` scope may
+    /// leave it out, because every row already belongs to that principal.
+    owner: option<owner>,
     /// Oldest first, bounded by the host.
     activity: list<activity>,
     prompts: list<prompt>,
@@ -216,7 +260,7 @@ interface types {
 
 /// Read-only: what the agents are doing.
 interface observe {
-  use types.{agent, binding, error, turn};
+  use types.{agent, binding, error, scope, turn};
 
   record page {
     /// Newest last.
@@ -234,6 +278,12 @@ interface observe {
 
   /// The launch intent the host chose for this surface.
   intent: func() -> binding;
+
+  /// What this surface is allowed to see. A wall over a shared desktop names
+  /// the desktop; a session window names the principal it was opened for.
+  /// (`current-scope` rather than `scope`: WIT keeps a function and a type in
+  /// one interface apart by name, and the record is the useful half to keep.)
+  current-scope: func() -> scope;
 
   /// Conversation text, newest page first. `limit` is bounded by the host; a
   /// Spore asks again with `before` while the person scrolls back.

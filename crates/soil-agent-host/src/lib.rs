@@ -1,5 +1,5 @@
-//! The host side of `soil:agent`: one normalized agent, and the seam a harness
-//! adapter implements.
+//! The host side of `soil:agents`: the set of agents a surface may see, and the
+//! seam a harness adapter implements.
 //!
 //! These are plain records, not generated WIT types. A presenter maps them at
 //! the boundary (`CatalogHost` follows the same rule), so an adapter never
@@ -12,7 +12,7 @@ pub mod fixture;
 
 pub use fixture::FixtureAgents;
 
-/// Why an observation or an answer was refused. Mirrors `soil:agent/types.error`.
+/// Why an observation or an answer was refused. Mirrors `soil:agents/types.error`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Denied,
@@ -142,6 +142,43 @@ pub struct Goal {
     pub set_at_ms: u64,
 }
 
+/// Whose agents a surface is showing. Chosen by the host, never by the view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeKind {
+    Device,
+    /// One desktop session, possibly carrying several people's agents.
+    Desktop,
+    /// One principal's agents, wherever they run.
+    Principal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scope {
+    pub kind: ScopeKind,
+    pub id: Option<String>,
+    pub label: Option<String>,
+    /// The person this surface belongs to, when the host knows one.
+    pub owner: Option<Owner>,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self {
+            kind: ScopeKind::Device,
+            id: None,
+            label: None,
+            owner: None,
+        }
+    }
+}
+
+/// Who an agent belongs to: a projection, not an attestation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub actor: String,
+    pub display_name: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub id: String,
@@ -152,6 +189,8 @@ pub struct Agent {
     pub model: Option<String>,
     pub phase: Phase,
     pub goal: Option<Goal>,
+    /// Present on a shared desktop; omitted when the scope is one principal.
+    pub owner: Option<Owner>,
     pub activity: Vec<Activity>,
     pub prompts: Vec<Prompt>,
     pub usage: Usage,
@@ -201,6 +240,11 @@ pub trait AgentBackend: Send {
     fn list(&mut self) -> Vec<Agent>;
     fn get(&mut self, id: &str) -> Option<Agent>;
     fn binding(&mut self) -> Binding;
+    /// What this surface may see. Defaults to the device: a backend that has
+    /// not thought about sharing says so rather than implying a principal.
+    fn scope(&mut self) -> Scope {
+        Scope::default()
+    }
     fn transcript(&mut self, id: &str, before: Option<u64>, limit: u32) -> Result<Page, Error>;
     fn answer(&mut self, id: &str, prompt_id: &str, answer: Answer) -> Result<(), Error>;
     fn send(&mut self, id: &str, text: &str) -> Result<(), Error>;

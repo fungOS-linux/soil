@@ -7,8 +7,8 @@
 //! Operator or Pi adapter produces.
 
 use crate::{
-    Activity, ActivityKind, Agent, AgentBackend, Answer, Binding, Choice, Error, Goal, Page, Phase,
-    Prompt, PromptKind, Role, Status, Turn, Usage,
+    Activity, ActivityKind, Agent, AgentBackend, Answer, Binding, Choice, Error, Goal, Owner, Page,
+    Phase, Prompt, PromptKind, Role, Scope, ScopeKind, Status, Turn, Usage,
 };
 
 /// A fixed epoch so a captured frame shows stable timestamps. Real adapters
@@ -47,6 +47,7 @@ impl FixtureAgents {
             "compaction lane",
             "/Users/ajmwagar/src/operator",
             "deepseek-v4.1-flash",
+            "ajmwagar",
             Phase::NeedsYou,
             Some(Goal {
                 text: "Make the tool-output lane fire in serve mode".into(),
@@ -113,6 +114,7 @@ impl FixtureAgents {
             "arch mirror",
             "/Users/ajmwagar/src/operator",
             "deepseek-v4.1-flash",
+            "ajmwagar",
             Phase::Working,
             Some(Goal {
                 text: "Bring ARCHITECTURE.md back in line with agent.rs".into(),
@@ -165,6 +167,7 @@ impl FixtureAgents {
             "bead triage",
             "/Users/ajmwagar/src/marbles",
             "claude-sonnet-4-6",
+            "ajmwagar",
             Phase::Thinking,
             Some(Goal {
                 text: "Close or merge the nine stale marbles".into(),
@@ -217,6 +220,7 @@ impl FixtureAgents {
             "ui spike",
             "/Users/ajmwagar/src/spores",
             "kimi-k2",
+            "sam",
             Phase::NeedsYou,
             Some(Goal {
                 text: "Land the creature board without a second renderer".into(),
@@ -277,6 +281,7 @@ impl FixtureAgents {
             "release check",
             "/Users/ajmwagar/src/soil",
             "deepseek-v4.1-flash",
+            "ajmwagar",
             Phase::Finished,
             Some(Goal {
                 text: "Verify the 0.2.0 cut builds on all three hosts".into(),
@@ -341,6 +346,7 @@ impl FixtureAgents {
         title: &str,
         workspace: &str,
         model: &str,
+        owner: &str,
         phase: Phase,
         goal: Option<Goal>,
         usage: Usage,
@@ -359,6 +365,10 @@ impl FixtureAgents {
             model: Some(model.into()),
             phase,
             goal,
+            owner: Some(Owner {
+                actor: owner.into(),
+                display_name: Some(owner.into()),
+            }),
             activity,
             prompts,
             usage,
@@ -551,6 +561,20 @@ impl AgentBackend for FixtureAgents {
 
     fn binding(&mut self) -> Binding {
         self.binding.clone()
+    }
+
+    /// A handover machine: the wall shows this desktop's agents, and some of
+    /// them belong to somebody else.
+    fn scope(&mut self) -> Scope {
+        Scope {
+            kind: ScopeKind::Desktop,
+            id: Some("desk-ajmwagar".into()),
+            label: Some("this desktop".into()),
+            owner: Some(Owner {
+                actor: "ajmwagar".into(),
+                display_name: Some("ajmwagar".into()),
+            }),
+        }
     }
 
     fn transcript(&mut self, id: &str, _before: Option<u64>, limit: u32) -> Result<Page, Error> {
