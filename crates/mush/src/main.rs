@@ -768,12 +768,21 @@ fn run() -> Result<()> {
     let root = if let Some(desktop) = &desktop {
         desktop.root.clone()
     } else {
-        config::expand_home(
-            &take_option(&mut args, "--root")
-                .or_else(|| std::env::var("MUSH_ROOT").ok())
-                .or_else(|| config.root.as_ref().map(|path| path.display().to_string()))
-                .unwrap_or_else(|| "~/.local/share/fungos/vfs".into()),
-        )
+        match take_option(&mut args, "--root")
+            .or_else(|| std::env::var("MUSH_ROOT").ok())
+            .or_else(|| config.root.as_ref().map(|path| path.display().to_string()))
+        {
+            Some(path) => config::expand_home(&path),
+            // No root and no Desktop: this directory gets its own root. One
+            // shared scratch root meant every checkout an agent ran in looked
+            // like the same tree, which is wrong for a shell that is supposed
+            // to be the project's shell; a per-directory root keeps two agents
+            // from reading each other's files.
+            None => config::expand_home(&format!(
+                "~/.local/share/fungos/roots/{}",
+                root_slug(&std::env::current_dir()?)
+            )),
+        }
     };
 
     // A pure `-l` / `-i` flag carries no command, so what follows it may still be
@@ -2479,6 +2488,32 @@ fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
     true
 }
 
+/// A stable, readable name for one directory's root.
+///
+/// The last path component keeps it greppable (`soil-3f9c1a02`); the hash keeps
+/// two checkouts with the same name apart.
+fn root_slug(path: &Path) -> String {
+    let base = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "root".into());
+    let base = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in path.to_string_lossy().bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
+    format!("{base}-{:08x}", hash as u32)
+}
+
 fn expand_home(value: &str) -> PathBuf {
     if value == "~" {
         return PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
@@ -2492,6 +2527,16 @@ fn expand_home(value: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directory_gets_its_own_root() {
+        let a = root_slug(Path::new("/src/soil"));
+        let b = root_slug(Path::new("/src/soil"));
+        assert_eq!(a, b);
+        assert!(a.starts_with("soil-"), "{a}");
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert_ne!(a, root_slug(Path::new("/src/other/soil")));
+    }
 
     #[test]
     fn build_argv_moves_only_the_command_when_a_cwd_is_named() {
