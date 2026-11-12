@@ -426,11 +426,29 @@ impl Runtime {
         // the rest of what it was started with are visible to VFS commands.
         // `PATH`, `HOME`, `PWD`, `OLDPWD`, `SHELL`, `USER`, `LOGNAME` and `TERM`
         // keep their VFS meaning, so they are not forwarded.
+        //
+        // `MUSH_SPORE_ENV=NAME,...` narrows that to the names a caller chose,
+        // which is how a profile that knows better than the default (Geode, a
+        // Desktop with its own grants, a CI image) hands a Spore a *smaller*
+        // environment instead of the whole one. Unset means the whole
+        // environment, which is what an agent shell wants.
+        let only = std::env::var("MUSH_SPORE_ENV").ok().map(|list| {
+            list.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<String>>()
+        });
         for (key, value) in std::env::vars() {
             if matches!(
                 key.as_str(),
                 "PATH" | "HOME" | "PWD" | "OLDPWD" | "SHELL" | "USER" | "LOGNAME" | "TERM"
             ) {
+                continue;
+            }
+            if let Some(only) = &only
+                && !only.iter().any(|name| name == &key)
+            {
                 continue;
             }
             args.push(format!("--env={key}={value}"));
