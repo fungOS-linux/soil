@@ -27,7 +27,7 @@ target/
 !crates/soil-webgpu/fixtures/wgpu-compute.wasm
 
 # Checked-in wgpu 29 Canvas presentation fixture.
-!crates/soil-webgpu/fixtures/wgpu-canvas.wasm
+!crates/soil-webgpu/fixtures/wgpu-test.wasm
 
 # Checked-in cpal threaded process fixture.
 !crates/soil-process/fixtures/cpal-tone.wasm

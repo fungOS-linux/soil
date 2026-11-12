@@ -7,6 +7,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -21,7 +22,7 @@ use wasmtime_wasi::{
     },
 };
 
-use soil_records_host::RecordsBookHost;
+use soil_host::records_host::RecordsBookHost;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +119,15 @@ impl CommandRegistry {
             let dir = entry.path();
             let manifest_path = dir.join("command.toml");
             if !manifest_path.is_file() {
+                // A Spore installs commands too. The package owns both faces -
+                // a canvas and a terminal program - and the shell should not
+                // care which kind of manifest declared them.
+                for entry in spore_commands(&dir)? {
+                    if commands.contains_key(&entry.name) {
+                        bail!("duplicate command {}", entry.name);
+                    }
+                    commands.insert(entry.name.clone(), entry);
+                }
                 continue;
             }
             let source = std::fs::read_to_string(&manifest_path)
@@ -174,6 +184,37 @@ impl CommandRegistry {
     }
 }
 
+/// The commands an installed Spore declares.
+///
+/// Limits are the command defaults: a Spore declares what it runs, not how much
+/// memory the host may give it.
+fn spore_commands(dir: &Path) -> Result<Vec<CommandEntry>> {
+    if !dir.join("spore.toml").is_file() {
+        return Ok(Vec::new());
+    }
+    let manifest = soil_spore::Manifest::load(dir)
+        .map_err(|error| anyhow::anyhow!("{}: {error}", dir.display()))?;
+    let limits = Limits::default();
+    let mut entries = Vec::new();
+    for command in &manifest.commands {
+        let module = dir.join(&command.module);
+        if !module.is_file() {
+            bail!("spore command {} module missing", command.name);
+        }
+        entries.push(CommandEntry {
+            name: command.name.clone(),
+            version: manifest.spore.version.clone(),
+            summary: command.summary.clone(),
+            module,
+            timeout_ms: limits.timeout_ms,
+            max_stdout_bytes: limits.max_stdout_bytes,
+            max_stderr_bytes: limits.max_stderr_bytes,
+            max_memory_bytes: limits.max_memory_bytes,
+        });
+    }
+    Ok(entries)
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordsBinding {
     pub root: PathBuf,
@@ -199,6 +240,7 @@ pub struct RunOutput {
 pub struct CommandRunner {
     engine: Engine,
     records: Option<RecordsBinding>,
+    components: Mutex<BTreeMap<PathBuf, Arc<wasmtime::component::Component>>>,
 }
 
 impl CommandRunner {
@@ -207,12 +249,32 @@ impl CommandRunner {
         config.wasm_component_model(true);
         config.epoch_interruption(true);
         let engine = Engine::new(&config)?;
-        Ok(Self { engine, records })
+        Ok(Self {
+            engine,
+            records,
+            components: Mutex::new(BTreeMap::new()),
+        })
     }
 
     pub fn run(&self, entry: &CommandEntry, request: &RunRequest) -> Result<RunOutput> {
-        let component = wasmtime::component::Component::from_file(&self.engine, &entry.module)
-            .map_err(|error| anyhow::anyhow!("load command {}: {error}", entry.module.display()))?;
+        let component = {
+            let mut cache = self
+                .components
+                .lock()
+                .map_err(|_| anyhow::anyhow!("command component cache poisoned"))?;
+            if let Some(component) = cache.get(&entry.module) {
+                component.clone()
+            } else {
+                let component = Arc::new(
+                    wasmtime::component::Component::from_file(&self.engine, &entry.module)
+                        .map_err(|error| {
+                            anyhow::anyhow!("load command {}: {error}", entry.module.display())
+                        })?,
+                );
+                cache.insert(entry.module.clone(), component.clone());
+                component
+            }
+        };
         let mut linker = wasmtime::component::Linker::<Host>::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         let records = match &self.records {
@@ -227,7 +289,7 @@ impl CommandRunner {
             None => None,
         };
         if records.is_some() {
-            soil_records_host::add_to_linker::<Host>(&mut linker)?;
+            soil_host::records_host::add_to_linker::<Host>(&mut linker)?;
         }
 
         let stdout = MemoryOutputPipe::new(entry.max_stdout_bytes);
@@ -291,14 +353,14 @@ impl WasiView for Host {
     }
 }
 
-impl soil_records_host::records::Host for Host {
+impl soil_host::records_host::records::Host for Host {
     fn get(
         &mut self,
-        key: soil_records_host::records::Key,
-    ) -> Result<soil_records_host::records::Entry, soil_records_host::records::Error> {
+        key: soil_host::records_host::records::Key,
+    ) -> Result<soil_host::records_host::records::Entry, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .get(key)
     }
 
@@ -307,42 +369,42 @@ impl soil_records_host::records::Host for Host {
         collection: String,
         cursor: Option<String>,
         limit: u32,
-    ) -> Result<soil_records_host::records::Page, soil_records_host::records::Error> {
+    ) -> Result<soil_host::records_host::records::Page, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .scan(collection, cursor, limit)
     }
 
     fn upsert(
         &mut self,
-        entry: soil_records_host::records::Entry,
-    ) -> Result<soil_records_host::records::Entry, soil_records_host::records::Error> {
+        entry: soil_host::records_host::records::Entry,
+    ) -> Result<soil_host::records_host::records::Entry, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .upsert(entry)
     }
 
     fn compare_and_swap(
         &mut self,
-        key: soil_records_host::records::Key,
-        expected: Option<soil_records_host::records::Version>,
-        entry: soil_records_host::records::Entry,
-    ) -> Result<soil_records_host::records::CasResult, soil_records_host::records::Error> {
+        key: soil_host::records_host::records::Key,
+        expected: Option<soil_host::records_host::records::Version>,
+        entry: soil_host::records_host::records::Entry,
+    ) -> Result<soil_host::records_host::records::CasResult, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .compare_and_swap(key, expected, entry)
     }
 
     fn delete(
         &mut self,
-        key: soil_records_host::records::Key,
-    ) -> Result<(), soil_records_host::records::Error> {
+        key: soil_host::records_host::records::Key,
+    ) -> Result<(), soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .delete(key)
     }
 
@@ -350,20 +412,20 @@ impl soil_records_host::records::Host for Host {
         &mut self,
         since: Option<String>,
         limit: u32,
-    ) -> Result<soil_records_host::records::Page, soil_records_host::records::Error> {
+    ) -> Result<soil_host::records_host::records::Page, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .changes(since, limit)
     }
 
     fn apply(
         &mut self,
-        entries: Vec<soil_records_host::records::Entry>,
-    ) -> Result<soil_records_host::records::ApplyResult, soil_records_host::records::Error> {
+        entries: Vec<soil_host::records_host::records::Entry>,
+    ) -> Result<soil_host::records_host::records::ApplyResult, soil_host::records_host::records::Error> {
         self.records
             .as_mut()
-            .ok_or(soil_records_host::records::Error::Denied)?
+            .ok_or(soil_host::records_host::records::Error::Denied)?
             .apply(entries)
     }
 }
@@ -402,5 +464,79 @@ mod tests {
         let registry = CommandRegistry::scan(dir.path()).unwrap();
         assert_eq!(registry.path(), vec!["a", "b"]);
         assert!(registry.get("a").is_some());
+    }
+}
+
+#[cfg(test)]
+mod spore_command_tests {
+    use super::*;
+
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "soil-command-scan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ))
+    }
+
+    const SPORE: &str = r#"schema = 1
+
+[spore]
+id = "dev.fungos.unibus"
+name = "unibus"
+version = "0.2.0"
+license = "MIT"
+summary = "inbox"
+
+[engine]
+soil = ">=0.1"
+target = "wasm32-wasip2"
+
+[ui]
+entry = "ui/inbox.lua"
+
+[launch]
+default = "canvas"
+surfaces = ["canvas"]
+
+[[commands]]
+name = "unibus"
+summary = "read the inbox"
+module = "bin/unibus.wasm"
+"#;
+
+    #[test]
+    fn a_spore_installs_its_commands_into_the_registry() {
+        let root = scratch();
+        let spore = root.join("unibus");
+        std::fs::create_dir_all(spore.join("bin")).expect("scratch");
+        std::fs::write(spore.join("spore.toml"), SPORE).expect("manifest");
+        std::fs::write(spore.join("bin/unibus.wasm"), b"\0asm").expect("module");
+
+        let registry = CommandRegistry::scan(&root).expect("scan");
+        let entry = registry.get("unibus").expect("the Spore's command");
+        assert_eq!(
+            entry.version, "0.2.0",
+            "the package's version, not the command's"
+        );
+        assert_eq!(entry.summary, "read the inbox");
+        assert!(entry.module.ends_with("bin/unibus.wasm"));
+        assert_eq!(registry.path(), vec!["unibus"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_command_whose_module_is_missing_is_refused() {
+        let root = scratch();
+        let spore = root.join("unibus");
+        std::fs::create_dir_all(&spore).expect("scratch");
+        std::fs::write(spore.join("spore.toml"), SPORE).expect("manifest");
+        // No bin/unibus.wasm: a registry that listed it would promise a program
+        // that cannot run.
+        assert!(CommandRegistry::scan(&root).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

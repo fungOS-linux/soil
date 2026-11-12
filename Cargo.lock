@@ -667,6 +667,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-winit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "pollster",
+ "portable-pty",
+ "softbuffer",
+ "soil-host",
+ "soil-spore",
+ "soil-vt",
+ "soil-webgpu",
+ "url",
+ "winit",
+]
+
+[[package]]
 name = "canvas-workspace-ui"
 version = "0.1.0"
 source = "git+https://github.com/FuturePresentLabs/dock.git?rev=6e3ba644388196224f2588b4fc78fdfddb866bed#6e3ba644388196224f2588b4fc78fdfddb866bed"
@@ -1667,6 +1684,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
+ "const-oid 0.10.2",
  "crypto-common 0.2.2",
 ]
 
@@ -2421,30 +2439,20 @@ dependencies = [
 [[package]]
 name = "fungos-vfs"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=6a12314e673ee6814486f9079a57b11715039e13#6a12314e673ee6814486f9079a57b11715039e13"
+source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af#8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af"
 dependencies = [
  "anyhow",
  "blake3",
  "clap",
  "libc",
+ "pem",
+ "quinn",
+ "rcgen",
  "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "fungos-vfs"
-version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=bcd2bc682662467d1371a2c9f8436e08934132d9#bcd2bc682662467d1371a2c9f8436e08934132d9"
-dependencies = [
- "anyhow",
- "blake3",
- "clap",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -4157,18 +4165,18 @@ name = "mush"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fungos-vfs 0.1.0 (git+https://github.com/fungOS-linux/fungos-vfs.git?rev=6a12314e673ee6814486f9079a57b11715039e13)",
+ "fungos-vfs",
  "ignore",
+ "libc",
  "rand 0.9.5",
  "rustyline",
  "serde",
  "serde_json",
  "soil-command",
+ "soil-host",
  "soil-inference",
- "soil-records-host",
  "soil-scrub",
  "soil-spore",
- "soil-vfs-host",
  "tempfile",
  "tiny_http",
  "ureq 2.12.1",
@@ -5312,6 +5320,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5668,6 +5686,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "quinn"
+version = "0.11.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4051e23e9185c255a7e33ef59cdbca87a22d359052eecd22fc6b901fb37d9d11"
+dependencies = [
+ "bytes",
+ "cfg_aliases 0.2.2",
+ "pin-project-lite",
+ "quinn-proto",
+ "quinn-udp",
+ "rustc-hash 2.1.3",
+ "rustls",
+ "socket2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "quinn-proto"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
+dependencies = [
+ "bytes",
+ "getrandom 0.4.3",
+ "lru-slab",
+ "rand 0.10.3",
+ "rand_pcg",
+ "ring",
+ "rustc-hash 2.1.3",
+ "rustls",
+ "rustls-pki-types",
+ "slab",
+ "thiserror 2.0.21",
+ "tinyvec",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "quinn-udp"
+version = "0.5.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
+dependencies = [
+ "cfg_aliases 0.2.2",
+ "libc",
+ "once_cell",
+ "socket2",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5815,6 +5889,18 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
 ]
 
 [[package]]
@@ -6392,6 +6478,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6778,7 +6875,8 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
- "soil-records-host",
+ "soil-host",
+ "soil-spore",
  "tempfile",
  "toml 0.8.23",
  "wasmtime",
@@ -6866,12 +6964,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-desktop"
+version = "0.1.0"
+
+[[package]]
 name = "soil-dev-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "soil-ble-host",
- "soil-records-host",
+ "soil-host",
  "soil-wasi-host",
  "wasmtime",
  "wasmtime-wasi",
@@ -6912,15 +7014,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "soil-http-host"
+name = "soil-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "blake3",
+ "clap",
+ "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-vfs",
+ "model2vec-rs",
  "percent-encoding",
- "serde",
+ "regex",
+ "rusqlite",
  "serde_json",
  "tempfile",
+ "tiny_http",
  "ureq 2.12.1",
  "url",
  "wasmtime",
@@ -6962,6 +7071,18 @@ dependencies = [
  "serde",
  "serde_json",
  "winit",
+]
+
+[[package]]
+name = "soil-install"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soil-spore",
+ "soil-store",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -7056,6 +7177,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-openapi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "soil-abi",
+ "wit-parser 0.233.0",
+]
+
+[[package]]
 name = "soil-principal-host"
 version = "0.1.0"
 dependencies = [
@@ -7075,20 +7207,6 @@ dependencies = [
  "anyhow",
  "cpal",
  "rtrb",
- "wasmtime",
- "wasmtime-wasi",
-]
-
-[[package]]
-name = "soil-records-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
- "serde_json",
- "tempfile",
- "tiny_http",
  "wasmtime",
  "wasmtime-wasi",
 ]
@@ -7228,13 +7346,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
- "fungos-vfs 0.1.0 (git+https://github.com/fungOS-linux/fungos-vfs.git?rev=bcd2bc682662467d1371a2c9f8436e08934132d9)",
+ "fungos-vfs",
  "plist",
  "serde",
  "serde_json",
+ "soil-host",
  "soil-marbles",
  "soil-spore",
- "soil-vfs-host",
  "tempfile",
  "wasmtime",
 ]
@@ -7244,10 +7362,19 @@ name = "soil-shell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fungos-vfs 0.1.0 (git+https://github.com/fungOS-linux/fungos-vfs.git?rev=bcd2bc682662467d1371a2c9f8436e08934132d9)",
+ "fungos-vfs",
+ "http",
  "serde_json",
- "soil-vfs-host",
+ "soil-host",
+ "soil-spore",
+ "soil-wasi-host",
+ "soil-web-bridge",
  "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "unibus",
 ]
 
 [[package]]
@@ -7260,6 +7387,7 @@ dependencies = [
  "sha2 0.10.9",
  "signal-hook",
  "tar",
+ "tempfile",
  "toml 0.8.23",
  "wit-component 0.247.0",
  "wit-parser 0.247.0",
@@ -7273,6 +7401,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "soil-spore",
+ "tempfile",
 ]
 
 [[package]]
@@ -7348,22 +7477,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "soil-vfs-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "fungos-vfs 0.1.0 (git+https://github.com/fungOS-linux/fungos-vfs.git?rev=bcd2bc682662467d1371a2c9f8436e08934132d9)",
- "model2vec-rs",
- "regex",
- "rusqlite",
- "serde_json",
- "tempfile",
- "ureq 2.12.1",
- "wasmtime",
-]
-
-[[package]]
 name = "soil-vt"
 version = "0.1.0"
 dependencies = [
@@ -7387,7 +7500,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "soil-records-host",
+ "soil-host",
  "tempfile",
  "tokio",
  "tracing",
@@ -7400,12 +7513,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-web-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "soil-host",
+ "soil-spore",
+ "tempfile",
+ "tungstenite",
+]
+
+[[package]]
 name = "soil-webgpu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "pollster",
- "soil-records-host",
+ "sha2 0.10.9",
+ "soil-host",
+ "soil-spore",
  "wasi-webgpu-wasmtime",
  "wasmtime",
  "wasmtime-wasi",
@@ -8173,6 +8304,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.10.3",
+ "sha1",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -10462,6 +10609,15 @@ name = "xml-rs"
 version = "0.8.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
+]
 
 [[package]]
 name = "yoke"

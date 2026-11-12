@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use soil_ble_host::ble as ble_host;
 use soil_ble_host::session;
-use soil_records_host::{Namespace, NamespacedRecordsHost, records};
+use soil_host::records_host::{self, Namespace, NamespacedRecordsHost, records};
 use soil_wasi_host::{MemoryBus, WasiHost, WasiHostBuilder, WasiHostPolicy, unibus::bus};
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Engine, Store};
@@ -384,7 +384,7 @@ fn main() -> Result<()> {
     soil::time::time::add_to_linker::<DevHost, HasSelf<DevHost>>(&mut linker, |state| state)
         .map_err(anyhow::Error::from)
         .context("link soil:time")?;
-    soil_records_host::add_to_linker::<DevHost>(&mut linker).context("link soil:records")?;
+    records_host::add_to_linker::<DevHost>(&mut linker).context("link soil:records")?;
     soil_wasi_host::unibus::add_to_linker::<DevHost>(&mut linker).context("link soil:unibus")?;
 
     let mut store = Store::new(&engine, state);

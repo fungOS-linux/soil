@@ -98,7 +98,9 @@ pub fn lua(snapshot: &Snapshot, extra: &str) -> String {
         lua_string(&snapshot.title)
     ));
     if let Some((x, y)) = snapshot.cursor {
-        out.push_str(&format!("  cursor = {{ x = {x}, y = {y}, visible = true }},\n"));
+        out.push_str(&format!(
+            "  cursor = {{ x = {x}, y = {y}, visible = true }},\n"
+        ));
     }
     if let Some(scroll) = snapshot.scroll {
         out.push_str(&format!(
@@ -113,7 +115,8 @@ pub fn lua(snapshot: &Snapshot, extra: &str) -> String {
     for y in 0..snapshot.rows {
         let mut runs: Vec<String> = Vec::new();
         let mut current: Option<(String, Option<String>, Option<String>, u8)> = None;
-        let flush = |run: Option<(String, Option<String>, Option<String>, u8)>, runs: &mut Vec<String>| {
+        let flush = |run: Option<(String, Option<String>, Option<String>, u8)>,
+                     runs: &mut Vec<String>| {
             if let Some((text, fg, bg, flags)) = run {
                 runs.push(format!(
                     "{{ {}, {}, {}, {} }}",
@@ -125,11 +128,17 @@ pub fn lua(snapshot: &Snapshot, extra: &str) -> String {
             }
         };
         for x in 0..snapshot.cols {
-            let Some(cell) = snapshot.cell(x, y) else { break };
+            let Some(cell) = snapshot.cell(x, y) else {
+                break;
+            };
             if cell.wide_tail {
                 continue;
             }
-            let text = if cell.text.is_empty() { " ".to_string() } else { cell.text.clone() };
+            let text = if cell.text.is_empty() {
+                " ".to_string()
+            } else {
+                cell.text.clone()
+            };
             let fg = cell.fg.map(hex);
             let bg = cell.bg.map(hex);
             let cell_flags = flags(cell);
@@ -146,7 +155,10 @@ pub fn lua(snapshot: &Snapshot, extra: &str) -> String {
             }
         }
         flush(current.take(), &mut runs);
-        out.push_str(&format!("    {{ y = {y}, runs = {{ {} }} }},\n", runs.join(", ")));
+        out.push_str(&format!(
+            "    {{ y = {y}, runs = {{ {} }} }},\n",
+            runs.join(", ")
+        ));
     }
     out.push_str("  },\n}\n");
     out

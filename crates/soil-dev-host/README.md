@@ -8,7 +8,7 @@ soil:ble + soil:records + soil:unibus + soil:time
 
 The BLE path is the same one `soil-ble-host` uses. By default it runs
 `soil-ble-sim` with 50 ms pacing; `--real` selects CoreBluetooth on macOS or
-BlueZ on Linux. Records use `soil-records-host`'s namespaced adapter. Unibus is
+BlueZ on Linux. Records use `soil-host`'s namespaced adapter. Unibus is
 an in-memory `MemoryBus`, so published frames are visible for the life of the
 process but do not persist.
 

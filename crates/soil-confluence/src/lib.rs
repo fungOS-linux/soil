@@ -13,10 +13,14 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod admin;
 pub mod spore;
 
 pub const EVENT_KIND: &str = "confluence.webhook.received.v1";
-pub const MAX_BODY: usize = 64 * 1024;
+/// One MiB, not 64 KiB: a real GitHub advisory record can exceed 100 KB
+/// (crates.io advisories have reached 146 KB), and the ingress dropping a
+/// security delivery for size is the one failure it cannot report.
+pub const MAX_BODY: usize = 1024 * 1024;
 
 /// The durable fact published to Unibus. Consumers must treat this as
 /// at-least-once and deduplicate on `provider` + `delivery_id`.

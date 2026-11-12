@@ -94,6 +94,7 @@ fn collatz(numbers: &[u32]) -> Result<Vec<u32>, String> {
     let steps = staging
         .slice(..)
         .get_mapped_range()
+        .map_err(|e| format!("map: {e}"))?
         .as_chunks::<4>()
         .0
         .iter()

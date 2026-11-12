@@ -1,0 +1,6 @@
+package soil:wgpu-test-fixture@0.1.0;
+
+world runner {
+  import soil:present/surface@0.1.0;
+  export run: async func() -> u32;
+}

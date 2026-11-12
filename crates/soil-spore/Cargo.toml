@@ -13,6 +13,7 @@ serde_json = "1"
 sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 tar = "0.4"
+tempfile = "3"
 toml = "0.8"
 # Reading a component's real imports is what lets `check` hold the manifest to
 # the module instead of the other way round.

@@ -13,7 +13,7 @@ use hyper::{server::conn::http1, service::service_fn};
 use tokio::net::TcpListener;
 use wasmtime::{
     Config, Engine, Store,
-    component::{Component, Linker},
+    component::{Component, HasSelf, Linker},
 };
 use wasmtime_wasi_http::{
     WasiHttpView,
@@ -79,7 +79,13 @@ impl HttpService {
         creds::add_to_linker(&mut linker)?;
         unibus::add_to_linker(&mut linker)?;
         if builder.has_records() {
-            soil_records_host::add_to_linker(&mut linker).context("link soil:records")?;
+            soil_host::records_host::add_to_linker(&mut linker).context("link soil:records")?;
+        }
+        if builder.has_http() {
+            soil_host::http_host::api::add_to_linker::<
+                super::host::WasiHost,
+                HasSelf<super::host::WasiHost>,
+            >(&mut linker, |state| state)?;
         }
         let pre = ProxyPre::new(linker.instantiate_pre(&component)?)
             .map_err(anyhow::Error::from)

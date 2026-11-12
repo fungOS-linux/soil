@@ -34,8 +34,8 @@ review map for what else exists and what is missing.
 | WIT package | Host object | Grant shape | v1? | Notes |
 |---|---|---|---|---|
 | `soil:canvas@1` | Canvas owner surface (window / layout / renderer) | `soil:canvas` | yes | Spore presents or navigates the host-owned Canvas surface. Typed state, generation-bound input, no pixels or display handles. Canonical WIT: [`wit/soil-canvas.wit`](../wit/soil-canvas.wit). |
-| `soil:surface@1` | window / compositor / seat | `soil:surface` | **deferred** | Spore submits a bounded retained scene; only if a Spore or non-Canvas host ever needs its own UI. Not on the v1 path. |
-| `wasi:webgpu@0.3.0-rc.2` | wgpu-core device | link `wasi:webgpu` | yes | Upstream WIT, no native handles. Host: [`crates/soil-webgpu`](../crates/soil-webgpu). Presentation stays Canvas-owned. |
+| `soil:surface@1.1.0` | window / compositor / seat | `soil:surface` | **frozen** | The spore-facing surface: `present(document: list<u8>)`, `observe`, `generation`-bound `input`, `close`, plus `theme.current` behind `state.theme-generation`. Renamed from `soil:canvas`; input types come from `soil:input@1.0.0` instead of being restated. Canonical WIT lives in the spores repo (`spores/dragshift/wit/deps/soil-surface.wit`, hashed in its `wit-provenance.txt`); `crates/spore-guest` and its two guest worlds link it. Soil's Canvas crates still import `soil:canvas@1.0.0` until the runtime sweep lands. |
+| `wasi:webgpu@0.3.0-rc.2` | wgpu 30 device | link `wasi:webgpu` | yes | Upstream WIT, no native handles. Host: [`crates/soil-webgpu`](../crates/soil-webgpu), moving from `wgpu-core` 29 to the host's own `wgpu` 30 device ([decision](gpu-spores.md)). Presentation stays Canvas-owned via a texture lease. |
 | `wasi:audio@0.1.0` | audio sink | link `wasi:audio` | draft | Soil-maintained PCM sink; cpal host; no callbacks or device handles. [`docs/wasi-audio.md`](wasi-audio.md). |
 | `soil:mic@1` | audio capture | `soil:mic.capture` | yes | Bounded PCM chunks. Visible capture indicator; no background capture. Separate from playback so muting output never implies mic permission. |
 | `soil:camera@1` | camera capture | `soil:camera.capture` | yes | Still/low-rate frames only. Full-rate video belongs on `soil:stream`/producer path. No device paths or raw controls. |
@@ -48,7 +48,7 @@ review map for what else exists and what is missing.
 | `soil:storage@1` | content-addressed assets | `soil:storage.read`, optional `soil:storage.write` | yes | CIDs, never paths. Read-only cache by default. Canonical WIT: [`wit/soil-storage.wit`](../wit/soil-storage.wit). |
 | `soil:vfs@1` | workspace namespace and bounded reads | `soil:vfs` | yes | Canonical workspace-relative paths, `ContentId`, paged listing and range reads. No host paths or providers. Canonical WIT: [`wit/soil-vfs.wit`](../wit/soil-vfs.wit). |
 | `soil:appdata@1` | private app storage | `soil:appdata` | yes | Local and per-user/per-app synced key-value storage. Opaque bytes, quota-bounded, not indexed, not shareable, not Git and not CID-addressed. Host adapter: [`crates/soil-appdata-host`](../crates/soil-appdata-host). Canonical WIT: [`wit/soil-appdata.wit`](../wit/soil-appdata.wit). |
-| `soil:records@0.1` | durable records | `soil:records` read/write/sync | draft | Schema-tagged entries, tombstones, scan/changes/apply, and compare-and-swap for single-writer claims. Host adapter: [`crates/soil-records-host`](../crates/soil-records-host); guest SDK: [`crates/soil-sdk-records`](../crates/soil-sdk-records). |
+| `soil:records@0.1` | durable records | `soil:records` read/write/sync | draft | Schema-tagged entries, tombstones, scan/changes/apply, and compare-and-swap for single-writer claims. Host adapter: [`crates/soil-host`](../crates/soil-host); guest SDK: [`crates/soil-sdk-records`](../crates/soil-sdk-records). |
 | `soil:unibus@0.1` | Unibus connection (host-owned) | `soil:unibus` observe/publish | draft | Cursor-paged `poll(kinds, cursor, limit)` and `publish(kind, body, destination, ttl-ms)` over opaque JSON-object bodies. The Spore names kinds; the host owns the session, credential, hub selection and retention. `stale` means the cursor predates retention, never a silent gap. Host adapter: [`crates/soil-wasi-host/src/unibus.rs`](../crates/soil-wasi-host/src/unibus.rs); guest SDK: [`crates/soil-sdk-unibus`](../crates/soil-sdk-unibus). |
 | `soil:index@1.1` | derived browse/search index + KNN | `soil:index` | yes | Rebuildable, generationed, returns paths and snippets; fast direct-child traversal; explicit KNN when the host has embeddings. Never authority. Canonical WIT: [`wit/soil-index.wit`](../wit/soil-index.wit). |
 | `soil:vfs-mut@0.1` | bounded VFS mutation | `soil:vfs-mut` | draft | Separate write/remove/mkdir/rmdir/rename grant. Paths stay workspace-relative; no host handles. Canonical WIT: [`wit/soil-vfs-mut.wit`](../wit/soil-vfs-mut.wit). |
@@ -74,8 +74,9 @@ other app depend on it.
 
 `soil:canvas` is the explicit exception: Canvas is the fleet's cross-platform
 shell, not a Spore. It ships with the host, owns the window/compositor/layout/
-renderer, and is the only way a Spore presents UI. `soil:surface` stays deferred
-until a Spore must draw its own interface or a host runs without Canvas. See
+renderer, and is the only way a Spore presents UI. Its spore-facing contract is
+now frozen as `soil:surface@1.1.0` (see the capability matrix); Canvas's own
+crates keep the `soil:canvas@1.0.0` import until they are ported. See
 [`docs/soil-canvas.md`](soil-canvas.md).
 
 ## Contract sketches
@@ -268,7 +269,8 @@ Any unsupported row is a named denial, not an empty success.
 2. **Upstream and wired here:** `wasi:webgpu@0.3.0-rc.2` (host + compute proof,
    [`docs/soil-webgpu.md`](soil-webgpu.md)) and draft `wasi:audio@0.1.0`
    (host + tone proof, [`docs/wasi-audio.md`](wasi-audio.md)). `stream` is
-   design. `soil:surface` is deferred, not scheduled.
+   design. `soil:surface@1.1.0` is frozen for spores; Canvas's own crates still
+   import `soil:canvas@1.0.0` and are the remaining port.
 3. **Next, highest value:** build a small read-only file-browser Spore on the
    now-implemented `soil:vfs`/`soil:index` host adapter, then wire
    `soil:canvas-input` into the S22/Fire TV hosts,

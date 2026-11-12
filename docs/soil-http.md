@@ -1,8 +1,10 @@
 # `soil:http`
 
-Status: **host proof, 2026-11-05.** The direct transport and a real Wasm guest
-work against a loopback HTTP server. Iroh/Mycelium route selection is an
-explicit transport seam, not yet wired.
+Status: **host + Geode path credentials + desktop presenter, 2026-11-05.** The
+direct transport and a real Wasm guest work against a loopback HTTP server,
+Geode leases path credentials into the v1 URL slot, and `canvas-winit` grants
+the same policy to a GPUI Spore. Iroh/Mycelium route selection is an explicit
+transport seam, not yet wired.
 
 ## Why not ureq/hyper/reqwest inside the Spore
 
@@ -51,7 +53,7 @@ Errors are typed: `denied`, `invalid`, `over-budget`, `timeout`, `unavailable`,
 
 ## Host policy
 
-`crates/soil-http-host` currently provides:
+`crates/soil-host` currently provides:
 
 - origin allowlist (`scheme://host:port`)
 - `get`, `head`, `post`, `put`, `patch` and `delete`; a body on a read is
@@ -68,8 +70,24 @@ Errors are typed: `denied`, `invalid`, `over-budget`, `timeout`, `unavailable`,
 
 The `CredentialProvider` trait is where **Geode** belongs: the Spore sends a
 handle, Geode resolves it inside the host, and the host injects the resulting
-header. The direct transport is the first `HttpTransport`; a Geode adapter and
-an Iroh transport do not change the WIT or the Spore.
+header or path segment. `GeodeCredentials` is the shipped path adapter; the
+direct transport is the first `HttpTransport`, and an Iroh transport does not
+change the WIT or the Spore.
+
+## Capability origins
+
+`canvas-winit` can bind a stable capability hostname to a configured origin:
+
+```sh
+canvas-winit lights.wasm \
+  --hue-bridge http://192.168.10.15 \
+  --geode-socket ~/.geode/geode.sock --geode-purpose hue.control
+```
+
+The guest requests `http://hue.local/api/__CREDENTIAL__/...`. The host
+allowlists `http://hue.local`, rewrites it to the configured bridge in its
+`HttpTransport`, then leases and substitutes the Geode path segment before the
+request leaves the process. The Spore never learns the bridge IP or the key.
 
 ## Iroh / Mycelium routing
 
@@ -98,11 +116,11 @@ host can either allow direct fetch or deny the origin; that is host policy.
 
 ```sh
 # direct transport + a real guest component
-cd crates/soil-http-host/fixtures/get
+cd crates/soil-host/fixtures/get
 cargo build --target wasm32-wasip2 --release
 cd ../../..
 target/debug/soil-http --allow http://127.0.0.1:8891 \
-  crates/soil-http-host/fixtures/get/target/wasm32-wasip2/release/soil_http_get.wasm \
+  crates/soil-host/fixtures/get/target/wasm32-wasip2/release/soil_http_get.wasm \
   http://127.0.0.1:8891/feed.txt
 ```
 
@@ -146,7 +164,6 @@ store.
 
 ## Next
 
-- Geode `CredentialProvider`
 - Mycelium directory / Iroh `HttpTransport`
 - shared router with best-route selection and explicit fallback policy
 - conditional GET / ETag at the host layer

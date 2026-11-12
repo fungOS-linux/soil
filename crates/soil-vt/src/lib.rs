@@ -88,6 +88,9 @@ pub struct Snapshot {
     pub rows: u16,
     /// Row-major, `cols * rows` cells.
     pub cells: Vec<Cell>,
+    /// Cursor position as `(column, row)`, only while the viewport is on the
+    /// active screen. A cursor in history would point at a row that is not the
+    /// program's.
     pub cursor: Option<(u16, u16)>,
     pub title: String,
     /// Bells rung so far, cumulative. A renderer compares this with the value it

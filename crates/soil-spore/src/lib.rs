@@ -129,6 +129,15 @@ pub struct Manifest {
     /// authorizes it.
     #[serde(default)]
     pub anycast: Option<Anycast>,
+    /// The names this Spore answers on, and what it will accept there.
+    ///
+    /// A claim is routing, not privilege. Claiming `contacts.myc` says where
+    /// requests arrive; it says nothing about what the Spore may do with them,
+    /// which stays in `[grants]`. The host refuses two live claims on one name
+    /// unless an operator pins the name, because a silently stolen name is the
+    /// failure that never shows up in a unit test.
+    #[serde(default)]
+    pub http: Option<Http>,
     /// Chrome regions this Spore draws, when it draws any.
     #[serde(default)]
     pub chrome: Option<Chrome>,
@@ -152,6 +161,23 @@ pub struct Manifest {
     /// the Spore is prose, and the prose has to travel with the package.
     #[serde(default)]
     pub skills: Vec<Skill>,
+    /// Views this package ships, declared so a host can refuse one it cannot
+    /// present before it opens anything.
+    ///
+    /// Empty is the default and the pre-declaration behaviour: the host renders
+    /// the package's `[ui]`/`[module]` in whatever kind `[launch] surfaces`
+    /// allows. Absent means every manifest written before surfaces existed
+    /// keeps working untouched.
+    #[serde(default)]
+    pub surfaces: Vec<Surface>,
+    /// Command-line programs this Spore installs into a shell's virtual PATH.
+    ///
+    /// A command is not an action: an action takes one JSON request, a command
+    /// takes argv and stdin and answers on stdout with an exit code. Both are
+    /// declared here because the package owns both faces; the shell decides
+    /// which of them it exposes.
+    #[serde(default)]
+    pub commands: Vec<SporeCommand>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +195,17 @@ pub struct Action {
     pub expose: Vec<String>,
     #[serde(default)]
     pub idempotent: bool,
+}
+
+/// One program a Spore installs into a shell's virtual PATH.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SporeCommand {
+    /// The name a shell resolves. A slug, so it cannot be mistaken for a path.
+    pub name: String,
+    pub summary: String,
+    /// A `wasi:cli` command component, relative to the package root.
+    pub module: String,
 }
 
 /// One agent skill: a `SKILL.md` whose frontmatter names it.
@@ -342,7 +379,14 @@ pub const CHROME_REGIONS: [&str; 8] = [
 #[serde(deny_unknown_fields)]
 pub struct SporeMeta {
     pub id: String,
+    /// The package directory and registry slug. Stable and lower-case; it is
+    /// identity, not a label.
     pub name: String,
+    /// How the app names itself in a window title, a Dock, or a launcher row.
+    /// Optional so every manifest written before this field keeps working; a
+    /// host falls back to title-casing `name`.
+    #[serde(default)]
+    pub title: Option<String>,
     pub version: String,
     pub license: String,
     pub summary: String,
@@ -385,7 +429,21 @@ pub struct Ui {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Launch {
+    /// The surface a bare launch opens.
+    ///
+    /// A kind from `surfaces` (`canvas`, `native`, `web`) while the Spore
+    /// declares no `[[surfaces]]`, and the name of a declared surface when it
+    /// does. One field because it is one fact: what the host opens when the
+    /// caller names nothing. This is `default-surface` on the wire.
     pub default: String,
+    /// Kinds this package can be rendered as.
+    ///
+    /// Required while the Spore declares no `[[surfaces]]`, because the kind
+    /// list is then the whole statement of what it can be launched as. Once
+    /// surfaces carry their own kind this is only an outer bound: every
+    /// declared kind must appear here, and a package whose one artifact renders
+    /// on more engines than it names surfaces for may list more.
+    #[serde(default)]
     pub surfaces: Vec<String>,
     /// The composed Lua module Canvas opens, when the launcher starts a view
     /// rather than the module. Composition writes it into the runtime modules
@@ -418,6 +476,103 @@ pub struct Anycast {
 
 pub const MAX_LEASE_SECS: u64 = 300;
 
+/// A command name: a slug a shell resolves, never a path or a flag.
+fn command_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        // It must start like a word, not like a flag: `--force` in a PATH is a
+        // name a shell would hand to the wrong program.
+        && value
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A hostname a vhost could be granted: lowercase labels, no scheme, no port.
+fn http_host(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+}
+
+/// Most hostnames one Spore may claim. A Spore serving a handful of names is
+/// ordinary; one claiming dozens is a registry, not a Spore.
+pub const MAX_HTTP_HOSTS: usize = 16;
+
+/// Most routes one Spore may declare.
+pub const MAX_HTTP_ROUTES: usize = 32;
+
+/// Largest request body a claimed route may accept.
+pub const MAX_HTTP_BODY: usize = 1024 * 1024;
+
+/// Methods a route may name.
+///
+/// A closed set: an unknown method is a typo or a fresh idea, and both should
+/// arrive as a change to this list rather than as a route that silently never
+/// matches.
+pub const HTTP_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+/// Where a Spore answers, declared by the Spore so an install needs no sidecar
+/// config.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Http {
+    /// Hostnames, as a vhost would match them: no scheme, no port, no path.
+    pub hosts: Vec<String>,
+    /// The component that answers, when it is not the package's own `[module]`.
+    ///
+    /// A package carries one artifact per face: a window, a shell command and a
+    /// network endpoint are three components with three worlds, and the HTTP
+    /// gateway can only instantiate one whose world exports
+    /// `wasi:http/incoming-handler`. Naming it here is the same statement
+    /// `[[commands]] module` already makes, so a Spore that answers on a name
+    /// does not have to give up its UI to do it.
+    ///
+    /// Absent means the package's `[module]` answers, which is what every
+    /// manifest written before this field had to mean.
+    #[serde(default)]
+    pub module: Option<String>,
+    #[serde(default = "default_max_body")]
+    pub max_body: usize,
+    #[serde(default)]
+    pub origin_auth: OriginAuth,
+    pub routes: Vec<HttpRoute>,
+}
+
+/// One URL prefix this Spore will service, and the methods it accepts there.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpRoute {
+    pub methods: Vec<String>,
+    /// Prefix, beginning with `/`. A grant is a prefix rather than a pattern:
+    /// the vhost already decides which Spore sees the request.
+    pub path: String,
+}
+
+/// Transport truth for a listener.
+///
+/// Most Spores verify a provider's own signature. A declared terminator says
+/// the reverse: only that peer may assert a verified identity, because it saw
+/// the client certificate and this process did not.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OriginAuth {
+    #[default]
+    ProviderSignature,
+    TrustedTerminator,
+}
+
+const fn default_max_body() -> usize {
+    64 * 1024
+}
+
 const fn default_lease_secs() -> u64 {
     240
 }
@@ -433,7 +588,201 @@ const fn default_true() -> bool {
     true
 }
 
+/// The kind names a `[launch] surfaces` list is drawn from. `native` is here
+/// because it has always been launchable, not because a surface can declare it:
+/// see [`SurfaceKind`].
 pub const SURFACES: [&str; 3] = ["web", "native", "canvas"];
+
+/// The page a `web` surface opens when its manifest does not say otherwise.
+pub const DEFAULT_WEB_ENTRY: &str = "web/index.html";
+
+/// A view a package ships, declared in `[[surfaces]]`.
+///
+/// A Spore declares a surface when the host could not guess it: a bundled web
+/// page, or a Canvas artifact that is not the package's own `[ui] entry`. The
+/// declaration is what lets a host answer "this Spore needs a browser and I
+/// have none" before it opens anything.
+///
+/// The entry point is a path, not a content id. The package is the unit of
+/// identity and provenance — `spore.lock` and the package digest already cover
+/// every byte the package ships — so a per-asset content id would be a second
+/// version of the same fact, kept in a second place, drifting against the
+/// first. Do not add one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Surface {
+    /// The name `launch(id, surface)` takes and [`Launch::default`] may name.
+    pub name: String,
+    pub kind: SurfaceKind,
+    /// Entry point relative to the package root, and the whole of the default:
+    /// `web/index.html` for a [`SurfaceKind::Web`] surface, the package's own
+    /// `[ui] entry` for a canvas one.
+    ///
+    /// Written down only when the artifact is not the conventional one, so a
+    /// Spore that ships `web/index.html` says `kind = "web"` and nothing else.
+    #[serde(default)]
+    pub entry: Option<String>,
+    /// Engine or host capability this surface needs, if any.
+    ///
+    /// The kind is already a requirement, so most surfaces need nothing here.
+    /// It exists for the case where one host can present a kind and another
+    /// cannot — a specific browser engine, a particular decoder.
+    #[serde(default)]
+    pub requires: Option<String>,
+}
+
+impl Surface {
+    /// The artifact this surface opens, relative to the package root.
+    ///
+    /// A declared `entry` wins; otherwise the kind's convention, which is
+    /// `web/index.html` for a web page and the package's own [`Ui`] entry for a
+    /// Canvas one. Resolved here rather than in each host so there is one
+    /// answer.
+    #[must_use]
+    pub fn entry<'a>(&'a self, ui: Option<&'a Ui>) -> Option<&'a str> {
+        match (&self.entry, self.kind) {
+            (Some(entry), _) => Some(entry),
+            (None, SurfaceKind::Web) => Some(DEFAULT_WEB_ENTRY),
+            (None, SurfaceKind::Canvas) => ui.map(|ui| ui.entry.as_str()),
+        }
+    }
+}
+
+/// How a host presents a surface.
+///
+/// `canvas` is the host's own Lua renderer. `web` needs a browser view — the
+/// `browser` kind in `soil:surface-import` — which a host is allowed not to
+/// have. Native rendering has no variant: it is the default, it is what
+/// `[module]` and `[ui]` already are, and a package that needs nothing extra
+/// should not have to say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SurfaceKind {
+    Canvas,
+    Web,
+}
+
+impl SurfaceKind {
+    /// Every kind, in the order a host lists them when it refuses a request.
+    pub const ALL: [Self; 2] = [Self::Canvas, Self::Web];
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Canvas => "canvas",
+            Self::Web => "web",
+        }
+    }
+
+    /// The kind a surface declaration may carry.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+
+    /// The kind a `[launch] surfaces` entry names.
+    ///
+    /// `native` is `None` on purpose: it is the host rendering the package's own
+    /// artifacts, so there is no capability a host could be missing.
+    fn from_launch_kind(value: &str) -> Option<Option<Self>> {
+        match value {
+            "native" => Some(None),
+            other => Self::parse(other).map(Some),
+        }
+    }
+
+    #[must_use]
+    pub fn names() -> String {
+        Self::ALL.map(Self::as_str).join(", ")
+    }
+}
+
+impl fmt::Display for SurfaceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SurfaceKind {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown surface kind {raw:?}; a surface kind is one of {}",
+                Self::names()
+            ))
+        })
+    }
+}
+
+/// What a host opens for one `launch(id, surface)` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchTarget<'a> {
+    /// The name the host asked for; what `launched.surface` echoes back.
+    pub surface: &'a str,
+    /// The renderer that presents it. `None` for a legacy `native` launch, where
+    /// the host draws the package itself.
+    pub kind: Option<SurfaceKind>,
+    /// Package-relative entry point. `None` when the host renders the package's
+    /// own `[ui]` artifact, which is what a Spore that declares no surfaces
+    /// means.
+    pub entry: Option<&'a str>,
+}
+
+/// Why a launch request cannot be honoured.
+///
+/// These are the two `soil:spore/catalog.error` members a host needs here;
+/// [`LaunchError::code`] is that mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchError {
+    /// The package declares no surface by that name.
+    NotFound {
+        requested: String,
+        declared: Vec<String>,
+    },
+    /// The surface exists, but this host cannot present its kind.
+    Unsupported {
+        surface: String,
+        kind: SurfaceKind,
+        host: Vec<SurfaceKind>,
+    },
+}
+
+impl LaunchError {
+    /// The `soil:spore/catalog.error` member this maps to.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound { .. } => "not-found",
+            Self::Unsupported { .. } => "unsupported",
+        }
+    }
+}
+
+impl fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound {
+                requested,
+                declared,
+            } => write!(
+                f,
+                "surface {requested:?} is not declared; this Spore declares {declared:?}"
+            ),
+            Self::Unsupported {
+                surface,
+                kind,
+                host,
+            } => write!(
+                f,
+                "surface {surface:?} needs a {kind} view, and this host presents only {host:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LaunchError {}
 
 impl Manifest {
     pub fn parse(source: &str) -> Result<Self> {
@@ -450,6 +799,69 @@ impl Manifest {
         let manifest = Self::parse(&source)?;
         manifest.check_skills(root)?;
         Ok(manifest)
+    }
+
+    /// A stable, non-secret projection for authoring tools.
+    ///
+    /// `tend dev`/`tend publish` need the id, view entry, declared surfaces and
+    /// listing fields without implementing a second TOML parser. This is the
+    /// JSON shape they consume; it contains no package bytes and no keys.
+    #[must_use]
+    pub fn info_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.spore.id,
+            "name": self.spore.name,
+            "version": self.spore.version,
+            "license": self.spore.license,
+            "summary": self.spore.summary,
+            "description": self.spore.description,
+            "homepage": self.spore.homepage,
+            "engine": {
+                "soil": self.engine.soil,
+                "target": self.engine.target,
+                "abi": self.engine.abi,
+            },
+            "module": self.module.as_ref().map(|module| serde_json::json!({
+                "path": module.path,
+                "sha256": module.sha256,
+            })),
+            "ui": self.ui.as_ref().map(|ui| serde_json::json!({
+                "entry": ui.entry,
+                "jit": ui.jit,
+                "hot_reload": ui.hot_reload,
+            })),
+            "launch": {
+                "default": self.launch.default,
+                "surfaces": self.launch.surfaces,
+                "canvas_module": self.launch.canvas_module,
+            },
+            "surfaces": self.surfaces.iter().map(|surface| serde_json::json!({
+                "name": surface.name,
+                "kind": surface.kind.as_str(),
+                "entry": surface.entry,
+                "requires": surface.requires,
+            })).collect::<Vec<_>>(),
+            "grants": self.grants,
+            "docs": self.docs.as_ref().map(|docs| serde_json::json!({
+                "usage": docs.usage,
+                "man": docs.man,
+            })),
+            "presentation": self.presentation.as_ref().map(|presentation| serde_json::json!({
+                "badge": presentation.badge,
+                "color": presentation.color,
+                "icon": presentation.icon,
+            })),
+            "catalog": self.catalog.as_ref().map(|catalog| serde_json::json!({
+                "categories": catalog.categories,
+                "keywords": catalog.keywords,
+                "screenshots": catalog.screenshots.iter().map(|screenshot| serde_json::json!({
+                    "cid": screenshot.cid,
+                    "caption": screenshot.caption,
+                })).collect::<Vec<_>>(),
+                "record": catalog.record,
+            })),
+            "system": self.system.as_ref().map(|system| system.role.clone()),
+        })
     }
 
     /// Skills are files, so only `load` can check them: `parse` has no root.
@@ -528,9 +940,12 @@ impl Manifest {
                 )));
             }
             let path = safe_relative(&skill.path)?;
+            // `map(..) != Some(true)` covers both "a different file name" and
+            // "no file name at all" (the path is `skills/hello/`), which are
+            // the same mistake to a packager.
             if path
                 .file_name()
-                .map(|name| name.to_string_lossy() != "SKILL.md")
+                .map(|name| name.to_string_lossy() == "SKILL.md")
                 != Some(true)
             {
                 return Err(Error::Invalid(format!(
@@ -550,10 +965,18 @@ impl Manifest {
             // A Spore without a module still has to do something. Any entrypoint
             // counts, and Lua is one of them: the host JITs `[ui] entry`, so a
             // Lua-only Spore is a program, not a second-class attachment to a
-            // wasm build. `chrome` counts because a host draws the region.
-            None if self.ui.is_none() && self.chrome.is_none() => {
+            // wasm build. `chrome` counts because a host draws the region, and a
+            // declared surface counts because a page is an entrypoint too: a
+            // web-only Spore is a program the host presents in a browser view.
+            None if self.ui.is_none()
+                && self.chrome.is_none()
+                && !self
+                    .surfaces
+                    .iter()
+                    .any(|surface| surface.entry(self.ui.as_ref()).is_some()) =>
+            {
                 return Err(Error::Invalid(
-                    "a Spore needs an entrypoint: a module, a Lua UI, or a chrome region".into(),
+                    "a Spore needs an entrypoint: a module, a Lua UI, a chrome region, or a declared surface".into(),
                 ));
             }
             None => {}
@@ -565,19 +988,87 @@ impl Manifest {
             }
         }
 
-        if self.launch.surfaces.is_empty() {
-            return Err(Error::Invalid("launch.surfaces must not be empty".into()));
-        }
-        for surface in &self.launch.surfaces {
-            if !SURFACES.contains(&surface.as_str()) {
-                return Err(Error::Invalid(format!("unknown surface {surface:?}")));
+        if self.surfaces.is_empty() {
+            // No declarations: the kind list is the whole statement of what
+            // this package can be launched as, exactly as before.
+            if self.launch.surfaces.is_empty() {
+                return Err(Error::Invalid("launch.surfaces must not be empty".into()));
             }
-        }
-        if !self.launch.surfaces.contains(&self.launch.default) {
-            return Err(Error::Invalid(format!(
-                "launch.default {:?} is not in launch.surfaces",
-                self.launch.default
-            )));
+            for surface in &self.launch.surfaces {
+                if !SURFACES.contains(&surface.as_str()) {
+                    return Err(Error::Invalid(format!(
+                        "unknown surface {surface:?}: launch.surfaces is drawn from {SURFACES:?}"
+                    )));
+                }
+            }
+            if !self.launch.surfaces.contains(&self.launch.default) {
+                return Err(Error::Invalid(format!(
+                    "launch.default {:?} is not in launch.surfaces {:?}",
+                    self.launch.default, self.launch.surfaces
+                )));
+            }
+        } else {
+            let mut seen = BTreeSet::new();
+            for surface in &self.surfaces {
+                if !identifier(&surface.name) {
+                    return Err(Error::Invalid(format!(
+                        "surface name {:?} must be lowercase letters, digits, - or _",
+                        surface.name
+                    )));
+                }
+                if !seen.insert(surface.name.as_str()) {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} is declared twice",
+                        surface.name
+                    )));
+                }
+                let Some(entry) = surface.entry(self.ui.as_ref()) else {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} is {} but this Spore has no [ui] entry to present; name one with `entry`",
+                        surface.name, surface.kind
+                    )));
+                };
+                safe_relative(entry)?;
+                let expected = match surface.kind {
+                    SurfaceKind::Canvas => ".lua",
+                    SurfaceKind::Web => ".html",
+                };
+                if !entry.ends_with(expected) {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} is {}, so its entry {entry:?} must end in {expected}",
+                        surface.name, surface.kind
+                    )));
+                }
+                if let Some(requires) = &surface.requires
+                    && !identifier(requires)
+                {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} requires {requires:?}, which must be lowercase letters, digits, - or _",
+                        surface.name
+                    )));
+                }
+                // A kind list, when given, is an outer bound: one artifact can
+                // render on more engines than the package names surfaces for,
+                // never fewer.
+                let kind = surface.kind.as_str();
+                if !self.launch.surfaces.is_empty()
+                    && !self.launch.surfaces.iter().any(|listed| listed == kind)
+                {
+                    return Err(Error::Invalid(format!(
+                        "surface {:?} is {kind}, which launch.surfaces {:?} does not list",
+                        surface.name, self.launch.surfaces
+                    )));
+                }
+            }
+            // Declared surfaces are the authority for what opens, so the
+            // default has to name one of them.
+            let declared = self.surface_names();
+            if !declared.contains(&self.launch.default.as_str()) {
+                return Err(Error::Invalid(format!(
+                    "launch.default {:?} names no declared surface; [[surfaces]] declares {declared:?}",
+                    self.launch.default
+                )));
+            }
         }
 
         if let Some(system) = &self.system
@@ -631,6 +1122,107 @@ impl Manifest {
                 return Err(Error::Invalid(format!(
                     "anycast.ttl_secs {} must be 1..={MAX_LEASE_SECS}",
                     anycast.ttl_secs
+                )));
+            }
+        }
+
+        if let Some(http) = &self.http {
+            // A Spore that answers on a name must name the component that
+            // answers: the package's own `[module]`, or an `[http] module` of
+            // its own when the window and the endpoint are different artifacts.
+            if self.module.is_none() && http.module.is_none() {
+                return Err(Error::Invalid(
+                    "[http] needs a module: a Spore that answers on a name must be able to answer"
+                        .into(),
+                ));
+            }
+            if let Some(module) = &http.module {
+                safe_relative(module)?;
+                if !module.ends_with(".wasm") {
+                    return Err(Error::Invalid(format!(
+                        "http module {module:?} must end in .wasm"
+                    )));
+                }
+            }
+            if http.hosts.is_empty() || http.hosts.len() > MAX_HTTP_HOSTS {
+                return Err(Error::Invalid(format!(
+                    "[http] needs 1..={MAX_HTTP_HOSTS} hosts"
+                )));
+            }
+            for host in &http.hosts {
+                if !http_host(host) {
+                    return Err(Error::Invalid(format!(
+                        "http host {host:?} must be a lowercase hostname, no scheme, port or path"
+                    )));
+                }
+            }
+            if http.max_body == 0 || http.max_body > MAX_HTTP_BODY {
+                return Err(Error::Invalid(format!(
+                    "http.max_body {} must be 1..={MAX_HTTP_BODY}",
+                    http.max_body
+                )));
+            }
+            if http.routes.is_empty() || http.routes.len() > MAX_HTTP_ROUTES {
+                return Err(Error::Invalid(format!(
+                    "[http] needs 1..={MAX_HTTP_ROUTES} routes"
+                )));
+            }
+            for route in &http.routes {
+                if !route.path.starts_with('/')
+                    || route.path.len() > 128
+                    || route
+                        .path
+                        .chars()
+                        .any(|c| c.is_whitespace() || c.is_control())
+                {
+                    return Err(Error::Invalid(format!(
+                        "route path {:?} must start with `/`, be at most 128 bytes, and contain no whitespace",
+                        route.path
+                    )));
+                }
+                if route.methods.is_empty() {
+                    return Err(Error::Invalid(format!(
+                        "route {} names no methods",
+                        route.path
+                    )));
+                }
+                for method in &route.methods {
+                    if !HTTP_METHODS.contains(&method.as_str()) {
+                        return Err(Error::Invalid(format!(
+                            "route {} names method {method:?}; allowed: {}",
+                            route.path,
+                            HTTP_METHODS.join(", ")
+                        )));
+                    }
+                }
+            }
+        }
+
+        let mut command_names = std::collections::BTreeSet::new();
+        for command in &self.commands {
+            if !command_slug(&command.name) {
+                return Err(Error::Invalid(format!(
+                    "command name {:?} must be lowercase [a-z0-9-] and at most 32 bytes",
+                    command.name
+                )));
+            }
+            if !command_names.insert(command.name.clone()) {
+                return Err(Error::Invalid(format!(
+                    "command {:?} is declared twice",
+                    command.name
+                )));
+            }
+            if command.summary.trim().is_empty() {
+                return Err(Error::Invalid(format!(
+                    "command {:?} has no summary, so a shell cannot list it",
+                    command.name
+                )));
+            }
+            safe_relative(&command.module)?;
+            if !command.module.ends_with(".wasm") {
+                return Err(Error::Invalid(format!(
+                    "command {:?} module must end in .wasm",
+                    command.name
                 )));
             }
         }
@@ -814,8 +1406,17 @@ impl Manifest {
         }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
         paths.extend(self.skills.iter().map(|skill| skill.path.clone()));
+        paths.extend(self.commands.iter().map(|command| command.module.clone()));
+        if let Some(module) = self.http.as_ref().and_then(|http| http.module.clone()) {
+            paths.push(module);
+        }
         if let Some(man) = self.docs.as_ref().and_then(|docs| docs.man.clone()) {
             paths.push(man);
+        }
+        for surface in &self.surfaces {
+            if let Some(entry) = surface.entry(self.ui.as_ref()) {
+                paths.push(entry.to_owned());
+            }
         }
         let mut seen = std::collections::BTreeSet::new();
         paths
@@ -824,6 +1425,36 @@ impl Manifest {
             .map(PathBuf::from)
             .filter(|path| seen.insert(path.clone()))
             .collect()
+    }
+
+    /// Every component the manifest names, labelled with the face that names
+    /// it.
+    ///
+    /// A package carries one artifact per face, and the manifest rule is the
+    /// same for each of them: what a component imports, `[grants]` declares.
+    /// The label is what makes a failure readable when two artifacts disagree
+    /// about their capabilities — the file name alone does not say which face
+    /// asked for a socket. Paths are deduplicated, so a Spore whose `[http]`
+    /// reuses its `[module]` is checked once.
+    #[must_use]
+    pub fn declared_modules(&self) -> Vec<(String, String)> {
+        let mut modules: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut push = |face: &str, path: &str| {
+            if seen.insert(path.to_owned()) {
+                modules.push((face.to_owned(), path.to_owned()));
+            }
+        };
+        if let Some(module) = &self.module {
+            push("module", &module.path);
+        }
+        for command in &self.commands {
+            push(&format!("command {:?}", command.name), &command.module);
+        }
+        if let Some(module) = self.http.as_ref().and_then(|http| http.module.as_deref()) {
+            push("[http]", module);
+        }
+        modules
     }
 
     /// Every file the package ships, relative to the package root.
@@ -839,6 +1470,85 @@ impl Manifest {
         paths.sort();
         paths.dedup();
         paths
+    }
+
+    /// The declared surface `name`, if this Spore declares one.
+    #[must_use]
+    pub fn surface(&self, name: &str) -> Option<&Surface> {
+        self.surfaces.iter().find(|surface| surface.name == name)
+    }
+
+    /// The names a launch may ask for: declared surfaces when there are any,
+    /// the `[launch] surfaces` kinds when there are none.
+    #[must_use]
+    pub fn surface_names(&self) -> Vec<&str> {
+        if self.surfaces.is_empty() {
+            self.launch.surfaces.iter().map(String::as_str).collect()
+        } else {
+            self.surfaces
+                .iter()
+                .map(|surface| surface.name.as_str())
+                .collect()
+        }
+    }
+
+    /// What a host opens for `requested`, given the kinds it can present.
+    ///
+    /// This is the decision `soil:spore/catalog.launch` makes before it launches
+    /// anything. `host` is what this host can actually render, so a request for
+    /// a [`SurfaceKind::Web`] surface on a host with no browser view is
+    /// [`LaunchError::Unsupported`] — and never a launch that cannot present.
+    ///
+    /// A Spore that declares no surfaces keeps the old behaviour: the kinds in
+    /// `[launch] surfaces` are the names, so this changes nothing about how an
+    /// existing package launches.
+    pub fn resolve_launch<'a>(
+        &'a self,
+        requested: &'a str,
+        host: &[SurfaceKind],
+    ) -> std::result::Result<LaunchTarget<'a>, LaunchError> {
+        let Some(surface) = self.surface(requested) else {
+            let launchable = self.surfaces.is_empty()
+                && self.launch.surfaces.iter().any(|kind| kind == requested);
+            if !launchable {
+                return Err(LaunchError::NotFound {
+                    requested: requested.to_owned(),
+                    declared: self
+                        .surface_names()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                });
+            }
+            let kind = SurfaceKind::from_launch_kind(requested).flatten();
+            if let Some(kind) = kind
+                && !host.contains(&kind)
+            {
+                return Err(LaunchError::Unsupported {
+                    surface: requested.to_owned(),
+                    kind,
+                    host: host.to_vec(),
+                });
+            }
+            return Ok(LaunchTarget {
+                surface: requested,
+                kind,
+                entry: None,
+            });
+        };
+
+        if !host.contains(&surface.kind) {
+            return Err(LaunchError::Unsupported {
+                surface: surface.name.clone(),
+                kind: surface.kind,
+                host: host.to_vec(),
+            });
+        }
+        Ok(LaunchTarget {
+            surface: &surface.name,
+            kind: Some(surface.kind),
+            entry: surface.entry(self.ui.as_ref()),
+        })
     }
 
     /// The Lua a host loads for a chrome `region`.
@@ -956,6 +1666,28 @@ pub fn reference(value: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// The title a slug reads as: `vitals-view` -> `Vitals View`.
+///
+/// A manifest's `name` is an identity, and every surface that shows one to a
+/// person — a launcher row, a window title, a store shelf — has to turn it into
+/// words the same way, or the same package goes by three different names.
+/// An explicit `title` still wins wherever one is declared; this is only the
+/// fallback.
+pub fn display_title(name: &str) -> String {
+    let mut title = String::with_capacity(name.len());
+    for (index, word) in name.split(['-', '_']).enumerate() {
+        if index > 0 {
+            title.push(' ');
+        }
+        let mut characters = word.chars();
+        if let Some(first) = characters.next() {
+            title.extend(first.to_uppercase());
+            title.push_str(characters.as_str());
+        }
+    }
+    title
 }
 
 /// Resolve a manifest path without letting it leave the package.
@@ -1135,12 +1867,41 @@ pub fn collect_package(root: &Path, manifest: &Manifest) -> Result<Vec<(String, 
     }
     let ui = root.join("ui");
     if ui.is_dir() {
-        walk_lua(root, &ui, &mut files)?;
+        walk_dir(root, &ui, Some("lua"), &mut files)?;
+    }
+    // A declared surface is a directory artifact for the same reason the Lua UI
+    // is: how an author splits a web page across modules, styles and fonts is
+    // not something the manifest should have to enumerate. The package carries
+    // the files; the surface names the entry point into them.
+    for surface in &manifest.surfaces {
+        let Some(entry) = surface.entry(manifest.ui.as_ref()) else {
+            continue;
+        };
+        let Some(dir) = Path::new(entry).parent() else {
+            continue;
+        };
+        // An entry at the package root names no directory of its own, and
+        // walking the root here would ship the build inputs this function
+        // exists to leave out.
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let full = root.join(dir);
+        if full.is_dir() {
+            walk_dir(root, &full, None, &mut files)?;
+        }
     }
     Ok(files.into_iter().collect())
 }
 
-fn walk_lua(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
+/// Add every regular file under `dir`, when `extension` is `None`, or only the
+/// files with that extension.
+fn walk_dir(
+    root: &Path,
+    dir: &Path,
+    extension: Option<&str>,
+    out: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
     for entry in
         fs::read_dir(dir).map_err(|error| Error::Io(format!("{}: {error}", dir.display())))?
     {
@@ -1155,10 +1916,12 @@ fn walk_lua(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Res
             )));
         }
         if metadata.is_dir() {
-            walk_lua(root, &path, out)?;
+            walk_dir(root, &path, extension, out)?;
             continue;
         }
-        if !metadata.is_file() || path.extension().is_none_or(|extension| extension != "lua") {
+        let wanted =
+            extension.is_none_or(|wanted| path.extension().is_some_and(|found| found == wanted));
+        if !metadata.is_file() || !wanted {
             continue;
         }
         let relative = path
@@ -1277,12 +2040,32 @@ pub fn imported_packages(bytes: &[u8]) -> Result<BTreeSet<String>> {
     Ok(packages)
 }
 
+/// WASI packages a component built from a normal language toolchain imports
+/// without asking.
+///
+/// They are not capabilities a Spore requests: the host's WASI profile decides
+/// what they mean for every Spore at once — no preopens, no inherited
+/// environment, no inherited stdio, clocks and randomness where the profile
+/// says. A manifest line for each of them would fill a listing with rows that
+/// say "the linker needed this", which is the noise a capability review cannot
+/// afford. Everything outside this set is declared, including the WASI packages
+/// that are real authority — `wasi:http`, `wasi:webgpu`, `wasi:audio`,
+/// `wasi:sockets`.
+pub const WASI_BASELINE: [&str; 5] = [
+    "wasi:cli",
+    "wasi:clocks",
+    "wasi:filesystem",
+    "wasi:io",
+    "wasi:random",
+];
+
 fn undeclared_packages(
     imported: &BTreeSet<String>,
     grants: &BTreeMap<String, String>,
 ) -> Vec<String> {
     imported
         .iter()
+        .filter(|package| !WASI_BASELINE.contains(&package.as_str()))
         .filter(|package| !grants.contains_key(package.as_str()))
         .cloned()
         .collect()
@@ -1294,22 +2077,22 @@ fn undeclared_packages(
 /// `soil:records` while the manifest lists only WASI fails here instead of at
 /// review time.
 fn check_declared_grants(root: &Path, manifest: &Manifest) -> Result<()> {
-    // A chrome-only Spore has no module, so there is nothing to import.
-    let Some(module) = &manifest.module else {
-        return Ok(());
-    };
-    let path = root.join(&module.path);
-    let bytes =
-        fs::read(&path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
-    let imported = imported_packages(&bytes)?;
-    let undeclared = undeclared_packages(&imported, &manifest.grants);
-    if !undeclared.is_empty() {
-        return Err(Error::Invalid(format!(
-            "{} imports {} but [grants] does not declare {}",
-            module.path,
-            undeclared.join(", "),
-            if undeclared.len() == 1 { "it" } else { "them" },
-        )));
+    // A chrome-only Spore names no module, so the loop is empty and there is
+    // nothing to import. Every artifact the manifest does name is checked: the
+    // rule is about what ships, not about which face ships it.
+    for (face, module) in manifest.declared_modules() {
+        let path = root.join(&module);
+        let bytes =
+            fs::read(&path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
+        let imported = imported_packages(&bytes)?;
+        let undeclared = undeclared_packages(&imported, &manifest.grants);
+        if !undeclared.is_empty() {
+            return Err(Error::Invalid(format!(
+                "{face} {module} imports {} but [grants] does not declare {}",
+                undeclared.join(", "),
+                if undeclared.len() == 1 { "it" } else { "them" },
+            )));
+        }
     }
     Ok(())
 }
@@ -1436,11 +2219,27 @@ pub fn write_lock(root: &Path) -> Result<Lock> {
 pub fn pack(root: &Path) -> Result<Vec<u8>> {
     let manifest = Manifest::load(root)?;
     let lock = write_lock(root)?;
+    tarball(root, &manifest, &lock)
+}
+
+/// Pack a tree whose `spore.lock` is already current, without writing to it.
+///
+/// The lock is the package identity a publisher reviewed, so a reader that only
+/// wants the bytes — the store index, a mirror, a review queue — must not
+/// refresh it. A stale lock means the tree is not what was published, and the
+/// answer is `soil-spore lock`, not a digest nobody looked at.
+pub fn pack_locked(root: &Path) -> Result<Vec<u8>> {
+    let manifest = Manifest::load(root)?;
+    let lock = check(root)?;
+    tarball(root, &manifest, &lock)
+}
+
+fn tarball(root: &Path, manifest: &Manifest, lock: &Lock) -> Result<Vec<u8>> {
     if lock.id != manifest.spore.id || lock.version != manifest.spore.version {
         return Err(Error::Lock("lock does not match the manifest".into()));
     }
 
-    let mut files = collect_package(root, &manifest)?;
+    let mut files = collect_package(root, manifest)?;
     files.push((LOCK_NAME.to_owned(), lock.render().into_bytes()));
 
     let total: u64 = files.iter().map(|(_, bytes)| bytes.len() as u64).sum();
@@ -1627,6 +2426,198 @@ pub fn sign(package: &Path, signature: &Path, key: Option<&str>) -> Result<()> {
     run(command, "gpg --detach-sign")
 }
 
+/// Sign a package through a running Geode broker.
+///
+/// `principal` is the Geode account label, not the raw OIDC subject: the
+/// reference is `geode://principal/<label>/pgp`. The `geode-pgp` client leases
+/// the key from `geoded` and returns only the detached signature; Soil never
+/// sees key material.
+///
+/// `socket` defaults to `GEODE_SOCKET` or `$HOME/.geode/geode.sock` in the
+/// client. `fingerprint` is optional because the client can read it from the
+/// leased key.
+pub fn sign_principal(
+    package: &Path,
+    signature: &Path,
+    principal: &str,
+    socket: Option<&Path>,
+    fingerprint: Option<&str>,
+) -> Result<()> {
+    validate_geode_label(principal)?;
+    let reference = format!("geode://principal/{principal}/pgp");
+    let mut command = std::process::Command::new("geode-pgp");
+    command
+        .arg("sign")
+        .arg("--reference")
+        .arg(&reference)
+        .arg("--purpose")
+        .arg("spore.package.sign")
+        .arg("--message")
+        .arg(package);
+    if let Some(socket) = socket {
+        command.arg("--socket").arg(socket);
+    }
+    if let Some(fingerprint) = fingerprint {
+        command.arg("--fingerprint").arg(fingerprint);
+    }
+    let output = command
+        .output()
+        .map_err(|error| Error::Tool(format!("geode-pgp: {error}")))?;
+    if !output.status.success() {
+        return Err(Error::Signature(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    std::fs::write(signature, output.stdout)
+        .map_err(|error| Error::Io(format!("{}: {error}", signature.display())))
+}
+
+fn validate_geode_label(label: &str) -> Result<()> {
+    let mut bytes = label.bytes();
+    let starts_well = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric());
+    let rest_well =
+        bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if label.is_empty() || label.len() > 64 || !starts_well || !rest_well {
+        return Err(Error::Invalid(
+            "--principal must be a Geode label: 1..=64 letters, digits, `.`, `_` or `-`".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Verify a detached armored signature over an arbitrary payload.
+///
+/// This is the catalog/delegation counterpart to [`verify_signature`], which is
+/// tied to a package file. The public key is imported into a temporary GnuPG
+/// home for one verification and then removed. A missing `gpg` fails closed.
+pub fn verify_detached(public_key: &[u8], payload: &[u8], signature: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let base = if Path::new("/tmp").is_dir() {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let home = tempfile::Builder::new()
+        .prefix("soil-pgp-")
+        .tempdir_in(&base)
+        .map_err(|error| Error::Tool(format!("temporary GnuPG home: {error}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700))
+            .map_err(|error| Error::Tool(format!("protect GnuPG home: {error}")))?;
+    }
+
+    let import = {
+        let mut command = Command::new("gpg");
+        command
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--batch", "--no-tty", "--import"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|error| Error::Tool(format!("gpg: {error}")))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Tool("gpg import has no stdin".into()))?
+            .write_all(public_key)
+            .map_err(|error| Error::Tool(format!("gpg import: {error}")))?;
+        child
+            .wait_with_output()
+            .map_err(|error| Error::Tool(format!("gpg import: {error}")))?
+    };
+    if !import.status.success() {
+        return Err(Error::Signature(format!(
+            "could not import public key: {}",
+            String::from_utf8_lossy(&import.stderr).trim()
+        )));
+    }
+
+    let signature_path = home.path().join("signature.asc");
+    let payload_path = home.path().join("payload");
+    fs::write(&signature_path, signature)
+        .map_err(|error| Error::Io(format!("{}: {error}", signature_path.display())))?;
+    fs::write(&payload_path, payload)
+        .map_err(|error| Error::Io(format!("{}: {error}", payload_path.display())))?;
+
+    let verified = {
+        let mut command = Command::new("gpg");
+        command
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--batch", "--no-tty", "--verify"])
+            .arg(&signature_path)
+            .arg(&payload_path);
+        let output = command
+            .output()
+            .map_err(|error| Error::Tool(format!("gpg verify: {error}")))?;
+        let _ = Command::new("gpgconf")
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--kill", "all"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        output
+    };
+    if verified.status.success() {
+        Ok(())
+    } else {
+        Err(Error::Signature(
+            String::from_utf8_lossy(&verified.stderr).trim().to_owned(),
+        ))
+    }
+}
+
+/// Sign an arbitrary payload with a detached, armored PGP signature.
+///
+/// The counterpart to [`verify_detached`]: a store operator signs delegations
+/// and revocations, and a publisher signs catalog entries, over canonical text
+/// rather than a package file. `home` selects the GnuPG home that holds the
+/// secret key and `key` names that key (fingerprint or user id). Soil never
+/// generates or stores a key, so an empty `home` means the caller's keyring.
+pub fn sign_detached(home: Option<&Path>, key: &str, payload: &[u8]) -> Result<String> {
+    let base = if Path::new("/tmp").is_dir() {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("soil-sign-")
+        .tempdir_in(&base)
+        .map_err(|error| Error::Tool(format!("temporary directory: {error}")))?;
+    let payload_path = dir.path().join("payload");
+    let signature_path = dir.path().join("signature.asc");
+    fs::write(&payload_path, payload).map_err(io_error)?;
+
+    let mut command = std::process::Command::new("gpg");
+    if let Some(home) = home {
+        command.arg("--homedir").arg(home);
+    }
+    command
+        .arg("--batch")
+        .arg("--yes")
+        .arg("--armor")
+        .arg("--detach-sign")
+        .arg("--local-user")
+        .arg(key)
+        .arg("--output")
+        .arg(&signature_path)
+        .arg(&payload_path);
+    run(command, "gpg --detach-sign")?;
+
+    fs::read_to_string(&signature_path)
+        .map_err(|error| Error::Io(format!("{}: {error}", signature_path.display())))
+}
+
 /// Verify a detached signature against a trusted keyring.
 pub fn verify_signature(
     package: &Path,
@@ -1708,6 +2699,169 @@ mod fixtures {
         format!(
             "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n{ui}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
         )
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::fixtures::manifest;
+    use super::*;
+
+    /// A Spore that ships one web page and one Canvas view, launched on the
+    /// page by default.
+    const DECLARED: &str = "[launch]\ndefault = \"workbook\"\nsurfaces = [\"canvas\", \"web\"]\n\
+[[surfaces]]\nname = \"workbook\"\nkind = \"web\"\nentry = \"web/index.html\"\n\
+[[surfaces]]\nname = \"preview\"\nkind = \"canvas\"\nentry = \"ui/sheet.lua\"\n";
+
+    /// The fixture's own `[launch]`, so a test writes only the tables it is
+    /// about. `with_ui` already emits one, and TOML cannot repeat a table.
+    fn declared() -> String {
+        manifest("").replace(
+            "[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n",
+            DECLARED,
+        )
+    }
+
+    #[test]
+    fn an_absent_surface_block_parses_exactly_as_before() {
+        let parsed = Manifest::parse(&manifest("")).expect("a Spore with no surfaces is a Spore");
+        assert!(parsed.surfaces.is_empty());
+        assert_eq!(parsed.launch.surfaces, vec!["canvas".to_owned()]);
+        assert_eq!(parsed.surface_names(), vec!["canvas"]);
+        // The kind list is still the authority, so the old launch path is what
+        // a host that never heard of surfaces keeps getting.
+        let target = parsed
+            .resolve_launch("canvas", &SurfaceKind::ALL)
+            .expect("canvas is what it declares");
+        assert_eq!(target.kind, Some(SurfaceKind::Canvas));
+        assert_eq!(
+            target.entry, None,
+            "no declaration means the host renders the package's own UI"
+        );
+        assert_eq!(
+            parsed.declared_paths(),
+            vec![PathBuf::from("ui/main.lua"), PathBuf::from("module.wasm")],
+            "declaring nothing adds nothing to the package"
+        );
+    }
+
+    #[test]
+    fn a_declared_web_surface_and_a_canvas_one_both_resolve() {
+        let parsed = Manifest::parse(&declared()).expect("canvas and web together are a Spore");
+        assert_eq!(parsed.surface_names(), vec!["workbook", "preview"]);
+
+        let web = parsed
+            .resolve_launch("workbook", &SurfaceKind::ALL)
+            .expect("a host with a browser opens the page");
+        assert_eq!(web.kind, Some(SurfaceKind::Web));
+        assert_eq!(web.entry, Some("web/index.html"));
+        assert_eq!(web.surface, "workbook");
+
+        let canvas = parsed
+            .resolve_launch("preview", &SurfaceKind::ALL)
+            .expect("a host with Canvas opens the view");
+        assert_eq!(canvas.kind, Some(SurfaceKind::Canvas));
+        assert_eq!(canvas.entry, Some("ui/sheet.lua"));
+
+        // The default is a surface name once surfaces exist, and it is one of
+        // them rather than a fourth thing.
+        assert_eq!(parsed.launch.default, "workbook");
+        assert!(parsed.surface(&parsed.launch.default).is_some());
+    }
+
+    #[test]
+    fn a_web_surface_may_leave_the_conventional_entry_out() {
+        let parsed = Manifest::parse(&manifest("").replace(
+            "[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n",
+            "[launch]\ndefault = \"workbook\"\nsurfaces = [\"web\"]\n\
+[[surfaces]]\nname = \"workbook\"\nkind = \"web\"\n",
+        ))
+        .expect("a Spore that ships the conventional page says so once");
+        assert_eq!(
+            parsed
+                .resolve_launch("workbook", &SurfaceKind::ALL)
+                .expect("resolves")
+                .entry,
+            Some(DEFAULT_WEB_ENTRY),
+            "the page is named by the kind, not repeated in every manifest"
+        );
+    }
+
+    #[test]
+    fn a_default_that_names_no_surface_lists_both_sets() {
+        let bad = declared().replace("default = \"workbook\"", "default = \"spreadsheet\"");
+        let error = Manifest::parse(&bad).expect_err("a default has to name something");
+        let message = error.to_string();
+        assert!(
+            message.contains("spreadsheet"),
+            "the error names what was asked for: {message}"
+        );
+        assert!(
+            message.contains("workbook") && message.contains("preview"),
+            "and everything it could have named: {message}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_surface_kind_lists_the_valid_ones() {
+        let bad = declared().replace("kind = \"canvas\"", "kind = \"desktop\"");
+        let error = Manifest::parse(&bad).expect_err("the host only has the kinds it has");
+        let message = error.to_string();
+        assert!(
+            message.contains("desktop"),
+            "the error names the bad kind: {message}"
+        );
+        for valid in SurfaceKind::ALL {
+            assert!(
+                message.contains(valid.as_str()),
+                "and every kind that would have parsed: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_web_surface_on_a_host_without_a_browser_is_unsupported() {
+        let parsed = Manifest::parse(&declared()).expect("manifest");
+        let refused = parsed
+            .resolve_launch("workbook", &[SurfaceKind::Canvas])
+            .expect_err("a host with no browser view cannot render a page");
+        assert_eq!(refused.code(), "unsupported");
+        assert!(matches!(
+            refused,
+            LaunchError::Unsupported {
+                kind: SurfaceKind::Web,
+                ..
+            }
+        ));
+
+        // The same host still opens the Canvas surface, so the refusal is about
+        // the kind and not about the package.
+        assert!(
+            parsed
+                .resolve_launch("preview", &[SurfaceKind::Canvas])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_unknown_surface_name_is_not_found() {
+        let parsed = Manifest::parse(&declared()).expect("manifest");
+        let refused = parsed
+            .resolve_launch("spreadsheet", &SurfaceKind::ALL)
+            .expect_err("the package declares no such view");
+        assert_eq!(refused.code(), "not-found");
+    }
+
+    #[test]
+    fn a_declared_surface_kind_must_be_launchable() {
+        let bad = declared().replace(
+            "surfaces = [\"canvas\", \"web\"]",
+            "surfaces = [\"canvas\"]",
+        );
+        assert!(
+            Manifest::parse(&bad).is_err(),
+            "a web surface the kind list forbids is a contradiction"
+        );
     }
 }
 
@@ -1994,5 +3148,255 @@ mod anycast_tests {
             .is_err(),
             "the daemon drops an observation with more than 32 endpoints"
         );
+    }
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::fixtures::{manifest, with_ui};
+    use super::{HTTP_METHODS, Manifest, OriginAuth};
+
+    fn claim(extra: &str) -> String {
+        format!(
+            "[http]\nhosts = [\"contacts.myc\"]\nroutes = [{{ methods = [\"GET\", \"POST\"], path = \"/\" }}]\n{extra}"
+        )
+    }
+
+    #[test]
+    fn a_spore_declares_where_it_answers() {
+        let parsed = Manifest::parse(&manifest(&claim(""))).expect("claim parses");
+        let http = parsed.http.expect("an [http] table");
+        assert_eq!(http.hosts, vec!["contacts.myc"]);
+        assert_eq!(http.max_body, 64 * 1024, "a body limit exists by default");
+        assert_eq!(http.routes[0].path, "/");
+        assert_eq!(http.routes[0].methods, vec!["GET", "POST"]);
+        assert_eq!(http.origin_auth, OriginAuth::ProviderSignature);
+        assert!(HTTP_METHODS.contains(&"PATCH"), "the method set is closed");
+    }
+
+    #[test]
+    fn a_host_a_vhost_could_not_match_is_refused() {
+        for bad in [
+            "Contacts.myc",
+            "contacts.myc:443",
+            "https://contacts.myc",
+            ".myc",
+            "contacts.myc/",
+        ] {
+            let text = format!(
+                "[http]\nhosts = [{bad:?}]\nroutes = [{{ methods = [\"GET\"], path = \"/\" }}]\n"
+            );
+            assert!(
+                Manifest::parse(&manifest(&text)).is_err(),
+                "{bad} is not a hostname a vhost can match"
+            );
+        }
+    }
+
+    #[test]
+    fn a_route_needs_a_prefix_and_a_known_method() {
+        for bad in ["contacts", "/a b", ""] {
+            let text = format!(
+                "[http]\nhosts = [\"contacts.myc\"]\nroutes = [{{ methods = [\"GET\"], path = {bad:?} }}]\n"
+            );
+            assert!(
+                Manifest::parse(&manifest(&text)).is_err(),
+                "{bad:?} is not a prefix"
+            );
+        }
+        let unknown = "[http]\nhosts = [\"contacts.myc\"]\nroutes = [{ methods = [\"FETCH\"], path = \"/\" }]\n";
+        assert!(
+            Manifest::parse(&manifest(unknown)).is_err(),
+            "an unknown method would silently never match"
+        );
+    }
+
+    #[test]
+    fn a_spore_without_a_module_cannot_claim_a_name() {
+        let text = claim("");
+        let bare = with_ui("[ui]\nentry = \"ui/main.lua\"\n", &text)
+            .replace("[module]\npath = \"module.wasm\"\n", "");
+        let refused = Manifest::parse(&bare);
+        assert!(
+            refused.is_err(),
+            "a Spore must be able to answer on the name it claims"
+        );
+    }
+
+    #[test]
+    fn the_endpoint_can_be_its_own_artifact() {
+        // A Spore that draws a window and answers on a name has two components.
+        // The event loop never sees an `incoming-handler`, and the gateway
+        // never instantiates a WebGPU import it has no device for.
+        let parsed = Manifest::parse(&manifest(&claim("module = \"bin/hello-api.wasm\"\n")))
+            .expect("a named http module parses");
+        let http = parsed.http.as_ref().expect("an [http] table");
+        assert_eq!(http.module.as_deref(), Some("bin/hello-api.wasm"));
+        assert!(
+            parsed
+                .declared_paths()
+                .contains(&std::path::PathBuf::from("bin/hello-api.wasm")),
+            "the endpoint ships with the package"
+        );
+        assert_eq!(
+            parsed.declared_modules(),
+            vec![
+                ("module".to_owned(), "module.wasm".to_owned()),
+                ("[http]".to_owned(), "bin/hello-api.wasm".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_http_module_that_could_not_be_a_component_is_refused() {
+        for bad in ["bin/api.lua", "../api.wasm", "/api.wasm"] {
+            let text = format!(
+                "[http]\nhosts = [\"contacts.myc\"]\nmodule = {bad:?}\nroutes = [{{ methods = [\"GET\"], path = \"/\" }}]\n"
+            );
+            assert!(
+                Manifest::parse(&manifest(&text)).is_err(),
+                "{bad:?} is not a component this package can ship"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_limit_past_a_megabyte_is_refused() {
+        let text = format!("{}\nmax_body = {}\n", claim(""), super::MAX_HTTP_BODY + 1);
+        assert!(Manifest::parse(&manifest(&text)).is_err());
+    }
+}
+#[cfg(test)]
+mod command_tests {
+    use super::Manifest;
+    use super::fixtures::manifest;
+
+    const OK: &str = "[[commands]]\nname = \"unibus\"\nsummary = \"read the inbox\"\nmodule = \"bin/unibus.wasm\"\n";
+
+    #[test]
+    fn a_spore_installs_its_own_commands() {
+        let parsed = Manifest::parse(&manifest(OK)).expect("command parses");
+        assert_eq!(parsed.commands.len(), 1);
+        assert_eq!(parsed.commands[0].name, "unibus");
+        // The module travels with the package like any other declared path.
+        assert!(
+            parsed
+                .declared_paths()
+                .iter()
+                .any(|path| path == std::path::Path::new("bin/unibus.wasm")),
+            "a command module that is not locked could vanish from the package"
+        );
+    }
+
+    #[test]
+    fn a_command_a_shell_could_misread_is_refused() {
+        for bad in [
+            // A path, a flag, or an empty name: a shell resolves names, not paths.
+            "[[commands]]\nname = \"bin/x\"\nsummary = \"s\"\nmodule = \"bin/x.wasm\"\n",
+            "[[commands]]\nname = \"--force\"\nsummary = \"s\"\nmodule = \"bin/x.wasm\"\n",
+            "[[commands]]\nname = \"\"\nsummary = \"s\"\nmodule = \"bin/x.wasm\"\n",
+            // No summary means a shell cannot list what it would run.
+            "[[commands]]\nname = \"x\"\nsummary = \"  \"\nmodule = \"bin/x.wasm\"\n",
+            // A module must be a wasm component, not a script.
+            "[[commands]]\nname = \"x\"\nsummary = \"s\"\nmodule = \"bin/x.lua\"\n",
+        ] {
+            assert!(Manifest::parse(&manifest(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn two_commands_cannot_share_a_name() {
+        let twice = format!("{OK}{OK}");
+        assert!(Manifest::parse(&manifest(&twice)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    /// A composition Spore: no module, so the tar is the manifest, the view and
+    /// the lock — enough to exercise packing without a real wasm build.
+    fn tree() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("ui")).expect("ui");
+        std::fs::write(
+            dir.path().join("spore.toml"),
+            "schema = 1\n[spore]\nid = \"dev.fungos.demo\"\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             license = \"MIT\"\nsummary = \"demo\"\n[engine]\nsoil = \">=0.1\"\n\
+             target = \"wasm32-wasip2\"\n[ui]\nentry = \"ui/main.lua\"\n\
+             [launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("ui/main.lua"), "return {}").expect("view");
+        dir
+    }
+
+    #[test]
+    fn packing_for_publication_never_rewrites_the_lock() {
+        let dir = tree();
+        let root = dir.path();
+        write_lock(root).expect("a first lock");
+        let lock_path = root.join(LOCK_NAME);
+        let current = std::fs::read_to_string(&lock_path).expect("read lock");
+
+        assert_eq!(
+            pack_locked(root).expect("a current lock packs"),
+            pack(root).expect("pack"),
+            "a fresh lock and a refreshed one are the same bytes"
+        );
+
+        // An author edits a view without re-locking: the lock no longer describes
+        // the tree, and packing for publication refuses rather than blessing a
+        // digest nobody reviewed.
+        std::fs::write(root.join("ui/main.lua"), "return { edited = true }").expect("edit");
+        let error = pack_locked(root).expect_err("a stale lock is not publishable");
+        assert!(error.to_string().contains("stale"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("read lock"),
+            current,
+            "a refused pack writes nothing"
+        );
+
+        // Authoring still refreshes it, which is what `soil-spore pack` is for.
+        let refreshed = pack(root).expect("authoring pack refreshes");
+        assert_ne!(
+            std::fs::read_to_string(&lock_path).expect("read lock"),
+            current,
+            "the authoring pack wrote the new lock"
+        );
+        assert_eq!(
+            pack_locked(root).expect("the refreshed lock is current"),
+            refreshed,
+            "and it describes the tree it was written for"
+        );
+    }
+
+    const PAGE: &str = "schema = 1\n[spore]\nid = \"dev.fungos.store\"\nname = \"store\"\nversion = \"0.2.0\"\n\
+        license = \"MIT\"\nsummary = \"a page\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n\
+        [system]\nrole = \"store\"\n";
+
+    #[test]
+    fn a_web_surface_is_an_entrypoint() {
+        // A storefront is a page: no module, no Lua view, no chrome region. The
+        // host presents it in a browser view, which is why the surface counts as
+        // the program rather than an attachment to one.
+        let page = Manifest::parse(&format!(
+            "{PAGE}[[surfaces]]\nname = \"store\"\nkind = \"web\"\n[launch]\ndefault = \"store\"\nsurfaces = [\"web\"]\n"
+        ))
+        .expect("a web surface is an entrypoint");
+        assert_eq!(
+            page.surface("store")
+                .and_then(|surface| surface.entry(None)),
+            Some("web/index.html"),
+            "the conventional artifact needs no `entry`"
+        );
+
+        // Nothing to present is still an error, and it names every way out.
+        let empty = Manifest::parse(&format!(
+            "{PAGE}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n"
+        ));
+        let message = empty.expect_err("no entrypoint").to_string();
+        assert!(message.contains("declared surface"), "{message}");
     }
 }

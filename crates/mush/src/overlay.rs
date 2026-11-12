@@ -14,9 +14,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use fungos_vfs::{Expect, Vfs};
+use fungos_vfs::{Expect, NodeRole, Vfs};
 use ignore::WalkBuilder;
 use tempfile::TempDir;
+
+/// What a file is when the VFS did not say: readable, not executable.
+/// Matches the default `fungos-vfs` gives a path nobody has written.
+const NEW_FILE_MODE: u32 = 0o644;
 
 const IGNORED: &[&str] = &[
     ".operator/",
@@ -50,30 +54,108 @@ pub struct ApplyReport {
 
 pub struct Overlay {
     dir: TempDir,
-    original: BTreeMap<String, Vec<u8>>,
+    original: BTreeMap<String, Snapshot>,
     original_dirs: BTreeSet<String>,
 }
 
+/// What a file looked like when the overlay was materialized.
+///
+/// The bytes are what confirms a change exactly; the size and mtime are what
+/// let an unchanged file skip being read at all. A host command that changed
+/// nothing — `git status`, a build writing only gitignored output — otherwise
+/// reads the whole tree twice.
+struct Snapshot {
+    bytes: Vec<u8>,
+    stamp: FileStamp,
+    /// Permission bits the VFS carried. A build output that is a program must
+    /// come back out of the namespace as one, and a `chmod` in the overlay has
+    /// to be visible as a change even when the bytes are identical.
+    mode: u32,
+}
+
+/// One file in the overlay as it stands now.
+struct CurrentFile {
+    bytes: Vec<u8>,
+    mode: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    size: u64,
+    mtime: Option<std::time::SystemTime>,
+}
+
+impl FileStamp {
+    fn of(metadata: &fs::Metadata) -> Self {
+        Self {
+            size: metadata.len(),
+            mtime: metadata.modified().ok(),
+        }
+    }
+}
+
+/// A scratch directory for one overlay.
+///
+/// `TMPDIR` is inherited, and an inherited `TMPDIR` can name a directory that no
+/// longer exists: an agent session's per-turn scratch directory is deleted
+/// between turns, and `tempfile` then fails with `ENOENT` — which would make
+/// every host command fail for the rest of the session. Fall back to the system
+/// temp instead of making that the caller's problem.
+fn overlay_tempdir() -> Result<TempDir> {
+    #[cfg(unix)]
+    const FALLBACK: &str = "/tmp";
+    #[cfg(not(unix))]
+    const FALLBACK: &str = "C:\\Windows\\Temp";
+    match tempfile::tempdir() {
+        Ok(dir) => Ok(dir),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            tempfile::tempdir_in(FALLBACK).context("create overlay directory")
+        }
+        Err(err) => Err(err).context("create overlay directory"),
+    }
+}
+
 impl Overlay {
-    pub fn materialize(vfs_root: impl AsRef<Path>) -> Result<Self> {
-        let dir = tempfile::tempdir().context("create overlay directory")?;
-        let mut vfs = Vfs::open(vfs_root).context("open VFS for overlay")?;
+    pub fn materialize(vfs_root: impl AsRef<Path>, store: Option<&Path>) -> Result<Self> {
+        let dir = overlay_tempdir()?;
+        let mut vfs =
+            Vfs::open_with(vfs_root, NodeRole::Full, store).context("open VFS for overlay")?;
+        let mut written: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for entry in vfs.list("")? {
             let bytes = vfs.get(&entry.path)?;
             let target = safe_join(dir.path(), &entry.path)?;
             if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
+                // A path in the VFS can name both a file and a directory (a
+                // `directories` row that outlived the file replacing it, or a
+                // file claiming a parent that is itself a file). No filesystem
+                // can hold that, and one such entry must not fail every host
+                // command for the workspace, so the entry that cannot be
+                // represented is skipped and the rest still materializes.
+                if parent.is_file() {
+                    continue;
+                }
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create overlay directory {}", parent.display()))?;
             }
             fs::write(&target, &bytes).with_context(|| format!("write overlay {}", entry.path))?;
+            set_file_mode(&target, entry.mode)?;
+            written.insert(entry.path.clone(), bytes);
         }
         for path in vfs.directories("")? {
-            fs::create_dir_all(safe_join(dir.path(), &path)?)?;
+            let target = safe_join(dir.path(), &path)?;
+            // The file won above: `stat` in the VFS reports the file, and a
+            // directory cannot also exist at that path.
+            if target.is_file() {
+                continue;
+            }
+            fs::create_dir_all(&target)
+                .with_context(|| format!("create overlay directory {}", target.display()))?;
         }
 
         // Snapshot after materialization so nested ignore files apply to the
-        // exact overlay tree the agent will see.
-        let original = collect_files(dir.path())?;
-        let original_dirs = collect_dirs(dir.path())?;
+        // exact overlay tree the agent will see. The bytes come from the write
+        // pass, not a second read of every file.
+        let (original, original_dirs) = snapshot(dir.path(), &mut written)?;
         Ok(Self {
             dir,
             original,
@@ -90,18 +172,23 @@ impl Overlay {
     }
 
     pub fn diff(&self) -> Result<Vec<Change>> {
-        let current = self.current_files()?;
+        Ok(self.changes(&self.current_files()?))
+    }
+
+    fn changes(&self, current: &BTreeMap<String, CurrentFile>) -> Vec<Change> {
         let mut changes = Vec::new();
-        for (path, bytes) in &current {
+        for (path, file) in current {
             match self.original.get(path) {
                 None => changes.push(Change {
                     path: path.clone(),
                     kind: ChangeKind::Added,
                 }),
-                Some(original) if original != bytes => changes.push(Change {
-                    path: path.clone(),
-                    kind: ChangeKind::Modified,
-                }),
+                Some(snapshot) if &snapshot.bytes != &file.bytes || snapshot.mode != file.mode => {
+                    changes.push(Change {
+                        path: path.clone(),
+                        kind: ChangeKind::Modified,
+                    })
+                }
                 Some(_) => {}
             }
         }
@@ -114,13 +201,14 @@ impl Overlay {
             }
         }
         changes.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(changes)
+        changes
     }
 
-    pub fn apply(&self, vfs_root: impl AsRef<Path>) -> Result<ApplyReport> {
-        let mut vfs = Vfs::open(vfs_root).context("open VFS to apply overlay")?;
-        let changes = self.diff()?;
+    pub fn apply(&self, vfs_root: impl AsRef<Path>, store: Option<&Path>) -> Result<ApplyReport> {
+        let mut vfs =
+            Vfs::open_with(vfs_root, NodeRole::Full, store).context("open VFS to apply overlay")?;
         let current = self.current_files()?;
+        let changes = self.changes(&current);
         let mut written = 0;
         let mut deleted = 0;
         let mut directories = 0;
@@ -128,11 +216,21 @@ impl Overlay {
         for change in &changes {
             match change.kind {
                 ChangeKind::Added | ChangeKind::Modified => {
-                    let bytes = current
+                    let file = current
                         .get(&change.path)
                         .with_context(|| format!("overlay lost {}", change.path))?;
                     let media = media_type(&change.path);
-                    vfs.put(&change.path, bytes, media, Expect::Any)?;
+                    // Only the mode moved: write the entry, not a new version of
+                    // bytes nobody changed.
+                    let mode_only = self
+                        .original
+                        .get(&change.path)
+                        .is_some_and(|snapshot| snapshot.bytes == file.bytes);
+                    if mode_only {
+                        vfs.set_mode(&change.path, file.mode)?;
+                    } else {
+                        vfs.put_with_mode(&change.path, &file.bytes, media, file.mode, Expect::Any)?;
+                    }
                     written += 1;
                 }
                 ChangeKind::Deleted => {
@@ -171,8 +269,29 @@ impl Overlay {
         })
     }
 
-    fn current_files(&self) -> Result<BTreeMap<String, Vec<u8>>> {
-        collect_files(self.path())
+    fn current_files(&self) -> Result<BTreeMap<String, CurrentFile>> {
+        let mut out = BTreeMap::new();
+        for entry in walker(self.path())? {
+            let entry = entry?;
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let relative = relative(self.path(), entry.path())?;
+            if ignored(&relative) {
+                continue;
+            }
+            let metadata = entry.metadata().ok();
+            let stamp = metadata.as_ref().map(FileStamp::of);
+            let bytes = match self.original.get(&relative) {
+                // Same size and mtime: these are the bytes we materialized, so
+                // there is nothing to read.
+                Some(snapshot) if stamp == Some(snapshot.stamp) => snapshot.bytes.clone(),
+                _ => fs::read(entry.path())?,
+            };
+            let mode = metadata.as_ref().map(file_mode).unwrap_or(NEW_FILE_MODE);
+            out.insert(relative, CurrentFile { bytes, mode });
+        }
+        Ok(out)
     }
 
     fn current_dirs(&self) -> Result<Vec<String>> {
@@ -196,33 +315,11 @@ fn walker(root: &Path) -> Result<ignore::Walk> {
     Ok(builder.build())
 }
 
-fn collect_files(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
-    let mut out = BTreeMap::new();
-    for entry in walker(root)? {
-        let entry = entry?;
-        let Some(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-        let relative = relative(root, entry.path())?;
-        if ignored(&relative) {
-            continue;
-        }
-        out.insert(relative, fs::read(entry.path())?);
-    }
-    Ok(out)
-}
-
 fn collect_dirs(root: &Path) -> Result<BTreeSet<String>> {
     let mut out = BTreeSet::new();
     for entry in walker(root)? {
         let entry = entry?;
-        let Some(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
+        if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
             continue;
         }
         let relative = relative(root, entry.path())?;
@@ -234,12 +331,94 @@ fn collect_dirs(root: &Path) -> Result<BTreeSet<String>> {
     Ok(out)
 }
 
+/// Snapshot the materialized tree in one walk: the bytes that were written,
+/// stamped with the size and mtime the filesystem gave them.
+fn snapshot(
+    root: &Path,
+    written: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(BTreeMap<String, Snapshot>, BTreeSet<String>)> {
+    let mut files = BTreeMap::new();
+    let mut dirs = BTreeSet::new();
+    for entry in walker(root)? {
+        let entry = entry?;
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        let relative = relative(root, entry.path())?;
+        if ignored(&relative) {
+            continue;
+        }
+        if file_type.is_dir() {
+            if !relative.is_empty() {
+                dirs.insert(relative);
+            }
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let bytes = match written.remove(&relative) {
+            Some(bytes) => bytes,
+            None => fs::read(entry.path())?,
+        };
+        let stamp = entry
+            .metadata()
+            .map(|metadata| FileStamp::of(&metadata))
+            .unwrap_or(FileStamp {
+                size: 0,
+                mtime: None,
+            });
+        let mode = entry
+            .metadata()
+            .as_ref()
+            .map(file_mode)
+            .unwrap_or(NEW_FILE_MODE);
+        files.insert(
+            relative,
+            Snapshot {
+                bytes,
+                stamp,
+                mode,
+            },
+        );
+    }
+    Ok((files, dirs))
+}
+
 fn relative(root: &Path, path: &Path) -> Result<String> {
     Ok(path
         .strip_prefix(root)
         .with_context(|| format!("strip {}", path.display()))?
         .to_string_lossy()
         .replace('\\', "/"))
+}
+
+/// Permission bits of a materialized file.
+#[cfg(unix)]
+fn file_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o7777
+}
+
+#[cfg(not(unix))]
+fn file_mode(_metadata: &fs::Metadata) -> u32 {
+    NEW_FILE_MODE
+}
+
+/// Give a materialized file the mode the namespace remembers.
+///
+/// A build that produces an executable writes it through this path; without it
+/// the VFS hands back a file nobody can run.
+#[cfg(unix)]
+fn set_file_mode(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("set mode on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_file_mode(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
 }
 
 fn current_dir_exists(root: &Path, relative: &str) -> bool {
@@ -280,11 +459,17 @@ fn media_type(path: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    /// The store this test owns. Inside `.fungos`, so it is the VFS's own state
+    /// directory rather than workspace content, and it dies with the tempdir.
+    fn owned(root: &Path) -> std::path::PathBuf {
+        root.join(".fungos/store")
+    }
+
     #[test]
     fn overlay_applies_add_modify_delete_and_empty_dirs() {
         let vfs = tempfile::tempdir().unwrap();
         {
-            let mut store = Vfs::open(vfs.path()).unwrap();
+            let mut store = Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
             store
                 .put("notes/a.txt", b"old", "text/plain", Expect::Any)
                 .unwrap();
@@ -294,17 +479,17 @@ mod tests {
             store.mkdir("empty").unwrap();
         }
 
-        let overlay = Overlay::materialize(vfs.path()).unwrap();
+        let overlay = Overlay::materialize(vfs.path(), Some(&owned(vfs.path()))).unwrap();
         fs::write(overlay.path().join("notes/a.txt"), b"new").unwrap();
         fs::remove_file(overlay.path().join("notes/b.txt")).unwrap();
         fs::write(overlay.path().join("new.txt"), b"fresh").unwrap();
         fs::create_dir_all(overlay.path().join("empty/nested")).unwrap();
 
-        let report = overlay.apply(vfs.path()).unwrap();
+        let report = overlay.apply(vfs.path(), Some(&owned(vfs.path()))).unwrap();
         assert_eq!(report.written, 2);
         assert_eq!(report.deleted, 1);
         assert!(report.directories >= 1);
-        let mut store = Vfs::open(vfs.path()).unwrap();
+        let mut store = Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
         assert_eq!(store.get("notes/a.txt").unwrap(), b"new");
         assert!(store.file("notes/b.txt").unwrap().is_none());
         assert_eq!(store.get("new.txt").unwrap(), b"fresh");
@@ -312,24 +497,90 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing benchmark; run with `--ignored --nocapture`"]
+    fn bench_overlay_round_trip() {
+        use std::time::Instant;
+
+        // Shapes a real workspace: many small files, and a host command that
+        // changed nothing (the common case: `git status`, a build that only
+        // touches gitignored output).
+        for files in [250usize, 2_000, 10_000] {
+            let vfs = tempfile::tempdir().unwrap();
+            let body = vec![b'x'; 2048];
+            {
+                let mut store = Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
+                for index in 0..files {
+                    store
+                        .put(
+                            &format!("src/f{index:05}.rs"),
+                            &body,
+                            "text/x-rust",
+                            Expect::Any,
+                        )
+                        .unwrap();
+                }
+            }
+            let start = Instant::now();
+            let overlay = Overlay::materialize(vfs.path(), Some(&owned(vfs.path()))).unwrap();
+            let materialize = start.elapsed();
+            let start = Instant::now();
+            let report = overlay.apply(vfs.path(), Some(&owned(vfs.path()))).unwrap();
+            let apply = start.elapsed();
+            println!(
+                "{files:>6} files x 2 KiB: materialize {:?}, apply {:?} ({} written)",
+                materialize, apply, report.written
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_survives_a_path_that_is_both_a_file_and_a_directory() {
+        let vfs = tempfile::tempdir().unwrap();
+        {
+            let mut store = Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
+            // A `directories` row can outlive the file that replaced it: `put`
+            // only consults the file table, so both name `docs/a.txt` and no
+            // filesystem can hold both.
+            store.mkdir("docs").unwrap();
+            store.mkdir("docs/a.txt").unwrap();
+            store
+                .put("docs/a.txt", b"file wins", "text/plain", Expect::Any)
+                .unwrap();
+            store
+                .put("docs/ok.txt", b"ok", "text/plain", Expect::Any)
+                .unwrap();
+            store.mkdir("stale").unwrap();
+        }
+
+        let overlay = Overlay::materialize(vfs.path(), Some(&owned(vfs.path()))).unwrap();
+        assert!(overlay.path().join("docs/a.txt").is_file());
+        assert_eq!(
+            fs::read(overlay.path().join("docs/a.txt")).unwrap(),
+            b"file wins"
+        );
+        assert!(overlay.path().join("docs/ok.txt").is_file());
+        assert!(overlay.path().join("stale").is_dir());
+    }
+
+    #[test]
     fn overlay_tracks_git_metadata() {
         let vfs = tempfile::tempdir().unwrap();
         {
-            let mut store = Vfs::open(vfs.path()).unwrap();
+            let mut store = Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
             store
                 .put(".git/config", b"[core]\n", "text/plain", Expect::Any)
                 .unwrap();
         }
-        let overlay = Overlay::materialize(vfs.path()).unwrap();
+        let overlay = Overlay::materialize(vfs.path(), Some(&owned(vfs.path()))).unwrap();
         assert!(overlay.path().join(".git/config").is_file());
         fs::write(
             overlay.path().join(".git/config"),
             b"[core]\n\tbranch = main\n",
         )
         .unwrap();
-        let report = overlay.apply(vfs.path()).unwrap();
+        let report = overlay.apply(vfs.path(), Some(&owned(vfs.path()))).unwrap();
         assert_eq!(report.written, 1);
-        let mut store = Vfs::open(vfs.path()).unwrap();
+        let mut store = Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
         assert_eq!(
             store.get(".git/config").unwrap(),
             b"[core]\n\tbranch = main\n"
@@ -340,7 +591,7 @@ mod tests {
     fn overlay_respects_gitignore_for_build_outputs() {
         let vfs = tempfile::tempdir().unwrap();
         {
-            let mut store = Vfs::open(vfs.path()).unwrap();
+            let mut store = Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
             store
                 .put(".gitignore", b"target/\n*.bin\n", "text/plain", Expect::Any)
                 .unwrap();
@@ -356,7 +607,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let overlay = Overlay::materialize(vfs.path()).unwrap();
+        let overlay = Overlay::materialize(vfs.path(), Some(&owned(vfs.path()))).unwrap();
         fs::write(overlay.path().join("src/lib.rs"), b"new").unwrap();
         fs::create_dir_all(overlay.path().join("target/release")).unwrap();
         fs::write(overlay.path().join("target/release/app"), b"new binary").unwrap();
@@ -371,8 +622,8 @@ mod tests {
                 .any(|change| change.path.starts_with("target/"))
         );
 
-        overlay.apply(vfs.path()).unwrap();
-        let mut store = Vfs::open(vfs.path()).unwrap();
+        overlay.apply(vfs.path(), Some(&owned(vfs.path()))).unwrap();
+        let mut store = Vfs::open_with(vfs.path(), NodeRole::Full, Some(&owned(vfs.path()))).unwrap();
         assert_eq!(store.get("src/lib.rs").unwrap(), b"new");
         assert!(store.file("artifact.bin").unwrap().is_none());
         assert_eq!(

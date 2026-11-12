@@ -1,0 +1,1264 @@
+{
+  "components": {
+    "schemas": {
+      "BridgeError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/RecordsError"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "BridgeEvent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "grants": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "interfaces": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "kind": {
+                "const": "ready"
+              },
+              "spore": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "spore",
+              "grants",
+              "interfaces"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "collection": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "changed"
+              },
+              "revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "collection",
+              "id",
+              "revision"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CallApply": {
+        "additionalProperties": false,
+        "description": "Merge remote changes with last-writer-wins. This never calls back into\nthe network; the Spore or host transports the page.",
+        "properties": {
+          "call": {
+            "additionalProperties": false,
+            "properties": {
+              "function": {
+                "const": "apply"
+              },
+              "id": {
+                "type": "string"
+              },
+              "interface": {
+                "const": "soil:records"
+              },
+              "params": {
+                "additionalProperties": false,
+                "properties": {
+                  "entries": {
+                    "items": {
+                      "$ref": "#/components/schemas/RecordsEntry"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "entries"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "interface",
+              "function",
+              "params"
+            ],
+            "type": "object"
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "call"
+        ],
+        "type": "object"
+      },
+      "CallChanges": {
+        "additionalProperties": false,
+        "description": "Export changes after `since`, ordered by `(revision, origin)`. This is the\nsync producer side; pass the result to `apply` on the peer.",
+        "properties": {
+          "call": {
+            "additionalProperties": false,
+            "properties": {
+              "function": {
+                "const": "changes"
+              },
+              "id": {
+                "type": "string"
+              },
+              "interface": {
+                "const": "soil:records"
+              },
+              "params": {
+                "additionalProperties": false,
+                "properties": {
+                  "limit": {
+                    "maximum": 4294967295,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "since": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "since",
+                  "limit"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "interface",
+              "function",
+              "params"
+            ],
+            "type": "object"
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "call"
+        ],
+        "type": "object"
+      },
+      "CallCompareAndSwap": {
+        "additionalProperties": false,
+        "description": "Conditional create/replace/delete.\n\n`expected = none` means create only if there is no live record.\n`expected = some(version)` requires the current live record to match\nexactly. On a mismatch the host returns `applied = false` and the\ncurrent entry; it never overwrites the winner. A missing record with an\nexpected version returns `not-found`.",
+        "properties": {
+          "call": {
+            "additionalProperties": false,
+            "properties": {
+              "function": {
+                "const": "compare-and-swap"
+              },
+              "id": {
+                "type": "string"
+              },
+              "interface": {
+                "const": "soil:records"
+              },
+              "params": {
+                "additionalProperties": false,
+                "properties": {
+                  "entry": {
+                    "$ref": "#/components/schemas/RecordsEntry"
+                  },
+                  "expected": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/RecordsVersion"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "key": {
+                    "$ref": "#/components/schemas/RecordsKey"
+                  }
+                },
+                "required": [
+                  "key",
+                  "expected",
+                  "entry"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "interface",
+              "function",
+              "params"
+            ],
+            "type": "object"
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "call"
+        ],
+        "type": "object"
+      },
+      "CallDelete": {
+        "additionalProperties": false,
+        "description": "Write a tombstone. The record remains visible to `changes` until the\nhost's tombstone retention expires.",
+        "properties": {
+          "call": {
+            "additionalProperties": false,
+            "properties": {
+              "function": {
+                "const": "delete"
+              },
+              "id": {
+                "type": "string"
+              },
+              "interface": {
+                "const": "soil:records"
+              },
+              "params": {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "$ref": "#/components/schemas/RecordsKey"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "interface",
+              "function",
+              "params"
+            ],
+            "type": "object"
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "call"
+        ],
+        "type": "object"
+      },
+      "CallGet": {
+        "additionalProperties": false,
+        "description": "Read one record.",
+        "properties": {
+          "call": {
+            "additionalProperties": false,
+            "properties": {
+              "function": {
+                "const": "get"
+              },
+              "id": {
+                "type": "string"
+              },
+              "interface": {
+                "const": "soil:records"
+              },
+              "params": {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "$ref": "#/components/schemas/RecordsKey"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "interface",
+              "function",
+              "params"
+            ],
+            "type": "object"
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "call"
+        ],
+        "type": "object"
+      },
+      "CallScan": {
+        "additionalProperties": false,
+        "description": "Scan one collection in revision order. A cursor from a previous page is\nvalid until the host reports `stale`.",
+        "properties": {
+          "call": {
+            "additionalProperties": false,
+            "properties": {
+              "function": {
+                "const": "scan"
+              },
+              "id": {
+                "type": "string"
+              },
+              "interface": {
+                "const": "soil:records"
+              },
+              "params": {
+                "additionalProperties": false,
+                "properties": {
+                  "collection": {
+                    "type": "string"
+                  },
+                  "cursor": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "limit": {
+                    "maximum": 4294967295,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "collection",
+                  "cursor",
+                  "limit"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "interface",
+              "function",
+              "params"
+            ],
+            "type": "object"
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "call"
+        ],
+        "type": "object"
+      },
+      "CallUpsert": {
+        "additionalProperties": false,
+        "description": "Create or replace a local record. The host assigns `revision` and\n`origin`; the returned entry is authoritative.",
+        "properties": {
+          "call": {
+            "additionalProperties": false,
+            "properties": {
+              "function": {
+                "const": "upsert"
+              },
+              "id": {
+                "type": "string"
+              },
+              "interface": {
+                "const": "soil:records"
+              },
+              "params": {
+                "additionalProperties": false,
+                "properties": {
+                  "entry": {
+                    "$ref": "#/components/schemas/RecordsEntry"
+                  }
+                },
+                "required": [
+                  "entry"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "id",
+              "interface",
+              "function",
+              "params"
+            ],
+            "type": "object"
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "call"
+        ],
+        "type": "object"
+      },
+      "RecordsApplyResult": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skipped": {
+            "description": "Older or equal revisions that lost the last-writer-wins comparison.",
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "applied",
+          "skipped"
+        ],
+        "type": "object"
+      },
+      "RecordsCasResult": {
+        "additionalProperties": false,
+        "description": "Result of a conditional write. On conflict `entry` is the current\nauthoritative entry, so the caller can re-read and retry.",
+        "properties": {
+          "applied": {
+            "type": "boolean"
+          },
+          "entry": {
+            "$ref": "#/components/schemas/RecordsEntry"
+          }
+        },
+        "required": [
+          "applied",
+          "entry"
+        ],
+        "type": "object"
+      },
+      "RecordsEntry": {
+        "additionalProperties": false,
+        "description": "One stored record. `body` is opaque to the host (JSON, CBOR, or a Spore\nschema); `schema` names the body contract.\n\nLocal `upsert` ignores `revision` and `origin` and assigns both. Remote\n`apply` uses them for last-writer-wins:\n  higher `revision` wins; equal revision is broken by lexicographic\n  `origin`; a `deleted` entry is a tombstone.",
+        "properties": {
+          "body": {
+            "contentEncoding": "base64",
+            "format": "byte",
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "key": {
+            "$ref": "#/components/schemas/RecordsKey"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schema": {
+            "type": "string"
+          },
+          "updatedAtMs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "schema",
+          "revision",
+          "updatedAtMs",
+          "origin",
+          "deleted",
+          "body"
+        ],
+        "type": "object"
+      },
+      "RecordsError": {
+        "enum": [
+          "denied",
+          "not-found",
+          "over-budget",
+          "invalid",
+          "stale",
+          "io",
+          "unsupported"
+        ],
+        "type": "string"
+      },
+      "RecordsKey": {
+        "additionalProperties": false,
+        "description": "A record address. `collection` is a Spore-defined namespace\n(`email.message`, `chat.message`, `contact`); `id` is stable within it.",
+        "properties": {
+          "collection": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "collection",
+          "id"
+        ],
+        "type": "object"
+      },
+      "RecordsPage": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/RecordsEntry"
+            },
+            "type": "array"
+          },
+          "next": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Opaque cursor for the next page, or none at the end."
+          }
+        },
+        "required": [
+          "entries",
+          "next"
+        ],
+        "type": "object"
+      },
+      "RecordsVersion": {
+        "additionalProperties": false,
+        "description": "The exact revision/origin tuple returned by a local write.",
+        "properties": {
+          "origin": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "origin"
+        ],
+        "type": "object"
+      },
+      "ResultApply": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "ok": {
+                    "$ref": "#/components/schemas/RecordsApplyResult"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "err": {
+                    "$ref": "#/components/schemas/BridgeError"
+                  }
+                },
+                "required": [
+                  "err"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "id",
+          "result"
+        ],
+        "type": "object"
+      },
+      "ResultChanges": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "ok": {
+                    "$ref": "#/components/schemas/RecordsPage"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "err": {
+                    "$ref": "#/components/schemas/BridgeError"
+                  }
+                },
+                "required": [
+                  "err"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "id",
+          "result"
+        ],
+        "type": "object"
+      },
+      "ResultCompareAndSwap": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "ok": {
+                    "$ref": "#/components/schemas/RecordsCasResult"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "err": {
+                    "$ref": "#/components/schemas/BridgeError"
+                  }
+                },
+                "required": [
+                  "err"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "id",
+          "result"
+        ],
+        "type": "object"
+      },
+      "ResultDelete": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "ok": {
+                    "additionalProperties": false,
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "err": {
+                    "$ref": "#/components/schemas/BridgeError"
+                  }
+                },
+                "required": [
+                  "err"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "id",
+          "result"
+        ],
+        "type": "object"
+      },
+      "ResultGet": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "ok": {
+                    "$ref": "#/components/schemas/RecordsEntry"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "err": {
+                    "$ref": "#/components/schemas/BridgeError"
+                  }
+                },
+                "required": [
+                  "err"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "id",
+          "result"
+        ],
+        "type": "object"
+      },
+      "ResultScan": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "ok": {
+                    "$ref": "#/components/schemas/RecordsPage"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "err": {
+                    "$ref": "#/components/schemas/BridgeError"
+                  }
+                },
+                "required": [
+                  "err"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "id",
+          "result"
+        ],
+        "type": "object"
+      },
+      "ResultUpsert": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "ok": {
+                    "$ref": "#/components/schemas/RecordsEntry"
+                  }
+                },
+                "required": [
+                  "ok"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "err": {
+                    "$ref": "#/components/schemas/BridgeError"
+                  }
+                },
+                "required": [
+                  "err"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "v": {
+            "const": 1
+          }
+        },
+        "required": [
+          "v",
+          "id",
+          "result"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "description": "Shared token for this bridge deployment. A session may also pass it as `?token=` because a browser cannot set an Authorization header on a WebSocket. Absent means loopback-only access.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "soil:records served by soil-web-bridge. Every call names a WIT interface and function; see the generated client for typed operations.",
+    "title": "soil:records over the Soil web bridge",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        },
+        "summary": "Liveness"
+      }
+    },
+    "/v1/call": {
+      "post": {
+        "description": "A capability failure arrives as 200 with result.err; HTTP errors are transport only.",
+        "operationId": "call",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/CallGet"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CallScan"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CallUpsert"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CallCompareAndSwap"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CallDelete"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CallChanges"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CallApply"
+                  }
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ResultGet"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ResultScan"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ResultUpsert"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ResultCompareAndSwap"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ResultDelete"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ResultChanges"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ResultApply"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "The WIT result value, or a typed error"
+          },
+          "400": {
+            "description": "Malformed request or unsupported protocol version"
+          },
+          "401": {
+            "description": "No token, or a token that does not match"
+          },
+          "403": {
+            "description": "Origin is not in the allowlist"
+          },
+          "411": {
+            "description": "POST without Content-Length"
+          },
+          "413": {
+            "description": "Body over budget"
+          }
+        },
+        "summary": "One WIT call"
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "description": "The session as an event stream: `ready` (which names the session id), `changed`, host `call` frames and `cancel` frames, one JSON object per `data:` line. Use it where a WebSocket upgrade does not survive a proxy.",
+        "operationId": "events",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "text/event-stream of the same frames the socket carries"
+          },
+          "401": {
+            "description": "No token, or a token that does not match"
+          },
+          "403": {
+            "description": "Origin is not in the allowlist"
+          }
+        },
+        "summary": "Server-sent events"
+      }
+    },
+    "/v1/frame": {
+      "post": {
+        "description": "`?session=` comes from the `ready` frame. A `call` or `provide` gets its result in the response body; a `result` answers a host call that arrived on the event stream.",
+        "operationId": "frame",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The correlated result, or an acknowledgement for a delivered answer"
+          },
+          "400": {
+            "description": "Malformed frame or missing session"
+          },
+          "404": {
+            "description": "No such session, or no call in flight with that id"
+          }
+        },
+        "summary": "Send one client frame on an SSE session"
+      }
+    },
+    "/v1/provider/call": {
+      "post": {
+        "description": "Node-side door. The host asks a session that volunteered an interface — `soil:http` answered with the page's own `fetch` — to do the work, with a deadline. Not for pages: a page uses the session frames.",
+        "operationId": "providerCall",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "function": {
+                    "type": "string"
+                  },
+                  "package": {
+                    "description": "A package the Spore's [grants] name and a session registered.",
+                    "type": "string"
+                  },
+                  "params": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "timeoutMs": {
+                    "default": 10000,
+                    "maximum": 60000,
+                    "minimum": 50,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "package",
+                  "function"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The provider's result, or `timeout`/`unavailable`"
+          },
+          "400": {
+            "description": "Malformed provider call"
+          },
+          "401": {
+            "description": "No token, or a token that does not match"
+          }
+        },
+        "summary": "Call an interface a session provides"
+      }
+    },
+    "/v1/session": {
+      "get": {
+        "description": "Upgrade to a WebSocket. The host sends a ready event, answers the same call envelopes, and pushes changed events. Frames are text JSON with the same version.",
+        "operationId": "session",
+        "responses": {
+          "101": {
+            "description": "Switching Protocols"
+          },
+          "401": {
+            "description": "No token, or a token that does not match"
+          },
+          "403": {
+            "description": "Origin is not in the allowlist"
+          },
+          "426": {
+            "description": "Not a WebSocket upgrade"
+          },
+          "503": {
+            "description": "Too many sessions"
+          }
+        },
+        "summary": "WebSocket session",
+        "x-websocket-frames": {
+          "client": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CallGet"
+              },
+              {
+                "$ref": "#/components/schemas/CallScan"
+              },
+              {
+                "$ref": "#/components/schemas/CallUpsert"
+              },
+              {
+                "$ref": "#/components/schemas/CallCompareAndSwap"
+              },
+              {
+                "$ref": "#/components/schemas/CallDelete"
+              },
+              {
+                "$ref": "#/components/schemas/CallChanges"
+              },
+              {
+                "$ref": "#/components/schemas/CallApply"
+              }
+            ]
+          },
+          "server": [
+            {
+              "$ref": "#/components/schemas/BridgeEvent"
+            },
+            {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/ResultGet"
+                },
+                {
+                  "$ref": "#/components/schemas/ResultScan"
+                },
+                {
+                  "$ref": "#/components/schemas/ResultUpsert"
+                },
+                {
+                  "$ref": "#/components/schemas/ResultCompareAndSwap"
+                },
+                {
+                  "$ref": "#/components/schemas/ResultDelete"
+                },
+                {
+                  "$ref": "#/components/schemas/ResultChanges"
+                },
+                {
+                  "$ref": "#/components/schemas/ResultApply"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "security": [
+    {},
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8795"
+    }
+  ]
+}

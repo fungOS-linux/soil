@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>soil web bridge</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0f12;
+    --panel: #12181d;
+    --edge: #1d262d;
+    --ink: #dfe7ec;
+    --muted: #8195a3;
+    --accent: #7dd3a8;
+    --danger: #ff7b72;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .02em; margin: 0; }
+  .muted { color: var(--muted); }
+  code { font-family: var(--mono); font-size: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; padding: 14px; }
+  .bar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
+  button {
+    font: inherit; font-size: 12px; color: var(--ink); background: #182128;
+    border: 1px solid var(--edge); border-radius: 7px; padding: 5px 10px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.link { background: none; border: 0; color: var(--danger); padding: 0; }
+  .status { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .status[data-live="true"] { color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  th { text-align: left; font-weight: 500; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--edge); }
+  td { padding: 6px 8px; border-bottom: 1px solid #161e24; vertical-align: top; }
+  td.body { color: var(--muted); max-width: 560px; overflow-wrap: anywhere; }
+  tr:last-child td { border-bottom: 0; }
+  form { display: grid; grid-template-columns: 160px 200px 1fr auto; gap: 8px; margin-top: 14px; }
+  input, textarea {
+    font-family: var(--mono); font-size: 12px; color: var(--ink); background: #0e1419;
+    border: 1px solid var(--edge); border-radius: 7px; padding: 7px 9px; resize: vertical;
+  }
+  textarea { min-height: 34px; }
+  #error { color: var(--danger); font-family: var(--mono); font-size: 12px; min-height: 18px; margin: 12px 0 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>soil web bridge</h1>
+  <span id="identity" class="muted">connecting…</span>
+</header>
+
+<main class="panel">
+  <div class="bar">
+    <button id="reload">Refresh</button>
+    <span class="muted" id="count"></span>
+    <span class="status" id="status">disconnected</span>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>id</th><th>schema</th><th>revision</th><th>body</th><th></th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <form id="upsert">
+    <input name="id" placeholder="id" required>
+    <input name="schema" value="worklog/event@1" required>
+    <textarea name="body">{"message":"hello from the bridge"}</textarea>
+    <button>Upsert</button>
+  </form>
+
+  <p id="error"></p>
+</main>
+
+<main class="panel" style="margin-top: 14px">
+  <div class="bar">
+    <button id="provide">Offer soil:http</button>
+    <span class="muted" id="provider">not offering</span>
+  </div>
+  <p class="muted" style="margin: 0">
+    Offering makes this page answer the node's <code>soil:http</code> calls with
+    <code>fetch</code> — its network, its cookies, its CORS rules. The node asked for
+    <code>soil:http</code> in the Spore's <code>[grants]</code>, so it is allowed to
+    accept the offer.
+  </p>
+</main>
+
+<script type="module">
+const token = new URLSearchParams(location.search).get('token');
+// The server owns the collection name; the page learns it from the session's
+// `ready` event instead of hard-coding a second copy of host configuration.
+let collection = null;
+let session = null;
+
+const $ = (id) => document.getElementById(id);
+const rows = $('rows');
+const pendingFetches = new Map();
+
+function showError(error) {
+  $('error').textContent = error ? `${error.code}: ${error.message}` : '';
+}
+
+async function call(fn, params) {
+  const response = await fetch('/v1/call', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      v: 1,
+      call: { id: crypto.randomUUID(), interface: 'soil:records', function: fn, params },
+    }),
+  });
+  const frame = await response.json();
+  if (frame.result.err) throw frame.result.err;
+  return frame.result.ok;
+}
+
+// Everything the page says on the session goes through one POST. The events
+// themselves arrive over EventSource, which every HTTP proxy forwards — a
+// WebSocket upgrade does not survive the ones that strip hop-by-hop headers.
+async function postFrame(frame) {
+  if (!session) throw { code: 'unavailable', message: 'no session yet' };
+  const query = `session=${encodeURIComponent(session)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+  const response = await fetch(`/v1/frame?${query}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(frame),
+  });
+  return response.json();
+}
+
+function decodeBody(base64) {
+  const binary = atob(base64);
+  return new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)));
+}
+
+function encodeBody(text) {
+  const bytes = new TextEncoder().encode(text);
+  return btoa(String.fromCharCode(...bytes));
+}
+
+function render(entries) {
+  rows.replaceChildren();
+  for (const entry of entries) {
+    const tr = document.createElement('tr');
+    for (const value of [entry.key.id, entry.schema, entry.revision]) {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.append(td);
+    }
+    const body = document.createElement('td');
+    body.className = 'body';
+    body.textContent = decodeBody(entry.body);
+    tr.append(body);
+    const actions = document.createElement('td');
+    const remove = document.createElement('button');
+    remove.className = 'link';
+    remove.textContent = 'delete';
+    remove.onclick = () => mutate(() => call('delete', { key: entry.key }));
+    actions.append(remove);
+    tr.append(actions);
+    rows.append(tr);
+  }
+  $('count').textContent = `${entries.length} record${entries.length === 1 ? '' : 's'}`;
+}
+
+async function refresh() {
+  if (!collection) return;
+  try {
+    const page = await call('scan', { collection, limit: 200 });
+    render(page.entries);
+    showError(null);
+  } catch (error) {
+    // A refused scan is the useful failure here: the page shows the grant it is
+    // missing instead of an empty table that looks like "no records".
+    showError(error);
+  }
+}
+
+async function mutate(operation) {
+  try {
+    await operation();
+    showError(null);
+    await refresh();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+$('reload').onclick = () => refresh();
+$('upsert').onsubmit = (event) => {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  const body = String(form.get('body'));
+  try {
+    JSON.parse(body);
+  } catch {
+    showError({ code: 'invalid', message: 'body must be a JSON object' });
+    return;
+  }
+  mutate(() =>
+    call('upsert', {
+      entry: {
+        key: { collection, id: String(form.get('id')) },
+        schema: String(form.get('schema')),
+        body: encodeBody(body),
+      },
+    }),
+  );
+};
+
+// --- provider side ---------------------------------------------------------
+
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+async function reply(id, result) {
+  try {
+    await postFrame({ v: 1, id, result });
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Answer an inbound `soil:http.fetch` with the page's own network. The host
+// gives up on a deadline and sends `cancel`; observing the abort signal is what
+// makes that cancellation real instead of a dropped result.
+async function answerHttp(call) {
+  const params = call.params ?? {};
+  const controller = new AbortController();
+  pendingFetches.set(call.id, controller);
+  try {
+    const response = await fetch(params.url, {
+      method: params.method ?? "GET",
+      headers: Object.fromEntries((params.headers ?? []).map((h) => [h.name, h.value])),
+      body: params.body ? base64ToBytes(params.body) : undefined,
+      signal: controller.signal,
+    });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    await reply(call.id, {
+      ok: {
+        status: response.status,
+        finalUrl: response.url || params.url,
+        headers: [...response.headers].map(([name, value]) => ({ name, value })),
+        body: bytesToBase64(bytes),
+      },
+    });
+  } catch (error) {
+    await reply(call.id, {
+      err: {
+        code: error.name === "AbortError" ? "timeout" : "unavailable",
+        message: String(error.message ?? error),
+      },
+    });
+  } finally {
+    pendingFetches.delete(call.id);
+  }
+}
+
+function handleCall(call) {
+  if (call.interface === "soil:http" && call.function === "fetch") {
+    void answerHttp(call);
+    return;
+  }
+  void reply(call.id, {
+    err: {
+      code: "unsupported",
+      message: `this page does not provide ${call.interface}.${call.function}`,
+    },
+  });
+}
+
+$("provide").onclick = async () => {
+  try {
+    const frame = await postFrame({
+      v: 1,
+      provide: { id: crypto.randomUUID(), packages: ["soil:http"] },
+    });
+    const refusal = frame.result.err;
+    $("provider").textContent = refusal
+      ? `refused: ${refusal.code} ${refusal.message}`
+      : `offering ${frame.result.ok.packages.join(", ")}`;
+    $("provider").dataset.live = refusal ? "false" : "true";
+  } catch (error) {
+    showError(error);
+  }
+};
+
+function connect() {
+  const url = new URL("/v1/events", location.href);
+  if (token) url.searchParams.set("token", token);
+  const source = new EventSource(url);
+  source.onopen = () => {
+    $("status").textContent = "live";
+    $("status").dataset.live = "true";
+  };
+  source.onerror = () => {
+    // EventSource reconnects on its own; the next `ready` names a new session.
+    $("status").textContent = "reconnecting";
+    $("status").dataset.live = "false";
+  };
+  source.onmessage = (message) => {
+    const frame = JSON.parse(message.data);
+    if (frame.v !== 1) return;
+    if (frame.event) {
+      if (frame.event.kind === 'ready') {
+        session = frame.event.session ?? null;
+        $('identity').textContent = frame.event.spore;
+        if (frame.event.grants.length) $('identity').title = frame.event.grants.join('\n');
+        collection = frame.event.interfaces?.['soil:records']?.collection ?? null;
+        refresh();
+      }
+      if (frame.event.kind === 'changed') refresh();
+      return;
+    }
+    if (frame.call) {
+      handleCall(frame.call);
+      return;
+    }
+    if (frame.cancel) pendingFetches.get(frame.cancel.id)?.abort();
+  };
+}
+
+connect();
+</script>
+</body>
+</html>

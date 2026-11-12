@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use soil_scene::{
     Area, Band, Candle, Candles, Content, DenseResource, GpuDense, GpuDenseMode, GpuPoints3D,
-    GpuResource, Heatmap, Node, PointCloudResource, Points, Polyline, Rect, Scene, Text, Transform,
+    GpuReduction, GpuResource, Heatmap, Node, PointCloudResource, Points, Polyline, Rect, Scene,
+    Text, Transform,
 };
 use sysinfo::{ProcessesToUpdate, System};
 
@@ -1251,6 +1252,7 @@ impl<'a> Painter<'a> {
             content: Content::GpuDense(GpuDense {
                 resource: resource.into(),
                 mode,
+                reduction: GpuReduction::Average,
                 range,
                 buckets,
                 ink: None,

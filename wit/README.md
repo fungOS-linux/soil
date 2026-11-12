@@ -37,6 +37,7 @@ credential resolution stay in host adapters.
 | `soil:canvas@1.0.0` | wired | owner surface, `soil-scene` document, guest SDK and component host |
 | `soil:terminal@0.1.0` | contract | host-rendered terminal surface |
 | `soil:view@1.0.0` | contract | host-reviewed web/Spore/retained view |
+| `fungos:mycelium@0.1.0` | contract | Pulse control-plane bridge to myceliumd; host implementation pending |
 | `soil:mycelium@0.1.0` | deferred | directory/session; no host yet |
 | `soil:device@0.1.0` | wired | battery/estimate/lid core-Wasm lowering |
 | `wasi:audio@0.1.0` | wired | draft cpal audio sink |

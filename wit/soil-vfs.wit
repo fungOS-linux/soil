@@ -62,6 +62,10 @@ interface vfs {
     hydration: hydration,
     pinned: bool,
     updated-at-ms: u64,
+    /// Permission bits (`0o755`), not a full `st_mode`. A namespace that can
+    /// hold a built binary has to remember that it is executable, or every
+    /// materialization hands back a file nobody can run.
+    mode: u32,
     /// Direct children for a directory; 0 for a file.
     child-count: u64,
   }

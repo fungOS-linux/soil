@@ -16,6 +16,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use fungos_vfs::Vfs;
 
+mod spore;
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("soil: {error:#}");
@@ -26,6 +28,8 @@ fn main() {
 fn usage() -> &'static str {
     "usage: soil --root ROOT <command>\n\
      commands:\n\
+       spore run <dir|package.spore> [--listen ADDR] [--hub ADDR]... [--unibus-config FILE]\n\
+                                    [--bridge ADDR] [--bridge-wait SECS] [--allow-origin URL]...\n\
        shell [--mount DIR] [--fuse-binary PATH] [--shell PATH] [--no-mount] [-- command...]\n\
        ls [PREFIX]\n\
        stat PATH\n\
@@ -45,6 +49,9 @@ fn run() -> Result<()> {
     };
     args.remove(0);
     match command.as_str() {
+        // Any `.spore` on the names it claims: the same launcher for every
+        // Spore, so a product never ships its own host again.
+        "spore" => spore::run(&args),
         "shell" => shell(&root, args),
         "rm" => remove(&root, args),
         "ls" => list(&root, args),
@@ -169,8 +176,11 @@ fn history(root: &Path, args: Vec<String>) -> Result<()> {
         bail!("usage: soil history PATH");
     };
     let vfs = Vfs::open(root)?;
-    for (version, content_id, size, created) in vfs.history(path)? {
-        println!("{version}\t{size}\t{created}\t{content_id}");
+    for entry in vfs.history(path)? {
+        println!(
+            "{}\t{}\t{}\t{}",
+            entry.version, entry.size, entry.created_at_ms, entry.content_id
+        );
     }
     Ok(())
 }
@@ -180,11 +190,11 @@ fn search(root: &Path, args: Vec<String>) -> Result<()> {
     if query.trim().is_empty() {
         bail!("usage: soil search QUERY");
     }
-    let mut host = soil_vfs_host::VfsHost::open(root)?;
-    use soil_vfs_host::index::Host as _;
-    let page = host.search(soil_vfs_host::index::Query {
+    let mut host = soil_host::vfs_host::VfsHost::open(root)?;
+    use soil_host::vfs_host::index::Host as _;
+    let page = host.search(soil_host::vfs_host::index::Query {
         text: query,
-        mode: Some(soil_vfs_host::index::Mode::Fuzzy),
+        mode: Some(soil_host::vfs_host::index::Mode::Fuzzy),
         parent: None,
         media_type_prefix: None,
         offset: 0,
@@ -270,17 +280,33 @@ fn expand_home(value: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A store inside the root's own state directory: it dies with the tempdir,
+    /// and no other test (or the operator's real store) can see it.
+    fn open_owned(root: &std::path::Path) -> Vfs {
+        Vfs::open_with(
+            root,
+            fungos_vfs::NodeRole::Full,
+            Some(&root.join(".fungos/store")),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn rm_unlinks_namespace_and_keeps_history() {
         let dir = tempfile::tempdir().unwrap();
-        let mut vfs = Vfs::open(dir.path()).unwrap();
+        let mut vfs = open_owned(dir.path());
         let entry = vfs
-            .put("notes.txt", b"keep this blob", "text/plain", None)
+            .put(
+                "notes.txt",
+                b"keep this blob",
+                "text/plain",
+                fungos_vfs::Expect::Any,
+            )
             .unwrap();
         remove(dir.path(), vec!["notes.txt".into()]).unwrap();
         assert!(vfs.file("notes.txt").unwrap().is_none());
         let history = vfs.history("notes.txt").unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].1, entry.content_id);
+        assert_eq!(history[0].content_id, entry.content_id);
     }
 }

@@ -420,6 +420,44 @@ fn a_package_ships_only_what_it_declares() {
 }
 
 #[test]
+fn a_web_surface_ships_the_directory_it_names() {
+    let root = fixture();
+    let declared = format!(
+        "{}\n[[surfaces]]\nname = \"workbook\"\nkind = \"web\"\n",
+        MANIFEST.replace("default = \"canvas\"", "default = \"workbook\"")
+    );
+    fs::write(root.join("spore.toml"), &declared).unwrap();
+    fs::create_dir_all(root.join("web/fonts")).unwrap();
+    fs::write(root.join("web/index.html"), b"<!doctype html>\n").unwrap();
+    fs::write(root.join("web/app.js"), b"export {}\n").unwrap();
+    fs::write(root.join("web/fonts/ui.woff2"), b"\0wOF2").unwrap();
+
+    let manifest = Manifest::parse(&declared).unwrap();
+    let paths: Vec<String> = soil_spore::collect_package(&root, &manifest)
+        .unwrap()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    assert!(
+        paths.contains(&"web/index.html".to_owned())
+            && paths.contains(&"web/app.js".to_owned())
+            && paths.contains(&"web/fonts/ui.woff2".to_owned()),
+        "a page is useless without the files beside it: {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|path| path.starts_with("src/")),
+        "and naming a surface does not turn the package into a source archive"
+    );
+
+    // The lock is the identity, so what ships is what is signed.
+    let lock = write_lock(&root).unwrap();
+    assert!(
+        lock.files.iter().any(|file| file.path == "web/app.js"),
+        "the bytes the page loads are covered by the package digest"
+    );
+}
+
+#[test]
 fn a_composition_needs_no_module() {
     let source = MANIFEST.replace("[module]\npath = \"module.wasm\"\n\n", "");
     let manifest = Manifest::parse(&source).expect("a view is still a Spore");
@@ -579,4 +617,66 @@ height = 52
         silent.chrome.as_ref().unwrap().height(),
         soil_spore::chrome::DEFAULT_HEIGHT
     );
+}
+
+#[test]
+fn info_json_is_the_authoring_projection() {
+    let manifest = Manifest::parse(MANIFEST).expect("manifest parses");
+    let info = manifest.info_json();
+    assert_eq!(info["id"], "dev.fungos.markdown");
+    assert_eq!(info["ui"]["entry"], "ui/editor.lua");
+    assert_eq!(info["launch"]["default"], "canvas");
+    assert_eq!(info["module"]["path"], "module.wasm");
+}
+
+/// A manifest with one declared skill, so the two cases below differ only in
+/// the path they name.
+fn with_skill(path: &str) -> String {
+    format!("{MANIFEST}\n[[skills]]\nname = \"hello\"\npath = {path:?}\n")
+}
+
+#[test]
+fn a_declared_skill_ships_with_the_package() {
+    let root = fixture();
+    fs::write(root.join("spore.toml"), with_skill("skills/hello/SKILL.md")).unwrap();
+    fs::create_dir_all(root.join("skills/hello")).unwrap();
+    fs::write(
+        root.join("skills/hello/SKILL.md"),
+        b"---\nname: hello\ndescription: greet someone\n---\n",
+    )
+    .unwrap();
+
+    let manifest = Manifest::load(&root).unwrap();
+    assert_eq!(
+        manifest.skills.len(),
+        1,
+        "the skill is declared, not guessed"
+    );
+    assert!(
+        manifest
+            .declared_paths()
+            .contains(&PathBuf::from("skills/hello/SKILL.md")),
+        "the lock and the tar have to cover what teaches an agent to use it"
+    );
+}
+
+#[test]
+fn a_skill_that_is_not_a_skill_file_is_refused() {
+    // `SKILL.md` is the name the registry installs. A path to anything else is
+    // a file the package ships and nobody reads.
+    let root = fixture();
+    fs::write(
+        root.join("spore.toml"),
+        with_skill("skills/hello/README.md"),
+    )
+    .unwrap();
+    let error = Manifest::load(&root).unwrap_err();
+    assert!(matches!(error, Error::Invalid(_)), "{error}");
+}
+#[test]
+fn display_title_reads_a_slug_as_words() {
+    assert_eq!(soil_spore::display_title("vitals-view"), "Vitals View");
+    assert_eq!(soil_spore::display_title("dfm_report"), "Dfm Report");
+    assert_eq!(soil_spore::display_title("store"), "Store");
+    assert_eq!(soil_spore::display_title(""), "");
 }

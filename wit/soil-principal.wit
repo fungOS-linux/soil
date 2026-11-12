@@ -39,7 +39,26 @@ interface principal {
     generation: u64,
   }
 
+  /// Non-secret projection of the key this principal signs with.
+  ///
+  /// The host owns the key through Geode or an enclave. This record never
+  /// carries private material; it is what a verifier or a store needs to name
+  /// the signer and resolve its public key.
+  record signing-key-info {
+    /// Signature algorithm, e.g. `pgp` or `ed25519`.
+    algorithm: string,
+    /// Public fingerprint, uppercase hex.
+    fingerprint: string,
+    /// Non-secret Geode address, e.g. `geode://principal/alice/pgp`.
+    reference: string,
+    /// Changes when the host rotates or replaces the key.
+    generation: u64,
+  }
+
   current: func() -> result<identity, error>;
+
+  /// Present only when this principal has a host-managed signing key.
+  signing-key: func() -> result<option<signing-key-info>, error>;
 }
 
 world guest {

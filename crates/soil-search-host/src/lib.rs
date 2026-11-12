@@ -26,7 +26,7 @@ use git::GitIndex;
 use graph::GraphIndex;
 use mru::{MruCache, hit_from_usage, now_ms, usage_from_hit};
 use soil_marbles::MarblesIndex;
-use soil_vfs_host::{EmbeddingProvider, VfsHost, index};
+use soil_host::vfs_host::{EmbeddingProvider, VfsHost, index};
 use tgrep::TgrepSource;
 use wasmtime::component::{HasSelf, Linker};
 
@@ -553,7 +553,7 @@ impl SearchService {
             offset: 0,
             limit: MAX_PAGE,
         };
-        use soil_vfs_host::index::Host as _;
+        use soil_host::vfs_host::index::Host as _;
         let page = vfs.search(index_query).map_err(index_error)?;
         Ok(page
             .hits
@@ -792,7 +792,7 @@ impl SearchService {
         let Some(vfs) = self.vfs.as_mut() else {
             return Ok(Vec::new());
         };
-        use soil_vfs_host::index::Host as _;
+        use soil_host::vfs_host::index::Host as _;
         let page = vfs
             .search(index::Query {
                 text: text.to_string(),
@@ -1179,32 +1179,48 @@ mod tests {
     use super::*;
     use crate::soil::search::mentions::Host as _;
     use crate::soil::search::search::Host as _;
-    use fungos_vfs::Vfs;
+    use fungos_vfs::{Expect, Vfs};
+
+    /// A store inside the root's own state directory: it dies with the tempdir,
+    /// and no other test (or the operator's real store) can see it.
+    fn open_owned(root: &std::path::Path) -> Vfs {
+        Vfs::open_with(
+            root,
+            fungos_vfs::NodeRole::Full,
+            Some(&root.join(".fungos/store")),
+        )
+        .unwrap()
+    }
 
     fn seed_vfs(root: &std::path::Path) {
-        let mut vfs = Vfs::open(root).unwrap();
-        vfs.put("notes/greece.txt", b"a greece trip", "text/plain", None)
-            .unwrap();
-        vfs.put("photos/paris.jpg", b"jpeg", "image/jpeg", None)
+        let mut vfs = open_owned(root);
+        vfs.put(
+            "notes/greece.txt",
+            b"a greece trip",
+            "text/plain",
+            Expect::Any,
+        )
+        .unwrap();
+        vfs.put("photos/paris.jpg", b"jpeg", "image/jpeg", Expect::Any)
             .unwrap();
     }
 
     fn seed_office_files(root: &std::path::Path) {
-        let mut vfs = Vfs::open(root).unwrap();
-        vfs.put("docs/brief.pdf", b"pdf", "application/pdf", None)
+        let mut vfs = open_owned(root);
+        vfs.put("docs/brief.pdf", b"pdf", "application/pdf", Expect::Any)
             .unwrap();
         vfs.put(
             "sheets/budget.xlsx",
             b"xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            None,
+            Expect::Any,
         )
         .unwrap();
         vfs.put(
             "slides/kickoff.pptx",
             b"pptx",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            None,
+            Expect::Any,
         )
         .unwrap();
     }
@@ -1253,7 +1269,12 @@ mod tests {
     fn semantic_file_search_uses_the_host_provider() {
         let dir = tempfile::tempdir().unwrap();
         seed_vfs(dir.path());
-        let vfs = VfsHost::open(dir.path()).unwrap();
+        let vfs = VfsHost::open_with_role_and_store(
+            dir.path(),
+            fungos_vfs::NodeRole::Full,
+            Some(&dir.path().join(".fungos/store")),
+        )
+        .unwrap();
         let mut host = SearchService::new(Some(vfs), None, vec![])
             .with_embeddings(Arc::new(FakeEmbeddings))
             .unwrap();
@@ -1661,7 +1682,12 @@ surfaces = ["canvas"]
         let dir = tempfile::tempdir().unwrap();
         seed_vfs(dir.path());
         let store = seed_records(&dir.path().join("records"));
-        let vfs = VfsHost::open(dir.path()).unwrap();
+        let vfs = VfsHost::open_with_role_and_store(
+            dir.path(),
+            fungos_vfs::NodeRole::Full,
+            Some(&dir.path().join(".fungos/store")),
+        )
+        .unwrap();
         let mut host = SearchService::new(
             Some(vfs),
             Some(store),
@@ -1770,7 +1796,12 @@ surfaces = ["canvas"]
         let dir = tempfile::tempdir().unwrap();
         seed_vfs(dir.path());
         let store = seed_records(&dir.path().join("records"));
-        let vfs = VfsHost::open(dir.path()).unwrap();
+        let vfs = VfsHost::open_with_role_and_store(
+            dir.path(),
+            fungos_vfs::NodeRole::Full,
+            Some(&dir.path().join(".fungos/store")),
+        )
+        .unwrap();
         let mut host = SearchService::new(
             Some(vfs),
             Some(store),

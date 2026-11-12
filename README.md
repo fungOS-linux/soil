@@ -10,7 +10,8 @@ capability host (BLE) and one real Spore do run. Nothing here is a shipped
 product surface yet. Canonical capability contracts for `soil:view`,
 `soil:time`, `soil:storage`, `soil:ble` and `soil:canvas` live in [`wit/`](wit)
 and are enforced by `crates/soil-abi`. Canvas is the cross-platform owner;
-`soil:surface` is deferred. The broader design record lives in the `mycelium`
+the spore-facing half is frozen as `soil:surface@1.1.0` in the spores repo, with
+Canvas's own crates still on `soil:canvas@1.0.0`. The broader design record lives in the `mycelium`
 repository (`docs/soil-capabilities.md`, PR pending) and covers the remaining
 capability boundary (`soil:gpu`, `soil:audio`, `soil:stream`),
 signed-Spore verification, and the target matrix (macOS, Linux, Android/Fire TV,
@@ -96,7 +97,7 @@ WebGPU host is [`crates/soil-webgpu`](crates/soil-webgpu): raw
 `wasi:webgpu` components and real wgpu 29 programs both request a GPU
 adapter/device, run WGSL compute and render passes, read results back through
 `wgpu-core`, and hand a standard WebGPU texture to a host-owned Canvas frame
-through the narrow `soil:canvas-gpu` presentation bridge. See [`docs/soil-webgpu.md`](docs/soil-webgpu.md).
+through the narrow `soil:present` presentation bridge. See [`docs/soil-webgpu.md`](docs/soil-webgpu.md).
 The draft audio sink is [`crates/wasi-audio-wasmtime`](crates/wasi-audio-wasmtime):
 a real component pushes bounded PCM into a cpal host. See
 [`docs/wasi-audio.md`](docs/wasi-audio.md). Guest code uses the umbrella
@@ -245,4 +246,14 @@ Operator inference profiles and `unibus-mcp`/DCP routes resolve from one Soil co
 
 ## Mush
 
-`mush` is now a Wasm Spore over `soil:vfs`, `soil:index`, and `soil:vfs-mut`: no host PATH, no subprocesses, workspace-relative paths, `.mushrc`, `PWD`/`OLDPWD`, `TERM`, `mkdir`, `rmdir`, and `rm` as namespace unlink. See [Mush](docs/mush.md).
+`mush` is a shell over one VFS workspace. The command engine is a Wasm Spore
+over `soil:vfs`, `soil:index`, `soil:vfs-mut`, `soil:command`, `soil:http` and
+`soil:net`; the native host owns the workspace, the grants, the daemon and the
+overlay. Allowlisted host programs (`git`, `cargo`, `gh`, `fpl bob`) run against
+a materialized overlay, and builds route to the fleet through
+[`bob`](https://github.com/FuturePresentLabs/bob).
+
+- [Mush](docs/mush.md) — the shell: syntax, commands, config, doctor.
+- [Mush architecture](docs/mush-architecture.md) — where the pieces live,
+  repository by repository, and how a line is routed.
+- [Mush operator](docs/mush-operator.md) — running it for other people.

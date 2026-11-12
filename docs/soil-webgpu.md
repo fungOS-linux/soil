@@ -1,6 +1,9 @@
 # Soil WebGPU
 
-Status: **host + Canvas presentation proof, 2026-11-02.** Soil runs real
+Status: **host + Canvas presentation proof, 2026-11-02; superseded by the
+[GPU-spore decision](gpu-spores.md).** The host moves to `wgpu` 30 and
+`wgpu-core` retires with the wasmtime fork; this document stays as the proof of
+the WIT, the texture handoff and the readback path. Soil runs real
 components that import upstream `wasi:webgpu@0.3.0-rc.2`, request a GPU device,
 compile WGSL, run compute and render passes, read results back, and hand a
 standard WebGPU texture to a host-owned Canvas frame.
@@ -19,12 +22,14 @@ without it the component cannot instantiate.
 
 Canvas presentation is a separate, presentation-only package:
 
-- [`soil:canvas-gpu@0.1.0`](../crates/soil-webgpu/wit/deps/soil-canvas-gpu/package.wit)
+- [`soil:present@0.1.0`](../crates/soil-webgpu/wit/deps/soil-present/package.wit)
 
 It accepts a `wasi:webgpu` `gpu-texture` by borrow and returns nothing but a
-success/error. It cannot create a device, texture, window, swapchain, or input
-event. The host chooses the target extent through `size()`; the guest does not
-control the Canvas surface.
+success/error. Its `input` interface carries normalized key, pointer, and scroll
+events in one ordered stream, and `cursor` lets the Spore ask what it is pointing
+at. The host chooses the target extent through `size()` and reports device scale
+through `scale()`; the guest does not control the Canvas surface or open a
+window.
 
 Renderer Spores that need the Spore-owned view model also import
 `soil:records`. The host links one read-only namespace, `vitals.view`, backed by
@@ -41,9 +46,12 @@ name a filesystem path.
   pipelines, buffers, textures, queues and error scopes;
 - `soil:records` is a read-only `vitals.view` namespace; the renderer cannot
   mutate the store or read health signals directly;
+- `soil:http` is the bounded host transport from `soil-host`; origins,
+  credentials, methods, body caps, and deadlines are host policy;
 - one `Store` and `ResourceTable` per component, so two guests never share
   handles;
-- no native device, surface, pointer, queue or mapped memory crosses into Wasm.
+- no native device, surface, queue or mapped memory crosses into Wasm. Input is
+  normalized and queued by the presenter; the guest owns hit-testing.
 
 `wasi:io/poll` is linked because component-model async uses it as transport.
 The `WasiCtx` has no preopens, environment, arguments or network policy; a guest
@@ -69,6 +77,14 @@ This proves compute. It does **not** prove `wgpu::Surface`: the upstream WIT
 has a `gpu-canvas-context` resource but no constructor, and a guest-owned
 surface would bypass Canvas ownership.
 
+## Native presenter
+
+[`crates/canvas-winit`](../crates/canvas-winit) is the real desktop presenter:
+winit owns the window, `soil-webgpu` owns the component, and `soil:present` is
+the only surface contract. Pointer, key, scroll, cursor, catalog, PTY, HTTP, and
+records grants are wired there. `--capture` uses the same host path for
+screenshots, and `--size WxH` exercises the layouts a phone or flip presents.
+
 ## Canvas presentation
 
 The render fixture uses ordinary wgpu 29 APIs, then crosses the texture as a
@@ -83,7 +99,7 @@ let texture = device.create_texture(&wgpu::TextureDescriptor {
 queue.submit([encoder.finish()]);
 
 let texture = wgpu_wasi_webgpu::host_texture(texture);
-soil::canvas_gpu::surface::present(&texture)?;
+soil::present::surface::present(&texture)?;
 ```
 
 The host:
@@ -139,7 +155,7 @@ The wgpu fixtures need a GPU adapter and are tested with:
 
 ```sh
 cargo test -p soil-webgpu --test wgpu_compute -- --ignored --nocapture
-cargo test -p soil-webgpu --test wgpu_canvas -- --ignored --nocapture
+cargo test -p soil-webgpu --test wgpu_test -- --ignored --nocapture
 ```
 
 Run the Canvas fixture and write the same BGR24 frame format used by
@@ -147,7 +163,7 @@ Run the Canvas fixture and write the same BGR24 frame format used by
 
 ```sh
 cargo run -p soil-webgpu -- --frame /tmp/triangle.bgr --size 480x640 \
-  crates/soil-webgpu/fixtures/wgpu-canvas.wasm
+  crates/soil-webgpu/fixtures/wgpu-test.wasm
 # webgpu: ok frame=/tmp/triangle.bgr width=480 height=640 format=bgr24
 ```
 
@@ -163,7 +179,7 @@ the corners are the clear colour, and the frame is opaque.
   needs another view model adds a namespace here rather than receiving the
   whole store.
 - `gpu-canvas-context` remains unimplemented. It has no constructor in
-  `wasi:webgpu@0.3.0-rc.2`; the narrow `soil:canvas-gpu` package is the
+  `wasi:webgpu@0.3.0-rc.2`; the narrow `soil:present` package is the
   presentation boundary instead of a guest-owned surface.
 - `wasi-webgpu-wasmtime` still has TODOs and `unimplemented!` paths outside the
   compute/render/readback path.

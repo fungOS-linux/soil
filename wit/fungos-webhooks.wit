@@ -1,0 +1,70 @@
+// Hook administration: the one door the CLI and a console both use.
+//
+// This is a product contract, not a runtime one (`fungos:`, not `soil:`): only a
+// webhook product knows what a slug, a provider and a tenant are. The host
+// implements it because the host owns the registry and, later, Geode - a guest
+// that can create a hook is not a guest that should be able to read the secret
+// bytes behind one.
+//
+// The secret crosses this boundary exactly once, in `created`. There is no
+// read, no export and no list-of-secrets: a hook that is lost is revoked and
+// made again, which is cheaper than a capability that hands out credentials.
+package fungos:webhooks@0.1.0;
+
+interface admin {
+  /// A registered endpoint. The secret is deliberately absent.
+  record hook {
+    slug: string,
+    provider: string,
+    tenant: string,
+    created-at-ms: u64,
+  }
+
+  /// The only value that ever carries a secret.
+  record created {
+    hook: hook,
+    /// Shown once, at creation, and never again.
+    secret: string,
+  }
+
+  enum error {
+    /// A name, provider or tenant the registry cannot accept.
+    invalid,
+    /// The slug is already taken. Slugs are identity, not preference.
+    conflict,
+    /// The caller may not create hooks for this tenant.
+    denied,
+    /// The registry or the credential store could not answer.
+    unavailable,
+  }
+
+  /// Register a hook and mint its credential.
+  ///
+  /// One call, not two: a hook without a credential accepts nothing, and a
+  /// credential without a hook is a secret nobody owns.
+  create: func(
+    name: string,
+    provider: string,
+    tenant: string,
+    /// Fixed path segment, or `none` to let the registry choose one.
+    slug: option<string>,
+  ) -> result<created, error>;
+
+  /// Revoke a hook and its credential. `false` means it was already gone,
+  /// which is not an error - the caller wanted it absent and it is absent.
+  revoke: func(slug: string) -> result<bool, error>;
+
+  /// Every hook the caller may see. Never includes secrets.
+  hooks: func() -> result<list<hook>, error>;
+}
+
+/// The embedder's view of the contract.
+///
+/// A host binds this world to *provide* the capability; a guest names the
+/// interface in its own world. The world exists because an interface alone
+/// cannot be bound: `wasmtime::component::bindgen!` and `wit-bindgen` both
+/// name a world, so without one the CLI and the console would each invent
+/// their own glue for the same three functions.
+world admin-host {
+  import admin;
+}

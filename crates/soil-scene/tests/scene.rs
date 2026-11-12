@@ -329,6 +329,7 @@ fn gpu_content_requires_a_resident_resource() {
         content: Content::GpuDense(soil_scene::GpuDense {
             resource: "points".into(),
             mode: soil_scene::GpuDenseMode::Line,
+            reduction: soil_scene::GpuReduction::Average,
             range: [0.0, 0.0, 1.0, 1.0],
             buckets: 100,
             ink: Some(Ink::Primary),
@@ -491,5 +492,32 @@ fn a_light_refuses_negative_intensity_and_out_of_range_colour() {
         }))])
         .validate()
         .is_err()
+    );
+}
+
+#[test]
+fn dense_reduction_is_a_field_not_a_node_kind() {
+    // Absent means average: a document written before the field existed still
+    // draws the same way.
+    let dense: soil_scene::GpuDense =
+        serde_json::from_str(r#"{"resource":"points"}"#).expect("defaults");
+    assert_eq!(dense.reduction, soil_scene::GpuReduction::Average);
+    assert_eq!(dense.reduction.points_per_bucket(), 1);
+
+    for (wire, expected, points) in [
+        ("\"average\"", soil_scene::GpuReduction::Average, 1),
+        ("\"min-max\"", soil_scene::GpuReduction::MinMax, 2),
+        ("\"lttb\"", soil_scene::GpuReduction::Lttb, 1),
+    ] {
+        let json = format!(r#"{{"resource":"points","reduction":{wire}}}"#);
+        let dense: soil_scene::GpuDense = serde_json::from_str(&json).expect("parses");
+        assert_eq!(dense.reduction, expected);
+        assert_eq!(dense.reduction.points_per_bucket(), points);
+    }
+
+    assert!(
+        serde_json::from_str::<soil_scene::GpuDense>(r#"{"resource":"points","reduction":"max"}"#)
+            .is_err(),
+        "an unknown reduction is refused, not silently averaged"
     );
 }

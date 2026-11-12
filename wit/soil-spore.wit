@@ -14,15 +14,53 @@ interface catalog {
     io,
   }
 
+  /// How a host presents a surface.
+  ///
+  /// Native rendering is deliberately absent: it is the default, it is what
+  /// `[module]` and `[ui]` already are, and a package that needs nothing extra
+  /// should not have to declare it.
+  enum surface-kind {
+    /// The host's own Lua/Canvas renderer.
+    canvas,
+    /// A web page the host renders in a browser view.
+    web,
+  }
+
+  /// One view a package ships, declared so a host can tell what it would have
+  /// to provide before it opens anything.
+  ///
+  /// `entry` is a path inside the package, never a content id. The package is
+  /// the unit of identity and provenance: its lock and digest already cover
+  /// every byte under its root, so a per-asset content id would be a second
+  /// version of the same fact and the two would drift.
+  record surface {
+    name: string,
+    kind: surface-kind,
+    /// Entry point relative to the package root, already resolved by the host:
+    /// `web/index.html` for a `web` surface, `ui/sheet.lua` for a `canvas` one.
+    /// A manifest may leave it out and take the kind's convention instead, so
+    /// the artifact path is only written down when it is not the default.
+    entry: string,
+    /// Engine or host capability the surface requires, if any.
+    requires: option<string>,
+  }
+
   record entry {
     id: string,
+    /// Registry slug: identity, not a label.
     name: string,
+    /// What a window title or a launcher row shows. Falls back to `name` when
+    /// the package does not name itself.
+    title: string,
     version: string,
     summary: string,
     /// Optional Canvas workspace id supplied by host policy.
     workspace: option<string>,
+    /// The surface a bare launch opens. Names one of `surfaces`.
     default-surface: string,
-    surfaces: list<string>,
+    /// Named views this package ships. Empty means the package declares none
+    /// and the host chooses its own renderer.
+    surfaces: list<surface>,
   }
 
   record launched {
@@ -32,6 +70,12 @@ interface catalog {
   }
 
   entries: func() -> result<list<entry>, error>;
+  /// Launch `surface` of `id`.
+  ///
+  /// Fails with `unsupported` when this host cannot present the surface's kind
+  /// — a host without a browser view refuses a `web` surface rather than
+  /// opening something it cannot render. A name the package does not declare
+  /// is `not-found`.
   launch: func(id: string, surface: string) -> result<launched, error>;
 }
 
