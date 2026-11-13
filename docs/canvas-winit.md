@@ -39,6 +39,16 @@ Three rules carry most of the design:
   reporting to the running program are separate contracts and are not part of
   this one.
 
+## Spores with a native host
+
+Not every Spore is a GPUI component this presenter can draw. A package may name
+`[launch] native = "terminal-host"`; when that surface is requested, the
+catalogue resolves the named binary (package-relative, the runtime bin
+directories, then `PATH`) and starts it with `SOIL_SPORE_MODULE` and
+`SOIL_SPORE_PACKAGE`. The presenter does not link the host's contracts. The
+installed `terminal` Spore is the first user: `terminal-host` owns Mycelium, the
+SSH pty and the grid, and `canvas-winit` only starts it.
+
 ## Starting a Spore
 
 Compiling a component is the slow part — tens of seconds for a 9.5 MB guest,

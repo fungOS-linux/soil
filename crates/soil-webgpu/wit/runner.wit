@@ -10,6 +10,8 @@ world runner {
   import soil:present/cursor@0.1.0;
   import soil:present/clipboard@0.1.0;
   import soil:spore/catalog@0.1.0;
+  import soil:agents/observe@0.1.0;
+  import soil:agents/control@0.1.0;
   import soil:http/http@0.1.0;
   import soil:terminal-screen/screen@0.1.0;
 

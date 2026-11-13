@@ -27,7 +27,7 @@ use soil_host::http_host::{
 use soil_webgpu::{
     CanvasFrame, CanvasGpuPresenter, CatalogEntry, CatalogError, CatalogHost, CatalogLaunched,
     CatalogSurface, CatalogSurfaceKind, ClipboardHost, CursorHost, CursorStyle, HostSetup,
-    HttpAccess, InputEvent, InputKey, PointerButton, RecordsAccess, WebGpuRuntime,
+    HttpAccess, InputEvent, InputKey, NoAgents, PointerButton, RecordsAccess, WebGpuRuntime,
 };
 use terminal::Terminals;
 use winit::{
@@ -180,22 +180,47 @@ impl CatalogHost for SporeCatalog {
                     summary: manifest.spore.summary.clone(),
                     workspace: None,
                     default_surface: manifest.launch.default.clone(),
-                    surfaces: manifest
-                        .surfaces
-                        .iter()
-                        .map(|surface| CatalogSurface {
-                            name: surface.name.clone(),
-                            kind: match surface.kind {
-                                soil_spore::SurfaceKind::Canvas => CatalogSurfaceKind::Canvas,
-                                soil_spore::SurfaceKind::Web => CatalogSurfaceKind::Web,
-                            },
-                            entry: surface
-                                .entry(manifest.ui.as_ref())
-                                .unwrap_or_default()
-                                .to_owned(),
-                            requires: surface.requires.clone(),
-                        })
-                        .collect(),
+                    surfaces: if manifest.surfaces.is_empty() {
+                        // Legacy manifests state their surfaces as kinds. The
+                        // catalogue enum has no native case yet, so name the
+                        // native surface and let launch() route it to its host;
+                        // the kind is only a hint to the picker.
+                        manifest
+                            .launch
+                            .surfaces
+                            .iter()
+                            .filter_map(|name| {
+                                let kind = match name.as_str() {
+                                    "canvas" | "native" => CatalogSurfaceKind::Canvas,
+                                    "web" => CatalogSurfaceKind::Web,
+                                    _ => return None,
+                                };
+                                Some(CatalogSurface {
+                                    name: name.clone(),
+                                    kind,
+                                    entry: String::new(),
+                                    requires: None,
+                                })
+                            })
+                            .collect()
+                    } else {
+                        manifest
+                            .surfaces
+                            .iter()
+                            .map(|surface| CatalogSurface {
+                                name: surface.name.clone(),
+                                kind: match surface.kind {
+                                    soil_spore::SurfaceKind::Canvas => CatalogSurfaceKind::Canvas,
+                                    soil_spore::SurfaceKind::Web => CatalogSurfaceKind::Web,
+                                },
+                                entry: surface
+                                    .entry(manifest.ui.as_ref())
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                requires: surface.requires.clone(),
+                            })
+                            .collect()
+                    },
                 }
             })
             .collect())
@@ -214,7 +239,16 @@ impl CatalogHost for SporeCatalog {
             .ok_or(CatalogError::Unsupported)?;
         let path = installed.root.join(&module.path);
         let executable = std::env::current_exe().map_err(|_| CatalogError::Io)?;
-        let mut command = launch_command(&executable, &path, &self.launch);
+        // A package that ships a native host for this surface is launched in
+        // that host, not in the window presenter. The presenter owns pixels
+        // and input; the host owns the capabilities the Spore asked for.
+        let native = (surface == "native")
+            .then(|| installed.manifest.launch.native.as_deref())
+            .flatten();
+        let mut command = match native {
+            Some(host) => native_command(host, &installed.root, &path, id, surface)?,
+            None => launch_command(&executable, &path, &self.launch),
+        };
         let mut child = command.spawn().map_err(|_| CatalogError::Io)?;
         // Reap the child without blocking the launcher's event loop. Launch
         // Services hands the window to another process, so there is often
@@ -225,7 +259,10 @@ impl CatalogHost for SporeCatalog {
         Ok(CatalogLaunched {
             id: id.to_owned(),
             surface: surface.to_owned(),
-            target: format!("fungOS {}", path.display()),
+            target: match native {
+                Some(host) => format!("native {host} {}", path.display()),
+                None => format!("fungOS {}", path.display()),
+            },
         })
     }
 }
@@ -266,6 +303,75 @@ fn launch_command(
         .stderr(std::process::Stdio::null());
     launch.append_args(&mut command);
     command
+}
+
+/// Start the package's native host for a surface this window cannot present.
+///
+/// The host contract is two environment variables: the module to run and the
+/// package root it belongs to. A host that also knows a private variable (the
+/// terminal's window switch, for example) can read it; the presenter stays
+/// unaware of that host's internals.
+fn native_command(
+    host: &str,
+    package: &std::path::Path,
+    module: &std::path::Path,
+    id: &str,
+    surface: &str,
+) -> Result<std::process::Command, CatalogError> {
+    let program = resolve_native(host, package).ok_or(CatalogError::Io)?;
+    let mut command = std::process::Command::new(&program);
+    command
+        .env("SOIL_SPORE_ID", id)
+        .env("SOIL_SPORE_SURFACE", surface)
+        .env("SOIL_SPORE_PACKAGE", package)
+        .env("SOIL_SPORE_MODULE", module)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // The terminal host predates the generic environment and still reads its
+    // own names. Keep both working until it moves to the contract.
+    if program
+        .file_name()
+        .is_some_and(|name| name == "terminal-host")
+    {
+        command
+            .env("TERMINAL_SPORE", module)
+            .env("TERMINAL_WINDOW", "1");
+    }
+    Ok(command)
+}
+
+/// Resolve a native host the way a shell would: an absolute or package-relative
+/// path first, then the two runtime bin directories, then `PATH`.
+fn resolve_native(host: &str, package: &std::path::Path) -> Option<std::path::PathBuf> {
+    let expanded = if let Some(rest) = host.strip_prefix("~/") {
+        std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(rest))?
+    } else {
+        std::path::PathBuf::from(host)
+    };
+    if expanded.is_absolute() {
+        return expanded.is_file().then_some(expanded);
+    }
+    if host.contains('/') {
+        let beside = package.join(&expanded);
+        return beside.is_file().then_some(beside);
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    if let Some(home) = home {
+        for directory in [
+            home.join(".local/share/fungos/bin"),
+            home.join(".local/bin"),
+        ] {
+            let candidate = directory.join(&expanded);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(&expanded))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Build (or refresh) a `.app` that stands for one Spore, and answer its path.
@@ -550,6 +656,11 @@ impl App {
                         catalog: Box::new(catalog),
                         http,
                         records,
+                        // The storefront origin is already in the HTTP policy
+                        // `build_http` constructs; this presenter has no agent
+                        // cast of its own and needs no single-origin shorthand.
+                        agents: Box::new(NoAgents),
+                        store_origin: None,
                         terminal: Box::new(Terminals::new(80, 24, command)),
                         cursor: Some(Box::new(WindowCursor(window))),
                         clipboard: Some(Box::new(SystemClipboard)),
@@ -1610,4 +1721,135 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod native_launch_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn native_host_is_resolved_beside_the_package() {
+        let root = std::env::temp_dir().join(format!(
+            "canvas-winit-native-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("native")).expect("test package");
+        let host = root.join("native/terminal-host");
+        std::fs::write(&host, "#!/bin/sh\n").expect("test host");
+        let mut permissions = std::fs::metadata(&host)
+            .expect("host metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&host, permissions).expect("host permissions");
+        let module = root.join("module.wasm");
+        std::fs::write(&module, b"").expect("test module");
+
+        let command = native_command(
+            "native/terminal-host",
+            &root,
+            &module,
+            "dev.fungos.terminal",
+            "native",
+        )
+        .expect("a native host beside the package");
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(command.get_program(), host.as_os_str());
+        assert_eq!(
+            envs.get("SOIL_SPORE_MODULE")
+                .and_then(|value| value.as_deref()),
+            module.to_str()
+        );
+        assert_eq!(
+            envs.get("TERMINAL_WINDOW")
+                .and_then(|value| value.as_deref()),
+            Some("1")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn catalogue_launches_the_native_host() {
+        let root = std::env::temp_dir().join(format!(
+            "canvas-winit-terminal-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let package = root.join("terminal");
+        std::fs::create_dir_all(package.join("native")).expect("test package");
+        std::fs::write(package.join("module.wasm"), b"").expect("test module");
+        let host = package.join("native/terminal-host");
+        std::fs::write(
+            &host,
+            "#!/bin/sh\nprintf '%s\\n%s\\n' \"$SOIL_SPORE_MODULE\" \"$SOIL_SPORE_SURFACE\" > \"$SOIL_SPORE_PACKAGE/launched\"\n",
+        )
+        .expect("test host");
+        let mut permissions = std::fs::metadata(&host)
+            .expect("host metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&host, permissions).expect("host permissions");
+        std::fs::write(
+            package.join("spore.toml"),
+            "schema = 1\n\
+             [spore]\n\
+             id = \"dev.fungos.terminal\"\n\
+             name = \"terminal\"\n\
+             version = \"0.1.0\"\n\
+             license = \"MIT\"\n\
+             summary = \"a terminal\"\n\
+             [engine]\n\
+             soil = \">=0.1\"\n\
+             target = \"wasm32-wasip2\"\n\
+             [module]\n\
+             path = \"module.wasm\"\n\
+             [launch]\n\
+             default = \"native\"\n\
+             surfaces = [\"native\"]\n\
+             native = \"native/terminal-host\"\n",
+        )
+        .expect("test manifest");
+
+        let mut catalog =
+            SporeCatalog::new(&root, LaunchConfig::default()).expect("test catalogue");
+        let entries = catalog.entries().expect("catalogue entries");
+        let terminal = entries
+            .iter()
+            .find(|entry| entry.id == "dev.fungos.terminal")
+            .expect("terminal entry");
+        assert_eq!(terminal.default_surface, "native");
+        assert!(
+            terminal
+                .surfaces
+                .iter()
+                .any(|surface| surface.name == "native")
+        );
+
+        let launched = catalog
+            .launch("dev.fungos.terminal", "native")
+            .expect("native launch");
+        assert!(launched.target.starts_with("native native/terminal-host"));
+
+        let log = package.join("launched");
+        for _ in 0..100 {
+            if log.is_file() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let text = std::fs::read_to_string(&log).expect("native host ran");
+        assert!(text.contains(&package.join("module.wasm").display().to_string()));
+        assert!(text.contains("native"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

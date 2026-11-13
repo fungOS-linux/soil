@@ -140,6 +140,45 @@ fn handle(stream: UnixStream, jobs: &Jobs) -> Result<()> {
             }
         }
         _ => {
+            // A streaming caller watches the command instead of collecting it.
+            // Everything else about the request is the same, so this branch sits
+            // in front of the one-shot path rather than beside it.
+            if request.get("stream").and_then(Value::as_bool) == Some(true) {
+                let Some(command) = request.get("command").and_then(Value::as_str) else {
+                    write_response(
+                        stream,
+                        &json!({"ok": false, "error": "request needs a string `command`"}),
+                    )?;
+                    return Ok(());
+                };
+                let shell = kind == "shell";
+                let budget = request
+                    .get("timeout_secs")
+                    .and_then(Value::as_u64)
+                    .map(Duration::from_secs);
+                let sink = SocketOutput {
+                    stream: stream.try_clone()?,
+                    closed: false,
+                };
+                let outcome = jobs.submit_streaming(command, shell, budget, Box::new(sink))?;
+                let frame = match outcome {
+                    Outcome::Completed(executed) => json!({
+                        "done": true,
+                        "ok": true,
+                        "status": executed.status,
+                        "state": executed.state.as_str(),
+                    }),
+                    Outcome::Background { job, .. } => json!({
+                        "done": true,
+                        "ok": true,
+                        "status": 0,
+                        "state": "background",
+                        "job": job,
+                    }),
+                };
+                write_response(stream, &frame)?;
+                return Ok(());
+            }
             let Some(command) = request.get("command").and_then(Value::as_str) else {
                 write_response(
                     stream,
@@ -186,6 +225,88 @@ fn handle(stream: UnixStream, jobs: &Jobs) -> Result<()> {
     Ok(())
 }
 
+/// A live sink over the request socket.
+///
+/// Frames are newline-delimited JSON so a reader never has to buffer a whole
+/// build to show its first line: `{"out": ...}`, `{"err": ...}`, then a final
+/// `{"done": true, "status": ...}`.
+struct SocketOutput {
+    stream: UnixStream,
+    closed: bool,
+}
+
+impl SocketOutput {
+    fn send(&mut self, frame: Value) {
+        if self.closed {
+            return;
+        }
+        let mut text = frame.to_string();
+        text.push('\n');
+        if self.stream.write_all(text.as_bytes()).is_err() || self.stream.flush().is_err() {
+            // The reader went away (a cancelled tool call). Keep running so the
+            // job record still ends up correct; just stop writing.
+            self.closed = true;
+        }
+    }
+}
+
+impl crate::shell::Output for SocketOutput {
+    fn stdout(&mut self, text: &str) {
+        self.send(json!({ "out": text }));
+    }
+    fn stderr(&mut self, text: &str) {
+        self.send(json!({ "err": text }));
+    }
+    fn inherits_stdio(&self) -> bool {
+        false
+    }
+}
+
+/// Send one streaming request and relay frames until the daemon says done.
+fn request_stream(socket: &Path, request: &Value, wait: Duration) -> Option<i32> {
+    let stream = UnixStream::connect(socket).ok()?;
+    stream.set_read_timeout(Some(wait)).ok()?;
+    let mut writer = stream.try_clone().ok()?;
+    writer
+        .write_all(serde_json::to_string(request).ok()?.as_bytes())
+        .ok()?;
+    writer.write_all(b"\n").ok()?;
+    writer.flush().ok()?;
+    let reader = BufReader::new(stream);
+    let mut status = 0;
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(text) = frame.get("out").and_then(Value::as_str) {
+            print!("{text}");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+        if let Some(text) = frame.get("err").and_then(Value::as_str) {
+            eprint!("{text}");
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+        }
+        if let Some(text) = frame.get("output").and_then(Value::as_str) {
+            print!("{text}");
+        }
+        if let Some(text) = frame.get("stderr").and_then(Value::as_str) {
+            eprint!("{text}");
+        }
+        if let Some(error) = frame.get("error").and_then(Value::as_str) {
+            eprintln!("mush: {error}");
+            status = 1;
+        }
+        if let Some(code) = frame.get("status").and_then(Value::as_i64) {
+            status = code as i32;
+        }
+        if frame.get("done").and_then(Value::as_bool) == Some(true) {
+            break;
+        }
+    }
+    Some(status)
+}
+
 /// What a client sends for one command line.
 ///
 /// `budget` is the caller's deadline. It is also the background threshold unless
@@ -197,6 +318,7 @@ fn request_body(line: &str, shell: bool, budget: Option<Duration>, adaptive: boo
     let mut request = json!({
         "kind": if shell { "shell" } else { "exec" },
         "command": line,
+        "stream": true,
     });
     if let Some(budget) = budget {
         request["timeout_secs"] = json!(budget.as_secs());
@@ -312,45 +434,20 @@ pub fn forward(
     } = forward;
     let request = request_body(line, shell, budget, adaptive);
     let wait = budget.unwrap_or(Duration::from_secs(120)) + Duration::from_secs(5);
-    let mut response = request_once(socket, &request, wait);
-    if response.is_none() {
-        // A socket file with nothing behind it is what a killed daemon leaves.
+    // Streamed, not one-shot: a build that runs for ten minutes has to show its
+    // first line in the first second, and the caller's exit status still comes
+    // from the daemon's own record of the command.
+    let mut status = request_stream(socket, &request, wait);
+    if status.is_none() {
+        // A socket file with nothing behind it is what a killed daemon leaves,
+        // and a cold daemon is the first command after an idle shutdown.
         let _ = std::fs::remove_file(socket);
         if !start(socket, root, desktop, idle, budget) {
             return None;
         }
-        response = request_once(socket, &request, wait);
+        status = request_stream(socket, &request, wait);
     }
-    let response = response?;
-    if response.get("state").and_then(Value::as_str) == Some("background") {
-        let hint = response
-            .get("hint")
-            .and_then(Value::as_str)
-            .unwrap_or("command still running");
-        eprintln!("{hint}");
-        return Some(0);
-    }
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        let error = response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("Mush service request failed");
-        eprintln!("mush: {error}");
-        return Some(1);
-    }
-    if let Some(output) = response.get("output").and_then(Value::as_str) {
-        print!("{output}");
-    }
-    if let Some(stderr) = response.get("stderr").and_then(Value::as_str) {
-        eprint!("{stderr}");
-    }
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    Some(
-        response
-            .get("status")
-            .and_then(Value::as_i64)
-            .unwrap_or(0) as i32,
-    )
+    status
 }
 
 /// One request/response exchange, or `None` when no daemon is listening.

@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   soil-webgpu <component.wasm>
-//!   soil-webgpu --frame FILE.bgr [--size WxH] <component.wasm>
+//!   soil-webgpu --frame FILE.bgr [--size WxH] [--agents demo] <component.wasm>
 
 use std::{env, fs, path::Path, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
@@ -17,8 +17,12 @@ fn main() -> ExitCode {
     let mut size = (480, 640);
     let mut spores_root = None;
     let mut origins = Vec::new();
+    let mut store_origin: Option<String> = None;
     let mut geode_socket = None;
     let mut geode_purpose = None;
+    let mut agents = None;
+    let mut view = None;
+    let mut agent = None;
     let mut component = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -63,12 +67,47 @@ fn main() -> ExitCode {
                 };
                 spores_root = Some(path);
             }
-            "--allow-origin" | "--store-origin" => {
+            "--allow-origin" => {
                 let Some(origin) = args.next() else {
                     eprintln!("--allow-origin requires a URL");
                     return ExitCode::FAILURE;
                 };
                 origins.push(origin);
+            }
+            "--store-origin" => {
+                let Some(origin) = args.next() else {
+                    eprintln!("--store-origin requires a URL");
+                    return ExitCode::FAILURE;
+                };
+                store_origin = Some(origin);
+            }
+            "--agents" => {
+                // Only one cast exists so far. Naming it explicitly keeps a
+                // capture honest: a frame of the demo cast is not a frame of a
+                // running Operator session.
+                let Some(value) = args.next() else {
+                    eprintln!("--agents requires a cast name (demo)");
+                    return ExitCode::FAILURE;
+                };
+                if value != "demo" {
+                    eprintln!("--agents: unknown cast {value:?} (demo)");
+                    return ExitCode::FAILURE;
+                }
+                agents = Some(value);
+            }
+            "--view" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--view requires board|roster|stage|focus");
+                    return ExitCode::FAILURE;
+                };
+                view = Some(value);
+            }
+            "--agent" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--agent requires an agent id");
+                    return ExitCode::FAILURE;
+                };
+                agent = Some(value);
             }
             "--geode-socket" => {
                 let Some(path) = args.next() else {
@@ -87,7 +126,7 @@ fn main() -> ExitCode {
             _ => {
                 if component.replace(arg).is_some() {
                     eprintln!(
-                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--records-dir DIR] [--spores-root DIR] [--allow-origin URL]... [--geode-socket PATH --geode-purpose PURPOSE] <component.wasm>"
+                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--records-dir DIR] [--spores-root DIR] [--allow-origin URL]... [--store-origin URL] [--agents demo] [--view NAME] [--agent ID] [--geode-socket PATH --geode-purpose PURPOSE] <component.wasm>"
                     );
                     return ExitCode::FAILURE;
                 }
@@ -96,7 +135,7 @@ fn main() -> ExitCode {
     }
     let Some(path) = component else {
         eprintln!(
-            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--records-dir DIR] [--spores-root DIR] [--allow-origin URL]... [--geode-socket PATH --geode-purpose PURPOSE] <component.wasm>"
+            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--records-dir DIR] [--spores-root DIR] [--allow-origin URL]... [--store-origin URL] [--agents demo] [--view NAME] [--agent ID] [--geode-socket PATH --geode-purpose PURPOSE] <component.wasm>"
         );
         return ExitCode::FAILURE;
     };
@@ -108,8 +147,15 @@ fn main() -> ExitCode {
         }
     };
     let result = if frame_path.is_some() {
-        if records_dir.is_some() && (!origins.is_empty() || spores_root.is_some()) {
-            eprintln!("--records-dir cannot be combined with --allow-origin or --spores-root");
+        if records_dir.is_some()
+            && (!origins.is_empty()
+                || spores_root.is_some()
+                || store_origin.is_some()
+                || agents.is_some())
+        {
+            eprintln!(
+                "--records-dir cannot be combined with --allow-origin, --store-origin, --spores-root or --agents"
+            );
             return ExitCode::FAILURE;
         }
         let result = if let Some(root) = records_dir.as_deref() {
@@ -119,14 +165,18 @@ fn main() -> ExitCode {
                 Box::new(soil_webgpu::InstallCatalog::new(root.clone()))
                     as Box<dyn soil_webgpu::CatalogHost>
             });
-            let http = match build_http(origins, geode_socket, geode_purpose) {
+            let http = match build_http(origins, store_origin, geode_socket, geode_purpose) {
                 Ok(http) => http,
                 Err(error) => {
                     eprintln!("webgpu: {error}");
                     return ExitCode::FAILURE;
                 }
             };
-            soil_webgpu::run_component_capture_with(&bytes, size.0, size.1, catalog, http)
+            let cast = agents.map(|_| {
+                Box::new(soil_agent_host::FixtureAgents::new().bind(agent.clone(), view.clone()))
+                    as Box<dyn soil_agent_host::AgentBackend>
+            });
+            soil_webgpu::run_component_capture_with(&bytes, size.0, size.1, catalog, http, cast)
         };
         match result {
             Ok((status, frame)) => {
@@ -173,6 +223,7 @@ fn main() -> ExitCode {
 
 fn build_http(
     origins: Vec<String>,
+    store_origin: Option<String>,
     geode_socket: Option<PathBuf>,
     geode_purpose: Option<String>,
 ) -> Result<Option<HttpAccess>, String> {
@@ -183,7 +234,12 @@ fn build_http(
         _ => {}
     }
     if origins.is_empty() {
-        return Ok(None);
+        return match store_origin {
+            Some(origin) => HttpAccess::store(origin)
+                .map(Some)
+                .map_err(|error| format!("http policy: {error:#}")),
+            None => Ok(None),
+        };
     }
     let policy = HttpPolicy::new(origins, 16 * 1024 * 1024, Duration::from_secs(30))
         .map_err(|error| format!("http policy: {error:#}"))?;

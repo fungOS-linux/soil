@@ -339,6 +339,14 @@ pub struct Presentation {
     /// Never a path: the fallback badge is what works with no network.
     #[serde(default)]
     pub icon: Option<String>,
+    /// The package's own mark, as a path inside the package.
+    ///
+    /// The difference from `icon` is where the bytes live: this one ships in
+    /// the package, so the lock covers it and a launcher draws it with no
+    /// network at all. `icon` stays the fetched, content-addressed form a store
+    /// may have and this machine may not.
+    #[serde(default)]
+    pub mark: Option<String>,
 }
 
 /// Categories a listing may claim. A fixed vocabulary is what makes browsing
@@ -450,6 +458,14 @@ pub struct Launch {
     /// directory; the entry point is a window, not a file in the package.
     #[serde(default)]
     pub canvas_module: Option<String>,
+    /// Native host for the `native` surface, when the package ships one.
+    ///
+    /// A bare name is resolved by the launcher on `PATH` and in the runtime
+    /// bin directories; an absolute path is used as-is. The host receives the
+    /// module path and package root in `SOIL_SPORE_MODULE` and
+    /// `SOIL_SPORE_PACKAGE`, so a native host needs no private convention.
+    #[serde(default)]
+    pub native: Option<String>,
 }
 
 /// A Spore's opt-in claim on an anycast name.
@@ -834,6 +850,7 @@ impl Manifest {
                 "default": self.launch.default,
                 "surfaces": self.launch.surfaces,
                 "canvas_module": self.launch.canvas_module,
+                "native": self.launch.native,
             },
             "surfaces": self.surfaces.iter().map(|surface| serde_json::json!({
                 "name": surface.name,
@@ -850,6 +867,7 @@ impl Manifest {
                 "badge": presentation.badge,
                 "color": presentation.color,
                 "icon": presentation.icon,
+                "mark": presentation.mark,
             })),
             "catalog": self.catalog.as_ref().map(|catalog| serde_json::json!({
                 "categories": catalog.categories,
@@ -1006,6 +1024,22 @@ impl Manifest {
                     "launch.default {:?} is not in launch.surfaces {:?}",
                     self.launch.default, self.launch.surfaces
                 )));
+            }
+            if let Some(native) = &self.launch.native {
+                if native.trim().is_empty() {
+                    return Err(Error::Invalid("launch.native must not be empty".into()));
+                }
+                if !self
+                    .launch
+                    .surfaces
+                    .iter()
+                    .any(|surface| surface == "native")
+                {
+                    return Err(Error::Invalid(
+                        "launch.native is set but launch.surfaces does not include \"native\""
+                            .into(),
+                    ));
+                }
             }
         } else {
             let mut seen = BTreeSet::new();
@@ -1271,6 +1305,14 @@ impl Manifest {
             if let Some(icon) = &presentation.icon {
                 reference(icon)?;
             }
+            if let Some(mark) = &presentation.mark {
+                safe_relative(mark)?;
+                if !(mark.ends_with(".svg") || mark.ends_with(".png")) {
+                    return Err(Error::Invalid(format!(
+                        "presentation.mark {mark:?} must be a .svg or .png inside the package"
+                    )));
+                }
+            }
         }
         if let Some(description) = &self.spore.description {
             if description.trim().is_empty() {
@@ -1403,6 +1445,9 @@ impl Manifest {
                     paths.push(source.clone());
                 }
             }
+        }
+        if let Some(mark) = self.presentation.as_ref().and_then(|value| value.mark.as_ref()) {
+            paths.push(mark.clone());
         }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
         paths.extend(self.skills.iter().map(|skill| skill.path.clone()));
@@ -2699,6 +2744,42 @@ mod fixtures {
         format!(
             "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n{ui}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
         )
+    }
+}
+
+#[cfg(test)]
+mod native_launch_tests {
+    use super::fixtures::manifest;
+    use super::*;
+
+    fn with_launch(default: &str, surfaces: &str, native: Option<&str>) -> String {
+        let native = native
+            .map(|host| format!("native = {host:?}\n"))
+            .unwrap_or_default();
+        manifest("").replace(
+            "[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]",
+            &format!("[launch]\ndefault = {default:?}\nsurfaces = {surfaces}\n{native}"),
+        )
+    }
+
+    #[test]
+    fn native_launch_names_its_host() {
+        let source = with_launch("native", "[\"web\", \"native\"]", Some("terminal-host"));
+        let manifest = Manifest::parse(&source).expect("a native launch is valid");
+        assert_eq!(manifest.launch.default, "native");
+        assert_eq!(manifest.launch.native.as_deref(), Some("terminal-host"));
+    }
+
+    #[test]
+    fn native_launch_requires_the_native_surface() {
+        let source = with_launch("canvas", "[\"canvas\"]", Some("terminal-host"));
+        assert!(Manifest::parse(&source).is_err());
+    }
+
+    #[test]
+    fn native_launch_rejects_an_empty_host() {
+        let source = with_launch("native", "[\"native\"]", Some("  "));
+        assert!(Manifest::parse(&source).is_err());
     }
 }
 
