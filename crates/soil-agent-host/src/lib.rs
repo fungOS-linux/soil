@@ -8,7 +8,10 @@
 //! The contract carries facts, not moods: no energy, health or mood lives here.
 //! A view derives those from `usage`, `activity` and `prompts`.
 
+pub mod escalation;
 pub mod fixture;
+
+pub use escalation::Escalation;
 
 pub use fixture::FixtureAgents;
 
