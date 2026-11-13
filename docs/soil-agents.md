@@ -113,6 +113,21 @@ Operator's `session/status` already carries the facts this contract wants:
 carry steps and usage; its adapter classifies steps into the same activity
 stations.
 
+## When nobody answers
+
+A prompt with no deadline is a deadlock: the agent will not move and the person
+may be asleep. `Escalating<B>` wraps any backend with a policy — stamp a
+deadline on every open prompt, hand the question to another agent after that
+(`SOIL_ESCALATE_TO`, typically a PM), and if the delegate has not decided when
+the grace runs out, take the safest option — the first non-danger choice, or
+`interrupt` when there is none.
+
+It is configuration, not code: `SOIL_ESCALATE_AFTER_SECS` (default 90),
+`SOIL_ESCALATE_GRACE_SECS` (default 60), `SOIL_ESCALATE_TO` (default none). A
+host with no delegate still gets the deadline, so a view can count down before
+anyone is named. Nothing here decides what is right; it decides when waiting is
+over, using only `answer` and `interrupt`.
+
 ## Bounded by the host
 
 Nothing here is an unbounded pipe:
