@@ -14,6 +14,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use soil_agent_host::{AgentBackend, NoAgents};
 use soil_spore::Manifest;
 
 mod terminal;
@@ -441,6 +442,7 @@ impl App {
                         }),
                         input,
                         interactive: true,
+                        agents: cast,
                         catalog: Box::new(catalog),
                         store_origin: Some(soil_webgpu::LOCAL_STORE_ORIGIN.to_string()),
                         terminal: Box::new(Terminals::new(80, 24, command)),
@@ -1191,6 +1193,8 @@ fn main() -> Result<()> {
     let mut splash = Splash::Flow;
     let mut prewarm = false;
     let mut spores = None;
+    let mut agents: Option<String> = None;
+    let mut acp_cmd: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1232,6 +1236,12 @@ fn main() -> Result<()> {
                         .parse()
                         .context("--after needs a number")?,
                 )
+            }
+            "--agents" => {
+                agents = Some(args.next().context("--agents takes demo or acp")?);
+            }
+            "--acp-cmd" => {
+                acp_cmd = Some(args.next().context("--acp-cmd needs a command")?);
             }
             "--spores" => {
                 spores = Some(PathBuf::from(
@@ -1281,6 +1291,22 @@ fn main() -> Result<()> {
         println!("canvas-winit: warmed {}", module.display());
         return Ok(());
     }
+    let cast: Box<dyn AgentBackend> = match agents.as_deref() {
+        None => Box::new(NoAgents),
+        Some("demo") => Box::new(soil_agent_host::FixtureAgents::new()),
+        Some("acp") => {
+            #[cfg(feature = "acp")]
+            {
+                let command = acp_cmd.clone().unwrap_or_else(|| "delta-acp".to_string());
+                Box::new(soil_webgpu::acp::AcpBackend::spawn(&command).expect("start the ACP agent"))
+            }
+            #[cfg(not(feature = "acp"))]
+            {
+                panic!("--agents acp needs the `acp` feature");
+            }
+        }
+        Some(other) => panic!("--agents: unknown source {other:?} (demo, acp)"),
+    };
     let input = Arc::new(Mutex::new(VecDeque::new()));
     if let Some(key) = key {
         let text = (key.chars().count() == 1).then(|| key.clone());

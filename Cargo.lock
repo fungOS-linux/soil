@@ -675,6 +675,7 @@ dependencies = [
  "pollster",
  "portable-pty",
  "softbuffer",
+ "soil-agent-host",
  "soil-spore",
  "soil-vt",
  "soil-webgpu",

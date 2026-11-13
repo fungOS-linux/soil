@@ -17,6 +17,12 @@ pollster = "0.4"
 portable-pty = "0.9"
 softbuffer = "0.4"
 soil-spore = { path = "../soil-spore" }
+soil-agent-host = { path = "../soil-agent-host" }
 soil-vt = { path = "../soil-vt" }
 soil-webgpu = { path = "../soil-webgpu" }
 winit = "0.30"
+
+[features]
+default = []
+# One ACP client for every harness, same as the capture host.
+acp = ["soil-webgpu/acp"]
