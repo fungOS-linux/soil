@@ -11,6 +11,7 @@ fn main() -> ExitCode {
     let mut size = (480, 640);
     let mut spores_root = None;
     let mut agents = None;
+    let mut acp_cmd = None;
     let mut view = None;
     let mut agent = None;
     let mut store_origin = None;
@@ -52,18 +53,24 @@ fn main() -> ExitCode {
                 spores_root = Some(path);
             }
             "--agents" => {
-                // Only one cast exists so far. Naming it explicitly keeps a
-                // capture honest: a frame of the demo cast is not a frame of a
-                // running Operator session.
+                // Naming the source explicitly keeps a capture honest: a frame of
+                // the demo cast is not a frame of a running Operator session.
                 let Some(value) = args.next() else {
-                    eprintln!("--agents requires a cast name (demo)");
+                    eprintln!("--agents requires a source (demo, acp)");
                     return ExitCode::FAILURE;
                 };
-                if value != "demo" {
-                    eprintln!("--agents: unknown cast {value:?} (demo)");
+                if value != "demo" && value != "acp" {
+                    eprintln!("--agents: unknown source {value:?} (demo, acp)");
                     return ExitCode::FAILURE;
                 }
                 agents = Some(value);
+            }
+            "--acp-cmd" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--acp-cmd requires a command");
+                    return ExitCode::FAILURE;
+                };
+                acp_cmd = Some(value);
             }
             "--view" => {
                 let Some(value) = args.next() else {
@@ -89,7 +96,7 @@ fn main() -> ExitCode {
             _ => {
                 if component.replace(arg).is_some() {
                     eprintln!(
-                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--agents demo] <component.wasm>"
+                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--agents demo|acp] [--acp-cmd CMD] <component.wasm>"
                     );
                     return ExitCode::FAILURE;
                 }
@@ -98,7 +105,7 @@ fn main() -> ExitCode {
     }
     let Some(path) = component else {
         eprintln!(
-            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--agents demo] <component.wasm>"
+            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--agents demo|acp] [--acp-cmd CMD] <component.wasm>"
         );
         return ExitCode::FAILURE;
     };
@@ -114,10 +121,36 @@ fn main() -> ExitCode {
             Box::new(soil_webgpu::InstallCatalog::new(root.clone()))
                 as Box<dyn soil_webgpu::CatalogHost>
         });
-        let cast = agents.map(|_| {
-            Box::new(soil_agent_host::FixtureAgents::new().bind(agent.clone(), view.clone()))
-                as Box<dyn soil_agent_host::AgentBackend>
-        });
+        let cast: Option<Box<dyn soil_agent_host::AgentBackend>> = match agents.as_deref() {
+            None => None,
+            Some("demo") => Some(Box::new(
+                soil_agent_host::FixtureAgents::new().bind(agent.clone(), view.clone()),
+            )),
+            Some("acp") => {
+                #[cfg(feature = "acp")]
+                {
+                    let command = acp_cmd.clone().unwrap_or_else(|| "delta-acp".to_string());
+                    match soil_webgpu::acp::AcpBackend::spawn(&command) {
+                        Ok(backend) => Some(Box::new(backend.bind(agent.clone(), view.clone()))),
+                        Err(error) => {
+                            eprintln!("acp: {error}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                #[cfg(not(feature = "acp"))]
+                {
+                    eprintln!(
+                        "--agents acp needs the `acp` feature: cargo build -p soil-webgpu --features acp"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+            Some(other) => {
+                eprintln!("--agents: unknown source {other:?} (demo, acp)");
+                return ExitCode::FAILURE;
+            }
+        };
         match soil_webgpu::run_component_capture_with(
             &bytes,
             size.0,

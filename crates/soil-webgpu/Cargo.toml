@@ -11,6 +11,7 @@ soil-spore = { path = "../soil-spore" }
 soil-agent-host = { path = "../soil-agent-host" }
 ureq = "2"
 anyhow = "1"
+serde_json = { version = "1", optional = true }
 wasi-webgpu-wasmtime = { git = "https://github.com/fungOS-linux/wasi-gfx-runtime", rev = "9624cae" }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 wasmtime = { version = "50", default-features = false, features = [
@@ -27,6 +28,13 @@ sha2 = "0.10"
 
 [dev-dependencies]
 wat = "1"
+
+[features]
+default = []
+# The ACP client: one adapter for every harness that speaks the protocol.
+# Off by default so a capture host stays a single binary with no process to
+# spawn and no JSON dependency it does not use.
+acp = ["dep:serde_json"]
 
 [[bin]]
 name = "soil-webgpu"

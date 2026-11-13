@@ -84,8 +84,23 @@ the generated WIT types, because hosts do not depend on generated types
 | Backend | Speaks | State it needs |
 |---|---|---|
 | `FixtureAgents` | a scripted cast | none; answers advance the script |
-| Operator | ACP JSON-RPC (`session/status`, `session/history`) plus the SSE stream | the server origin and a session id |
-| Pi | its JSON/RPC mode | the process or endpoint, and a session id |
+| `AcpBackend` | ACP over stdio: `initialize`, `session/list`, `session/load`, `session/prompt`, `session/cancel`, plus `session/update` and `session/request_permission` frames | a command to spawn; one process can hold many sessions |
+| Operator | ACP (the client above, pointed at its stdio or HTTP+SSE endpoint) | the server origin and a session id |
+| Pi | its JSON/RPC mode, or ACP through a shim | the process or endpoint, and a session id |
+
+One ACP client covers every harness that speaks the protocol, so `operator`,
+`pi` and the `delta-acp` sidecar are command lines rather than crates. It lives
+in `crates/soil-webgpu` behind the `acp` feature (`--agents acp --acp-cmd CMD`),
+off by default so a capture host spawns no process and links no JSON it does not
+use.
+
+`session/update` folds into `activity` and `phase`; chunk text fills the
+`transcript` page. `session/request_permission` parks as a `Prompt` whose
+choices are the protocol's own `optionId`s, with `allow_always` marked `danger`
+because it widens authority, and `answer` replies with the native
+`{"outcome": {"outcome": "selected", "optionId": …}}`. A harness that never
+raises a permission request — Delta's, whose approvals are modal in its app —
+simply never reaches `needs-you`.
 
 Operator's `session/status` already carries the facts this contract wants:
 `running`, `context { tokens, window }`, `turn`, `finish`, `usage`, `model`,

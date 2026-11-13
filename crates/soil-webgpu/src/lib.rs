@@ -20,6 +20,11 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use soil::present::input;
 use soil_agent_host::{AgentBackend, Answer, Binding, NoAgents, Page};
 
+/// One adapter for every harness that speaks ACP. Off by default: a capture
+/// host spawns no process and links no JSON dependency it does not use.
+#[cfg(feature = "acp")]
+pub mod acp;
+
 wasmtime::component::bindgen!({
     path: "wit",
     world: "runner",
