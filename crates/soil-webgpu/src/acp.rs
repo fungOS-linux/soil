@@ -223,6 +223,9 @@ pub struct AcpBackend {
     /// Text that arrived on the stream, per session. ACP has no history call:
     /// `session/load` replays, and this is where that replay lands.
     turns: HashMap<String, Vec<Turn>>,
+    /// What the agent called itself in `initialize` — `operator`, `delta-acp`,
+    /// `claude-code`. A view shows this instead of the transport's name.
+    harness: String,
     /// Sessions this backend asked the agent to stream. Attaching opens a live
     /// stream, so it is done per agent rather than for a whole roster.
     attached: HashSet<String>,
@@ -235,17 +238,26 @@ impl AcpBackend {
     /// refuses `initialize`, is an error rather than an empty wall of agents.
     pub fn spawn(command: &str) -> Result<Self, String> {
         let (acp, events) = Acp::spawn(command)?;
-        acp.request(
-            "initialize",
-            json!({"protocolVersion": 1, "clientCapabilities": {}}),
-            REQUEST_TIMEOUT,
-        )
-        .map_err(|error| format!("{command}: {error}"))?;
+        let hello = acp
+            .request(
+                "initialize",
+                json!({"protocolVersion": 1, "clientCapabilities": {}}),
+                REQUEST_TIMEOUT,
+            )
+            .map_err(|error| format!("{command}: {error}"))?;
+        let harness = hello
+            .get("agentInfo")
+            .and_then(|info| info.get("name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("acp")
+            .to_string();
         Ok(Self {
             acp,
             events,
             agents: Vec::new(),
             turns: HashMap::new(),
+            harness,
             attached: HashSet::new(),
             binding: Binding::default(),
             started_at_ms: now_ms(),
@@ -272,7 +284,7 @@ impl AcpBackend {
             .unwrap_or_default();
         let mut agents: Vec<Agent> = sessions
             .iter()
-            .filter_map(|session| agent_from_session(session, self.started_at_ms))
+            .filter_map(|session| agent_from_session(session, self.started_at_ms, &self.harness))
             .collect();
         agents.sort_by_key(|agent| std::cmp::Reverse(agent.updated_at_ms));
         if !agents.is_empty() {
@@ -284,7 +296,7 @@ impl AcpBackend {
         if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
             return &mut self.agents[index];
         }
-        self.agents.push(agent_stub(id, self.started_at_ms));
+        self.agents.push(agent_stub(id, self.started_at_ms, &self.harness));
         let last = self.agents.len() - 1;
         &mut self.agents[last]
     }
@@ -460,7 +472,7 @@ impl AgentBackend for AcpBackend {
     }
 }
 
-fn agent_from_session(session: &Value, started_at_ms: u64) -> Option<Agent> {
+fn agent_from_session(session: &Value, started_at_ms: u64, harness: &str) -> Option<Agent> {
     let id = session.get("sessionId")?.as_str()?;
     let archived = session
         .get("archived")
@@ -481,7 +493,7 @@ fn agent_from_session(session: &Value, started_at_ms: u64) -> Option<Agent> {
         });
     Some(Agent {
         id: id.to_string(),
-        harness: "acp".to_string(),
+        harness: harness.to_string(),
         title: title.to_string(),
         workspace: session
             .get("workspace")
@@ -508,10 +520,10 @@ fn agent_from_session(session: &Value, started_at_ms: u64) -> Option<Agent> {
     })
 }
 
-fn agent_stub(id: &str, started_at_ms: u64) -> Agent {
+fn agent_stub(id: &str, started_at_ms: u64, harness: &str) -> Agent {
     Agent {
         id: id.to_string(),
-        harness: "acp".to_string(),
+        harness: harness.to_string(),
         title: id.chars().take(12).collect(),
         workspace: None,
         model: None,
@@ -711,6 +723,7 @@ mod tests {
                 "workspace": "/w",
             }),
             7,
+            "acp",
         )
         .expect("a session with an id");
         assert_eq!(agent.id, "s1");
@@ -721,12 +734,12 @@ mod tests {
         );
         assert_eq!(agent.workspace.as_deref(), Some("/w"));
         assert_eq!(agent.phase, Phase::Idle);
-        assert!(agent_from_session(&json!({"title": "no id"}), 0).is_none());
+        assert!(agent_from_session(&json!({"title": "no id"}), 0, "acp").is_none());
     }
 
     #[test]
     fn an_update_without_a_session_still_folds() {
-        let mut agent = agent_stub("s1", 0);
+        let mut agent = agent_stub("s1", 0, "acp");
         apply_update(
             &mut agent,
             &json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}}),
@@ -737,11 +750,12 @@ mod tests {
 
     #[test]
     fn an_archived_thread_is_finished_not_idle() {
-        let idle = agent_from_session(&json!({"sessionId": "s1", "title": "live"}), 0).unwrap();
+        let idle = agent_from_session(&json!({"sessionId": "s1", "title": "live"}), 0, "acp").unwrap();
         assert_eq!(idle.phase, Phase::Idle);
         let archived = agent_from_session(
             &json!({"sessionId": "s2", "title": "done", "archived": true}),
             0,
+            "acp",
         )
         .unwrap();
         assert_eq!(archived.phase, Phase::Finished);
@@ -749,7 +763,7 @@ mod tests {
 
     #[test]
     fn a_turn_frame_decides_whether_a_thread_is_active() {
-        let mut agent = agent_stub("s1", 0);
+        let mut agent = agent_stub("s1", 0, "acp");
         apply_update(
             &mut agent,
             &json!({"sessionUpdate": "turn", "state": "running"}),
@@ -764,7 +778,7 @@ mod tests {
 
     #[test]
     fn a_tool_call_and_its_update_are_one_station() {
-        let mut agent = agent_stub("s1", 0);
+        let mut agent = agent_stub("s1", 0, "acp");
         apply_update(
             &mut agent,
             &json!({"sessionUpdate": "tool_call", "toolCallId": "t", "title": "cargo test", "kind": "execute", "status": "in_progress"}),
@@ -785,7 +799,7 @@ mod tests {
 
     #[test]
     fn activity_is_bounded() {
-        let mut agent = agent_stub("s1", 0);
+        let mut agent = agent_stub("s1", 0, "acp");
         for index in 0..(ACTIVITY_LIMIT + 4) {
             apply_update(
                 &mut agent,
