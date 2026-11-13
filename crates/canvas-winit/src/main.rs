@@ -21,7 +21,7 @@ mod terminal;
 use soil_webgpu::{
     CanvasFrame, CanvasGpuPresenter, CatalogEntry, CatalogError, CatalogHost, CatalogLaunched,
     CatalogSurface, CatalogSurfaceKind, ClipboardHost, CursorHost, CursorStyle, HostSetup,
-    InputEvent, InputKey, PointerButton, WebGpuRuntime,
+    InputEvent, InputKey, NoAgents, PointerButton, WebGpuRuntime,
 };
 use terminal::Terminals;
 use winit::{
@@ -126,7 +126,16 @@ impl CatalogHost for SporeCatalog {
             .ok_or(CatalogError::Unsupported)?;
         let path = installed.root.join(&module.path);
         let executable = std::env::current_exe().map_err(|_| CatalogError::Io)?;
-        let mut command = launch_command(&executable, &path);
+        // A package that ships a native host for this surface is launched in
+        // that host, not in the window presenter. The presenter owns pixels
+        // and input; the host owns the capabilities the Spore asked for.
+        let native = (surface == "native")
+            .then(|| installed.manifest.launch.native.as_deref())
+            .flatten();
+        let mut command = match native {
+            Some(host) => native_command(host, &installed.root, &path, id, surface)?,
+            None => launch_command(&executable, &path),
+        };
         let mut child = command.spawn().map_err(|_| CatalogError::Io)?;
         // Reap the child without blocking the launcher's event loop. Launch
         // Services hands the window to another process, so there is often
@@ -137,7 +146,10 @@ impl CatalogHost for SporeCatalog {
         Ok(CatalogLaunched {
             id: id.to_owned(),
             surface: surface.to_owned(),
-            target: format!("fungOS {}", path.display()),
+            target: match native {
+                Some(host) => format!("native {host} {}", path.display()),
+                None => format!("fungOS {}", path.display()),
+            },
         })
     }
 }
@@ -172,6 +184,75 @@ fn launch_command(executable: &std::path::Path, module: &std::path::Path) -> std
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     command
+}
+
+/// Start the package's native host for a surface this window cannot present.
+///
+/// The host contract is two environment variables: the module to run and the
+/// package root it belongs to. A host that also knows a private variable (the
+/// terminal's window switch, for example) can read it; the presenter stays
+/// unaware of that host's internals.
+fn native_command(
+    host: &str,
+    package: &std::path::Path,
+    module: &std::path::Path,
+    id: &str,
+    surface: &str,
+) -> Result<std::process::Command, CatalogError> {
+    let program = resolve_native(host, package).ok_or(CatalogError::Io)?;
+    let mut command = std::process::Command::new(&program);
+    command
+        .env("SOIL_SPORE_ID", id)
+        .env("SOIL_SPORE_SURFACE", surface)
+        .env("SOIL_SPORE_PACKAGE", package)
+        .env("SOIL_SPORE_MODULE", module)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // The terminal host predates the generic environment and still reads its
+    // own names. Keep both working until it moves to the contract.
+    if program
+        .file_name()
+        .is_some_and(|name| name == "terminal-host")
+    {
+        command
+            .env("TERMINAL_SPORE", module)
+            .env("TERMINAL_WINDOW", "1");
+    }
+    Ok(command)
+}
+
+/// Resolve a native host the way a shell would: an absolute or package-relative
+/// path first, then the two runtime bin directories, then `PATH`.
+fn resolve_native(host: &str, package: &std::path::Path) -> Option<std::path::PathBuf> {
+    let expanded = if let Some(rest) = host.strip_prefix("~/") {
+        std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(rest))?
+    } else {
+        std::path::PathBuf::from(host)
+    };
+    if expanded.is_absolute() {
+        return expanded.is_file().then_some(expanded);
+    }
+    if host.contains('/') {
+        let beside = package.join(&expanded);
+        return beside.is_file().then_some(beside);
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    if let Some(home) = home {
+        for directory in [
+            home.join(".local/share/fungos/bin"),
+            home.join(".local/bin"),
+        ] {
+            let candidate = directory.join(&expanded);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(&expanded))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Build (or refresh) a `.app` that stands for one Spore, and answer its path.
@@ -442,6 +523,7 @@ impl App {
                         input,
                         interactive: true,
                         catalog: Box::new(catalog),
+                        agents: Box::new(NoAgents),
                         store_origin: Some(soil_webgpu::LOCAL_STORE_ORIGIN.to_string()),
                         terminal: Box::new(Terminals::new(80, 24, command)),
                         cursor: Some(Box::new(WindowCursor(window))),

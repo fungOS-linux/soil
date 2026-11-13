@@ -458,6 +458,14 @@ pub struct Launch {
     /// directory; the entry point is a window, not a file in the package.
     #[serde(default)]
     pub canvas_module: Option<String>,
+    /// Native host for the `native` surface, when the package ships one.
+    ///
+    /// A bare name is resolved by the launcher on `PATH` and in the runtime
+    /// bin directories; an absolute path is used as-is. The host receives the
+    /// module path and package root in `SOIL_SPORE_MODULE` and
+    /// `SOIL_SPORE_PACKAGE`, so a native host needs no private convention.
+    #[serde(default)]
+    pub native: Option<String>,
 }
 
 /// A Spore's opt-in claim on an anycast name.
@@ -842,6 +850,7 @@ impl Manifest {
                 "default": self.launch.default,
                 "surfaces": self.launch.surfaces,
                 "canvas_module": self.launch.canvas_module,
+                "native": self.launch.native,
             },
             "surfaces": self.surfaces.iter().map(|surface| serde_json::json!({
                 "name": surface.name,
@@ -1015,6 +1024,22 @@ impl Manifest {
                     "launch.default {:?} is not in launch.surfaces {:?}",
                     self.launch.default, self.launch.surfaces
                 )));
+            }
+            if let Some(native) = &self.launch.native {
+                if native.trim().is_empty() {
+                    return Err(Error::Invalid("launch.native must not be empty".into()));
+                }
+                if !self
+                    .launch
+                    .surfaces
+                    .iter()
+                    .any(|surface| surface == "native")
+                {
+                    return Err(Error::Invalid(
+                        "launch.native is set but launch.surfaces does not include \"native\""
+                            .into(),
+                    ));
+                }
             }
         } else {
             let mut seen = BTreeSet::new();
@@ -2719,6 +2744,42 @@ mod fixtures {
         format!(
             "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n{ui}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
         )
+    }
+}
+
+#[cfg(test)]
+mod native_launch_tests {
+    use super::fixtures::manifest;
+    use super::*;
+
+    fn with_launch(default: &str, surfaces: &str, native: Option<&str>) -> String {
+        let native = native
+            .map(|host| format!("native = {host:?}\n"))
+            .unwrap_or_default();
+        manifest("").replace(
+            "[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]",
+            &format!("[launch]\ndefault = {default:?}\nsurfaces = {surfaces}\n{native}"),
+        )
+    }
+
+    #[test]
+    fn native_launch_names_its_host() {
+        let source = with_launch("native", "[\"web\", \"native\"]", Some("terminal-host"));
+        let manifest = Manifest::parse(&source).expect("a native launch is valid");
+        assert_eq!(manifest.launch.default, "native");
+        assert_eq!(manifest.launch.native.as_deref(), Some("terminal-host"));
+    }
+
+    #[test]
+    fn native_launch_requires_the_native_surface() {
+        let source = with_launch("canvas", "[\"canvas\"]", Some("terminal-host"));
+        assert!(Manifest::parse(&source).is_err());
+    }
+
+    #[test]
+    fn native_launch_rejects_an_empty_host() {
+        let source = with_launch("native", "[\"native\"]", Some("  "));
+        assert!(Manifest::parse(&source).is_err());
     }
 }
 

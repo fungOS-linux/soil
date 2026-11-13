@@ -18,7 +18,10 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use soil::present::input;
-use soil_agent_host::{AgentBackend, Answer, Binding, NoAgents, Page};
+use soil_agent_host::{AgentBackend, Answer, Binding, Page};
+
+/// The denying agent backend, for presenters that own no agent session.
+pub use soil_agent_host::NoAgents;
 
 wasmtime::component::bindgen!({
     path: "wit",
