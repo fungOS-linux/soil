@@ -36,10 +36,10 @@ credential resolution stay in host adapters.
 | `fungos:actions@1.0.0` | wired | action bus plus presentation catalog |
 | `soil:ble@1.0.0` | wired | BLE host and COLMI ring Spore |
 | `soil:canvas@1.0.0` | wired | owner surface, `soil-scene` document, guest SDK and component host |
-| `soil:terminal@0.1.0` | contract | host-rendered terminal surface |
+| `soil:terminal@0.1.0` | wired | host-rendered terminal surface; `terminal-host` |
 | `soil:view@1.0.0` | contract | host-reviewed web/Spore/retained view |
 | `fungos:mycelium@0.1.0` | contract | Pulse control-plane bridge to myceliumd; host implementation pending |
-| `soil:mycelium@0.1.0` | deferred | directory/session; no host yet |
+| `soil:mycelium@0.1.0` | wired | directory/session; `terminal-host` in Soil |
 | `soil:device@0.1.0` | wired | battery/estimate/lid core-Wasm lowering |
 | `wasi:audio@0.1.0` | wired | draft cpal audio sink |
 
