@@ -96,22 +96,47 @@ impl CatalogHost for SporeCatalog {
                     summary: manifest.spore.summary.clone(),
                     workspace: None,
                     default_surface: manifest.launch.default.clone(),
-                    surfaces: manifest
-                        .surfaces
-                        .iter()
-                        .map(|surface| CatalogSurface {
-                            name: surface.name.clone(),
-                            kind: match surface.kind {
-                                soil_spore::SurfaceKind::Canvas => CatalogSurfaceKind::Canvas,
-                                soil_spore::SurfaceKind::Web => CatalogSurfaceKind::Web,
-                            },
-                            entry: surface
-                                .entry(manifest.ui.as_ref())
-                                .unwrap_or_default()
-                                .to_owned(),
-                            requires: surface.requires.clone(),
-                        })
-                        .collect(),
+                    surfaces: if manifest.surfaces.is_empty() {
+                        // Legacy manifests state their surfaces as kinds. The
+                        // catalogue enum has no native case yet, so name the
+                        // native surface and let launch() route it to its host;
+                        // the kind is only a hint to the picker.
+                        manifest
+                            .launch
+                            .surfaces
+                            .iter()
+                            .filter_map(|name| {
+                                let kind = match name.as_str() {
+                                    "canvas" | "native" => CatalogSurfaceKind::Canvas,
+                                    "web" => CatalogSurfaceKind::Web,
+                                    _ => return None,
+                                };
+                                Some(CatalogSurface {
+                                    name: name.clone(),
+                                    kind,
+                                    entry: String::new(),
+                                    requires: None,
+                                })
+                            })
+                            .collect()
+                    } else {
+                        manifest
+                            .surfaces
+                            .iter()
+                            .map(|surface| CatalogSurface {
+                                name: surface.name.clone(),
+                                kind: match surface.kind {
+                                    soil_spore::SurfaceKind::Canvas => CatalogSurfaceKind::Canvas,
+                                    soil_spore::SurfaceKind::Web => CatalogSurfaceKind::Web,
+                                },
+                                entry: surface
+                                    .entry(manifest.ui.as_ref())
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                requires: surface.requires.clone(),
+                            })
+                            .collect()
+                    },
                 }
             })
             .collect())
@@ -1589,6 +1614,14 @@ mod native_launch_tests {
         .expect("test manifest");
 
         let mut catalog = SporeCatalog::new(&root).expect("test catalogue");
+        let entries = catalog.entries().expect("catalogue entries");
+        let terminal = entries
+            .iter()
+            .find(|entry| entry.id == "dev.fungos.terminal")
+            .expect("terminal entry");
+        assert_eq!(terminal.default_surface, "native");
+        assert!(terminal.surfaces.iter().any(|surface| surface.name == "native"));
+
         let launched = catalog
             .launch("dev.fungos.terminal", "native")
             .expect("native launch");
