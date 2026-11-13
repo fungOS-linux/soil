@@ -1309,7 +1309,27 @@ pub fn run_component_capture_with(
     store_origin: Option<String>,
     agents: Option<Box<dyn AgentBackend>>,
 ) -> Result<(u32, Option<CanvasFrame>)> {
-    let runtime = WebGpuRuntime::new()?;
+    run_component_capture_with_keys(bytes, width, height, catalog, store_origin, agents, Vec::new())
+}
+
+/// A capture that presses keys first. A Spore gets one surface lease, so a
+/// capture is the only way to photograph a state a person reaches by key.
+#[allow(clippy::too_many_arguments)]
+pub fn run_component_capture_with_keys(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    catalog: Option<Box<dyn CatalogHost>>,
+    store_origin: Option<String>,
+    agents: Option<Box<dyn AgentBackend>>,
+    keys: Vec<String>,
+) -> Result<(u32, Option<CanvasFrame>)> {
+    // Compiling a Spore takes minutes; a capture that repeats should pay that
+    // once. Every frame this host takes in a session runs the same module.
+    let runtime = match component_cache() {
+        Some(cache) => WebGpuRuntime::new()?.with_component_cache(cache),
+        None => WebGpuRuntime::new()?,
+    };
     let capture = FrameCapture::new(width, height);
     let mut setup = HostSetup::capture(Box::new(capture.clone()));
     if let Some(catalog) = catalog {
@@ -1319,8 +1339,34 @@ pub fn run_component_capture_with(
         setup.agents = agents;
     }
     setup.store_origin = store_origin;
+    for key in keys {
+        let text = (key.chars().count() == 1).then(|| key.clone());
+        setup.input.lock().expect("input queue").push_back(InputEvent::Key(InputKey {
+            key,
+            text,
+            pressed: true,
+            shift: false,
+            control: false,
+            alt: false,
+            meta: false,
+        }));
+    }
     let status = pollster::block_on(runtime.run_component_with(bytes, setup))?;
     Ok((status, capture.take()))
+}
+
+/// Where a capture host caches compiled components. `SOIL_COMPONENT_CACHE`
+/// overrides it; without a home directory there is no cache and every frame
+/// pays Cranelift again.
+fn component_cache() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("SOIL_COMPONENT_CACHE") {
+        return Some(std::path::PathBuf::from(path));
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let mut path = std::path::PathBuf::from(home);
+    path.push("Library/Caches/soil/components");
+    std::fs::create_dir_all(&path).ok()?;
+    Some(path)
 }
 
 #[cfg(test)]

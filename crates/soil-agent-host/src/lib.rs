@@ -295,3 +295,43 @@ impl AgentBackend for NoAgents {
         Err(Error::Denied)
     }
 }
+
+/// A boxed backend is a backend. A host that decorates one (escalation,
+/// caching, a composite) should not have to re-forward every method by hand.
+impl<T: AgentBackend + ?Sized> AgentBackend for Box<T> {
+    fn list(&mut self) -> Vec<Agent> {
+        (**self).list()
+    }
+
+    fn get(&mut self, id: &str) -> Option<Agent> {
+        (**self).get(id)
+    }
+
+    fn binding(&mut self) -> Binding {
+        (**self).binding()
+    }
+
+    fn scope(&mut self) -> Scope {
+        (**self).scope()
+    }
+
+    fn transcript(&mut self, id: &str, before: Option<u64>, limit: u32) -> Result<Page, Error> {
+        (**self).transcript(id, before, limit)
+    }
+
+    fn answer(&mut self, id: &str, prompt_id: &str, answer: Answer) -> Result<(), Error> {
+        (**self).answer(id, prompt_id, answer)
+    }
+
+    fn send(&mut self, id: &str, text: &str) -> Result<(), Error> {
+        (**self).send(id, text)
+    }
+
+    fn interrupt(&mut self, id: &str) -> Result<(), Error> {
+        (**self).interrupt(id)
+    }
+
+    fn next(&mut self, timeout_ms: u32) -> Option<Change> {
+        (**self).next(timeout_ms)
+    }
+}
