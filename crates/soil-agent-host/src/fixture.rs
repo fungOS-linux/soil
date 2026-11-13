@@ -259,14 +259,14 @@ impl FixtureAgents {
             vec![Prompt {
                 id: "p2".into(),
                 kind: PromptKind::Question,
-                title: "Delete the dead `old_view()` path, or leave it for the next branch?".into(),
+                title: "Rotate the staging deploy key now, or wait for the window?".into(),
                 body: Some(
                     "Nothing calls it, and the Lua host never loads it. Removing it is a \
                      two-line diff; leaving it means the next branch inherits a second \
                      layout path."
                         .into(),
                 ),
-                details: Some("src/views.rs\n  fn old_view() -> AnyElement   // 0 callers".into()),
+                details: Some("deploy/staging.env\n  DEPLOY_KEY   expires in 2h\n  last rotated 29d ago".into()),
                 origin: Some("finish_status".into()),
                 choices: Vec::new(),
                 allows_text: true,
@@ -457,7 +457,7 @@ impl FixtureAgents {
                         "Board, stage and focus share one layout pass; skins are pure functions of vitals.",
                         Role::Assistant,
                     ),
-                    ("finish_status(decision): delete old_view()?", Role::Tool),
+                    ("finish_status(decision): rotate the staging key?", Role::Tool),
                 ],
             ),
             (
