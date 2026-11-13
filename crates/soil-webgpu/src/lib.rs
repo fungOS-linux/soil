@@ -18,7 +18,14 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use soil::present::input;
-use soil_agent_host::{AgentBackend, Answer, Binding, NoAgents, Page};
+use soil_agent_host::{AgentBackend, Answer, Binding, Page};
+// Re-exported so a presenter can name the denying defaults it hands over
+// without depending on `soil-host` or `soil-agent-host` itself.
+pub use soil_agent_host::NoAgents;
+pub use soil_host::http_host::{BearerCredential, CredentialProvider, NoCredentials};
+use soil_host::http_host::{
+    Error as HostError, HttpHost, HttpPolicy, Request as HostRequest, Response as HostResponse,
+};
 
 wasmtime::component::bindgen!({
     path: "wit",
@@ -442,7 +449,7 @@ pub struct WebGpuHost {
     /// empty wall.
     agents: Box<dyn AgentBackend>,
     /// The one origin a guest may reach with `soil:http`, if any.
-    store_origin: Option<String>,
+    http: Option<HttpHost>,
     terminal: Box<dyn TerminalHost>,
     cursor: Option<Box<dyn CursorHost>>,
     clipboard: Option<Box<dyn ClipboardHost>>,
@@ -452,6 +459,12 @@ pub struct WebGpuHost {
 /// storefront has to allow this origin; a capture host that needs no network
 /// leaves it out.
 pub const LOCAL_STORE_ORIGIN: &str = "http://127.0.0.1:8800";
+
+/// The largest `soil:http` response body any Spore here may ask for.
+const HTTP_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// The longest `soil:http` deadline any Spore here may ask for.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Everything one Spore run is allowed to talk to. A presenter fills in the
 /// parts it owns; anything left as the denying default refuses the guest loudly
@@ -466,6 +479,11 @@ pub struct HostSetup {
     /// The one origin a guest may reach with `soil:http`. `None` denies every
     /// request: a capture host that does not need the network has none.
     pub store_origin: Option<String>,
+    /// Resolves the opaque credential handles a guest names. The default
+    /// refuses every handle, so a host that was never given a credential
+    /// denies an authenticated request instead of quietly sending an
+    /// unauthenticated one with the same shape.
+    pub credentials: Arc<dyn CredentialProvider>,
     pub terminal: Box<dyn TerminalHost>,
     /// `None` on hosts without a window; `soil:present/cursor` still succeeds.
     pub cursor: Option<Box<dyn CursorHost>>,
@@ -483,6 +501,7 @@ impl HostSetup {
             catalog: Box::new(NoCatalog),
             agents: Box::new(NoAgents),
             store_origin: None,
+            credentials: Arc::new(NoCredentials),
             terminal: Box::new(NoTerminal),
             cursor: None,
             clipboard: None,
@@ -500,6 +519,16 @@ impl WebGpuHost {
             display: None,
         };
         let instance = wgpu_core::global::Global::new("webgpu", descriptor, None);
+        // `soil:http` is `soil-host`'s policy object, built here from the one
+        // origin this run was given. Budgets are the host's: a Spore asks
+        // within them or is told `over-budget`.
+        let http = match setup.store_origin {
+            Some(origin) => Some(
+                HttpHost::new(HttpPolicy::new([origin], HTTP_MAX_BYTES, HTTP_TIMEOUT)?)
+                    .with_credentials(setup.credentials),
+            ),
+            None => None,
+        };
         Ok(Self {
             instance: Arc::new(instance),
             table: ResourceTable::new(),
@@ -510,7 +539,7 @@ impl WebGpuHost {
             interactive: setup.interactive,
             catalog: setup.catalog,
             agents: setup.agents,
-            store_origin: setup.store_origin,
+            http,
             terminal: setup.terminal,
             cursor: setup.cursor,
             clipboard: setup.clipboard,
@@ -600,52 +629,77 @@ impl soil::present::surface::Host for WebGpuHost {
 }
 
 impl soil::http::http::Host for WebGpuHost {
-    /// One origin, one method, one bounded body.
+    /// Translate, then hand the request to `soil-host`.
     ///
-    /// The guest names a URL; this refuses anything outside the single origin
-    /// the run was given, refuses a body over the caller's own budget, and
-    /// reports a transport failure as `unavailable` rather than pretending the
-    /// upstream answered.
+    /// The origin allowlist, header rules, credential injection, TLS, redirect
+    /// policy and body cap are all `soil-host`'s. Reaching a second, subtly
+    /// different answer to "is this request allowed" by re-implementing them
+    /// here is exactly what this delegation exists to prevent. The conversion
+    /// below is unavoidable rather than optional: each crate that imports
+    /// `soil:http` gets its own generated types, so the two can only meet on
+    /// the plain host types in between.
     fn fetch(
         &mut self,
         request: soil::http::http::Request,
     ) -> std::result::Result<soil::http::http::Response, soil::http::http::Error> {
-        let Some(origin) = self.store_origin.as_deref() else {
+        let Some(http) = self.http.as_mut() else {
             return Err(soil::http::http::Error::Denied);
         };
-        if !request.url.starts_with(origin) {
-            return Err(soil::http::http::Error::Denied);
-        }
-        if !matches!(request.method, soil::http::http::Method::Get) {
-            return Err(soil::http::http::Error::Unsupported);
-        }
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_millis(
-                request.timeout_ms.max(1) as u64
-            ))
-            .build();
-        let response = match agent.get(&request.url).call() {
-            Ok(response) => response,
-            Err(ureq::Error::Status(_, response)) => response,
-            Err(_) => return Err(soil::http::http::Error::Unavailable),
-        };
-        let status = response.status();
-        let mut body = Vec::new();
-        use std::io::Read as _;
-        if response
-            .into_reader()
-            .take(request.max_bytes.max(1) as u64)
-            .read_to_end(&mut body)
-            .is_err()
-        {
-            return Err(soil::http::http::Error::Io);
-        }
-        Ok(soil::http::http::Response {
-            status,
-            final_url: request.url,
-            headers: Vec::new(),
-            body,
-        })
+        let response = http.perform(host_request(request)).map_err(guest_error)?;
+        Ok(guest_response(response))
+    }
+}
+
+/// The guest's request in `soil-host`'s host-internal form.
+fn host_request(request: soil::http::http::Request) -> HostRequest {
+    use soil::http::http::Method;
+    HostRequest {
+        url: request.url,
+        method: match request.method {
+            Method::Get => soil_host::http_host::Method::Get,
+            Method::Head => soil_host::http_host::Method::Head,
+            Method::Post => soil_host::http_host::Method::Post,
+            Method::Put => soil_host::http_host::Method::Put,
+            Method::Patch => soil_host::http_host::Method::Patch,
+            Method::Delete => soil_host::http_host::Method::Delete,
+        },
+        headers: request
+            .headers
+            .into_iter()
+            .map(|header| (header.name, header.value))
+            .collect(),
+        body: request.body,
+        credential: request.credential,
+        max_bytes: request.max_bytes,
+        timeout_ms: request.timeout_ms,
+    }
+}
+
+fn guest_response(response: HostResponse) -> soil::http::http::Response {
+    soil::http::http::Response {
+        status: response.status,
+        final_url: response.final_url,
+        headers: response
+            .headers
+            .into_iter()
+            .map(|(name, value)| soil::http::http::Header { name, value })
+            .collect(),
+        body: response.body,
+    }
+}
+
+fn guest_error(error: HostError) -> soil::http::http::Error {
+    use soil::http::http::Error;
+    match error {
+        HostError::Denied => Error::Denied,
+        HostError::Invalid => Error::Invalid,
+        HostError::OverBudget => Error::OverBudget,
+        HostError::Timeout => Error::Timeout,
+        HostError::Unavailable => Error::Unavailable,
+        HostError::Tls => Error::Tls,
+        HostError::Http => Error::Http,
+        HostError::Io => Error::Io,
+        HostError::Unsupported => Error::Unsupported,
     }
 }
 
@@ -1290,7 +1344,36 @@ pub fn run_component_capture(
     width: u32,
     height: u32,
 ) -> Result<(u32, Option<CanvasFrame>)> {
-    run_component_capture_with(bytes, width, height, None, None, None)
+    run_component_capture_with(bytes, width, height, CaptureHost::default())
+}
+
+/// What a capture run may reach.
+///
+/// `Default` is the denying host: no catalog, no agents, no origin, no
+/// credentials. A capture that needs one of them names it, so the call site
+/// says what authority the frame it produced had.
+pub struct CaptureHost {
+    pub catalog: Option<Box<dyn CatalogHost>>,
+    pub agents: Option<Box<dyn AgentBackend>>,
+    /// The one origin `soil:http` may reach.
+    pub store_origin: Option<String>,
+    /// Resolves the credential handles the guest names.
+    pub credentials: Arc<dyn CredentialProvider>,
+    /// Keep compiled components here, named by the module's digest. Compiling
+    /// a 16 MB Spore is minutes of Cranelift; reading it back is a read.
+    pub component_cache: Option<std::path::PathBuf>,
+}
+
+impl Default for CaptureHost {
+    fn default() -> Self {
+        Self {
+            catalog: None,
+            agents: None,
+            store_origin: None,
+            credentials: Arc::new(NoCredentials),
+            component_cache: None,
+        }
+    }
 }
 
 /// Capture one frame with a host that can answer `soil:spore/catalog` and
@@ -1300,20 +1383,22 @@ pub fn run_component_capture_with(
     bytes: &[u8],
     width: u32,
     height: u32,
-    catalog: Option<Box<dyn CatalogHost>>,
-    store_origin: Option<String>,
-    agents: Option<Box<dyn AgentBackend>>,
+    host: CaptureHost,
 ) -> Result<(u32, Option<CanvasFrame>)> {
-    let runtime = WebGpuRuntime::new()?;
+    let runtime = match host.component_cache {
+        Some(directory) => WebGpuRuntime::new()?.with_component_cache(directory),
+        None => WebGpuRuntime::new()?,
+    };
     let capture = FrameCapture::new(width, height);
     let mut setup = HostSetup::capture(Box::new(capture.clone()));
-    if let Some(catalog) = catalog {
+    if let Some(catalog) = host.catalog {
         setup.catalog = catalog;
     }
-    if let Some(agents) = agents {
+    if let Some(agents) = host.agents {
         setup.agents = agents;
     }
-    setup.store_origin = store_origin;
+    setup.store_origin = host.store_origin;
+    setup.credentials = host.credentials;
     let status = pollster::block_on(runtime.run_component_with(bytes, setup))?;
     Ok((status, capture.take()))
 }

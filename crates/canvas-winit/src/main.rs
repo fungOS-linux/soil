@@ -442,7 +442,11 @@ impl App {
                         input,
                         interactive: true,
                         catalog: Box::new(catalog),
+                        // This shell hosts one Spore's view, not its agents.
+                        agents: Box::new(soil_webgpu::NoAgents),
                         store_origin: Some(soil_webgpu::LOCAL_STORE_ORIGIN.to_string()),
+                        // The storefront needs no token, so it is given none.
+                        credentials: std::sync::Arc::new(soil_webgpu::NoCredentials),
                         terminal: Box::new(Terminals::new(80, 24, command)),
                         cursor: Some(Box::new(WindowCursor(window))),
                         clipboard: Some(Box::new(SystemClipboard)),

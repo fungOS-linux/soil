@@ -9,7 +9,9 @@ publish = false
 [dependencies]
 soil-spore = { path = "../soil-spore" }
 soil-agent-host = { path = "../soil-agent-host" }
-ureq = "2"
+# `soil:http` policy, credentials and transport live in one place. This crate
+# implements the interface by delegating to that one, not by keeping its own.
+soil-host = { path = "../soil-host", default-features = false }
 anyhow = "1"
 wasi-webgpu-wasmtime = { git = "https://github.com/fungOS-linux/wasi-gfx-runtime", rev = "9624cae" }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }

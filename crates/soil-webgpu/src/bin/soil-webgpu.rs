@@ -3,8 +3,15 @@
 //! Usage:
 //!   soil-webgpu <component.wasm>
 //!   soil-webgpu --frame FILE.bgr [--size WxH] [--agents demo] <component.wasm>
+//!
+//! A capture that needs the network names the one origin the guest may reach and,
+//! if the guest asks for a credential, the environment variable holding it:
+//!   soil-webgpu --frame f.bgr --store-origin http://127.0.0.1:23373 \
+//!                --credential-env WEEPER_TOKEN --component-cache DIR component.wasm
 
-use std::{env, fs, path::Path, process::ExitCode};
+use std::{env, fs, path::Path, process::ExitCode, sync::Arc};
+
+use soil_webgpu::{BearerCredential, CaptureHost, CredentialProvider, NoCredentials};
 
 fn main() -> ExitCode {
     let mut frame_path = None;
@@ -14,6 +21,8 @@ fn main() -> ExitCode {
     let mut view = None;
     let mut agent = None;
     let mut store_origin = None;
+    let mut credential_env = None;
+    let mut component_cache = None;
     let mut component = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -86,10 +95,30 @@ fn main() -> ExitCode {
                 };
                 store_origin = Some(origin);
             }
+            // The token never reaches the guest, the component's arguments or
+            // this process's `argv`: it is read here and stays in the host,
+            // which injects it for the handle the guest names.
+            "--credential-env" => {
+                let Some(variable) = args.next() else {
+                    eprintln!("--credential-env requires an environment variable name");
+                    return ExitCode::FAILURE;
+                };
+                credential_env = Some(variable);
+            }
+            // Compiling a Spore is minutes; reading a cached compilation of the
+            // same bytes is a read. Named by digest, so a rebuilt component
+            // misses the cache instead of running the old one.
+            "--component-cache" => {
+                let Some(directory) = args.next() else {
+                    eprintln!("--component-cache requires a directory");
+                    return ExitCode::FAILURE;
+                };
+                component_cache = Some(std::path::PathBuf::from(directory));
+            }
             _ => {
                 if component.replace(arg).is_some() {
                     eprintln!(
-                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--agents demo] <component.wasm>"
+                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--credential-env VAR] [--agents demo] <component.wasm>"
                     );
                     return ExitCode::FAILURE;
                 }
@@ -98,7 +127,7 @@ fn main() -> ExitCode {
     }
     let Some(path) = component else {
         eprintln!(
-            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--agents demo] <component.wasm>"
+            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--credential-env VAR] [--agents demo] <component.wasm>"
         );
         return ExitCode::FAILURE;
     };
@@ -118,13 +147,27 @@ fn main() -> ExitCode {
             Box::new(soil_agent_host::FixtureAgents::new().bind(agent.clone(), view.clone()))
                 as Box<dyn soil_agent_host::AgentBackend>
         });
+        let credentials: Arc<dyn CredentialProvider> = match credential_env {
+            Some(variable) => match env::var(&variable) {
+                Ok(token) if !token.is_empty() => Arc::new(BearerCredential::new(token)),
+                _ => {
+                    eprintln!("--credential-env: {variable} is unset or empty");
+                    return ExitCode::FAILURE;
+                }
+            },
+            None => Arc::new(NoCredentials),
+        };
         match soil_webgpu::run_component_capture_with(
             &bytes,
             size.0,
             size.1,
-            catalog,
-            store_origin.clone(),
-            cast,
+            CaptureHost {
+                catalog,
+                agents: cast,
+                store_origin: store_origin.clone(),
+                credentials,
+                component_cache: component_cache.clone(),
+            },
         ) {
             Ok((status, frame)) => {
                 if status != 0 {
