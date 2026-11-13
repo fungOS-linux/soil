@@ -32,6 +32,7 @@ credential resolution stay in host adapters.
 | `soil:surface-import@0.1.0` | wired | host-owned imported surfaces |
 | `soil:inference@0.2.0` | wired | models, tools, completion stream |
 | `soil:notify@1.1.0` | wired | inbox/focus/history/cleanup and ringer |
+| `soil:agents@0.1.0` | contract | the set of agents for a principal or shared desktop: phase, goal, owner, activity, prompts, answers |
 | `fungos:actions@1.0.0` | wired | action bus plus presentation catalog |
 | `soil:ble@1.0.0` | wired | BLE host and COLMI ring Spore |
 | `soil:canvas@1.0.0` | wired | owner surface, `soil-scene` document, guest SDK and component host |

@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   soil-webgpu <component.wasm>
-//!   soil-webgpu --frame FILE.bgr [--size WxH] <component.wasm>
+//!   soil-webgpu --frame FILE.bgr [--size WxH] [--agents demo] <component.wasm>
 
 use std::{env, fs, path::Path, process::ExitCode};
 
@@ -10,6 +10,9 @@ fn main() -> ExitCode {
     let mut frame_path = None;
     let mut size = (480, 640);
     let mut spores_root = None;
+    let mut agents = None;
+    let mut view = None;
+    let mut agent = None;
     let mut store_origin = None;
     let mut component = None;
     let mut args = env::args().skip(1);
@@ -48,6 +51,34 @@ fn main() -> ExitCode {
                 };
                 spores_root = Some(path);
             }
+            "--agents" => {
+                // Only one cast exists so far. Naming it explicitly keeps a
+                // capture honest: a frame of the demo cast is not a frame of a
+                // running Operator session.
+                let Some(value) = args.next() else {
+                    eprintln!("--agents requires a cast name (demo)");
+                    return ExitCode::FAILURE;
+                };
+                if value != "demo" {
+                    eprintln!("--agents: unknown cast {value:?} (demo)");
+                    return ExitCode::FAILURE;
+                }
+                agents = Some(value);
+            }
+            "--view" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--view requires board|roster|stage|focus");
+                    return ExitCode::FAILURE;
+                };
+                view = Some(value);
+            }
+            "--agent" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--agent requires an agent id");
+                    return ExitCode::FAILURE;
+                };
+                agent = Some(value);
+            }
             "--store-origin" => {
                 let Some(origin) = args.next() else {
                     eprintln!("--store-origin requires a URL");
@@ -58,7 +89,7 @@ fn main() -> ExitCode {
             _ => {
                 if component.replace(arg).is_some() {
                     eprintln!(
-                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] <component.wasm>"
+                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--agents demo] <component.wasm>"
                     );
                     return ExitCode::FAILURE;
                 }
@@ -67,7 +98,7 @@ fn main() -> ExitCode {
     }
     let Some(path) = component else {
         eprintln!(
-            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] <component.wasm>"
+            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--agents demo] <component.wasm>"
         );
         return ExitCode::FAILURE;
     };
@@ -83,12 +114,17 @@ fn main() -> ExitCode {
             Box::new(soil_webgpu::InstallCatalog::new(root.clone()))
                 as Box<dyn soil_webgpu::CatalogHost>
         });
+        let cast = agents.map(|_| {
+            Box::new(soil_agent_host::FixtureAgents::new().bind(agent.clone(), view.clone()))
+                as Box<dyn soil_agent_host::AgentBackend>
+        });
         match soil_webgpu::run_component_capture_with(
             &bytes,
             size.0,
             size.1,
             catalog,
             store_origin.clone(),
+            cast,
         ) {
             Ok((status, frame)) => {
                 if status != 0 {
