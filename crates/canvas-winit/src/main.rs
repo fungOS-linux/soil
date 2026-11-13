@@ -1496,3 +1496,114 @@ fn main() -> Result<()> {
     event_loop.run_app(&mut app)?;
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+mod native_launch_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn native_host_is_resolved_beside_the_package() {
+        let root = std::env::temp_dir().join(format!(
+            "canvas-winit-native-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("native")).expect("test package");
+        let host = root.join("native/terminal-host");
+        std::fs::write(&host, "#!/bin/sh\n").expect("test host");
+        let mut permissions = std::fs::metadata(&host).expect("host metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&host, permissions).expect("host permissions");
+        let module = root.join("module.wasm");
+        std::fs::write(&module, b"").expect("test module");
+
+        let command = native_command(
+            "native/terminal-host",
+            &root,
+            &module,
+            "dev.fungos.terminal",
+            "native",
+        )
+        .expect("a native host beside the package");
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(command.get_program(), host.as_os_str());
+        assert_eq!(
+            envs.get("SOIL_SPORE_MODULE").and_then(|value| value.as_deref()),
+            module.to_str()
+        );
+        assert_eq!(
+            envs.get("TERMINAL_WINDOW").and_then(|value| value.as_deref()),
+            Some("1")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn catalogue_launches_the_native_host() {
+        let root = std::env::temp_dir().join(format!(
+            "canvas-winit-terminal-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let package = root.join("terminal");
+        std::fs::create_dir_all(package.join("native")).expect("test package");
+        std::fs::write(package.join("module.wasm"), b"").expect("test module");
+        let host = package.join("native/terminal-host");
+        std::fs::write(
+            &host,
+            "#!/bin/sh\nprintf '%s\\n%s\\n' \"$SOIL_SPORE_MODULE\" \"$SOIL_SPORE_SURFACE\" > \"$SOIL_SPORE_PACKAGE/launched\"\n",
+        )
+        .expect("test host");
+        let mut permissions = std::fs::metadata(&host).expect("host metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&host, permissions).expect("host permissions");
+        std::fs::write(
+            package.join("spore.toml"),
+            "schema = 1\n\
+             [spore]\n\
+             id = \"dev.fungos.terminal\"\n\
+             name = \"terminal\"\n\
+             version = \"0.1.0\"\n\
+             license = \"MIT\"\n\
+             summary = \"a terminal\"\n\
+             [engine]\n\
+             soil = \">=0.1\"\n\
+             target = \"wasm32-wasip2\"\n\
+             [module]\n\
+             path = \"module.wasm\"\n\
+             [launch]\n\
+             default = \"native\"\n\
+             surfaces = [\"native\"]\n\
+             native = \"native/terminal-host\"\n",
+        )
+        .expect("test manifest");
+
+        let mut catalog = SporeCatalog::new(&root).expect("test catalogue");
+        let launched = catalog
+            .launch("dev.fungos.terminal", "native")
+            .expect("native launch");
+        assert!(launched.target.starts_with("native native/terminal-host"));
+
+        let log = package.join("launched");
+        for _ in 0..100 {
+            if log.is_file() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let text = std::fs::read_to_string(&log).expect("native host ran");
+        assert!(text.contains(&package.join("module.wasm").display().to_string()));
+        assert!(text.contains("native"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
