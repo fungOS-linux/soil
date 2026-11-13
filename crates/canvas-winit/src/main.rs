@@ -61,7 +61,11 @@ impl SporeCatalog {
             if !package.join("spore.toml").is_file() {
                 continue;
             }
-            let manifest = Manifest::load(&package).map_err(|_| CatalogError::Invalid)?;
+            // One package the running host cannot parse must not empty the
+            // launcher; skip it and let the others stay visible.
+            let Ok(manifest) = Manifest::load(&package) else {
+                continue;
+            };
             installed.push(Installed {
                 root: package,
                 manifest,
