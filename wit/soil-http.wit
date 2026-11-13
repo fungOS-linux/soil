@@ -70,12 +70,76 @@ interface http {
   fetch: func(request: request) -> result<response, error>;
 }
 
+/// Bounded, host-mediated WebSocket.
+///
+/// `fetch` cannot express an upgrade: it returns one buffered response and has
+/// no duplex. A socket therefore cannot be a record — it is state the host
+/// owns — so the connection is a resource and the guest holds only a handle.
+/// The host performs the handshake, masks client frames and answers the peer's
+/// pings, so an idle guest does not get dropped, and both directions stay
+/// bounded by the same budget idea as `http.fetch`.
+interface ws {
+  use http.{error, header};
+
+  enum close-reason {
+    /// The guest called `close`.
+    guest,
+    /// The peer closed normally.
+    peer,
+    /// A message exceeded `max-message-bytes`.
+    overflow,
+    /// No traffic within `idle-timeout-ms`.
+    idle,
+    /// The host shut the connection down.
+    host,
+    /// The handshake was refused by the peer.
+    refused,
+  }
+
+  record open-request {
+    /// `ws:` or `wss:`. The host applies the same origin allowlist as `fetch`.
+    url: string,
+    /// Allowlisted handshake headers only; the host rejects unknown names.
+    headers: list<header>,
+    /// Opaque host credential handle (for example a Geode entry). Never a
+    /// token, username, password, or private key.
+    credential: option<string>,
+    /// Cap on one received message; the host closes with `overflow` past it.
+    max-message-bytes: u32,
+    /// Idle deadline. The host answers the peer's pings itself, so this bounds
+    /// silence rather than the absence of guest traffic.
+    idle-timeout-ms: u32,
+  }
+
+  variant message {
+    text(string),
+    binary(list<u8>),
+    /// Terminal. The handle is spent once this is returned.
+    closed(close-reason),
+  }
+
+  resource connection {
+    /// Send one text message. The host masks it and applies the frame budget.
+    send-text: func(text: string) -> result<_, error>;
+    /// The next message, or `none` if none arrived within `timeout-ms`.
+    receive: func(timeout-ms: u32) -> result<option<message>, error>;
+    /// Close politely. Idempotent, and safe to call after `closed`.
+    close: func();
+  }
+
+  /// Open one connection. The host owns the socket, the handshake and the
+  /// keepalive; the guest never sees a file descriptor.
+  open: func(request: open-request) -> result<connection, error>;
+}
+
 world http-host {
   import http;
+  import ws;
 }
 
 world guest {
   import http;
+  import ws;
 }
 
 /// Host-runner world for a component that exports the bounded HTTP smoke test.

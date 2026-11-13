@@ -53,7 +53,7 @@ Principles:
 | [`soil:storage@1.0.0`](wit/soil-storage.wit) | `soil:storage.read`, optional `soil:storage.write` | WIT |
 | [`soil:appdata@1.0.0`](wit/soil-appdata.wit) | `soil:appdata` | WIT + guest SDK + records-backed host |
 | [`soil:records@0.1.0`](wit/soil-records.wit) | `soil:records` read/write/sync | WIT + generic/contacts host + guest SDK |
-| [`soil:http@0.1.0`](wit/soil-http.wit) | `soil:http` | WIT + bounded host + direct transport proof |
+| [`soil:http@0.1.0`](wit/soil-http.wit) | `soil:http`, optional `soil:http/ws` | WIT + bounded host + direct transport proof; `ws` adds a host-owned connection resource |
 | [`soil:index@1.1.0`](wit/soil-index.wit) | `soil:index` | derived browse/search + explicit KNN; fast direct-child traversal |
 | [`soil:vfs-mut@0.1.0`](wit/soil-vfs-mut.wit) | `soil:vfs-mut` | separate write/mkdir/rmdir/rename grant |
 | [`soil:media@0.1.0`](wit/soil-media.wit) | `soil:media`, optional `soil:media-encoded` | host playback, encoded chunks, bounded image readback |
