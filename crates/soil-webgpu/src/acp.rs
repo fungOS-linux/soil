@@ -10,14 +10,14 @@
 //! `soil:agents` already defines, and parks `session/request_permission` as a
 //! prompt until a person answers it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use soil_agent_host::{
@@ -223,6 +223,9 @@ pub struct AcpBackend {
     /// Text that arrived on the stream, per session. ACP has no history call:
     /// `session/load` replays, and this is where that replay lands.
     turns: HashMap<String, Vec<Turn>>,
+    /// Sessions this backend asked the agent to stream. Attaching opens a live
+    /// stream, so it is done per agent rather than for a whole roster.
+    attached: HashSet<String>,
     binding: Binding,
     started_at_ms: u64,
 }
@@ -243,6 +246,7 @@ impl AcpBackend {
             events,
             agents: Vec::new(),
             turns: HashMap::new(),
+            attached: HashSet::new(),
             binding: Binding::default(),
             started_at_ms: now_ms(),
         })
@@ -284,12 +288,43 @@ impl AcpBackend {
         let last = self.agents.len() - 1;
         &mut self.agents[last]
     }
+
+    /// Open one session's stream and fold what it already had, so the first
+    /// read of an agent describes a turn in progress rather than a blank card.
+    /// Bounded: it stops after a short silence, or at the budget.
+    fn attach(&mut self, id: &str) {
+        let loaded = self.acp.request(
+            "session/load",
+            json!({"sessionId": id, "cwd": "/", "mcpServers": []}),
+            REQUEST_TIMEOUT,
+        );
+        if loaded.is_err() {
+            return;
+        }
+        self.attached.insert(id.to_string());
+        let budget = Instant::now() + Duration::from_millis(3000);
+        let mut quiet = 0;
+        while Instant::now() < budget && quiet < 2 {
+            if self.next(50).is_some() {
+                quiet = 0;
+            } else {
+                quiet += 1;
+            }
+        }
+    }
 }
 
 impl AgentBackend for AcpBackend {
     fn list(&mut self) -> Vec<Agent> {
         if self.agents.is_empty() {
             self.refresh();
+        }
+        // A surface that was opened for one agent wants its stream, not the
+        // whole roster's: attaching is one process per conversation.
+        if let Some(bound) = self.binding.agent.clone()
+            && !self.attached.contains(&bound)
+        {
+            self.attach(&bound);
         }
         let mut agents = self.agents.clone();
         // Host order: whoever needs a person first, then most recently active.
@@ -303,6 +338,9 @@ impl AgentBackend for AcpBackend {
     fn get(&mut self, id: &str) -> Option<Agent> {
         if self.agents.is_empty() {
             self.refresh();
+        }
+        if !self.attached.contains(id) {
+            self.attach(id);
         }
         self.agents.iter().find(|agent| agent.id == id).cloned()
     }
@@ -424,6 +462,10 @@ impl AgentBackend for AcpBackend {
 
 fn agent_from_session(session: &Value, started_at_ms: u64) -> Option<Agent> {
     let id = session.get("sessionId")?.as_str()?;
+    let archived = session
+        .get("archived")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let title = session
         .get("title")
         .and_then(Value::as_str)
@@ -450,7 +492,11 @@ fn agent_from_session(session: &Value, started_at_ms: u64) -> Option<Agent> {
             .get("model")
             .and_then(Value::as_str)
             .map(str::to_string),
-        phase: Phase::Idle,
+        phase: if archived {
+            Phase::Finished
+        } else {
+            Phase::Idle
+        },
         goal,
         owner: None,
         activity: Vec::new(),
@@ -533,6 +579,14 @@ fn apply_update(agent: &mut Agent, update: &Value) {
             }
         }
         "available_commands_update" | "plan" => {}
+        // The harness's own statement that a turn is open. Without it a client
+        // cannot tell a running thread from one that ended days ago.
+        "turn" => {
+            agent.phase = match update.get("state").and_then(Value::as_str) {
+                Some("running") => Phase::Working,
+                _ => Phase::Idle,
+            };
+        }
         _ => {}
     }
     agent.revision += 1;
@@ -679,6 +733,33 @@ mod tests {
         );
         assert_eq!(agent.phase, Phase::Working);
         assert_eq!(agent.revision, 1);
+    }
+
+    #[test]
+    fn an_archived_thread_is_finished_not_idle() {
+        let idle = agent_from_session(&json!({"sessionId": "s1", "title": "live"}), 0).unwrap();
+        assert_eq!(idle.phase, Phase::Idle);
+        let archived = agent_from_session(
+            &json!({"sessionId": "s2", "title": "done", "archived": true}),
+            0,
+        )
+        .unwrap();
+        assert_eq!(archived.phase, Phase::Finished);
+    }
+
+    #[test]
+    fn a_turn_frame_decides_whether_a_thread_is_active() {
+        let mut agent = agent_stub("s1", 0);
+        apply_update(
+            &mut agent,
+            &json!({"sessionUpdate": "turn", "state": "running"}),
+        );
+        assert_eq!(agent.phase, Phase::Working);
+        apply_update(
+            &mut agent,
+            &json!({"sessionUpdate": "turn", "state": "ended"}),
+        );
+        assert_eq!(agent.phase, Phase::Idle);
     }
 
     #[test]

@@ -95,7 +95,11 @@ off by default so a capture host spawns no process and links no JSON it does not
 use.
 
 `session/update` folds into `activity` and `phase`; chunk text fills the
-`transcript` page. `session/request_permission` parks as a `Prompt` whose
+`transcript` page. A `turn` update carries the harness's own liveness, so a
+Delta thread reads as working while its turn runs and idle once it ends, rather
+than as whatever the last record left behind. A surface that was opened for one
+agent attaches to that agent's stream instead of the roster's: a live stream is
+one process per conversation. `session/request_permission` parks as a `Prompt` whose
 choices are the protocol's own `optionId`s, with `allow_always` marked `danger`
 because it widens authority, and `answer` replies with the native
 `{"outcome": {"outcome": "selected", "optionId": …}}`. A harness that never
