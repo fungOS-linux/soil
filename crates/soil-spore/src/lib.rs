@@ -1031,6 +1031,14 @@ impl Manifest {
                     "env.spore may not name {name:?}: inside the shell it means the VFS, not the host"
                 )));
             }
+            // The host's own control plane is never a package's to read: an MCP
+            // token or a principal is a capability and an identity, and a Spore
+            // holding either can act as the host that started it.
+            if name.starts_with("MUSH_") {
+                return Err(Error::Invalid(format!(
+                    "env.spore may not name {name:?}: the host's control variables never cross"
+                )));
+            }
         }
         for name in &self.env.host {
             if name.trim().is_empty() {

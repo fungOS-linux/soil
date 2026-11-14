@@ -387,9 +387,15 @@ pub(crate) struct Runtime {
     budget: Option<std::time::Duration>,
     /// Set by the service when a caller cancels the running command.
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Extra names a host child may see, from the package's `[env] host`.
+    host_env: Vec<String>,
 }
 
 impl Runtime {
+    pub(crate) fn host_env(&self) -> &[String] {
+        &self.host_env
+    }
+
     pub(crate) fn open(
         root: &std::path::Path,
         wasm: &[u8],
@@ -400,6 +406,8 @@ impl Runtime {
         desktop: Option<&desktop::Desktop>,
         budget: Option<std::time::Duration>,
         store: Option<&std::path::Path>,
+        environment: Vec<(String, String)>,
+        host_env: Vec<String>,
     ) -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
@@ -422,21 +430,9 @@ impl Runtime {
         store.set_epoch_deadline(u64::MAX);
         let instance = Mush::instantiate(&mut store, &component, &linker)?;
         let mut args = vec![format!("--term={term}")];
-        // The agent's environment is the Spore's: `$GIT_*`, its own keys, and
-        // the rest of what it was started with are visible to VFS commands.
-        // `PATH`, `HOME`, `PWD`, `OLDPWD`, `SHELL`, `USER`, `LOGNAME` and `TERM`
-        // keep their VFS meaning, so they are not forwarded.
-        //
-        // Not narrowed by an environment variable: whoever can spawn mush could
-        // set it, and a policy the constrained party can edit is not a policy.
-        // A Spore that needs less says so in its manifest.
-        for (key, value) in std::env::vars() {
-            if matches!(
-                key.as_str(),
-                "PATH" | "HOME" | "PWD" | "OLDPWD" | "SHELL" | "USER" | "LOGNAME" | "TERM"
-            ) {
-                continue;
-            }
+        // The agent's environment is the Spore's, narrowed by what this
+        // package's manifest declares it may read.
+        for (key, value) in &environment {
             args.push(format!("--env={key}={value}"));
         }
         if let Some(principal) = principal {
@@ -459,6 +455,7 @@ impl Runtime {
             engine,
             budget,
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            host_env,
         })
     }
 
@@ -1011,6 +1008,11 @@ fn run() -> Result<()> {
         }
     }
 
+    // The grants come from the package: `spore.toml` beside the module we were
+    // told to run. Computed before either path opens a Runtime, so the shell
+    // and the one-shot command see the same environment.
+    let manifest = spore_manifest(wasm.as_deref().map(Path::new))?;
+    let (environment, host_env) = manifest_grants(manifest.as_ref());
     let bytes = match wasm {
         Some(wasm) => std::fs::read(&wasm)
             .with_context(|| format!("read Mush component {}", wasm.display()))?,
@@ -1021,7 +1023,17 @@ fn run() -> Result<()> {
     // already went to the daemon above; this is the human-at-a-prompt path.
     if shell_mode && shell_command.is_none() {
         let shell_args = parse_shell_args(&mut args)?;
-        return run_shell(&root, &bytes, &term, command_root, records, store.as_deref(), shell_args);
+        return run_shell(
+            &root,
+            &bytes,
+            &term,
+            command_root,
+            records,
+            store.as_deref(),
+            environment,
+            host_env,
+            shell_args,
+        );
     }
 
     let interactive_command_root = command_root.clone();
@@ -1035,6 +1047,8 @@ fn run() -> Result<()> {
         desktop.as_ref(),
         budget,
         store.as_deref(),
+        environment,
+        host_env,
     )?;
 
     if serve {
@@ -2076,12 +2090,25 @@ fn run_shell(
     command_root: PathBuf,
     records: Option<RecordsBinding>,
     store: Option<&Path>,
+    environment: Vec<(String, String)>,
+    host_env: Vec<String>,
     args: ShellArgs,
 ) -> Result<()> {
     let key = session_key(args.session, root);
     let mut session = Session::load(root, &key);
-    let mut runtime =
-        Runtime::open(root, wasm, term, command_root, records, None, None, None, store)?;
+    let mut runtime = Runtime::open(
+        root,
+        wasm,
+        term,
+        command_root,
+        records,
+        None,
+        None,
+        None,
+        store,
+        environment,
+        host_env,
+    )?;
     session.restore(&mut runtime)?;
     let status = match args.command {
         Some(command) => execute_line(&mut runtime, root, &session, store, &command)?,
@@ -2173,7 +2200,7 @@ fn run_host_status(root: &Path, mut args: Vec<String>, store: Option<&Path>) -> 
     // Start empty: a host build needs its toolchain, not the agent's tokens.
     // The list lives with the shell's overlay bridge so both paths answer the
     // same question; anything beyond it is opt-in via --allow-env.
-    crate::shell::clear_and_seed(&mut command);
+    crate::shell::clear_and_seed(&mut command, &[]);
     for var in &extra_env {
         if let Ok(value) = std::env::var(var) {
             command.env(var, value);
@@ -2508,6 +2535,60 @@ fn root_slug(path: &Path) -> String {
         hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
     }
     format!("{base}-{:08x}", hash as u32)
+}
+
+/// The manifest that came with the module we were told to run.
+///
+/// `spore.toml` sits beside the module; parsing it here means the grants come
+/// from the package a reviewer read, not from anything in the environment.
+fn spore_manifest(wasm: Option<&Path>) -> Result<Option<soil_spore::Manifest>> {
+    let Some(directory) = wasm.and_then(|wasm| wasm.parent()) else {
+        return Ok(None);
+    };
+    let path = directory.join("spore.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        // No manifest is the embedded-module case, not a failure.
+        return Ok(None);
+    };
+    // A manifest that exists but does not parse fails closed: silently treating
+    // it as "no grants" would widen the environment because of a typo.
+    let manifest = soil_spore::Manifest::parse(&text)
+        .with_context(|| format!("parse {}", path.display()))?;
+    Ok(Some(manifest))
+}
+
+/// What the manifest's `[env]` grants, applied to this process's environment.
+///
+/// No manifest, or an empty `env.spore`, means the caller's whole environment —
+/// the agent-shell default. Names whose meaning inside the shell is the VFS are
+/// never forwarded, whatever the manifest says.
+fn manifest_grants(manifest: Option<&soil_spore::Manifest>) -> (Vec<(String, String)>, Vec<String>) {
+    let only = manifest.map(|manifest| manifest.env.spore.clone());
+    let mut environment = Vec::new();
+    for (key, value) in std::env::vars() {
+        if soil_spore::VFS_ENV_NAMES.contains(&key.as_str()) {
+            continue;
+        }
+        // Mush's control plane is not the shell's business. `MUSH_MCP_TOKEN` is
+        // a capability for this same VFS, so a Spore that can read it can mint
+        // its own MCP calls; `MUSH_PRINCIPAL` and `MUSH_GROUPS` are the identity
+        // it was handed, not one it may forge. None of it crosses, whatever a
+        // manifest asks for.
+        if key.starts_with("MUSH_") {
+            continue;
+        }
+        if let Some(only) = &only
+            && !only.is_empty()
+            && !only.iter().any(|name| name == &key)
+        {
+            continue;
+        }
+        environment.push((key, value));
+    }
+    let host_env = manifest
+        .map(|manifest| manifest.env.host.clone())
+        .unwrap_or_default();
+    (environment, host_env)
 }
 
 fn expand_home(value: &str) -> PathBuf {
