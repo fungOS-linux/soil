@@ -6975,6 +6975,13 @@ name = "soil-canvas-input"
 version = "0.1.0"
 
 [[package]]
+name = "soil-cid"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "soil-command"
 version = "0.1.0"
 dependencies = [
@@ -7500,12 +7507,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-storage-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "soil-cid",
+ "tempfile",
+]
+
+[[package]]
 name = "soil-store"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "soil-cid",
  "soil-spore",
  "tempfile",
 ]
