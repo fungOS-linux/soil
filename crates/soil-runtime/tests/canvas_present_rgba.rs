@@ -45,3 +45,20 @@ fn a_short_frame_is_refused() {
     let error = format!("{:#}", guest.render_canvas().unwrap_err());
     assert!(error.contains("1228796"), "unexpected error: {error}");
 }
+
+#[test]
+fn the_memory_budget_is_what_bounds_a_pixel_spore() {
+    use soil_runtime::{DEFAULT_FUEL, GuestScene, MemoryBudget};
+
+    // The fixture declares 20 pages (~1.3 MiB) for its 480x640 frame.
+    let too_small = MemoryBudget::new(64 * 1024, 1024 * 1024);
+    assert!(
+        GuestScene::with_canvas_budget(PIXEL_GUEST, DEFAULT_FUEL, None, too_small).is_err(),
+        "a 64 KiB per-Spore ceiling admitted a 1.3 MiB module"
+    );
+
+    // Same module, same fuel: only the budget differs.
+    let default = MemoryBudget::default();
+    assert!(default.per_spore() >= 20 * 64 * 1024);
+    assert!(GuestScene::with_canvas_budget(PIXEL_GUEST, DEFAULT_FUEL, None, default).is_ok());
+}
