@@ -451,6 +451,8 @@ impl Runtime {
         environment: Vec<(String, String)>,
         host_env: Vec<String>,
     ) -> Result<Self> {
+        // Projected before the wasmtime store shadows the `store` path.
+        let home = project_home(root, store)?;
         let mut config = Config::new();
         config.wasm_component_model(true);
         // Epoch interruption is what lets a timer stop a command that outlives
@@ -480,6 +482,7 @@ impl Runtime {
         store.set_epoch_deadline(u64::MAX);
         let instance = Mush::instantiate(&mut store, &component, &linker)?;
         let mut args = vec![format!("--term={term}")];
+        args.push(format!("--home={home}"));
         // The agent's environment is the Spore's, narrowed by what this
         // package's manifest declares it may read.
         for (key, value) in &environment {
@@ -2639,6 +2642,54 @@ fn manifest_grants(manifest: Option<&soil_spore::Manifest>) -> (Vec<(String, Str
         .map(|manifest| manifest.env.host.clone())
         .unwrap_or_default();
     (environment, host_env)
+}
+
+/// Project the user's home into the VFS at `/home/<user>`.
+///
+/// The root is per checkout; the person is not. One host directory holds the
+/// files a shell should carry from project to project — `.mushrc` above all —
+/// and they are copied in on start, so `~/.mushrc` means the same thing in
+/// every root while the working tree stays where it belongs.
+fn project_home(root: &Path, store: Option<&Path>) -> Result<String> {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "mush".into());
+    let user: String = user
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let directory = format!("/home/{user}");
+    let source = config::expand_home("~/.local/share/fungos/home");
+    std::fs::create_dir_all(&source).with_context(|| format!("create {}", source.display()))?;
+    let mut vfs = fungos_vfs::Vfs::open_with(root, fungos_vfs::NodeRole::Full, store)
+        .context("open VFS to project the home directory")?;
+    for entry in std::fs::read_dir(&source)?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        // Best effort: a projection that cannot be written must not stop the
+        // shell from starting, and the next run tries again.
+        // VFS paths are root-relative: the leading `/` is the shell's, not
+        // the store's.
+        let _ = vfs.put(
+            &format!("home/{user}/{name}"),
+            &bytes,
+            "text/plain",
+            fungos_vfs::Expect::Any,
+        );
+    }
+    Ok(directory)
 }
 
 fn expand_home(value: &str) -> PathBuf {
