@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -13,7 +13,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut root = std::env::var_os("FUNGOS_COMMAND_ROOT")
+    let command_root = std::env::var_os("FUNGOS_COMMAND_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             std::env::var_os("HOME")
@@ -21,6 +21,9 @@ fn run() -> Result<()> {
                 .unwrap_or_default()
                 .join(".local/share/fungos/commands")
         });
+    // Explicit `--root` flags replace the default pair; otherwise this sees
+    // exactly what a shell sees: hand-installed commands, then installed Spores.
+    let mut roots: Vec<PathBuf> = Vec::new();
     let mut records_root = None;
     let mut book = None;
     let mut collection = None;
@@ -29,7 +32,7 @@ fn run() -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "--root" => {
-                root = PathBuf::from(args.get(i + 1).context("--root DIR")?);
+                roots.push(PathBuf::from(args.get(i + 1).context("--root DIR")?));
                 i += 2;
             }
             "--records-root" => {
@@ -57,7 +60,17 @@ fn run() -> Result<()> {
             other => bail!("unknown option {other}"),
         }
     }
-    let registry = CommandRegistry::scan(&root)?;
+    let roots = if roots.is_empty() {
+        soil_command::roots(command_root)
+    } else {
+        roots
+    };
+    let registry = CommandRegistry::scan_roots(&roots)?;
+    // A package that could not be read is worth saying out loud, but it is not a
+    // reason to refuse the commands that did load.
+    for refusal in registry.refused() {
+        eprintln!("soil-command: {}: {}", refusal.name, refusal.reason);
+    }
     if list {
         for entry in registry.entries() {
             println!("{}\t{}\t{}", entry.name, entry.version, entry.summary);
@@ -65,7 +78,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
     let Some(name) = args.get(i).cloned() else {
-        bail!("usage: soil-command [--list] run NAME [ARGS...]");
+        bail!("usage: soil-command [--root DIR]... [--list] run NAME [ARGS...]");
     };
     let entry = registry.get(&name).context("unknown command")?.clone();
     let records = match (records_root, book, collection) {
@@ -78,7 +91,11 @@ fn run() -> Result<()> {
         _ => bail!("records binding needs --records-root, --book and --collection"),
     };
     let mut stdin = Vec::new();
-    std::io::stdin().read_to_end(&mut stdin)?;
+    // A command run from a prompt has no input. Reading a terminal to end-of-file
+    // would wedge the shell that started it, so only a pipe is read.
+    if !std::io::stdin().is_terminal() {
+        std::io::stdin().read_to_end(&mut stdin)?;
+    }
     let output = CommandRunner::new(records)?.run(
         &entry,
         &RunRequest {

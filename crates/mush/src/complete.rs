@@ -9,7 +9,7 @@
 use std::{
     borrow::Cow,
     collections::BTreeSet,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -40,9 +40,9 @@ pub struct MushHelper {
 }
 
 impl MushHelper {
-    pub fn new(root: PathBuf, command_root: &Path) -> Self {
+    pub fn new(root: PathBuf, roots: &[PathBuf]) -> Self {
         let mut names: Vec<String> = BUILTINS.iter().map(|name| (*name).to_string()).collect();
-        if let Ok(registry) = soil_command::CommandRegistry::scan(command_root) {
+        if let Ok(registry) = soil_command::CommandRegistry::scan_roots(roots) {
             names.extend(registry.entries().map(|entry| entry.name.clone()));
         }
         names.sort();

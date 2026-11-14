@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use soil_install::{
-    ApplyOptions, InstallOptions, SyncOptions, adopt, apply, install, install_cid, rollback,
-    status, sync,
+    ApplyOptions, InstallOptions, InstalledState, SyncOptions, adopt, apply, commands, install,
+    install_cid, rollback, status, sync,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -60,6 +60,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
                         state.digest,
                         state.previous_digest.as_deref().unwrap_or("none")
                     );
+                    announce_commands(&root, &state);
                 }
                 return Ok(());
             }
@@ -89,6 +90,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
                     state.digest,
                     state.previous_digest.as_deref().unwrap_or("none")
                 );
+                announce_commands(&root, &state);
             }
             Ok(())
         }
@@ -121,6 +123,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 println!("no installed Spores");
             } else {
                 for state in states {
+                    let commands = commands(&root, &state);
                     println!(
                         "{:<32} {}  {}  previous={}",
                         state.id,
@@ -128,6 +131,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
                         state.digest,
                         state.previous_digest.as_deref().unwrap_or("none")
                     );
+                    if !commands.is_empty() {
+                        println!("  commands: {}", commands.join(", "));
+                    }
                 }
             }
             Ok(())
@@ -257,4 +263,15 @@ fn first_path(args: &[String]) -> Result<PathBuf, String> {
         .filter(|argument| !argument.starts_with("--"))
         .ok_or_else(|| format!("a package path is required\n\n{}", usage()))?;
     Ok(Path::new(path).to_path_buf())
+}
+
+/// Say which programs the package just installed puts on a shell's PATH.
+///
+/// Nothing is copied at install time: the shell reads the tree where it landed,
+/// so this line is the whole handoff between the installer and the shell.
+fn announce_commands(root: &Path, state: &InstalledState) {
+    let commands = commands(root, state);
+    if !commands.is_empty() {
+        println!("  commands: {}", commands.join(", "));
+    }
 }

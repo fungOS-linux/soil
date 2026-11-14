@@ -1,7 +1,12 @@
 # Command registry
 
 `soil-command` is the first virtual PATH: installed wasm commands, not host
-binaries.
+binaries. A shell reads two roots, in this order:
+
+```text
+~/.local/share/fungos/commands/   what an operator installed, one package per name
+~/.local/share/fungos/spores/     what a store installed; a Spore declares its commands
+```
 
 ```text
 ~/.local/share/fungos/commands/
@@ -35,7 +40,29 @@ The runner uses WASI stdio, memory/output caps and an epoch timeout. It links
 `soil:records` only when a records binding is configured. Commands never get
 host PATH, host filesystem, network or a Marbles-specific host.
 
-## Profiles and installed Spores
+## Roots and precedence
+
+The roots are siblings under the fungOS data directory, so one setting moves
+both: `--command-root` / `FUNGOS_COMMAND_ROOT` (and `MUSH_SPORE_ROOT` to split
+them apart). The command root comes first, so a hand-installed command shadows a
+Spore that later declares the same name.
+
+Nothing is copied at install time. `soil-install` writes a tree to
+`spores/<name>/`, and the registry reads that tree's manifest where it sits,
+which is why an install shows up in a running shell at its next prompt instead
+of needing a link, a copy, or a restart.
+
+A package that cannot be read - a bad manifest, a module it names but does not
+carry - is refused *by name* and the rest of the PATH still answers. A name
+claimed twice is refused the same way, with the losing directory recorded.
+Neither is fatal: a shell loses one command, not every command, and `mush doctor`
+and `soil-command --list` both print what was refused.
+
+`soil-install` refuses a package that names a component it does not carry before
+it replaces anything, and prints the commands an install brought, so the
+promise is checked at the boundary rather than at the first run.
+
+## Profiles
 
 The next layer is profile-aware resolution:
 
@@ -44,10 +71,10 @@ human profile: interactive commands + full workspace
 agent profile: allowlisted commands, write scopes, quotas, no editors
 ```
 
-Installing a Spore updates its declared commands and capability set. The
-registry refreshes; Mush's virtual PATH and visible command set update without
-a shell restart. Profiles filter by declared command role and granted
-capabilities, not just by name.
+Installing a Spore is enough: the registry re-scans the install root on every
+lookup, so Mush's virtual PATH and visible command set update without a shell
+restart. Profiles filter by declared command role and granted capabilities, not
+just by name.
 
 The registry does not grant anything by itself. A command still needs its
 host capabilities linked and its profile's write/network/secret scopes.

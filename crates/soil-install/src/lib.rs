@@ -117,6 +117,14 @@ pub fn install(
             .map_err(|error| Error::Io(format!("{}: {error}", staging.display())))?;
     }
     soil_spore::unpack(&bytes, &staging)?;
+    // A package that names a component it does not carry is refused here, while
+    // the tree is still staged; the alternative is a later registry scan that
+    // promises a program which cannot run. `pack` refuses this too, but a
+    // package that arrived over the network never went through `pack`.
+    if let Err(error) = check_declared(&staging, &manifest) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
 
     let cached = package_path(root, &lock.digest);
     if !cached.is_file() {
@@ -199,6 +207,10 @@ pub fn rollback(id: &str, root: &Path) -> Result<InstalledState, Error> {
             .map_err(|error| Error::Io(format!("{}: {error}", staging.display())))?;
     }
     soil_spore::unpack(&bytes, &staging)?;
+    if let Err(error) = check_declared(&staging, &manifest) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
     let current = root.join(state.tree_name());
     let backup = root.join(STAGING_DIR).join(format!(
         "{id}-rollback-old-{}-{}",
@@ -395,6 +407,44 @@ fn scan_installed(root: &Path) -> Result<Vec<soil_store::Installed>, Error> {
         installed.push(soil_store::Installed::read(&path, None, None)?);
     }
     Ok(installed)
+}
+
+/// Every component the manifest names must be a regular file in the tree.
+///
+/// One rule for every face: a `[module]`, an `[http]` handler and a command are
+/// all components a host will try to instantiate, and a package that names one
+/// it does not carry fails at the worst possible moment - after the install has
+/// replaced a working tree.
+fn check_declared(tree: &Path, manifest: &soil_spore::Manifest) -> Result<(), Error> {
+    for (face, path) in manifest.declared_modules() {
+        let relative = soil_spore::safe_relative(&path)?;
+        let file = tree.join(&relative);
+        if !fs::symlink_metadata(&file).is_ok_and(|metadata| metadata.is_file()) {
+            return Err(Error::Invalid(format!(
+                "{face} {path} is declared but the package does not carry it"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The command names an installed tree puts on a shell's PATH.
+///
+/// Read from the tree's own manifest: the state file says what is installed, the
+/// package says what it provides, and only one of those is authoritative about
+/// the second. A tree that has gone missing has no commands - that is a `status`
+/// question, not an error here.
+#[must_use]
+pub fn commands(root: &Path, state: &InstalledState) -> Vec<String> {
+    soil_spore::Manifest::load(&root.join(state.tree_name()))
+        .map(|manifest| {
+            manifest
+                .commands
+                .into_iter()
+                .map(|command| command.name)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn ensure_layout(root: &Path) -> Result<(), Error> {
@@ -626,6 +676,43 @@ surfaces = ["canvas"]
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].action, "installed");
         assert_eq!(status(&root).unwrap()[0].version, "0.2.0");
+    }
+
+    const WITH_MODULE: &str = r#"schema = 1
+
+[spore]
+id = "dev.fungos.install-test"
+name = "install-test"
+version = "0.1.0"
+license = "MIT"
+summary = "install test"
+
+[engine]
+soil = ">=0.1"
+target = "soil"
+
+[ui]
+entry = "ui/main.lua"
+
+[launch]
+default = "canvas"
+surfaces = ["canvas"]
+
+[module]
+path = "module.wasm"
+"#;
+
+    #[test]
+    fn a_component_the_package_does_not_carry_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("spore.toml"), WITH_MODULE).unwrap();
+        let manifest = soil_spore::Manifest::parse(WITH_MODULE).unwrap();
+        // `pack` would never produce this; a package off the network can.
+        let error = check_declared(temp.path(), &manifest).unwrap_err();
+        assert!(error.to_string().contains("module.wasm"), "{error}");
+
+        std::fs::write(temp.path().join("module.wasm"), b"\0asm").unwrap();
+        check_declared(temp.path(), &manifest).unwrap();
     }
 
     #[test]
