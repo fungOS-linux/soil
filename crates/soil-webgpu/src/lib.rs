@@ -1430,9 +1430,13 @@ pub fn run_component_capture_with(
         setup.interactive = true;
         let mut queue = setup.input.lock().expect("input queue poisoned");
         for key in host.keys {
+            // A single-character key is also the text it types, the same rule
+            // canvas-winit's `--key` follows: the guest should not have to
+            // guess which of the two a host meant.
+            let text = (key.chars().count() == 1).then(|| key.clone());
             queue.push_back(InputEvent::Key(InputKey {
                 key,
-                text: None,
+                text,
                 pressed: true,
                 shift: false,
                 control: false,
