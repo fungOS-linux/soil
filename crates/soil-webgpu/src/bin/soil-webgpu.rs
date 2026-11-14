@@ -3,6 +3,12 @@
 //! Usage:
 //!   soil-webgpu <component.wasm>
 //!   soil-webgpu --frame FILE.bgr [--size WxH] [--agents demo] <component.wasm>
+//!   soil-webgpu --frame FILE.bgr --root VAULT --records DIR \
+//!     --book BOOK --collection NAME --actor WHO <component.wasm>
+//!
+//! `--root`, `--records`, `--book`, `--collection` and `--actor` are the grants
+//! a document-shaped Spore asks for: one workspace to read, a book to write
+//! pending entities into, and the identity the host attests for them.
 
 use std::{env, fs, path::Path, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
@@ -15,6 +21,11 @@ fn main() -> ExitCode {
     let mut frame_path = None;
     let mut fb_path: Option<String> = None;
     let mut records_dir: Option<PathBuf> = None;
+    let mut vfs_root: Option<PathBuf> = None;
+    let mut records_root: Option<PathBuf> = None;
+    let mut book: Option<String> = None;
+    let mut collection: Option<String> = None;
+    let mut actor: Option<String> = None;
     let mut size = (480, 640);
     let mut spores_roots: Vec<PathBuf> = Vec::new();
     let mut origins = Vec::new();
@@ -48,6 +59,41 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 records_dir = Some(PathBuf::from(path));
+            }
+            "--root" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--root requires a directory");
+                    return ExitCode::FAILURE;
+                };
+                vfs_root = Some(PathBuf::from(path));
+            }
+            "--records" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--records requires a directory");
+                    return ExitCode::FAILURE;
+                };
+                records_root = Some(PathBuf::from(path));
+            }
+            "--book" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--book requires a name");
+                    return ExitCode::FAILURE;
+                };
+                book = Some(value);
+            }
+            "--collection" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--collection requires a name");
+                    return ExitCode::FAILURE;
+                };
+                collection = Some(value);
+            }
+            "--actor" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--actor requires a principal name");
+                    return ExitCode::FAILURE;
+                };
+                actor = Some(value);
             }
             "--size" => {
                 let Some(value) = args.next() else {
@@ -162,11 +208,31 @@ fn main() -> ExitCode {
                 || agents.is_some())
         {
             eprintln!(
-                "--records-dir cannot be combined with --allow-origin, --store-origin, --spores-root or --agents"
+                "--records-dir alone cannot be combined with --allow-origin, --store-origin, --spores-root or --agents; pass --root or --actor to use the document grants"
             );
             return ExitCode::FAILURE;
         }
-        let result = if let Some(root) = records_dir.as_deref() {
+        let document_grants = vfs_root.is_some() || actor.is_some() || records_root.is_some();
+        let result = if document_grants {
+            let mut grants = soil_webgpu::Grants::new();
+            grants.vfs = vfs_root.clone();
+            if let Some(root) = records_root.clone() {
+                let Some(collection) = collection.clone() else {
+                    eprintln!("--records requires --collection: the guest names a collection");
+                    return ExitCode::FAILURE;
+                };
+                grants.records = Some(soil_webgpu::RecordsAccess::book(
+                    &root,
+                    collection.clone(),
+                    book.clone().unwrap_or_else(|| collection.clone()),
+                    collection,
+                ));
+            }
+            if let Some(actor) = actor.clone() {
+                grants = grants.actor(actor);
+            }
+            soil_webgpu::run_component_capture_with_grants(&bytes, size.0, size.1, grants)
+        } else if let Some(root) = records_dir.as_deref() {
             run_component_capture_with_records(&bytes, size.0, size.1, root)
         } else {
             let catalog = if spores_roots.is_empty() {
