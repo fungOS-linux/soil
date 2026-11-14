@@ -7136,6 +7136,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "ipnet",
+ "libc",
  "model2vec-rs",
  "percent-encoding",
  "regex",
