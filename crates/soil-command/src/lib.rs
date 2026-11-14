@@ -248,6 +248,16 @@ impl CommandRunner {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.epoch_interruption(true);
+        // Keep compiled components on disk. `mb` is invoked hundreds of times a
+        // day for the same 600 KB module, and without this every one of those
+        // invocations pays to compile it again. Failing to open the cache is not
+        // fatal: wasmtime falls back to compiling, which is the status quo ante.
+        match wasmtime::Cache::new(wasmtime::CacheConfig::default()) {
+            Ok(cache) => {
+                config.cache(Some(cache));
+            }
+            Err(error) => eprintln!("soil-command: component cache unavailable: {error}"),
+        }
         let engine = Engine::new(&config)?;
         Ok(Self {
             engine,
