@@ -23,6 +23,7 @@ fn main() -> ExitCode {
     let mut store_origin = None;
     let mut credential_env = None;
     let mut component_cache = None;
+    let mut keys = Vec::new();
     let mut component = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -115,10 +116,19 @@ fn main() -> ExitCode {
                 };
                 component_cache = Some(std::path::PathBuf::from(directory));
             }
+            // Deliver a key before the frame is taken. Repeatable, ordered, and
+            // the guest decides when to stop: it exits on its own quit key.
+            "--key" => {
+                let Some(key) = args.next() else {
+                    eprintln!("--key requires a key name, such as arrow-down or q");
+                    return ExitCode::FAILURE;
+                };
+                keys.push(key);
+            }
             _ => {
                 if component.replace(arg).is_some() {
                     eprintln!(
-                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--credential-env VAR] [--agents demo] <component.wasm>"
+                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--credential-env VAR] [--component-cache DIR] [--key NAME] [--agents demo] <component.wasm>"
                     );
                     return ExitCode::FAILURE;
                 }
@@ -127,7 +137,7 @@ fn main() -> ExitCode {
     }
     let Some(path) = component else {
         eprintln!(
-            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--credential-env VAR] [--agents demo] <component.wasm>"
+            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--spores-root DIR] [--store-origin URL] [--credential-env VAR] [--component-cache DIR] [--key NAME] [--agents demo] <component.wasm>"
         );
         return ExitCode::FAILURE;
     };
@@ -167,6 +177,7 @@ fn main() -> ExitCode {
                 store_origin: store_origin.clone(),
                 credentials,
                 component_cache: component_cache.clone(),
+                keys: keys.clone(),
             },
         ) {
             Ok((status, frame)) => {

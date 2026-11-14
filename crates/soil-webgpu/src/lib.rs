@@ -85,13 +85,25 @@ impl CanvasGpuPresenter for DiscardPresenter {
 pub struct FrameCapture {
     frame: Arc<Mutex<Option<CanvasFrame>>>,
     size: (u32, u32),
+    /// How many frames the guest may present. One for a one-shot capture; more
+    /// when the run delivers input, because each key can redraw.
+    budget: usize,
+    seen: usize,
 }
 
 impl FrameCapture {
     pub fn new(width: u32, height: u32) -> Self {
+        Self::with_budget(width, height, 1)
+    }
+
+    /// A capture that expects the guest to present up to `budget` frames and
+    /// keeps the last one: the state after the input the run delivered.
+    pub fn with_budget(width: u32, height: u32, budget: usize) -> Self {
         Self {
             frame: Arc::new(Mutex::new(None)),
             size: (width, height),
+            budget: budget.max(1),
+            seen: 0,
         }
     }
 
@@ -107,7 +119,11 @@ impl CanvasGpuPresenter for FrameCapture {
 
     fn present(&mut self, frame: CanvasFrame) -> Result<()> {
         let mut slot = self.frame.lock().expect("frame capture poisoned");
-        anyhow::ensure!(slot.is_none(), "present budget");
+        // The budget is a guard, not a limit to bump when a guest misbehaves: a
+        // Spore that keeps presenting is looping, and a capture that silently
+        // took the thousandth frame would hide that.
+        anyhow::ensure!(self.seen < self.budget, "present budget");
+        self.seen += 1;
         *slot = Some(frame);
         Ok(())
     }
@@ -1362,6 +1378,14 @@ pub struct CaptureHost {
     /// Keep compiled components here, named by the module's digest. Compiling
     /// a 16 MB Spore is minutes of Cranelift; reading it back is a read.
     pub component_cache: Option<std::path::PathBuf>,
+    /// Keys to deliver to the Spore, in order, before the frame is taken.
+    ///
+    /// A capture host is otherwise not interactive, so a Spore that renders one
+    /// frame and waits has no way to be shown a second one. These make the run
+    /// interactive: the guest polls, applies each key, redraws, and exits when
+    /// its own quit key arrives. That is how a keypress is reviewed in CI
+    /// without a window.
+    pub keys: Vec<String>,
 }
 
 impl Default for CaptureHost {
@@ -1372,6 +1396,7 @@ impl Default for CaptureHost {
             store_origin: None,
             credentials: Arc::new(NoCredentials),
             component_cache: None,
+            keys: Vec::new(),
         }
     }
 }
@@ -1389,7 +1414,7 @@ pub fn run_component_capture_with(
         Some(directory) => WebGpuRuntime::new()?.with_component_cache(directory),
         None => WebGpuRuntime::new()?,
     };
-    let capture = FrameCapture::new(width, height);
+    let capture = FrameCapture::with_budget(width, height, 1 + host.keys.len());
     let mut setup = HostSetup::capture(Box::new(capture.clone()));
     if let Some(catalog) = host.catalog {
         setup.catalog = catalog;
@@ -1399,6 +1424,23 @@ pub fn run_component_capture_with(
     }
     setup.store_origin = host.store_origin;
     setup.credentials = host.credentials;
+    if !host.keys.is_empty() {
+        // An input queue is only read when the host says it is interactive, and
+        // a guest that is handed no keys is left exactly as it was: one frame.
+        setup.interactive = true;
+        let mut queue = setup.input.lock().expect("input queue poisoned");
+        for key in host.keys {
+            queue.push_back(InputEvent::Key(InputKey {
+                key,
+                text: None,
+                pressed: true,
+                shift: false,
+                control: false,
+                alt: false,
+                meta: false,
+            }));
+        }
+    }
     let status = pollster::block_on(runtime.run_component_with(bytes, setup))?;
     Ok((status, capture.take()))
 }
