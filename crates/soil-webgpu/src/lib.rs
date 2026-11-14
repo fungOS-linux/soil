@@ -127,6 +127,9 @@ pub struct CatalogEntry {
     pub title: String,
     pub version: String,
     pub summary: String,
+    /// The art the package ships, read out of the package by the host because a
+    /// Spore has no filesystem to read it with.
+    pub mark: Option<soil_spore::Mark>,
     pub workspace: Option<String>,
     pub default_surface: String,
     pub surfaces: Vec<CatalogSurface>,
@@ -266,6 +269,7 @@ impl CatalogHost for InstallCatalog {
                     name: manifest.spore.name.clone(),
                     version: manifest.spore.version.clone(),
                     summary: manifest.spore.summary.clone(),
+                    mark: manifest.mark(&dir),
                     workspace: manifest.launch.canvas_module.clone(),
                     default_surface: manifest.launch.default.clone(),
                     surfaces,
@@ -876,6 +880,13 @@ impl soil::spore::catalog::Host for WebGpuHost {
                 title: entry.title,
                 version: entry.version,
                 summary: entry.summary,
+                mark: entry.mark.map(|mark| soil::spore::catalog::Mark {
+                    format: match mark.format {
+                        soil_spore::MarkFormat::Svg => soil::spore::catalog::MarkFormat::Svg,
+                        soil_spore::MarkFormat::Png => soil::spore::catalog::MarkFormat::Png,
+                    },
+                    bytes: mark.bytes,
+                }),
                 workspace: entry.workspace,
                 default_surface: entry.default_surface,
                 surfaces: entry

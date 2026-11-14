@@ -417,6 +417,26 @@ pub struct Presentation {
     pub mark: Option<String>,
 }
 
+/// A package's own art, read out of the package.
+///
+/// The bytes are what the package shipped. Nothing here interprets them, so a
+/// guest that can draw the format draws it and one that cannot falls back to the
+/// badge — the mark is never the reason a package fails to list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mark {
+    pub format: MarkFormat,
+    pub bytes: Vec<u8>,
+}
+
+/// How to read a [`Mark`]'s bytes. `validate` refuses a `presentation.mark` that
+/// is neither, so the extension the manifest wrote and the format a guest is
+/// told cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkFormat {
+    Svg,
+    Png,
+}
+
 /// Categories a listing may claim. A fixed vocabulary is what makes browsing
 /// and ranking comparable across publishers; an unlisted name is a typo or a
 /// new category, and both should arrive as a change to this list.
@@ -797,6 +817,25 @@ impl<'de> Deserialize<'de> for SurfaceKind {
                 Self::names()
             ))
         })
+    }
+}
+
+impl Manifest {
+    /// The package's own mark, read from `root`.
+    ///
+    /// `None` when the package declares none or the file it names is missing: a
+    /// launcher lists a package with a missing asset rather than hiding it, and
+    /// `SoilSpore check` is where a broken package is refused.
+    #[must_use]
+    pub fn mark(&self, root: &Path) -> Option<Mark> {
+        let path = self.presentation.as_ref()?.mark.as_ref()?;
+        let bytes = fs::read(root.join(path)).ok()?;
+        let format = if path.ends_with(".png") {
+            MarkFormat::Png
+        } else {
+            MarkFormat::Svg
+        };
+        Some(Mark { format, bytes })
     }
 }
 
@@ -2877,6 +2916,56 @@ mod fixtures {
         format!(
             "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n{ui}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
         )
+    }
+}
+
+#[cfg(test)]
+mod mark_tests {
+    use super::fixtures::manifest;
+    use super::*;
+
+    /// A package directory with one asset on disk, because a mark is read, not
+    /// parsed: the manifest names a path and the host opens it.
+    fn package(mark: Option<&str>) -> (PathBuf, Manifest) {
+        let root = std::env::temp_dir().join(format!(
+            "soil-spore-mark-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("assets")).expect("create assets");
+        std::fs::write(root.join("assets/icon.svg"), b"<svg/>").expect("write svg");
+        let presentation = match mark {
+            Some(path) => format!(
+                "[presentation]\nbadge = \"CH\"\ncolor = \"#8899aa\"\nmark = {path:?}\n"
+            ),
+            None => String::new(),
+        };
+        let parsed = Manifest::parse(&manifest(&presentation)).expect("fixture is valid");
+        (root, parsed)
+    }
+
+    #[test]
+    fn a_mark_is_read_from_the_package() {
+        let (root, parsed) = package(Some("assets/icon.svg"));
+        let mark = parsed.mark(&root).expect("the mark is readable");
+        assert_eq!(mark.format, MarkFormat::Svg);
+        assert_eq!(mark.bytes, b"<svg/>");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_absent_mark_file_still_lists_the_package() {
+        let (root, parsed) = package(Some("assets/absent.svg"));
+        assert!(parsed.mark(&root).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_package_without_a_mark_has_none() {
+        let (root, parsed) = package(None);
+        assert!(parsed.mark(&root).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

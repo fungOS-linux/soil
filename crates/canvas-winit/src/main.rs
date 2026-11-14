@@ -189,6 +189,7 @@ impl CatalogHost for SporeCatalog {
                         .unwrap_or_else(|| soil_spore::display_title(&manifest.spore.name)),
                     version: manifest.spore.version.clone(),
                     summary: manifest.spore.summary.clone(),
+                    mark: manifest.mark(&installed.root),
                     workspace: None,
                     default_surface: manifest.launch.default.clone(),
                     surfaces: if manifest.surfaces.is_empty() {

@@ -45,6 +45,24 @@ interface catalog {
     requires: option<string>,
   }
 
+  /// How to read `mark.bytes`.
+  enum mark-format {
+    svg,
+    png,
+  }
+
+  /// A package's own art, as bytes rather than a path.
+  ///
+  /// A Spore has no filesystem, so a launcher cannot open `presentation.mark`
+  /// itself: the host reads the file the manifest names and hands over what it
+  /// found. Nothing about the format is decided here — the bytes are what the
+  /// package shipped, and a guest that cannot draw them falls back to the
+  /// badge.
+  record mark {
+    format: mark-format,
+    bytes: list<u8>,
+  }
+
   record entry {
     id: string,
     /// Registry slug: identity, not a label.
@@ -54,6 +72,9 @@ interface catalog {
     title: string,
     version: string,
     summary: string,
+    /// The art the package ships, absent when it ships none. A launcher draws
+    /// this rather than inventing a tile; a store lists it without a network.
+    mark: option<mark>,
     /// Optional Canvas workspace id supplied by host policy.
     workspace: option<string>,
     /// The surface a bare launch opens. Names one of `surfaces`.
