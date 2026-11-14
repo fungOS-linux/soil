@@ -7,7 +7,8 @@
 //! Layout under the install root:
 //!
 //! ```text
-//! <root>/<spore-id>/            unpacked current package
+//! <root>/<spore-name>/          unpacked current package, named the way a
+//!                                catalog scan names it; the id lives in .install/
 //! <root>/.packages/<digest>.spore   immutable tars, including the previous one
 //! <root>/.install/<spore-id>.json   current/previous digest and publisher
 //! <root>/.staging/                  interrupted swaps only
@@ -46,6 +47,11 @@ impl From<soil_store::Error> for Error {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledState {
     pub id: String,
+    /// The directory this tree lives in. Trees are named by package, not by id,
+    /// because that is how every existing install and every catalog scan names
+    /// them; older state files predate the field and fall back to the id.
+    #[serde(default)]
+    pub name: Option<String>,
     pub version: String,
     pub digest: String,
     pub previous_digest: Option<String>,
@@ -113,7 +119,14 @@ pub fn install(
             .map_err(|error| Error::Io(format!("{}: {error}", cached.display())))?;
     }
 
-    let current = root.join(&id);
+    let name = manifest.spore.name.clone();
+    validate_id(&name)?;
+    let legacy = root.join(&id);
+    if name != id && legacy.exists() && !root.join(&name).exists() {
+        fs::rename(&legacy, root.join(&name))
+            .map_err(|error| Error::Io(format!("{}: {error}", legacy.display())))?;
+    }
+    let current = root.join(&name);
     let backup =
         root.join(STAGING_DIR)
             .join(format!("{id}-old-{}-{}", std::process::id(), nanos()));
@@ -131,6 +144,7 @@ pub fn install(
 
     let state = InstalledState {
         id,
+        name: Some(name),
         version: manifest.spore.version,
         digest: lock.digest,
         previous_digest: existing.as_ref().map(|state| state.digest.clone()),
@@ -177,7 +191,7 @@ pub fn rollback(id: &str, root: &Path) -> Result<InstalledState, Error> {
             .map_err(|error| Error::Io(format!("{}: {error}", staging.display())))?;
     }
     soil_spore::unpack(&bytes, &staging)?;
-    let current = root.join(id);
+    let current = root.join(state.name.as_deref().unwrap_or(id));
     let backup = root.join(STAGING_DIR).join(format!(
         "{id}-rollback-old-{}-{}",
         std::process::id(),
@@ -197,6 +211,7 @@ pub fn rollback(id: &str, root: &Path) -> Result<InstalledState, Error> {
 
     let next = InstalledState {
         id: id.to_owned(),
+        name: state.name.clone(),
         version: manifest.spore.version,
         digest: lock.digest,
         previous_digest: Some(state.digest),
@@ -679,6 +694,7 @@ pub fn adopt(root: &Path, overwrite: bool) -> Result<Vec<Adopted>, Error> {
         };
         let state = InstalledState {
             id: id.clone(),
+            name: Some(manifest.spore.name.clone()),
             version: manifest.spore.version.clone(),
             digest: lock.digest.clone(),
             previous_digest: None,
