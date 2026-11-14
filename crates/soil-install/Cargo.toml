@@ -12,6 +12,7 @@ serde_json = "1"
 soil-spore = { path = "../soil-spore" }
 soil-store = { path = "../soil-store" }
 thiserror = "2"
+ureq = "2"
 
 [dev-dependencies]
 tempfile = "3"

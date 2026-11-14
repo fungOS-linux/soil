@@ -615,3 +615,253 @@ surfaces = ["canvas"]
         assert_eq!(first, second);
     }
 }
+
+/// What `adopt` found, and what it recorded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Adopted {
+    pub id: String,
+    pub version: String,
+    pub digest: String,
+    pub action: String,
+}
+
+/// Record provenance for trees that were put here by hand.
+///
+/// Until a tree has `.install/<id>.json`, soil cannot tell current from drifted
+/// from adopted, so every later decision - sync, update, rollback - is guesswork.
+/// Adoption does not trust the tree; it hashes it, which is exactly the claim
+/// provenance makes. The publisher is left empty because nobody signed it here.
+pub fn adopt(root: &Path, overwrite: bool) -> Result<Vec<Adopted>, Error> {
+    ensure_layout(root)?;
+    let mut adopted = Vec::new();
+    let entries =
+        fs::read_dir(root).map_err(|error| Error::Io(format!("{}: {error}", root.display())))?;
+    for entry in entries {
+        let path = entry.map_err(|error| Error::Io(error.to_string()))?.path();
+        if !path.is_dir() || !path.join("spore.toml").is_file() {
+            continue;
+        }
+        let fallback = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("?")
+            .to_string();
+        // A tree that does not check is the interesting case, not the fatal
+        // one: adoption is what makes it visible instead of invisible.
+        let manifest = match soil_spore::Manifest::load(&path) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                adopted.push(Adopted {
+                    id: fallback,
+                    version: String::new(),
+                    digest: String::new(),
+                    action: format!("skipped: {error}"),
+                });
+                continue;
+            }
+        };
+        let id = manifest.spore.id.clone();
+        validate_id(&id)?;
+        if !overwrite && state_path(root, &id).is_file() {
+            continue;
+        }
+        let lock = match soil_spore::check(&path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                adopted.push(Adopted {
+                    id,
+                    version: manifest.spore.version.clone(),
+                    digest: String::new(),
+                    action: format!("skipped: {error}"),
+                });
+                continue;
+            }
+        };
+        let state = InstalledState {
+            id: id.clone(),
+            version: manifest.spore.version.clone(),
+            digest: lock.digest.clone(),
+            previous_digest: None,
+            publisher: None,
+            installed_at: now(),
+        };
+        write_state(root, &state)?;
+        adopted.push(Adopted {
+            id,
+            version: manifest.spore.version.clone(),
+            digest: lock.digest,
+            action: if overwrite {
+                "adopted (overwrote provenance)".into()
+            } else {
+                "adopted".into()
+            },
+        });
+    }
+    Ok(adopted)
+}
+
+/// What `sync` would do, or did.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncOutcome {
+    pub id: String,
+    /// The role that put this package in the seed.
+    pub role: String,
+    pub from: Option<String>,
+    pub to: String,
+    pub digest: String,
+    pub action: String,
+}
+
+pub struct SyncOptions<'a> {
+    /// A directory holding a signed index and its operator key: `index.json`
+    /// and `operator.asc`.
+    pub seed: &'a Path,
+    /// Where the tars live. Defaults to `<seed>/packages`.
+    pub packages: Option<&'a Path>,
+    pub root: &'a Path,
+    pub write: bool,
+}
+
+/// Install the role-bearing part of a seed index.
+///
+/// A role is the contract: `store` and `launcher` are things a host with soil is
+/// supposed to have, and the seed names which package fills each one today. Only
+/// entries that declare a `[system] role` are considered, so shipping an index
+/// does not install everything it lists.
+pub fn sync(root: &Path, options: SyncOptions<'_>) -> Result<Vec<SyncOutcome>, Error> {
+    let index_path = options.seed.join("index.json");
+    let operator_key = fs::read(options.seed.join("operator.asc"))
+        .map_err(|error| Error::Io(format!("{}: {error}", operator_key_path(options.seed).display())))?;
+    let index = soil_store::Index::read(&index_path)?;
+    let verified = index.verify(&operator_key)?;
+    let packages = match options.packages {
+        Some(path) => path.to_path_buf(),
+        None => options.seed.join("packages"),
+    };
+    let installed = scan_installed(root)?;
+    let mut outcomes = Vec::new();
+    for entry in &index.entries {
+        let Some(role) = entry.system.as_ref() else {
+            continue;
+        };
+        let current = installed
+            .iter()
+            .find(|app| app.manifest.spore.id == entry.spore_id)
+            .map(|app| app.digest.clone());
+        let action = match &current {
+            Some(digest) if digest == &entry.digest => "current",
+            Some(_) => "would update",
+            None => "would install",
+        };
+        if !options.write || action == "current" {
+            outcomes.push(SyncOutcome {
+                id: entry.spore_id.clone(),
+                role: role.clone(),
+                from: current,
+                to: entry.version.clone(),
+                digest: entry.digest.clone(),
+                action: action.into(),
+            });
+            continue;
+        }
+        let package = packages.join(format!("{}.spore", entry.digest));
+        if !package.is_file() {
+            outcomes.push(SyncOutcome {
+                id: entry.spore_id.clone(),
+                role: role.clone(),
+                from: current,
+                to: entry.version.clone(),
+                digest: entry.digest.clone(),
+                action: "missing package tar".into(),
+            });
+            continue;
+        }
+        let delegation = verified.for_entry(entry).ok_or_else(|| {
+            Error::Invalid(format!("{}: seed entry is not delegated", entry.spore_id))
+        })?;
+        install(
+            &package,
+            root,
+            InstallOptions {
+                public_key: Some(delegation.public_key.as_bytes()),
+                publisher: entry.publisher.as_deref(),
+                ..Default::default()
+            },
+        )?;
+        outcomes.push(SyncOutcome {
+            id: entry.spore_id.clone(),
+            role: role.clone(),
+            from: current,
+            to: entry.version.clone(),
+            digest: entry.digest.clone(),
+            action: if action == "would update" {
+                "updated".into()
+            } else {
+                "installed".into()
+            },
+        });
+    }
+    Ok(outcomes)
+}
+
+fn operator_key_path(seed: &Path) -> PathBuf {
+    seed.join("operator.asc")
+}
+
+/// Resolve a package by its content id instead of a path.
+///
+/// The index is what knows which digest and which publisher key a CID belongs
+/// to, so a CID installs the same way a tar does once it is found: the cache
+/// first, then the store origin. A peer fetch is the same lookup with a
+/// different transport.
+pub fn install_cid(
+    cid: &str,
+    index: &Path,
+    packages: &Path,
+    origin: Option<&str>,
+    root: &Path,
+) -> Result<InstalledState, Error> {
+    let index = soil_store::Index::read(index)?;
+    let entry = index
+        .entries
+        .iter()
+        .find(|entry| entry.package == cid)
+        .ok_or_else(|| Error::NotFound(format!("no index entry carries {cid}")))?;
+    let package = packages.join(format!("{}.spore", entry.digest));
+    if !package.is_file() {
+        let origin = origin.ok_or_else(|| {
+            Error::NotFound(format!(
+                "{} is not cached and no --origin was given",
+                entry.digest
+            ))
+        })?;
+        let url = format!("{}/package/{}", origin.trim_end_matches('/'), entry.digest);
+        let response = ureq::get(&url)
+            .call()
+            .map_err(|error| Error::Store(format!("{url}: {error}")))?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .map_err(|error| Error::Io(format!("{url}: {error}")))?;
+        fs::write(&package, &bytes)
+            .map_err(|error| Error::Io(format!("{}: {error}", package.display())))?;
+    }
+    let bytes =
+        fs::read(&package).map_err(|error| Error::Io(format!("{}: {error}", package.display())))?;
+    let found = soil_store::cid::raw(&bytes);
+    if found != cid {
+        return Err(Error::Invalid(format!(
+            "{} hashes to {found}, not {cid}",
+            package.display()
+        )));
+    }
+    install(
+        &package,
+        root,
+        InstallOptions {
+            publisher: entry.publisher.as_deref(),
+            ..Default::default()
+        },
+    )
+}

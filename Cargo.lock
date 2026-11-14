@@ -7066,6 +7066,7 @@ dependencies = [
  "soil-store",
  "tempfile",
  "thiserror 2.0.21",
+ "ureq 2.12.1",
 ]
 
 [[package]]
