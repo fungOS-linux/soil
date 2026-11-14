@@ -1,13 +1,19 @@
 //! Host content-addressed cache behind `soil:storage`.
 //!
-//! A Spore names a CID and never a path, directory, URL or handle. The cache is
-//! a flat, sharded directory of bytes keyed by their SHA-256 digest, and every
+//! `soil:storage` is for the content Soil ships: the storefront publishes a CID
+//! for every package, and a Spore reads it back by that address. It is the
+//! mirror of `soil:store`, not a workspace — a user's own files belong in
+//! `soil:vfs`, where the host decides what is mounted and paths are relative to
+//! it. Nothing here accepts a path from a guest.
+//!
+//! The cache is a flat, sharded directory keyed by SHA-256 digest, and every
 //! read re-hashes what it found: a cache that silently returns the wrong bytes
-//! is worse than one that misses.
+//! is worse than one that misses. Writes verify that the bytes hash to the
+//! address they are stored under, so the cache cannot invent an address for
+//! content that was never published.
 //!
 //! This crate is the storage policy, not the capability. Linking it into a host
-//! is what makes `soil:storage` callable by a Spore; `soil-storage` (the binary
-//! here) is the operator path for putting bytes in and proving what came out.
+//! is what makes `soil:storage` callable by a Spore.
 
 use std::fs;
 use std::io::Read;
