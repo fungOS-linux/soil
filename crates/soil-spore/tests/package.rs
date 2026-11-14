@@ -716,3 +716,24 @@ fn a_package_can_ship_its_own_mark() {
         "a mark is an svg or a png, not whatever a renderer happens to sniff"
     );
 }
+
+#[test]
+fn placement_names_the_devices_a_package_is_for() {
+    let placed = format!("{MANIFEST}\n[placement]\ndevices = [\"phone\", \"laptop\"]\nrequires = [\"camera\"]\n");
+    let manifest = Manifest::parse(&placed).expect("placement parses");
+    let placement = manifest.placement.as_ref().expect("placement");
+    assert_eq!(placement.devices, ["phone", "laptop"]);
+    assert_eq!(placement.requires, ["camera"]);
+
+    let nonsense = format!("{MANIFEST}\n[placement]\ndevices = [\"toaster\"]\n");
+    assert!(
+        Manifest::parse(&nonsense).is_err(),
+        "a device class outside the vocabulary is a typo, not a new platform"
+    );
+
+    let unplaced = Manifest::parse(MANIFEST).expect("manifest parses");
+    assert!(
+        unplaced.placement.is_none(),
+        "a package that says nothing is installable anywhere"
+    );
+}
