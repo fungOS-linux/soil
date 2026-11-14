@@ -130,6 +130,20 @@ pub struct CatalogEntry {
     pub workspace: Option<String>,
     pub default_surface: String,
     pub surfaces: Vec<CatalogSurface>,
+    /// The package's `[presentation] mark`, as SVG source. A launcher draws it;
+    /// a host with no renderer ignores it.
+    pub mark: Option<String>,
+}
+
+/// How large a mark may be. A tile is 104 px; anything that needs more than this
+/// is not an icon, and shipping it through the catalogue would be a bug.
+pub const MARK_LIMIT: usize = 64 * 1024;
+
+/// Read a package's mark, if it declares one and ships it.
+pub fn read_mark(root: &std::path::Path, manifest: &soil_spore::Manifest) -> Option<String> {
+    let path = manifest.presentation.as_ref()?.mark.as_deref()?;
+    let svg = std::fs::read_to_string(root.join(path)).ok()?;
+    (svg.len() <= MARK_LIMIT && svg.contains("<svg")).then_some(svg)
 }
 
 #[derive(Clone, Debug)]
@@ -269,6 +283,7 @@ impl CatalogHost for InstallCatalog {
                     workspace: manifest.launch.canvas_module.clone(),
                     default_surface: manifest.launch.default.clone(),
                     surfaces,
+                    mark: read_mark(&dir, &manifest),
                 });
             }
         }
@@ -878,6 +893,7 @@ impl soil::spore::catalog::Host for WebGpuHost {
                 summary: entry.summary,
                 workspace: entry.workspace,
                 default_surface: entry.default_surface,
+                mark: entry.mark,
                 surfaces: entry
                     .surfaces
                     .into_iter()

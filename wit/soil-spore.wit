@@ -61,6 +61,9 @@ interface catalog {
     /// Named views this package ships. Empty means the package declares none
     /// and the host chooses its own renderer.
     surfaces: list<surface>,
+    /// The package's mark, as SVG source: what a launcher draws on its tile.
+    /// A host with no renderer ignores it; a package that ships none has none.
+    mark: option<string>,
   }
 
   record launched {

@@ -232,6 +232,7 @@ impl CatalogHost for SporeCatalog {
                             })
                             .collect()
                     },
+                    mark: soil_webgpu::read_mark(&installed.root, manifest),
                 }
             })
             .collect())
