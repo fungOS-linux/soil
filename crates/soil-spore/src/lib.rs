@@ -383,6 +383,10 @@ pub struct Presentation {
     /// Never a path: the fallback badge is what works with no network.
     #[serde(default)]
     pub icon: Option<String>,
+    /// A drawn mark the package ships (a path or a CID), when it has one.
+    /// Distinct from `badge`: a monogram always works, a mark can go missing.
+    #[serde(default)]
+    pub mark: Option<String>,
 }
 
 /// Categories a listing may claim. A fixed vocabulary is what makes browsing
@@ -970,6 +974,14 @@ impl Manifest {
             if VFS_ENV_NAMES.contains(&name.as_str()) {
                 return Err(Error::Invalid(format!(
                     "env.spore may not name {name:?}: inside the shell it means the VFS, not the host"
+                )));
+            }
+            // The host's own control plane is never a package's to read: an MCP
+            // token or a principal is a capability and an identity, and a Spore
+            // holding either can act as the host that started it.
+            if name.starts_with("MUSH_") {
+                return Err(Error::Invalid(format!(
+                    "env.spore may not name {name:?}: the host's control variables never cross"
                 )));
             }
         }
