@@ -188,6 +188,12 @@ pub struct Manifest {
     /// Launcher identity: a mark and the colour it is drawn in.
     #[serde(default)]
     pub presentation: Option<Presentation>,
+    /// Where this package belongs. A host has a class - a phone, a laptop, a
+    /// server - and installs the packages whose placement admits it. Absent
+    /// means anywhere: a package that says nothing is not a package that runs
+    /// nowhere.
+    #[serde(default)]
+    pub placement: Option<Placement>,
     /// What `man` prints: synopsis lines and an authored body.
     #[serde(default)]
     pub docs: Option<Docs>,
@@ -370,6 +376,24 @@ pub mod chrome {
     /// Height of an interactive control in the bar; the whole row, so the target
     /// is the row rather than the glyph.
     pub const DEFAULT_CONTROL_HEIGHT: u32 = DEFAULT_HEIGHT;
+}
+
+/// The device classes a package is meant for.
+///
+/// A closed vocabulary, for the same reason categories are: `phone` has to mean
+/// the same thing to a publisher in one repo and a host in another, or the
+/// filter is a spelling test.
+pub const DEVICES: [&str; 5] = ["phone", "tablet", "laptop", "desktop", "server"];
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placement {
+    /// Device classes this package is meant for. Empty means anywhere.
+    #[serde(default)]
+    pub devices: Vec<String>,
+    /// Hardware or host capability it cannot run without, e.g. `gpu`, `camera`.
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -907,6 +931,10 @@ impl Manifest {
                 "usage": docs.usage,
                 "man": docs.man,
             })),
+            "placement": self.placement.as_ref().map(|placement| serde_json::json!({
+                "devices": placement.devices,
+                "requires": placement.requires,
+            })),
             "presentation": self.presentation.as_ref().map(|presentation| serde_json::json!({
                 "badge": presentation.badge,
                 "color": presentation.color,
@@ -1382,6 +1410,16 @@ impl Manifest {
                 if !(mark.ends_with(".svg") || mark.ends_with(".png")) {
                     return Err(Error::Invalid(format!(
                         "presentation.mark {mark:?} must be a .svg or .png inside the package"
+                    )));
+                }
+            }
+        }
+        if let Some(placement) = &self.placement {
+            for device in &placement.devices {
+                if !DEVICES.contains(&device.as_str()) {
+                    return Err(Error::Invalid(format!(
+                        "placement.devices {device:?} is not one of {}",
+                        DEVICES.join(", ")
                     )));
                 }
             }

@@ -89,7 +89,17 @@ fn main() -> anyhow::Result<()> {
         auth = auth.allow_origin(origin.clone());
     }
 
-    let bridge = Arc::new(Bridge::new(spore.clone(), grants, registry).with_auth(auth));
+    // A browser host runs the guest, so it has to be handed the guest: the
+    // manifest projection (which imports to provide) and the module bytes.
+    let module = manifest
+        .module
+        .as_ref()
+        .and_then(|module| std::fs::read(args.spore.join(&module.path)).ok());
+    let bridge = Arc::new(
+        Bridge::new(spore.clone(), grants, registry)
+            .with_auth(auth)
+            .with_package(manifest.info_json(), module),
+    );
     let server = bridge.serve(bind)?;
     let addr = server.addr();
 

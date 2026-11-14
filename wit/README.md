@@ -25,7 +25,7 @@ credential resolution stay in host adapters.
 | `soil:http@0.1.0` | wired | bounded host-mediated HTTP |
 | `soil:creds@1.0.0` | wired | host-held signing and verification; no secret export |
 | `fungos:http-context@0.1.0` | wired | host-attested invocation context for `wasi:http` handlers |
-| `soil:unibus@0.1.0` | wired | bounded poll/publish over Unibus; `soil-wasi-host` adapter |
+| `soil:unibus@0.1.0` | wired | bounded poll/publish over Unibus; `soil-host` adapter |
 | `soil:appdata@1.0.0` | contract | guest SDK exists; native host next |
 | `soil:storage@1.0.0` | contract | content-addressed asset cache |
 | `soil:media@0.1.0` | wired | playback, encoded chunks, image |

@@ -1,6 +1,6 @@
 # `soil:unibus@0.1.0` — the Spore-facing bus edge
 
-Status: **wired, 2026-11-07.** `soil-wasi-host` implements `bus.publish` /
+Status: **wired, 2026-11-07.** `soil-host` implements `bus.publish` /
 `bus.poll` over `UnibusPublisher` and `UnibusBus`; `MemoryBus` backs tests.
 
 ## What the contract is
@@ -55,7 +55,7 @@ unibus-router   still the only router. Hub-to-hub gossip/relay is Unibus proper,
 Host shape:
 
 ```rust
-use soil_wasi_host::UnibusBus;
+use soil_host::UnibusBus;
 
 let bus = UnibusBus::connect_any(&base_config, &endpoints)?; // tries in order
 bus.publish("confluence.webhook.received.v1", &body, None, 0)?;
@@ -109,5 +109,5 @@ means "retained head", not index 0.
 ## Run
 
 ```sh
-cargo test -p soil-wasi-host -p soil-confluence -p soil-abi
+cargo test -p soil-host -p soil-confluence -p soil-abi
 ```

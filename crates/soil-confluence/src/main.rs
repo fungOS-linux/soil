@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use soil_confluence::spore::ConfluenceBus;
 use soil_confluence::webhooks::{Registry, Webhook};
-use soil_wasi_host::{
+use soil_host::{
     GatewayRoute, HttpGatewayBuilder, HttpService, OriginAuth, StaticCredentials, UnibusBus,
     WasiHostBuilder, WasiHostPolicy,
 };

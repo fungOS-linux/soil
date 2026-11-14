@@ -21,7 +21,7 @@ use thiserror::Error;
 
 /// Largest body the host will accept on either side of the boundary.
 ///
-/// Matches `soil_wasi_host::unibus::MAX_BUS_BODY`, which in turn matches the
+/// Matches `soil_host::unibus::MAX_BUS_BODY`, which in turn matches the
 /// Unibus control-plane ceiling. Bulk payloads belong on the content plane as
 /// a reference (CID/URL) inside the JSON object, not as bytes here.
 pub const MAX_BODY: usize = 64 * 1024;
