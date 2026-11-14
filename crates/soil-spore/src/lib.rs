@@ -84,6 +84,41 @@ type Result<T> = std::result::Result<T, Error>;
 
 // ---- manifest -------------------------------------------------------------
 
+/// The environment a Spore and its host children may see.
+///
+/// `spore` narrows what the shell can read (unset means the caller's whole
+/// environment, which is what an agent shell wants). `host` widens the floor a
+/// host child is spawned with — and is deliberately not allowed to name
+/// anything secret-shaped, because a child runs with the user's real
+/// privileges.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvPolicy {
+    #[serde(default)]
+    pub spore: Vec<String>,
+    #[serde(default)]
+    pub host: Vec<String>,
+}
+
+/// Names whose meaning inside the shell is the VFS, not the host: `cd $HOME`
+/// and command lookup would resolve outside the sandbox if a manifest could
+/// hand them real paths.
+pub const VFS_ENV_NAMES: &[&str] = &[
+    "PATH", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME", "TERM",
+];
+
+/// Whether a name looks like it carries a secret. A host child is the thing
+/// running with the user's privileges, so this is a review guard, not a
+/// sandbox: it refuses the obvious names and leaves the judgement to a human.
+pub fn secret_shaped(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["TOKEN", "SECRET", "PASSWORD", "PASSPHRASE", "API_KEY", "PRIVATE_KEY"]
+        .iter()
+        .any(|needle| upper.contains(needle))
+        || upper.ends_with("_KEY")
+        || upper.starts_with("AWS_")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -114,6 +149,15 @@ pub struct Manifest {
     pub deps: BTreeMap<String, String>,
     #[serde(default)]
     pub grants: BTreeMap<String, String>,
+    /// Which environment variables this Spore may read, and which a host child
+    /// may see while running on its behalf.
+    ///
+    /// This lives in the manifest rather than in an environment variable the
+    /// caller sets, because the thing being constrained is the caller: whoever
+    /// spawns the host could otherwise widen its own grant. The manifest is what
+    /// a reviewer reads and what the lock digests, so a widened grant is a diff.
+    #[serde(default)]
+    pub env: EnvPolicy,
     #[serde(default)]
     pub assets: BTreeMap<String, Asset>,
     /// Declared absences. Reviewed like grants: intent is written down.
@@ -918,6 +962,26 @@ impl Manifest {
                 "version {:?} is not semver-ish",
                 self.spore.version
             )));
+        }
+        for name in &self.env.spore {
+            if name.trim().is_empty() {
+                return Err(Error::Invalid("env.spore has an empty name".into()));
+            }
+            if VFS_ENV_NAMES.contains(&name.as_str()) {
+                return Err(Error::Invalid(format!(
+                    "env.spore may not name {name:?}: inside the shell it means the VFS, not the host"
+                )));
+            }
+        }
+        for name in &self.env.host {
+            if name.trim().is_empty() {
+                return Err(Error::Invalid("env.host has an empty name".into()));
+            }
+            if secret_shaped(name) {
+                return Err(Error::Invalid(format!(
+                    "env.host may not name {name:?}: a host child runs with the user's privileges"
+                )));
+            }
         }
         for skill in &self.skills {
             if !identifier(&skill.name) {
@@ -2368,6 +2432,29 @@ pub fn sign_principal(
     }
     std::fs::write(signature, output.stdout)
         .map_err(|error| Error::Io(format!("{}: {error}", signature.display())))
+}
+
+#[cfg(test)]
+mod env_policy_tests {
+    use super::*;
+
+    #[test]
+    fn host_children_may_not_be_handed_a_secret_shaped_name() {
+        for name in ["GITHUB_TOKEN", "OPENAI_API_KEY", "AWS_PROFILE", "DB_PASSWORD"] {
+            assert!(secret_shaped(name), "{name} should look secret");
+        }
+        for name in ["SSH_AUTH_SOCK", "LANG", "TERM", "GIT_AUTHOR_NAME"] {
+            assert!(!secret_shaped(name), "{name} should be admissible");
+        }
+    }
+
+    #[test]
+    fn the_shell_may_not_be_handed_a_vfs_meaning_name() {
+        for name in ["PATH", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME", "TERM"] {
+            assert!(VFS_ENV_NAMES.contains(&name), "{name} should be reserved");
+        }
+        assert!(!VFS_ENV_NAMES.contains(&"GIT_AUTHOR_NAME"));
+    }
 }
 
 fn validate_geode_label(label: &str) -> Result<()> {
