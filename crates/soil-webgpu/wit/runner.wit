@@ -6,9 +6,12 @@ world runner {
   include wasi:webgpu/imports@0.3.0-rc.2;
   import soil:present/surface@0.1.0;
   import soil:present/input@0.1.0;
+  import soil:records/records@0.1.0;
   import soil:present/cursor@0.1.0;
   import soil:present/clipboard@0.1.0;
   import soil:spore/catalog@0.1.0;
+  import soil:agents/observe@0.1.0;
+  import soil:agents/control@0.1.0;
   import soil:http/http@0.1.0;
   import soil:terminal-screen/screen@0.1.0;
 

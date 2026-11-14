@@ -12,8 +12,8 @@ base64 = "0.22"
 bytes = "1"
 serde_json = "1"
 tracing = "0.1"
-unibus = { git = "https://github.com/fungOS-linux/unibus.git", rev = "8bf8f79" }
-unibus-sdk = { git = "https://github.com/fungOS-linux/unibus.git", rev = "8bf8f79" }
+unibus = { git = "https://github.com/mycelium-linux/unibus.git", rev = "8bf8f79" }
+unibus-sdk = { git = "https://github.com/mycelium-linux/unibus.git", rev = "8bf8f79" }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 hmac = "0.12"
 http = "1"

@@ -1,0 +1,12 @@
+[package]
+name = "soil-agent-host"
+description = "The host side of soil:agent — one normalized agent and the harness-adapter seam"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]

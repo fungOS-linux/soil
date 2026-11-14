@@ -5,9 +5,11 @@
 //! deadline and credential material. No socket, DNS API, proxy setting or
 //! secret crosses the component boundary.
 
-use std::{collections::BTreeSet, io::Read, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, io::Read, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use url::Url;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -31,6 +33,32 @@ const ALLOWED_HEADERS: &[&str] = &[
     "if-modified-since",
     "range",
 ];
+
+/// A guest puts this literal in a URL path when the host should resolve a
+/// credential into that segment instead of injecting it as a header.
+pub const CREDENTIAL_MARKER: &str = "__CREDENTIAL__";
+
+/// Percent-encode one path segment while preserving the RFC 3986 unreserved
+/// characters (`-`, `.`, `_`, `~`).
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b':')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 /// One request in host-internal form.
 ///
@@ -132,6 +160,12 @@ impl HttpPolicy {
 pub trait CredentialProvider: Send + Sync {
     /// Return the header name/value to inject for `handle`.
     fn resolve(&self, handle: &str) -> Result<Option<(String, String)>>;
+
+    /// Return a path segment to substitute for `credential`, when the host is
+    /// configured to resolve path credentials.
+    fn resolve_path(&self, _handle: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 #[derive(Default)]
@@ -162,6 +196,84 @@ impl BearerCredential {
 impl CredentialProvider for BearerCredential {
     fn resolve(&self, handle: &str) -> Result<Option<(String, String)>> {
         Ok((handle == "default").then(|| ("authorization".to_string(), self.value.clone())))
+    }
+}
+
+/// Resolve a Geode reference through the owner-only `geoded` socket and expose
+/// it as a URL path segment. The secret is leased for the duration of one fetch
+/// and never returns to the Spore.
+#[cfg(unix)]
+pub struct GeodeCredentials {
+    socket: PathBuf,
+    purpose: String,
+}
+
+#[cfg(unix)]
+impl GeodeCredentials {
+    pub fn new(socket: impl Into<PathBuf>, purpose: impl Into<String>) -> Self {
+        Self {
+            socket: socket.into(),
+            purpose: purpose.into(),
+        }
+    }
+
+    fn lease(&self, reference: &str) -> Result<String> {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let request = serde_json::json!({
+            "op": "lease",
+            "reference": reference,
+            "purpose": self.purpose,
+            "ttl_ms": 5_000,
+        });
+        let mut stream = UnixStream::connect(&self.socket)
+            .with_context(|| format!("connect Geode socket {}", self.socket.display()))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .context("set Geode read timeout")?;
+        stream
+            .write_all(format!("{}\n", request).as_bytes())
+            .context("write Geode lease")?;
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .context("read Geode lease")?;
+        let response: serde_json::Value =
+            serde_json::from_str(&response).context("decode Geode lease")?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            anyhow::bail!(
+                "Geode lease denied: {}",
+                response
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown error")
+            );
+        }
+        let encoded = response
+            .get("secret_b64")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("Geode lease omitted secret_b64"))?;
+        let bytes = BASE64.decode(encoded).context("decode Geode secret")?;
+        let secret = String::from_utf8(bytes).context("Geode secret is not UTF-8")?;
+        if secret.is_empty() {
+            anyhow::bail!("Geode returned an empty credential");
+        }
+        Ok(secret)
+    }
+}
+
+#[cfg(unix)]
+impl CredentialProvider for GeodeCredentials {
+    fn resolve(&self, _handle: &str) -> Result<Option<(String, String)>> {
+        Ok(None)
+    }
+
+    fn resolve_path(&self, handle: &str) -> Result<Option<String>> {
+        if !handle.starts_with("geode://") {
+            return Ok(None);
+        }
+        self.lease(handle).map(Some)
     }
 }
 
@@ -438,7 +550,28 @@ pub fn perform(
     transport: &dyn HttpTransport,
     request: Request,
 ) -> Result<Response, Error> {
-    let url = Url::parse(&request.url).map_err(|_| Error::Invalid)?;
+    let mut request_url = request.url.clone();
+    let mut path_secret = None;
+    if request_url.contains(CREDENTIAL_MARKER) {
+        if request_url.matches(CREDENTIAL_MARKER).count() != 1 {
+            return Err(Error::Invalid);
+        }
+        let handle = request.credential.as_deref().ok_or(Error::Denied)?;
+        let secret = credentials
+            .resolve_path(handle)
+            .map_err(|_| Error::Denied)?
+            .ok_or(Error::Denied)?;
+        if secret.contains(['\r', '\n', '\0']) {
+            return Err(Error::Denied);
+        }
+        let encoded = utf8_percent_encode(&secret, PATH_SEGMENT).to_string();
+        request_url = request_url.replace(CREDENTIAL_MARKER, &encoded);
+        path_secret = Some((secret, encoded));
+    }
+    let url = Url::parse(&request_url).map_err(|_| Error::Invalid)?;
+    if url.path().contains(CREDENTIAL_MARKER) {
+        return Err(Error::Denied);
+    }
     let origin = origin_of(&url).ok_or(Error::Invalid)?;
     if !policy.origins.contains(&origin) {
         return Err(Error::Denied);
@@ -472,13 +605,15 @@ pub fn perform(
         return Err(Error::OverBudget);
     }
     let mut auth = None;
-    if let Some(handle) = &request.credential {
-        let header = credentials.resolve(handle).map_err(|_| Error::Denied)?;
-        let header = header.ok_or(Error::Denied)?;
-        if header.0.contains(['\r', '\n']) || header.1.contains(['\r', '\n']) {
-            return Err(Error::Denied);
+    if path_secret.is_none() {
+        if let Some(handle) = &request.credential {
+            let header = credentials.resolve(handle).map_err(|_| Error::Denied)?;
+            let header = header.ok_or(Error::Denied)?;
+            if header.0.contains(['\r', '\n']) || header.1.contains(['\r', '\n']) {
+                return Err(Error::Denied);
+            }
+            auth = Some(header);
         }
-        auth = Some(header);
     }
 
     let mut headers = request.headers.clone();
@@ -505,9 +640,17 @@ pub fn perform(
             TransportError::Io => Error::Io,
             TransportError::Unsupported => Error::Unsupported,
         })?;
+    let final_url = if let Some((raw, encoded)) = &path_secret {
+        response
+            .final_url
+            .replace(encoded, CREDENTIAL_MARKER)
+            .replace(raw, CREDENTIAL_MARKER)
+    } else {
+        response.final_url
+    };
     Ok(Response {
         status: response.status,
-        final_url: response.final_url,
+        final_url,
         headers: response.headers,
         body: response.body,
     })
@@ -627,9 +770,16 @@ impl HttpRuntime {
         let component = Component::new(&self.engine, bytes)?;
         let mut store = Store::new(&self.engine, host);
         let bindings = Runner::instantiate(&mut store, &component, &self.linker)?;
-        bindings
+        let output = bindings
             .call_run(&mut store, args)?
             .map_err(|error| anyhow::anyhow!("guest: {error}"))?;
+        if !output.is_empty() {
+            if output.ends_with('\n') {
+                print!("{output}");
+            } else {
+                println!("{output}");
+            }
+        }
         Ok(())
     }
 }
@@ -644,6 +794,10 @@ mod tests {
     impl CredentialProvider for StaticCredentials {
         fn resolve(&self, handle: &str) -> Result<Option<(String, String)>> {
             Ok((handle == "test").then(|| ("authorization".into(), "Bearer spike".into())))
+        }
+
+        fn resolve_path(&self, handle: &str) -> Result<Option<String>> {
+            Ok((handle == "path").then(|| "path-secret".into()))
         }
     }
 
@@ -773,6 +927,93 @@ mod tests {
                 .unwrap_err(),
             http::Error::Denied
         );
+    }
+
+    #[test]
+    fn substitutes_a_path_credential_and_redacts_the_final_url() {
+        let (origin, rx, handle) = serve_once("ok", None);
+        let policy = HttpPolicy::new([origin.clone()], 1024, Duration::from_secs(5)).unwrap();
+        let mut host = HttpHost::new(policy).with_credentials(Arc::new(StaticCredentials));
+        let response = host
+            .fetch(http::Request {
+                url: format!("{origin}/api/{CREDENTIAL_MARKER}/groups/0"),
+                method: http::Method::Get,
+                headers: vec![],
+                body: None,
+                credential: Some("path".into()),
+                max_bytes: 128,
+                timeout_ms: 2_000,
+            })
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.final_url,
+            format!("{origin}/api/{CREDENTIAL_MARKER}/groups/0")
+        );
+        assert!(
+            rx.recv()
+                .unwrap()
+                .starts_with("GET /api/path-secret/groups/0"),
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_marker_without_a_path_credential_is_denied() {
+        let mut host = HttpHost::new(
+            HttpPolicy::new(
+                vec!["http://127.0.0.1:9".to_string()],
+                1024,
+                Duration::from_secs(5),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            host.fetch(http::Request {
+                url: format!("http://127.0.0.1:9/api/{CREDENTIAL_MARKER}/groups"),
+                method: http::Method::Get,
+                headers: vec![],
+                body: None,
+                credential: None,
+                max_bytes: 128,
+                timeout_ms: 2_000,
+            })
+            .unwrap_err(),
+            http::Error::Denied
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn geode_path_credentials_lease_over_the_socket() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("geode.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("geode://home/hue/bridge"), "{request}");
+            assert!(request.contains("hue.control"), "{request}");
+            stream
+                .write_all(b"{\"ok\":true,\"secret_b64\":\"c2VjcmV0\"}\n")
+                .unwrap();
+        });
+
+        let credentials = GeodeCredentials::new(&socket, "hue.control");
+        assert_eq!(
+            credentials
+                .resolve_path("geode://home/hue/bridge")
+                .unwrap()
+                .as_deref(),
+            Some("secret")
+        );
+        server.join().unwrap();
     }
 
     #[test]

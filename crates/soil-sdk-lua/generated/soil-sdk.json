@@ -979,7 +979,7 @@
                   "type": "option<s16>"
                 },
                 {
-                  "name": "ring-id",
+                  "name": "device-id",
                   "type": "option<string>"
                 }
               ],

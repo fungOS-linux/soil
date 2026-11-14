@@ -31,7 +31,7 @@ references. `soil-spore` refuses anything else.
 [spore]
 summary = "Markdown reader/editor with a hot-reloadable Lua UI"
 description = "Read and edit Markdown as one document. The module owns the model; the Lua view owns every pixel."
-homepage = "https://github.com/fungOS-linux/spores"
+homepage = "https://github.com/mycelium-linux/spores"
 
 [docs]
 usage = ["markdown [FILE]", "markdown --version"]

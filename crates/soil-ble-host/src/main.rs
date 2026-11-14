@@ -1,15 +1,14 @@
-//! Soil BLE host for the COLMI ring protocol Spore.
+//! Soil BLE host for device protocol Spores.
 //!
 //! Loads one protocol guest and gives it exactly the `soil:ble` capability.
 //! The radio transport (btleplug / BlueZ / CoreBluetooth) and the signed lease
 //! stay in the host; framing and command semantics stay in the Spore.
 //!
-//! See `ajmwagar/spores/spores/colmi-ring/README.md` for the target matrix and lease model.
-
-mod ble;
-mod session;
+//! See `ajmwagar/spores/spores/colmi-ring/README.md` for the COLMI target matrix
+//! and lease model, and `crates/soil-ble-sim` for the deterministic backend.
 
 use anyhow::{Context, Result, anyhow, bail};
+use soil_ble_host::{ble, session};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
@@ -73,7 +72,7 @@ impl soil::ble::ble::Host for State {
                 handle: i as u32 + 1,
                 name: d.name,
                 rssi: d.rssi,
-                ring_id: None,
+                device_id: None,
             })
             .collect())
     }
@@ -85,7 +84,7 @@ impl soil::ble::ble::Host for State {
             .ok_or(BleError::NotFound)?;
         let id = self.devices.get(index).cloned().ok_or(BleError::NotFound)?;
 
-        // The radio is exclusive: refuse to fight another host for the ring.
+        // The radio is exclusive: refuse to fight another host for the device.
         let lease = self
             .session
             .claim(&id, &self.host_id, LEASE_TTL_MS)
@@ -183,7 +182,7 @@ fn main() -> Result<()> {
             .next()
             .and_then(|value| value.parse().ok())
             .unwrap_or(3_000);
-        let mut ble = ble::Ble::new().context("init BLE backend")?;
+        let mut ble = ble::Ble::from_env().context("init BLE backend")?;
         let devices = ble.scan(timeout_ms).context("scan BLE")?;
         for device in devices {
             println!(
@@ -204,6 +203,18 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| "host".to_string());
     let session_path =
         std::env::var("SOIL_BLE_SESSION").unwrap_or_else(|_| "soil-ble-session.json".to_string());
+    if std::env::var_os("SOIL_BLE_SIM").is_some()
+        && std::env::var_os("SOIL_BLE_SIM_CONTENDER").is_some()
+    {
+        // Prove the host-level lease rule with the simulator: a second host
+        // claims the first virtual device before this host opens the store.
+        let mut contender = session::SessionStore::open(&session_path)
+            .with_context(|| format!("open contender session {session_path}"))?;
+        contender
+            .claim("sim-pinetime", "sim-contender", LEASE_TTL_MS)
+            .context("claim contender lease")?;
+        eprintln!("sim: sim-contender holds the lease for sim-pinetime");
+    }
     let session = session::SessionStore::open(&session_path)
         .with_context(|| format!("open session {session_path}"))?;
     eprintln!("host id {host_id}, session {session_path}");
@@ -215,7 +226,7 @@ fn main() -> Result<()> {
 
     let mut linker = Linker::<State>::new(&engine);
     // The guest is a wasip2 component (std pulls in wasi:io/cli), so WASI must
-    // be present even though the ring protocol itself never touches it.
+    // be present even though the device protocol itself never touches it.
     wasmtime_wasi::p2::add_to_linker_sync::<State>(&mut linker)
         .map_err(anyhow::Error::from)
         .context("link wasi:cli")?;
@@ -228,7 +239,7 @@ fn main() -> Result<()> {
     .context("link soil:ble/ble")?;
 
     let state = State {
-        ble: ble::Ble::new().context("init BLE backend")?,
+        ble: ble::Ble::from_env().context("init BLE backend")?,
         session,
         host_id,
         devices: Vec::new(),

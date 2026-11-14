@@ -64,6 +64,7 @@ Principles:
 | [`soil:graph@0.1.0`](wit/soil-graph.wit) | `soil:graph` | read-only edge/reference queries over records |
 | [`soil:input@1.0.0`](wit/soil-input.wit) | — | shared normalized input types for Canvas, Terminal and imported surfaces |
 | [`soil:notify@1.1.0`](wit/soil-notify.wit) | `soil:notify`, `soil:notify/ringer` | WIT + host broker + notify Spore; ringer is an interface, not a package |
+| [`soil:agents@0.1.0`](wit/soil-agents.wit) | `soil:agents.observe`, `soil:agents.control` | WIT + fixture host; Operator and Pi adapters next |
 | [`fungos:actions@1.0.0`](wit/fungos-actions.wit) | exact action id/version grants | granted catalog + bounded invoke; Canvas uses the catalog projection |
 | [`soil:device@0.1.0`](wit/soil-device.wit) | `soil:device` | semantic battery/estimate/lid contracts; runtime uses core-Wasm lowering |
 | [`soil:ble@1.0.0`](wit/soil-ble.wit) | `soil:ble.observe`, `soil:ble.connect`, `soil:ble.write` | WIT + host + COLMI ring Spore |
@@ -81,7 +82,12 @@ through a bounded core-Wasm ABI by the S22 runtime. See
 
 The first host-backed capability is BLE: [`crates/soil-ble-host`](crates/soil-ble-host)
 runs the [COLMI ring Spore](https://github.com/ajmwagar/spores/tree/main/spores/colmi-ring)
-against a real radio on desktop.
+against a real radio on desktop. `SOIL_BLE_SIM=1` swaps the radio for
+[`crates/soil-ble-sim`](crates/soil-ble-sim), a deterministic virtual
+PineTime/Ring/OMI GATT backend with scripted faults and golden replays.
+[`crates/soil-dev-host`](crates/soil-dev-host) composes BLE with Records, an
+in-memory Unibus, and monotonic time so the first device Spores can run end to
+end on a laptop before the S22/fungOS-mobile radio path is ready.
 
 Canvas is the cross-platform owner; Spores never submit UI trees.
 [`crates/soil-runtime`](crates/soil-runtime) is the S22 reference host (wasmtime
@@ -123,6 +129,17 @@ The portable Linux/Android/macOS input normalizer is
 obligations, [`docs/soil-canvas-s22.md`](docs/soil-canvas-s22.md) records the S22
 proving run, and [`docs/android.md`](docs/android.md) records the first Android
 JNI proof.
+
+## Device telemetry
+
+Wearable and edge-node data has a model, not just a stream:
+[`docs/device-telemetry.md`](docs/device-telemetry.md) defines identity, time,
+signal envelopes, fusion precedence, retention, privacy, and the boundary
+between `soil:records` for durable history and `soil:unibus` for live state.
+[`docs/device-profiles.md`](docs/device-profiles.md) records what the PineTime,
+COLMI Ring 2, OMI CV1, KZ AZ09, and CAT S22 actually expose today, including
+the limits that make a vendor-app-only device unsupported until its protocol is
+mapped.
 
 ## Terminal in the browser
 

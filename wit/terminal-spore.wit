@@ -1,0 +1,31 @@
+// Host world for the terminal Spore.
+//
+// The host lives in Soil (`crates/terminal-host`); the Spore and its package
+// live in mycelium-linux/spores. Keeping the world beside the interfaces means
+// the host and the Spore cannot drift on a hand-copied dependency.
+package fungos:terminal-spore@0.1.0;
+
+world terminal-spore {
+  import soil:mycelium/directory@0.1.0;
+  import soil:mycelium/session@0.1.0;
+  import soil:terminal/surface@0.1.0;
+
+  /// `list` prints the directory; `open <target>` drains one fixture/PTY
+  /// session into the terminal surface.
+  export run: func(args: list<string>) -> result<_, string>;
+
+  /// Feed PTY bytes into the live VT state.
+  export feed: func(bytes: list<u8>) -> result<_, string>;
+
+  /// Build and submit the current grid to the host surface.
+  export present: func() -> result<_, string>;
+
+  /// Resize the live VT state. The host view size is fixed for v0.
+  export resize: func(cols: u32, rows: u32) -> result<_, string>;
+
+  /// Close the live session and surface.
+  export stop: func() -> result<_, string>;
+
+  /// Return directory + grid snapshot as JSON bytes for the UI.
+  export snapshot: func() -> result<list<u8>, string>;
+}

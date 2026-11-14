@@ -383,8 +383,12 @@ pub struct Presentation {
     /// Never a path: the fallback badge is what works with no network.
     #[serde(default)]
     pub icon: Option<String>,
-    /// A drawn mark the package ships (a path or a CID), when it has one.
-    /// Distinct from `badge`: a monogram always works, a mark can go missing.
+    /// The package's own mark, as a path inside the package.
+    ///
+    /// The difference from `icon` is where the bytes live: this one ships in
+    /// the package, so the lock covers it and a launcher draws it with no
+    /// network at all. `icon` stays the fetched, content-addressed form a store
+    /// may have and this machine may not.
     #[serde(default)]
     pub mark: Option<String>,
 }
@@ -498,6 +502,14 @@ pub struct Launch {
     /// directory; the entry point is a window, not a file in the package.
     #[serde(default)]
     pub canvas_module: Option<String>,
+    /// Native host for the `native` surface, when the package ships one.
+    ///
+    /// A bare name is resolved by the launcher on `PATH` and in the runtime
+    /// bin directories; an absolute path is used as-is. The host receives the
+    /// module path and package root in `SOIL_SPORE_MODULE` and
+    /// `SOIL_SPORE_PACKAGE`, so a native host needs no private convention.
+    #[serde(default)]
+    pub native: Option<String>,
 }
 
 /// A Spore's opt-in claim on an anycast name.
@@ -574,6 +586,19 @@ pub const HTTP_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DEL
 pub struct Http {
     /// Hostnames, as a vhost would match them: no scheme, no port, no path.
     pub hosts: Vec<String>,
+    /// The component that answers, when it is not the package's own `[module]`.
+    ///
+    /// A package carries one artifact per face: a window, a shell command and a
+    /// network endpoint are three components with three worlds, and the HTTP
+    /// gateway can only instantiate one whose world exports
+    /// `wasi:http/incoming-handler`. Naming it here is the same statement
+    /// `[[commands]] module` already makes, so a Spore that answers on a name
+    /// does not have to give up its UI to do it.
+    ///
+    /// Absent means the package's `[module]` answers, which is what every
+    /// manifest written before this field had to mean.
+    #[serde(default)]
+    pub module: Option<String>,
     #[serde(default = "default_max_body")]
     pub max_body: usize,
     #[serde(default)]
@@ -869,6 +894,7 @@ impl Manifest {
                 "default": self.launch.default,
                 "surfaces": self.launch.surfaces,
                 "canvas_module": self.launch.canvas_module,
+                "native": self.launch.native,
             },
             "surfaces": self.surfaces.iter().map(|surface| serde_json::json!({
                 "name": surface.name,
@@ -885,6 +911,7 @@ impl Manifest {
                 "badge": presentation.badge,
                 "color": presentation.color,
                 "icon": presentation.icon,
+                "mark": presentation.mark,
             })),
             "catalog": self.catalog.as_ref().map(|catalog| serde_json::json!({
                 "categories": catalog.categories,
@@ -1003,9 +1030,12 @@ impl Manifest {
                 )));
             }
             let path = safe_relative(&skill.path)?;
+            // `map(..) != Some(true)` covers both "a different file name" and
+            // "no file name at all" (the path is `skills/hello/`), which are
+            // the same mistake to a packager.
             if path
                 .file_name()
-                .map(|name| name.to_string_lossy() != "SKILL.md")
+                .map(|name| name.to_string_lossy() == "SKILL.md")
                 != Some(true)
             {
                 return Err(Error::Invalid(format!(
@@ -1066,6 +1096,22 @@ impl Manifest {
                     "launch.default {:?} is not in launch.surfaces {:?}",
                     self.launch.default, self.launch.surfaces
                 )));
+            }
+            if let Some(native) = &self.launch.native {
+                if native.trim().is_empty() {
+                    return Err(Error::Invalid("launch.native must not be empty".into()));
+                }
+                if !self
+                    .launch
+                    .surfaces
+                    .iter()
+                    .any(|surface| surface == "native")
+                {
+                    return Err(Error::Invalid(
+                        "launch.native is set but launch.surfaces does not include \"native\""
+                            .into(),
+                    ));
+                }
             }
         } else {
             let mut seen = BTreeSet::new();
@@ -1187,11 +1233,22 @@ impl Manifest {
         }
 
         if let Some(http) = &self.http {
-            if self.module.is_none() {
+            // A Spore that answers on a name must name the component that
+            // answers: the package's own `[module]`, or an `[http] module` of
+            // its own when the window and the endpoint are different artifacts.
+            if self.module.is_none() && http.module.is_none() {
                 return Err(Error::Invalid(
                     "[http] needs a module: a Spore that answers on a name must be able to answer"
                         .into(),
                 ));
+            }
+            if let Some(module) = &http.module {
+                safe_relative(module)?;
+                if !module.ends_with(".wasm") {
+                    return Err(Error::Invalid(format!(
+                        "http module {module:?} must end in .wasm"
+                    )));
+                }
             }
             if http.hosts.is_empty() || http.hosts.len() > MAX_HTTP_HOSTS {
                 return Err(Error::Invalid(format!(
@@ -1319,6 +1376,14 @@ impl Manifest {
             }
             if let Some(icon) = &presentation.icon {
                 reference(icon)?;
+            }
+            if let Some(mark) = &presentation.mark {
+                safe_relative(mark)?;
+                if !(mark.ends_with(".svg") || mark.ends_with(".png")) {
+                    return Err(Error::Invalid(format!(
+                        "presentation.mark {mark:?} must be a .svg or .png inside the package"
+                    )));
+                }
             }
         }
         if let Some(description) = &self.spore.description {
@@ -1453,9 +1518,15 @@ impl Manifest {
                 }
             }
         }
+        if let Some(mark) = self.presentation.as_ref().and_then(|value| value.mark.as_ref()) {
+            paths.push(mark.clone());
+        }
         paths.extend(self.assets.values().map(|asset| asset.path.clone()));
         paths.extend(self.skills.iter().map(|skill| skill.path.clone()));
         paths.extend(self.commands.iter().map(|command| command.module.clone()));
+        if let Some(module) = self.http.as_ref().and_then(|http| http.module.clone()) {
+            paths.push(module);
+        }
         if let Some(man) = self.docs.as_ref().and_then(|docs| docs.man.clone()) {
             paths.push(man);
         }
@@ -1471,6 +1542,36 @@ impl Manifest {
             .map(PathBuf::from)
             .filter(|path| seen.insert(path.clone()))
             .collect()
+    }
+
+    /// Every component the manifest names, labelled with the face that names
+    /// it.
+    ///
+    /// A package carries one artifact per face, and the manifest rule is the
+    /// same for each of them: what a component imports, `[grants]` declares.
+    /// The label is what makes a failure readable when two artifacts disagree
+    /// about their capabilities — the file name alone does not say which face
+    /// asked for a socket. Paths are deduplicated, so a Spore whose `[http]`
+    /// reuses its `[module]` is checked once.
+    #[must_use]
+    pub fn declared_modules(&self) -> Vec<(String, String)> {
+        let mut modules: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut push = |face: &str, path: &str| {
+            if seen.insert(path.to_owned()) {
+                modules.push((face.to_owned(), path.to_owned()));
+            }
+        };
+        if let Some(module) = &self.module {
+            push("module", &module.path);
+        }
+        for command in &self.commands {
+            push(&format!("command {:?}", command.name), &command.module);
+        }
+        if let Some(module) = self.http.as_ref().and_then(|http| http.module.as_deref()) {
+            push("[http]", module);
+        }
+        modules
     }
 
     /// Every file the package ships, relative to the package root.
@@ -1682,6 +1783,28 @@ pub fn reference(value: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// The title a slug reads as: `vitals-view` -> `Vitals View`.
+///
+/// A manifest's `name` is an identity, and every surface that shows one to a
+/// person — a launcher row, a window title, a store shelf — has to turn it into
+/// words the same way, or the same package goes by three different names.
+/// An explicit `title` still wins wherever one is declared; this is only the
+/// fallback.
+pub fn display_title(name: &str) -> String {
+    let mut title = String::with_capacity(name.len());
+    for (index, word) in name.split(['-', '_']).enumerate() {
+        if index > 0 {
+            title.push(' ');
+        }
+        let mut characters = word.chars();
+        if let Some(first) = characters.next() {
+            title.extend(first.to_uppercase());
+            title.push_str(characters.as_str());
+        }
+    }
+    title
 }
 
 /// Resolve a manifest path without letting it leave the package.
@@ -2034,12 +2157,32 @@ pub fn imported_packages(bytes: &[u8]) -> Result<BTreeSet<String>> {
     Ok(packages)
 }
 
+/// WASI packages a component built from a normal language toolchain imports
+/// without asking.
+///
+/// They are not capabilities a Spore requests: the host's WASI profile decides
+/// what they mean for every Spore at once — no preopens, no inherited
+/// environment, no inherited stdio, clocks and randomness where the profile
+/// says. A manifest line for each of them would fill a listing with rows that
+/// say "the linker needed this", which is the noise a capability review cannot
+/// afford. Everything outside this set is declared, including the WASI packages
+/// that are real authority — `wasi:http`, `wasi:webgpu`, `wasi:audio`,
+/// `wasi:sockets`.
+pub const WASI_BASELINE: [&str; 5] = [
+    "wasi:cli",
+    "wasi:clocks",
+    "wasi:filesystem",
+    "wasi:io",
+    "wasi:random",
+];
+
 fn undeclared_packages(
     imported: &BTreeSet<String>,
     grants: &BTreeMap<String, String>,
 ) -> Vec<String> {
     imported
         .iter()
+        .filter(|package| !WASI_BASELINE.contains(&package.as_str()))
         .filter(|package| !grants.contains_key(package.as_str()))
         .cloned()
         .collect()
@@ -2051,22 +2194,22 @@ fn undeclared_packages(
 /// `soil:records` while the manifest lists only WASI fails here instead of at
 /// review time.
 fn check_declared_grants(root: &Path, manifest: &Manifest) -> Result<()> {
-    // A chrome-only Spore has no module, so there is nothing to import.
-    let Some(module) = &manifest.module else {
-        return Ok(());
-    };
-    let path = root.join(&module.path);
-    let bytes =
-        fs::read(&path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
-    let imported = imported_packages(&bytes)?;
-    let undeclared = undeclared_packages(&imported, &manifest.grants);
-    if !undeclared.is_empty() {
-        return Err(Error::Invalid(format!(
-            "{} imports {} but [grants] does not declare {}",
-            module.path,
-            undeclared.join(", "),
-            if undeclared.len() == 1 { "it" } else { "them" },
-        )));
+    // A chrome-only Spore names no module, so the loop is empty and there is
+    // nothing to import. Every artifact the manifest does name is checked: the
+    // rule is about what ships, not about which face ships it.
+    for (face, module) in manifest.declared_modules() {
+        let path = root.join(&module);
+        let bytes =
+            fs::read(&path).map_err(|error| Error::Io(format!("{}: {error}", path.display())))?;
+        let imported = imported_packages(&bytes)?;
+        let undeclared = undeclared_packages(&imported, &manifest.grants);
+        if !undeclared.is_empty() {
+            return Err(Error::Invalid(format!(
+                "{face} {module} imports {} but [grants] does not declare {}",
+                undeclared.join(", "),
+                if undeclared.len() == 1 { "it" } else { "them" },
+            )));
+        }
     }
     Ok(())
 }
@@ -2700,6 +2843,42 @@ mod fixtures {
 }
 
 #[cfg(test)]
+mod native_launch_tests {
+    use super::fixtures::manifest;
+    use super::*;
+
+    fn with_launch(default: &str, surfaces: &str, native: Option<&str>) -> String {
+        let native = native
+            .map(|host| format!("native = {host:?}\n"))
+            .unwrap_or_default();
+        manifest("").replace(
+            "[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]",
+            &format!("[launch]\ndefault = {default:?}\nsurfaces = {surfaces}\n{native}"),
+        )
+    }
+
+    #[test]
+    fn native_launch_names_its_host() {
+        let source = with_launch("native", "[\"web\", \"native\"]", Some("terminal-host"));
+        let manifest = Manifest::parse(&source).expect("a native launch is valid");
+        assert_eq!(manifest.launch.default, "native");
+        assert_eq!(manifest.launch.native.as_deref(), Some("terminal-host"));
+    }
+
+    #[test]
+    fn native_launch_requires_the_native_surface() {
+        let source = with_launch("canvas", "[\"canvas\"]", Some("terminal-host"));
+        assert!(Manifest::parse(&source).is_err());
+    }
+
+    #[test]
+    fn native_launch_rejects_an_empty_host() {
+        let source = with_launch("native", "[\"native\"]", Some("  "));
+        assert!(Manifest::parse(&source).is_err());
+    }
+}
+
+#[cfg(test)]
 mod surface_tests {
     use super::fixtures::manifest;
     use super::*;
@@ -3218,6 +3397,43 @@ mod http_tests {
             refused.is_err(),
             "a Spore must be able to answer on the name it claims"
         );
+    }
+
+    #[test]
+    fn the_endpoint_can_be_its_own_artifact() {
+        // A Spore that draws a window and answers on a name has two components.
+        // The event loop never sees an `incoming-handler`, and the gateway
+        // never instantiates a WebGPU import it has no device for.
+        let parsed = Manifest::parse(&manifest(&claim("module = \"bin/hello-api.wasm\"\n")))
+            .expect("a named http module parses");
+        let http = parsed.http.as_ref().expect("an [http] table");
+        assert_eq!(http.module.as_deref(), Some("bin/hello-api.wasm"));
+        assert!(
+            parsed
+                .declared_paths()
+                .contains(&std::path::PathBuf::from("bin/hello-api.wasm")),
+            "the endpoint ships with the package"
+        );
+        assert_eq!(
+            parsed.declared_modules(),
+            vec![
+                ("module".to_owned(), "module.wasm".to_owned()),
+                ("[http]".to_owned(), "bin/hello-api.wasm".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_http_module_that_could_not_be_a_component_is_refused() {
+        for bad in ["bin/api.lua", "../api.wasm", "/api.wasm"] {
+            let text = format!(
+                "[http]\nhosts = [\"contacts.myc\"]\nmodule = {bad:?}\nroutes = [{{ methods = [\"GET\"], path = \"/\" }}]\n"
+            );
+            assert!(
+                Manifest::parse(&manifest(&text)).is_err(),
+                "{bad:?} is not a component this package can ship"
+            );
+        }
     }
 
     #[test]

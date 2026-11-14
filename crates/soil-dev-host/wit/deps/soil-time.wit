@@ -1,0 +1,27 @@
+// Host monotonic clock.
+//
+// Requires the `soil:time` grant. There is no wall clock, timezone, sleep,
+// timer thread or per-frame callback: a Spore reads elapsed time and waits on
+// a bounded tick. The host may return a tick earlier than requested, so callers
+// must re-check their own deadline.
+package soil:time@1.0.0;
+
+interface time {
+  enum error {
+    /// The Spore manifest was not granted `soil:time`.
+    denied,
+    /// The host clock is unavailable. Never fabricate a zero.
+    not-ready,
+  }
+
+  /// Monotonic milliseconds from an unspecified host epoch.
+  ///
+  /// Only useful for measuring elapsed time. Values are not comparable across
+  /// processes, host restarts or devices.
+  monotonic-ms: func() -> result<u64, error>;
+
+  /// Wait up to `timeout-ms` for the next host tick and return its monotonic
+  /// millisecond value. `0` polls without blocking; `none` means the deadline
+  /// elapsed. A returned tick may precede the requested deadline.
+  tick: func(timeout-ms: u32) -> result<option<u64>, error>;
+}

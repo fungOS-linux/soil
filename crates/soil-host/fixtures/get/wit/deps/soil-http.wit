@@ -81,5 +81,5 @@ world guest {
 /// Host-runner world for a component that exports the bounded HTTP smoke test.
 world runner {
   import http;
-  export run: func(args: list<string>) -> result<_, string>;
+  export run: func(args: list<string>) -> result<string, string>;
 }

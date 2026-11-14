@@ -5,4 +5,4 @@
 	# submodules. An ssh URL makes every consumer of soil need a GitHub key,
 	# which no CI runner has, and that is why the pin in spores sat at a commit
 	# from before this submodule existed rather than being bumped.
-	url = https://github.com/fungOS-linux/spores.git
+	url = https://github.com/mycelium-linux/spores.git

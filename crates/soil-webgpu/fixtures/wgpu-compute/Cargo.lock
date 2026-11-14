@@ -663,7 +663,7 @@ dependencies = [
 [[package]]
 name = "wgpu-wasi-webgpu"
 version = "30.0.0"
-source = "git+https://github.com/fungOS-linux/wgpu-wasi-webgpu?rev=bec921356c366450408d5faee2d206b6a1b8061b#bec921356c366450408d5faee2d206b6a1b8061b"
+source = "git+https://github.com/mycelium-linux/wgpu-wasi-webgpu?rev=bec921356c366450408d5faee2d206b6a1b8061b#bec921356c366450408d5faee2d206b6a1b8061b"
 dependencies = [
  "wgpu",
  "wit-bindgen",

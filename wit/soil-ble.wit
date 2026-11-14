@@ -21,7 +21,7 @@ interface types {
     name: option<string>,
     rssi: option<s16>,
     /// Stable cross-host identity once Soil has read DIS; absent until then.
-    ring-id: option<string>,
+    device-id: option<string>,
   }
 
   record characteristic {

@@ -1,8 +1,10 @@
 # `soil:http`
 
-Status: **host proof, 2026-11-05.** The direct transport and a real Wasm guest
-work against a loopback HTTP server. Iroh/Mycelium route selection is an
-explicit transport seam, not yet wired.
+Status: **host + Geode path credentials + desktop presenter, 2026-11-05.** The
+direct transport and a real Wasm guest work against a loopback HTTP server,
+Geode leases path credentials into the v1 URL slot, and `canvas-winit` grants
+the same policy to a GPUI Spore. Iroh/Mycelium route selection is an explicit
+transport seam, not yet wired.
 
 ## Why not ureq/hyper/reqwest inside the Spore
 
@@ -61,13 +63,31 @@ Errors are typed: `denied`, `invalid`, `over-budget`, `timeout`, `unavailable`,
 - no redirects
 - per-call body and deadline caps, plus host maximums
 - credential handles resolved by `CredentialProvider`; no secret bytes enter
-  wasm
+  wasm. A provider may resolve a header or a URL path segment. The guest uses
+  the literal `__CREDENTIAL__` marker in a path when the host should substitute
+  the value; the response's `final-url` is redacted back to the marker
 - `DirectTransport` using `ureq` with TLS verification
 
 The `CredentialProvider` trait is where **Geode** belongs: the Spore sends a
 handle, Geode resolves it inside the host, and the host injects the resulting
-header. The direct transport is the first `HttpTransport`; a Geode adapter and
-an Iroh transport do not change the WIT or the Spore.
+header or path segment. `GeodeCredentials` is the shipped path adapter; the
+direct transport is the first `HttpTransport`, and an Iroh transport does not
+change the WIT or the Spore.
+
+## Capability origins
+
+`canvas-winit` can bind a stable capability hostname to a configured origin:
+
+```sh
+canvas-winit lights.wasm \
+  --hue-bridge http://192.168.10.15 \
+  --geode-socket ~/.geode/geode.sock --geode-purpose hue.control
+```
+
+The guest requests `http://hue.local/api/__CREDENTIAL__/...`. The host
+allowlists `http://hue.local`, rewrites it to the configured bridge in its
+`HttpTransport`, then leases and substitutes the Geode path segment before the
+request leaves the process. The Spore never learns the bridge IP or the key.
 
 ## Iroh / Mycelium routing
 
@@ -126,9 +146,24 @@ soil-http --allow https://api.spotify.com:443 \
   spores/spotify/module.wasm --device raspotify play
 ```
 
+For a path credential (Hue's v1 bridge key is the motivating case), point the
+host at the owner-only Geode broker and name a purpose:
+
+```sh
+soil-http --allow http://192.168.1.10:80 \
+  --geode-socket ~/.geode/geode.sock --geode-purpose hue.control \
+  spores/hue/module.wasm \
+  --bridge http://192.168.1.10 --credential geode://home/hue/bridge status
+```
+
+The guest URL contains `/api/__CREDENTIAL__/...`; the host leases the secret for
+one fetch, percent-encodes it as one path segment, substitutes it, and redacts
+the value from `final-url`. `geoded` is read-only over its socket; storing the
+key is the operator `--put` step, followed by a broker restart so it reloads the
+store.
+
 ## Next
 
-- Geode `CredentialProvider`
 - Mycelium directory / Iroh `HttpTransport`
 - shared router with best-route selection and explicit fallback policy
 - conditional GET / ETag at the host layer

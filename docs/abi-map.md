@@ -255,6 +255,10 @@ interface time {
 | storage | local CID cache | local CID cache | app cache | bundle only | OPFS/Cache Storage via host |
 | time | `mach_absolute_time` | `CLOCK_MONOTONIC` | `SystemClock.elapsedRealtime` | `mach_absolute_time` | `performance.now` |
 
+CAT S22 is a **fungOS-mobile / mainline Linux** target, so it uses the Linux
+column (BlueZ over D-Bus, or a direct HCI backend if the image has no BlueZ).
+The Android BLE column is for Android/Fire TV, not the S22.
+
 Any unsupported row is a named denial, not an empty success.
 
 ## Priorities
@@ -270,8 +274,9 @@ Any unsupported row is a named denial, not an empty success.
 3. **Next, highest value:** build a small read-only file-browser Spore on the
    now-implemented `soil:vfs`/`soil:index` host adapter, then wire
    `soil:canvas-input` into the S22/Fire TV hosts,
-   finish the BLE gaps (signed lease, DIS `ring-id`, Unibus publish, Android
-   JNI), then the host adapters and denial fixtures for `time` and `storage`,
+   finish the BLE gaps (signed lease, DIS `device-id`, Unibus publish, Android
+   JNI for Fire TV/Android; CAT S22 is BlueZ/mainline Linux), then the host
+   adapters and denial fixtures for `time` and `storage`,
    then `api`, `mic`, `camera`. `audio` waits for a concrete Spore that plays
    something.
 4. **After that:** `notify`.

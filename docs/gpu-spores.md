@@ -7,14 +7,18 @@ or raw wgpu) runs in the guest and writes pixels.
 ## Status (this thread)
 
 - **A GPUI Spore runs as a native Mac app.** `canvas-winit` presents its frames,
-  feeds it keys and pointer events, and owns the pty a terminal Spore renders.
-  Contracts, startup path, flags, packaging and limits are in
+  feeds it keys and pointer events, and owns the pty a GPUI terminal Spore
+  renders. Contracts, startup path, flags, packaging and limits are in
   [`canvas-winit.md`](canvas-winit.md). `launcher-gpui` and `terminal-gpui` are
   the two Spores proving it; both are plain components with no native code.
+- **The installed `terminal` Spore is host-rendered, not GPUI.** It names
+  `terminal-host` in Soil as its `[launch] native` host; that host owns the
+  Mycelium directory, the SSH pty and the cell grid. `canvas-winit` only
+  resolves and spawns it.
 
 
 - **Guest shim at wgpu 30: done and proven.** The patched fork lives at
-  `fungOS-linux/wgpu-wasi-webgpu`, branch `wgpu-30`, rev `bec9213`. Both
+  `mycelium-linux/wgpu-wasi-webgpu`, branch `wgpu-30`, rev `bec9213`. Both
   fixtures build for `wasm32-wasip2` and run against the existing wgpu-core 29
   host (`webgpu: ok`; the present fixture's 480×640 frame has a red centre and
   clear corners). The WIT boundary is version-independent.

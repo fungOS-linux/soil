@@ -233,14 +233,27 @@ async fn serve(spore: Spore, run: Run) -> Result<()> {
         run.state.as_deref(),
     )?;
 
-    let module = spore.manifest.module.as_ref().with_context(|| {
-        format!(
-            "{} claims a name but has no module to answer with",
-            spore.manifest.spore.id
-        )
-    })?;
-    let wasm = std::fs::read(spore.root.join(&module.path))
-        .with_context(|| format!("read module {}", module.path))?;
+    // The face that answers is the one the `[http]` table names, falling back
+    // to the package's own module. A Spore whose window and endpoint are two
+    // artifacts says so here; the gateway instantiates only what it calls.
+    let module = claimed
+        .module
+        .clone()
+        .or_else(|| {
+            spore
+                .manifest
+                .module
+                .as_ref()
+                .map(|module| module.path.clone())
+        })
+        .with_context(|| {
+            format!(
+                "{} claims a name but has no module to answer with",
+                spore.manifest.spore.id
+            )
+        })?;
+    let wasm =
+        std::fs::read(spore.root.join(&module)).with_context(|| format!("read module {module}"))?;
 
     let mut builder = WasiHostBuilder::new(WasiHostPolicy::default());
     if let Some(socket) = &run.geode_socket {

@@ -7,7 +7,7 @@ struct Component;
 export!(Component);
 
 impl Guest for Component {
-    fn run(args: Vec<String>) -> Result<(), String> {
+    fn run(args: Vec<String>) -> Result<String, String> {
         let url = args.first().cloned().ok_or_else(|| "usage: get URL [credential]".to_string())?;
         let credential = args.get(1).cloned();
         let response = http::fetch(&Request {
@@ -25,6 +25,6 @@ impl Guest for Component {
         .map_err(|error| format!("{error:?}"))?;
         println!("status={} final={} bytes={}", response.status, response.final_url, response.body.len());
         print!("{}", String::from_utf8_lossy(&response.body));
-        Ok(())
+        Ok(String::new())
     }
 }
