@@ -1,9 +1,13 @@
-//! Desktop development host: BLE + Records + Unibus + monotonic time.
+//! Desktop development host: BLE + Records + Unibus + HTTP + monotonic time.
 //!
 //! This is deliberately a composition, not a new capability. The BLE backend
-//! and lease are the same ones `soil-ble-host` uses; Records and Unibus are the
-//! canonical host adapters. It exists so a device Spore can run end to end
-//! against the simulator (or a real radio with `--real`) on a laptop.
+//! and lease are the same ones `soil-ble-host` uses; Records, Unibus and HTTP are
+//! the canonical host adapters. It exists so a device or CLI Spore can run end to
+//! end against the simulator (or a real radio with `--real`) on a laptop.
+//!
+//! `soil:http` is linked with an empty allowlist unless `--allow-origin` is
+//! passed: a guest that needs the network says which origin, and the host
+//! refuses everything else rather than falling back to a default.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -12,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use soil_ble_host::ble as ble_host;
 use soil_ble_host::session;
+use soil_host::http_host::{self, HttpHost, HttpPolicy};
 use soil_host::records_host::{self, Namespace, NamespacedRecordsHost, records};
 use soil_wasi_host::{MemoryBus, WasiHost, WasiHostBuilder, WasiHostPolicy, unibus::bus};
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -28,6 +33,8 @@ const MAX_READ_BYTES: u32 = 512;
 const MAX_WRITE_BYTES: usize = 512;
 const MAX_EVENT_WAIT_MS: u32 = 1_000;
 const LEASE_TTL_MS: u64 = 60_000;
+const MAX_HTTP_BYTES: usize = 16 * 1024 * 1024;
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct DevHost {
     ble: ble_host::Ble,
@@ -36,6 +43,7 @@ struct DevHost {
     /// One-based handles into the last scan result.
     devices: Vec<String>,
     records: NamespacedRecordsHost,
+    http: HttpHost,
     wasi: WasiHost,
     bus: Arc<MemoryBus>,
     start: Instant,
@@ -97,6 +105,17 @@ impl records::Host for DevHost {
         entries: Vec<records::Entry>,
     ) -> std::result::Result<records::ApplyResult, records::Error> {
         records::Host::apply(&mut self.records, entries)
+    }
+}
+
+/// `soil:http` is `soil-host`'s own implementation, unchanged. The dev host
+/// chooses the allowlist; the policy and the transport stay in one place.
+impl http_host::api::Host for DevHost {
+    fn fetch(
+        &mut self,
+        request: http_host::api::Request,
+    ) -> std::result::Result<http_host::api::Response, http_host::api::Error> {
+        <HttpHost as http_host::api::Host>::fetch(&mut self.http, request)
     }
 }
 
@@ -305,18 +324,20 @@ fn main() -> Result<()> {
         .or_else(|| std::env::var("HOSTNAME").ok())
         .unwrap_or_else(|| "dev-host".to_string());
 
+    let mut origins: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
     let mut guest_path = None;
     let mut guest_args = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--real" => real = true,
+            "--allow-origin" => origins.push(args.next().context("--allow-origin needs a URL")?),
             "--records-dir" => records_dir = args.next().context("--records-dir needs a path")?,
             "--session" => session_path = args.next().context("--session needs a path")?,
             "--host-id" => host_id = args.next().context("--host-id needs a value")?,
             "--help" | "-h" => {
                 println!(
-                    "usage: soil-dev-host [--real] [--records-dir DIR] [--session FILE] [--host-id ID] <guest.wasm> [guest args...]"
+                    "usage: soil-dev-host [--real] [--allow-origin URL]... [--records-dir DIR] [--session FILE] [--host-id ID] <guest.wasm> [guest args...]"
                 );
                 return Ok(());
             }
@@ -329,7 +350,7 @@ fn main() -> Result<()> {
         }
     }
     let guest_path = guest_path.context(
-        "usage: soil-dev-host [--real] [--records-dir DIR] [--session FILE] [--host-id ID] <guest.wasm> [guest args...]",
+        "usage: soil-dev-host [--real] [--allow-origin URL]... [--records-dir DIR] [--session FILE] [--host-id ID] <guest.wasm> [guest args...]",
     )?;
 
     let ble = if real {
@@ -347,10 +368,18 @@ fn main() -> Result<()> {
             Namespace::write("vitals.summary", "dev/personal/telemetry", "vitals.summary"),
             Namespace::write("vitals.latest", "dev/personal/telemetry", "vitals.latest"),
             Namespace::write("vitals.view", "dev/personal/telemetry", "vitals.view"),
+            Namespace::write("weather.current", "dev/personal/weather", "weather.current"),
         ],
     )
     .with_context(|| format!("open records {records_dir}"))?;
     let time_origin_ms = load_or_create_origin(&Path::new(&records_dir).join("time-origin-ms"))?;
+    let policy = HttpPolicy::new(origins, MAX_HTTP_BYTES, HTTP_TIMEOUT).context("http policy")?;
+    let allowed: Vec<&str> = policy.origins().collect();
+    if allowed.is_empty() {
+        eprintln!("http: no origins allowed; pass --allow-origin URL to grant one");
+    } else {
+        eprintln!("http: allowing {}", allowed.join(", "));
+    }
     let bus = Arc::new(MemoryBus::default());
     let wasi = WasiHostBuilder::new(WasiHostPolicy::default())
         .inherit_stdio(true)
@@ -364,6 +393,7 @@ fn main() -> Result<()> {
         host_id,
         devices: Vec::new(),
         records,
+        http: HttpHost::new(policy),
         wasi,
         bus,
         start: Instant::now(),
@@ -385,6 +415,9 @@ fn main() -> Result<()> {
         .map_err(anyhow::Error::from)
         .context("link soil:time")?;
     records_host::add_to_linker::<DevHost>(&mut linker).context("link soil:records")?;
+    http_host::api::add_to_linker::<DevHost, HasSelf<DevHost>>(&mut linker, |state| state)
+        .map_err(anyhow::Error::from)
+        .context("link soil:http")?;
     soil_wasi_host::unibus::add_to_linker::<DevHost>(&mut linker).context("link soil:unibus")?;
 
     let mut store = Store::new(&engine, state);
