@@ -50,6 +50,13 @@ const PINETIME_MUSIC_SPEED: &str = "0000000a-78fc-48fe-8e23-433b3a1942d0";
 const PINETIME_MUSIC_REPEAT: &str = "0000000b-78fc-48fe-8e23-433b3a1942d0";
 const PINETIME_MUSIC_SHUFFLE: &str = "0000000c-78fc-48fe-8e23-433b3a1942d0";
 const PINETIME_NOTIFICATION_EVENT: &str = "00020001-78fc-48fe-8e23-433b3a1942d0";
+const PINETIME_NAV_SERVICE: &str = "00010000-78fc-48fe-8e23-433b3a1942d0";
+const PINETIME_NAV_FLAGS: &str = "00010001-78fc-48fe-8e23-433b3a1942d0";
+const PINETIME_NAV_NARRATIVE: &str = "00010002-78fc-48fe-8e23-433b3a1942d0";
+const PINETIME_NAV_MAN_DIST: &str = "00010003-78fc-48fe-8e23-433b3a1942d0";
+const PINETIME_NAV_PROGRESS: &str = "00010004-78fc-48fe-8e23-433b3a1942d0";
+const PINETIME_WEATHER_SERVICE: &str = "00050000-78fc-48fe-8e23-433b3a1942d0";
+const PINETIME_WEATHER_DATA: &str = "00050001-78fc-48fe-8e23-433b3a1942d0";
 const RING_SERVICE: &str = "0000fff0-0000-1000-8000-00805f9b34fb";
 const RING_MEASUREMENT: &str = "0000fff1-0000-1000-8000-00805f9b34fb";
 const OMI_AUDIO_SERVICE: &str = "19b10000-e8f2-537e-4f6c-d104768a1214";
@@ -587,6 +594,47 @@ fn pine_time() -> SimDevice {
                 CTS,
                 vec![characteristic(
                     "00002a2b-0000-1000-8000-00805f9b34fb",
+                    true,
+                    true,
+                    false,
+                    Vec::new(),
+                    Source::Static,
+                )],
+            ),
+            service(
+                PINETIME_NAV_SERVICE,
+                vec![
+                    characteristic(PINETIME_NAV_FLAGS, true, true, false, Vec::new(), Source::Static),
+                    characteristic(
+                        PINETIME_NAV_NARRATIVE,
+                        true,
+                        true,
+                        false,
+                        Vec::new(),
+                        Source::Static,
+                    ),
+                    characteristic(
+                        PINETIME_NAV_MAN_DIST,
+                        true,
+                        true,
+                        false,
+                        Vec::new(),
+                        Source::Static,
+                    ),
+                    characteristic(
+                        PINETIME_NAV_PROGRESS,
+                        true,
+                        true,
+                        false,
+                        Vec::new(),
+                        Source::Static,
+                    ),
+                ],
+            ),
+            service(
+                PINETIME_WEATHER_SERVICE,
+                vec![characteristic(
+                    PINETIME_WEATHER_DATA,
                     true,
                     true,
                     false,

@@ -7074,6 +7074,18 @@ name = "soil-desktop"
 version = "0.1.0"
 
 [[package]]
+name = "soil-dev-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "soil-ble-host",
+ "soil-host",
+ "soil-wasi-host",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "soil-dfm-viz"
 version = "0.1.0"
 dependencies = [
