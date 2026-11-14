@@ -6,6 +6,7 @@ fn main() {
         "battery-canvas",
         "estimate-canvas",
         "animated-battery-canvas",
+        "pixel-client",
     ] {
         let source = format!("fixtures/{name}.wat");
         println!("cargo:rerun-if-changed={source}");

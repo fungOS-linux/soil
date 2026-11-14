@@ -1,0 +1,45 @@
+// How a Spore hands over the pixels it rendered.
+//
+// Two deliveries, one contract. `rgba` is the encoded arm: the Spore owns the
+// rasterizer and the host copies bytes straight into the frame it presents.
+// `texture` is the sampled arm: the Spore rendered with `wasi:webgpu` and the
+// host samples that texture instead of copying pixels back.
+//
+// Deliberately not a document format: no scene graph, no JSON, no per-frame
+// schema negotiation. A frame is an extent and a buffer.
+package soil:present@0.1.0;
+
+interface owner {
+  enum failure {
+    denied,
+    not-ready,
+    /// A present budget was exceeded, or the frame did not match the extent.
+    over-budget,
+    invalid,
+    backend,
+  }
+
+  enum delivery {
+    /// The host samples a texture the Spore rendered.
+    texture,
+    /// The Spore hands over encoded pixels and the host copies them.
+    rgba,
+  }
+
+  /// Tightly packed RGBA8, `width * height * 4` bytes, alpha 255.
+  ///
+  /// The extent is the host's: it equals the surface state the Spore observed,
+  /// never a size the Spore chose.
+  record rgba-frame {
+    width: u32,
+    height: u32,
+    pixels: list<u8>,
+  }
+
+  /// Which arm this host takes. A Spore checks once and picks its renderer.
+  delivery: func() -> delivery;
+
+  /// Present an encoded frame. The host validates extent and opacity, then
+  /// presents it in the space it granted.
+  present-rgba: func(frame: rgba-frame) -> result<_, failure>;
+}
