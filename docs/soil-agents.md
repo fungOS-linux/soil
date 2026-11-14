@@ -119,7 +119,7 @@ have them:
 
 ## The first surface
 
-[`spores/colony`](https://github.com/fungOS-linux/spores/tree/main/spores/colony)
+[`spores/colony`](https://github.com/mycelium-linux/spores/tree/main/spores/colony)
 is the proving Spore: one window per agent, a board of every agent, and a focus
 view with the transcript and a composer. It imports `observe` and `control` and
 knows nothing about Operator or Pi beyond the `harness` string it prints.

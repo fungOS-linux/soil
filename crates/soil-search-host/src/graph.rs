@@ -506,7 +506,7 @@ mod tests {
                 serde_json::json!({
                     "from": "soil",
                     "rel": "references",
-                    "to": "repository:fungOS-linux/soil",
+                    "to": "repository:mycelium-linux/soil",
                     "title": "Soil repository"
                 }),
             )
@@ -560,7 +560,7 @@ mod tests {
             .unwrap();
         assert_eq!(page.edges.len(), 2);
         assert!(page.edges.iter().any(|edge| {
-            edge.source == "soil" && edge.target == "repository:fungOS-linux/soil"
+            edge.source == "soil" && edge.target == "repository:mycelium-linux/soil"
         }));
         assert!(page.edges.iter().any(|edge| {
             edge.source == "doc-arch" && edge.target == "soil" && edge.rel == "mentions"

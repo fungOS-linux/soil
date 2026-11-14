@@ -6,14 +6,14 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/fungOS-linux/soil"
+repository = "https://github.com/mycelium-linux/soil"
 
 # `fungos-records` is the on-disk records format shared by the records host, the
 # sync host and every book consumer. Two revisions in one workspace means two
 # incompatible `Store` types and two `unibus` copies, so it is declared once
 # here and only here; a bump is one edit that moves every crate together.
 [workspace.dependencies]
-fungos-records = { git = "https://github.com/fungOS-linux/records.git", rev = "adc88b242957e5ee9b82d7e98f36d92a051635db" }
+fungos-records = { git = "https://github.com/mycelium-linux/records.git", rev = "adc88b242957e5ee9b82d7e98f36d92a051635db" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

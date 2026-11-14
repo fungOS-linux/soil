@@ -54,7 +54,7 @@ version = "0.1.0"
 license = "MIT"
 summary = "Markdown reader/editor with a hot-reloadable Lua UI"
 description = "Read and edit Markdown as one document."
-homepage = "https://github.com/fungOS-linux/spores"
+homepage = "https://github.com/mycelium-linux/spores"
 
 [engine]
 soil = ">=0.1"

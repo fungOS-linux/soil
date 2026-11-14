@@ -40,7 +40,7 @@ name a filesystem path.
 
 [`crates/soil-webgpu`](../crates/soil-webgpu) is the host:
 
-- a forked `wasi-webgpu-wasmtime` (`fungOS-linux/wasi-gfx-runtime` revision
+- a forked `wasi-webgpu-wasmtime` (`mycelium-linux/wasi-gfx-runtime` revision
   `9624cae`) binds the WIT and adds host texture readback;
 - `wgpu-core` 29 (Metal / Vulkan / GLES / DX12) owns adapter, device, shaders,
   pipelines, buffers, textures, queues and error scopes;
@@ -68,7 +68,7 @@ let (device, queue) = pollster::block_on(adapter.request_device(&Default::defaul
 // ordinary wgpu from here
 ```
 
-The guest backend is a fork of [`wgpu-wasi-webgpu`](https://github.com/fungOS-linux/wgpu-wasi-webgpu)
+The guest backend is a fork of [`wgpu-wasi-webgpu`](https://github.com/mycelium-linux/wgpu-wasi-webgpu)
 updated from `wasi:webgpu@0.0.1` to `0.3.0-rc.2`. It uses wgpu's `custom`
 dispatch traits, so wgpu itself is not forked for the backend. The fixture is
 pinned to revision `88938bb`.
