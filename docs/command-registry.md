@@ -33,6 +33,7 @@ max_memory_bytes = 268435456
 soil-command --list
 soil-command --records-root ~/.local/share/fungos/records \
   --book personal/avery/marbles --collection marbles \
+  --env MARBLES_ACTOR=avery \
   run mb --project elmers list
 ```
 
@@ -62,7 +63,13 @@ and `soil-command --list` both print what was refused.
 it replaces anything, and prints the commands an install brought, so the
 promise is checked at the boundary rather than at the first run.
 
-## Profiles
+Commands do not inherit the host environment. `--env NAME=VALUE` is the only way
+a variable reaches one, so what a command can see is what a caller wrote down.
+The output caps are per command (`command.toml` `[limits]`): a command that
+answers with megabytes needs `max_stdout_bytes` sized for it, and a write past
+the cap surfaces as an error to the command rather than as a truncated answer.
+
+## Profiles and installed Spores
 
 The next layer is profile-aware resolution:
 

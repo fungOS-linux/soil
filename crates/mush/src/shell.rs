@@ -60,9 +60,17 @@ pub const HOST_ENV: &[&str] = &[
 ///
 /// Both ways a host program can run — the shell's overlay bridge and
 /// `mush run host` — go through this, so "what can a child see" has one answer.
-pub fn clear_and_seed(command: &mut std::process::Command) {
+pub fn clear_and_seed(command: &mut std::process::Command, granted: &[String]) {
     command.env_clear();
     for key in HOST_ENV {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+    // What the package asked for, in `spore.toml`'s `[env] host`. `validate()`
+    // refuses secret-shaped names there, so this widens the floor without
+    // handing a child the caller's tokens.
+    for key in granted {
         if let Ok(value) = std::env::var(key) {
             command.env(key, value);
         }
@@ -319,7 +327,16 @@ fn run_one(
         // The Spore owns `cd`; the host program runs on the overlay, so ask
         // where the shell is before starting it.
         let cwd = spore_cwd(runtime);
-        return run_host(output, root, &words[0], &words[1..], &cwd, control, store);
+        return run_host(
+            output,
+            root,
+            &words[0],
+            &words[1..],
+            &cwd,
+            control,
+            store,
+            runtime.host_env(),
+        );
     }
     run_in_spore(output, runtime, command)
 }
@@ -362,6 +379,7 @@ fn run_host(
     cwd: &str,
     control: &Control,
     store: Option<&Path>,
+    granted: &[String],
 ) -> Result<i32> {
     use crate::outcome::{CANCELLED_STATUS, TIMEOUT_STATUS};
 
@@ -380,7 +398,7 @@ fn run_host(
     // The agent's environment is the Spore's. A host program starts empty and
     // gets the allowlist, plus the identity below and whatever the build plane
     // needs — never the caller's tokens.
-    clear_and_seed(&mut command);
+    clear_and_seed(&mut command, granted);
     command.args(args);
     // `cwd` is the Spore's directory; fall back to the overlay root when it does
     // not name a directory there (a stale session, or a directory the overlay

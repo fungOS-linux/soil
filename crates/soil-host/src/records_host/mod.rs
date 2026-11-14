@@ -17,6 +17,20 @@ wasmtime::component::bindgen!({ path: "wit/records", world: "records-host" });
 
 pub use self::soil::records::records;
 
+/// Map a store failure to the interface's `io` error, saying why on the host's
+/// own stderr first.
+///
+/// `soil:records` has no "other error" variant, so the cause cannot cross the
+/// boundary — but dropping it entirely means a contended store reaches the
+/// guest as a bare `io` and the guest can only abort. The engine that knows what
+/// went wrong writes it down.
+fn store_error(context: &str, error: anyhow::Error) -> records::Error {
+    eprintln!("records host: {context}: {error:#}");
+    records::Error::Io
+}
+
+
+
 const MAX_PAGE: u32 = 512;
 const CONTACT_SCHEMA: &str = "fungos.contacts/contact";
 
@@ -229,7 +243,7 @@ impl records::Host for RecordsBookHost {
             let store = self.store.lock().expect("records store poisoned");
             store
                 .scan_records(&self.book, cursor.as_deref(), limit as usize + 1)
-                .map_err(|_| records::Error::Io)?
+                .map_err(|error| store_error("records store", error))?
         };
         let mut entries: Vec<_> = records.into_iter().collect();
         let next = if entries.len() > limit as usize {
@@ -255,8 +269,10 @@ impl records::Host for RecordsBookHost {
         let mut store = self.store.lock().expect("records store poisoned");
         store
             .put_record(&self.book, &id, &entry.schema, 1, body)
-            .map_err(|_| records::Error::Io)?;
-        let record = store.get(&self.book, &id).map_err(|_| records::Error::Io)?;
+            .map_err(|error| store_error(&format!("upsert {id}"), error))?;
+        let record = store
+            .get(&self.book, &id)
+            .map_err(|error| store_error(&format!("read back {id}"), error))?;
         drop(store);
         Ok(self.entry(record))
     }
@@ -309,15 +325,15 @@ impl records::Host for RecordsBookHost {
         if entry.deleted {
             store
                 .delete_record(&self.book, &id, &schema, 1)
-                .map_err(|_| records::Error::Io)?;
+                .map_err(|error| store_error("records store", error))?;
         } else {
             let body = self.validate_body(&schema, &entry.body)?;
             store
                 .put_record(&self.book, &id, &schema, 1, body)
-                .map_err(|_| records::Error::Io)?;
+                .map_err(|error| store_error("records store", error))?;
         }
 
-        let record = store.get(&self.book, &id).map_err(|_| records::Error::Io)?;
+        let record = store.get(&self.book, &id).map_err(|error| store_error("records store", error))?;
         drop(store);
         Ok(records::CasResult {
             applied: true,
@@ -334,7 +350,7 @@ impl records::Host for RecordsBookHost {
             .unwrap_or_else(|_| self.schema_name().unwrap_or("unknown/record").to_string());
         store
             .delete_record(&self.book, &id, &schema, 1)
-            .map_err(|_| records::Error::Io)?;
+            .map_err(|error| store_error("records store", error))?;
         Ok(())
     }
 
@@ -398,7 +414,7 @@ impl records::Host for RecordsBookHost {
                         origin: &entry.origin,
                     },
                 )
-                .map_err(|_| records::Error::Io)?;
+                .map_err(|error| store_error("records store", error))?;
             if applied {
                 result.applied += 1;
             } else {

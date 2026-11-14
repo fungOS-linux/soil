@@ -2415,7 +2415,7 @@ dependencies = [
 [[package]]
 name = "fungos-records"
 version = "0.1.0"
-source = "git+https://github.com/mycelium-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db#adc88b242957e5ee9b82d7e98f36d92a051635db"
+source = "git+https://github.com/mycelium-linux/records.git?rev=cc5256ab284bd1ec71c8e5c677410b6360b04dfd#cc5256ab284bd1ec71c8e5c677410b6360b04dfd"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2427,7 +2427,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 0.8.23",
- "unibus 0.1.0 (git+https://github.com/fungOS-linux/unibus.git?rev=8bf8f79)",
+ "unibus",
  "ureq 2.12.1",
  "uuid",
 ]
@@ -2447,7 +2447,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 0.8.23",
- "unibus 0.1.0 (git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79)",
+ "unibus",
  "ureq 2.12.1",
  "uuid",
 ]
@@ -7004,7 +7004,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "unibus 0.1.0 (git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79)",
+ "unibus",
 ]
 
 [[package]]
@@ -7036,7 +7036,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fungos-content",
- "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=cc5256ab284bd1ec71c8e5c677410b6360b04dfd)",
  "serde",
  "serde_json",
  "tempfile",
@@ -7049,7 +7049,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "clap",
- "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=cc5256ab284bd1ec71c8e5c677410b6360b04dfd)",
  "serde",
  "serde_json",
  "tempfile",
@@ -7063,7 +7063,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=cc5256ab284bd1ec71c8e5c677410b6360b04dfd)",
  "serde_json",
  "tempfile",
  "tiny_http",
@@ -7117,7 +7117,7 @@ dependencies = [
  "bytes",
  "clap",
  "ed25519-dalek 2.2.0",
- "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=cc5256ab284bd1ec71c8e5c677410b6360b04dfd)",
  "fungos-vfs",
  "hmac",
  "http",
@@ -7136,7 +7136,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "tracing",
- "unibus 0.1.0 (git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79)",
+ "unibus",
  "unibus-sdk",
  "ureq 2.12.1",
  "url",
@@ -7245,7 +7245,7 @@ name = "soil-marbles-import"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=cc5256ab284bd1ec71c8e5c677410b6360b04dfd)",
  "rusqlite",
  "serde_json",
 ]
@@ -7266,7 +7266,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
- "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=cc5256ab284bd1ec71c8e5c677410b6360b04dfd)",
  "serde_json",
  "tempfile",
 ]
@@ -7281,7 +7281,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "unibus 0.1.0 (git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79)",
+ "unibus",
  "wasmtime",
  "wasmtime-wasi",
 ]
@@ -7455,7 +7455,7 @@ name = "soil-search-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=cc5256ab284bd1ec71c8e5c677410b6360b04dfd)",
  "fungos-vfs",
  "plist",
  "serde",
@@ -7483,7 +7483,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
- "unibus 0.1.0 (git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79)",
+ "unibus",
 ]
 
 [[package]]
@@ -7528,7 +7528,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ed25519-dalek 2.2.0",
- "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=cc5256ab284bd1ec71c8e5c677410b6360b04dfd)",
  "iroh",
  "mycelium-peer-protocol",
  "serde",
@@ -7536,7 +7536,7 @@ dependencies = [
  "soil-notify-host",
  "tempfile",
  "tokio",
- "unibus 0.1.0 (git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79)",
+ "unibus",
  "unibus-iroh",
 ]
 
@@ -8441,16 +8441,6 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "unibus"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/unibus.git?rev=8bf8f79#8bf8f79e48252feacd4ba84a04a5c8d3c0a91a9a"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "unibus"
-version = "0.1.0"
 source = "git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79#8bf8f79e48252feacd4ba84a04a5c8d3c0a91a9a"
 dependencies = [
  "anyhow",
@@ -8469,7 +8459,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "unibus 0.1.0 (git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79)",
+ "unibus",
  "url",
 ]
 
@@ -8481,7 +8471,7 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
- "unibus 0.1.0 (git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79)",
+ "unibus",
 ]
 
 [[package]]

@@ -109,6 +109,25 @@ mush doctor
 source, principal, Desktop, and service socket. Missing roots are errors, not
 silent fallbacks.
 
+## What an installed command sees
+
+Commands run with no inherited environment. The host adds three things and
+nothing else:
+
+```text
+TERM=dumb
+PWD=<the guest's cwd>
+MARBLES_ACTOR=<--principal, else $USER>
+MARBLES_PROJECT=<the .marbles/project.toml slug nearest the host's cwd, if any>
+```
+
+The identity is the host's, not the command's, because a claim and its heartbeat
+must name the same holder: `mb claim` records one and `mb touch` renews only for
+it. The project is read once from the *host's* working directory — the guest's
+`PWD` is a VFS path, and resolving `.marbles/project.toml` against it would
+answer a question about the wrong filesystem. No project is not an error: an
+unscoped `mb ready` means every project.
+
 ## Desktop
 
 `mush desktop` manages the local registry in `~/.config/fungos/desktops/`:
