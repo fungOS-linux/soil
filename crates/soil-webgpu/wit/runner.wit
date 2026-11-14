@@ -13,6 +13,7 @@ world runner {
   import soil:agents/control@0.1.0;
   import soil:http/http@0.1.0;
   import soil:terminal-screen/screen@0.1.0;
+  import soil:unibus/bus@0.1.0;
 
   /// Run one bounded WebGPU workload and return a host-visible status code.
   export run: async func() -> u32;

@@ -246,7 +246,7 @@ impl CatalogHost for InstallCatalog {
                 surfaces,
             });
         }
-        found.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+        found.sort_by_key(|entry| entry.title.to_lowercase());
         Ok(found)
     }
 
@@ -451,6 +451,7 @@ pub struct WebGpuHost {
     terminal: Box<dyn TerminalHost>,
     cursor: Option<Box<dyn CursorHost>>,
     clipboard: Option<Box<dyn ClipboardHost>>,
+    bus: Arc<soil_wasi_host::MemoryBus>,
 }
 
 /// Where a local `soil-store serve` listens. A desktop shell that runs the
@@ -476,6 +477,10 @@ pub struct HostSetup {
     pub cursor: Option<Box<dyn CursorHost>>,
     /// `None` on hosts without a pasteboard.
     pub clipboard: Option<Box<dyn ClipboardHost>>,
+    /// The Unibus this Spore publishes to and polls. In-process by default:
+    /// the notification frames a wall emits are for surfaces on this machine,
+    /// and a popup is one of them.
+    pub bus: Arc<soil_wasi_host::MemoryBus>,
 }
 
 impl HostSetup {
@@ -491,6 +496,7 @@ impl HostSetup {
             terminal: Box::new(NoTerminal),
             cursor: None,
             clipboard: None,
+            bus: Arc::new(soil_wasi_host::MemoryBus::default()),
         }
     }
 }
@@ -519,6 +525,7 @@ impl WebGpuHost {
             terminal: setup.terminal,
             cursor: setup.cursor,
             clipboard: setup.clipboard,
+            bus: setup.bus,
         })
     }
 }
@@ -651,6 +658,70 @@ impl soil::http::http::Host for WebGpuHost {
             headers: Vec::new(),
             body,
         })
+    }
+}
+
+impl soil::unibus::bus::Host for WebGpuHost {
+    fn poll(
+        &mut self,
+        kinds: Vec<String>,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> std::result::Result<soil::unibus::bus::Page, soil::unibus::bus::Error> {
+        let page = soil_wasi_host::Bus::poll(
+            &*self.bus,
+            &kinds,
+            cursor.as_deref(),
+            limit,
+        )
+        .map_err(bus_error)?;
+        Ok(soil::unibus::bus::Page {
+            frames: page.frames.into_iter().map(bus_frame).collect(),
+            next: page.next,
+        })
+    }
+
+    fn publish(
+        &mut self,
+        kind: String,
+        body: Vec<u8>,
+        destination: Option<String>,
+        ttl_ms: u64,
+    ) -> std::result::Result<soil::unibus::bus::Receipt, soil::unibus::bus::Error> {
+        let receipt = soil_wasi_host::Bus::publish(
+            &*self.bus,
+            &kind,
+            &body,
+            destination.as_deref(),
+            ttl_ms,
+        )
+        .map_err(bus_error)?;
+        // A publish is a fact about the surface, and the only way to see one
+        // from a capture host is the log.
+        eprintln!("unibus: published {kind} ({} bytes)", body.len());
+        Ok(soil::unibus::bus::Receipt {
+            request_id: receipt.request_id,
+        })
+    }
+}
+
+fn bus_error(error: soil_wasi_host::BusError) -> soil::unibus::bus::Error {
+    use soil_wasi_host::BusError as From;
+    match error {
+        From::Denied => soil::unibus::bus::Error::Denied,
+        From::Invalid => soil::unibus::bus::Error::Invalid,
+        From::OverBudget => soil::unibus::bus::Error::OverBudget,
+        From::Stale => soil::unibus::bus::Error::Stale,
+        From::Unavailable => soil::unibus::bus::Error::Unavailable,
+    }
+}
+
+fn bus_frame(frame: soil_wasi_host::Frame) -> soil::unibus::bus::Frame {
+    soil::unibus::bus::Frame {
+        kind: frame.kind,
+        producer: frame.producer,
+        issued_at_ms: frame.issued_at_ms,
+        body: frame.body,
     }
 }
 
@@ -1171,6 +1242,9 @@ impl WebGpuRuntime {
         soil::terminal_screen::screen::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:terminal-screen")?;
+        soil::unibus::bus::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+            .map_err(anyhow::Error::from)
+            .context("link soil:unibus")?;
         Ok(Self {
             engine,
             linker,

@@ -9,6 +9,9 @@ publish = false
 [dependencies]
 soil-spore = { path = "../soil-spore" }
 soil-agent-host = { path = "../soil-agent-host" }
+# The bus the Inbox/SFX Spores already use; the host reuses its in-memory
+# backend so a popup surface can read what a wall published.
+soil-wasi-host = { path = "../soil-wasi-host" }
 ureq = "2"
 anyhow = "1"
 serde_json = { version = "1", optional = true }
