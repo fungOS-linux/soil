@@ -1745,7 +1745,7 @@ surfaces = ["canvas"]
                 serde_json::json!({
                     "from": "soil",
                     "rel": "references",
-                    "to": "repository:fungOS-linux/soil",
+                    "to": "repository:mycelium-linux/soil",
                     "title": "Soil repository",
                     "role": "primary"
                 }),
@@ -1783,7 +1783,7 @@ surfaces = ["canvas"]
             .expect("project hit");
         assert!(project.references.iter().any(|reference| {
             reference.kind == "repository"
-                && reference.id == "repository:fungOS-linux/soil"
+                && reference.id == "repository:mycelium-linux/soil"
                 && reference.rel.as_deref() == Some("references")
         }));
         assert!(project.references.iter().any(|reference| {

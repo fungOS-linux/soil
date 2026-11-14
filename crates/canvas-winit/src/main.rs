@@ -129,31 +129,42 @@ struct SporeCatalog {
 }
 
 impl SporeCatalog {
-    fn new(root: &std::path::Path, launch: LaunchConfig) -> Result<Self, CatalogError> {
+    /// Join every directory a Spore can live in, most specific first. The
+    /// shell's own bundle set is a fallback, not the truth: what a store
+    /// installed, and what a project tree holds, belong in the same list.
+    fn new(roots: &[PathBuf], launch: LaunchConfig) -> Result<Self, CatalogError> {
         let mut installed = Vec::new();
-        let Ok(directory) = std::fs::read_dir(root) else {
-            return Ok(Self { installed, launch });
-        };
-        for entry in directory.flatten() {
-            if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+        let mut seen = std::collections::BTreeSet::new();
+        for root in roots {
+            let Ok(directory) = std::fs::read_dir(root) else {
                 continue;
-            }
-            let package = entry.path();
-            if !package.join("spore.toml").is_file() {
-                continue;
-            }
-            let manifest = match Manifest::load(&package) {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    // One half-written package must not hide every other Spore.
-                    eprintln!("canvas-winit: skip {}: {error}", package.display());
+            };
+            for entry in directory.flatten() {
+                if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                     continue;
                 }
-            };
-            installed.push(Installed {
-                root: package,
-                manifest,
-            });
+                let package = entry.path();
+                if !package.join("spore.toml").is_file() {
+                    continue;
+                }
+                let manifest = match Manifest::load(&package) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        // One half-written package must not hide every other Spore.
+                        eprintln!("canvas-winit: skip {}: {error}", package.display());
+                        continue;
+                    }
+                };
+                // The first root to offer an id wins, so a bundle cannot shadow
+                // what a store installed.
+                if !seen.insert(manifest.spore.id.clone()) {
+                    continue;
+                }
+                installed.push(Installed {
+                    root: package,
+                    manifest,
+                });
+            }
         }
         installed.sort_by(|left, right| left.manifest.spore.name.cmp(&right.manifest.spore.name));
         Ok(Self { installed, launch })
@@ -532,7 +543,7 @@ struct App {
     /// When the splash last painted, so it runs at a steady rate instead of
     /// spinning the event loop for the whole start-up.
     splashed: std::time::Instant,
-    spores: PathBuf,
+    spores: Vec<PathBuf>,
     /// Initial logical window size; captures use this to exercise the same
     /// layouts a phone, flip, or desktop presents.
     logical_size: (f64, f64),
@@ -1076,13 +1087,16 @@ impl ApplicationHandler for App {
 /// Compile the Spores this machine has, in the background, so opening one from
 /// the launcher does not pay for it. The module already running is skipped; a
 /// Spore whose cache is warm costs a file read and a deserialize to check.
-fn warm_installed(spores: &std::path::Path, running: &std::path::Path) {
-    let Ok(directory) = std::fs::read_dir(spores) else {
-        return;
-    };
-    let modules: Vec<std::path::PathBuf> = directory
-        .flatten()
-        .map(|entry| entry.path())
+fn warm_installed(roots: &[std::path::PathBuf], running: &std::path::Path) {
+    let mut packages = Vec::new();
+    for root in roots {
+        let Ok(directory) = std::fs::read_dir(root) else {
+            continue;
+        };
+        packages.extend(directory.flatten().map(|entry| entry.path()));
+    }
+    let modules: Vec<std::path::PathBuf> = packages
+        .into_iter()
         .filter(|package| package.join("spore.toml").is_file())
         .filter_map(|package| {
             let manifest = Manifest::load(&package).ok()?;
@@ -1710,11 +1724,21 @@ fn main() -> Result<()> {
         http,
         records,
         launch,
-        spores: spores.unwrap_or_else(|| {
+        spores: spores.map(|path| vec![path]).unwrap_or_else(|| {
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_default();
-            home.join("Library/Application Support/fungOS/spores")
+            // Every place a Spore can live: what the store installed, what the
+            // shell ships, and any root the environment adds. Joining them is
+            // what makes the launcher describe the machine instead of the app.
+            let mut roots = vec![
+                home.join(".local/share/fungos/spores"),
+                home.join("Library/Application Support/fungOS/spores"),
+            ];
+            if let Some(extra) = std::env::var_os("SOIL_SPORES_ROOTS") {
+                roots.extend(std::env::split_paths(&extra));
+            }
+            roots
         }),
         started: false,
     };
@@ -1820,8 +1844,8 @@ mod native_launch_tests {
         )
         .expect("test manifest");
 
-        let mut catalog =
-            SporeCatalog::new(&root, LaunchConfig::default()).expect("test catalogue");
+        let mut catalog = SporeCatalog::new(std::slice::from_ref(&root), LaunchConfig::default())
+            .expect("test catalogue");
         let entries = catalog.entries().expect("catalogue entries");
         let terminal = entries
             .iter()

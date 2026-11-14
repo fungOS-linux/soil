@@ -168,6 +168,10 @@ fn digest(value: &str) -> [u8; 32] {
 pub struct Bridge {
     spore: String,
     grants: GrantSet,
+    /// What the page is about to run: the manifest projection a browser host
+    /// needs to know which imports to provide, and the module itself, so a tab
+    /// never has to be trusted with a path.
+    package: Option<Arc<SporePackage>>,
     registry: Registry,
     auth: Auth,
     bus: EventBus,
@@ -183,11 +187,19 @@ pub struct Bridge {
     server_calls: AtomicU64,
 }
 
+/// The package a session is bound to, as a browser host needs it: the
+/// manifest projection (id, version, surfaces, grants) and the module bytes.
+pub struct SporePackage {
+    manifest: serde_json::Value,
+    module: Option<Vec<u8>>,
+}
+
 impl Bridge {
     pub fn new(spore: impl Into<String>, grants: GrantSet, registry: Registry) -> Self {
         Self {
             spore: spore.into(),
             grants,
+            package: None,
             registry,
             auth: Auth::default(),
             bus: EventBus::default(),
@@ -198,6 +210,16 @@ impl Bridge {
             sse_seq: AtomicU64::new(1),
             server_calls: AtomicU64::new(1),
         }
+    }
+
+    /// Attach the package this bridge is bound to, so a browser host can fetch
+    /// what it is about to run instead of being told a path.
+    pub fn with_package(mut self, manifest: serde_json::Value, module: Option<Vec<u8>>) -> Self {
+        self.package = Some(Arc::new(SporePackage {
+            manifest,
+            module,
+        }));
+        self
     }
 
     /// Call into a session that volunteered to implement `package`.
@@ -442,6 +464,44 @@ fn handle_connection(bridge: Arc<Bridge>, mut stream: TcpStream, peer: SocketAdd
         ("POST", "/v1/call") => handle_call(&bridge, &mut stream, &body, cors),
         ("POST", "/v1/provider/call") => handle_provider_call(&bridge, &mut stream, &body, cors),
         ("POST", "/v1/frame") => handle_frame(&bridge, &mut stream, &head, &body, cors),
+        ("GET", "/v1/spore") => match bridge.package.as_ref() {
+            Some(package) => respond_json(
+                &mut stream,
+                200,
+                "OK",
+                "",
+                &Outcome::Ok(package.manifest.clone()),
+                cors,
+            ),
+            None => respond(
+                &mut stream,
+                404,
+                "Not Found",
+                "text/plain; charset=utf-8",
+                b"this bridge was started without a package\n",
+                cors,
+            ),
+        },
+        ("GET", "/v1/spore/module.wasm") => {
+            match bridge.package.as_ref().and_then(|package| package.module.as_ref()) {
+                Some(module) => respond(
+                    &mut stream,
+                    200,
+                    "OK",
+                    "application/wasm",
+                    module,
+                    cors,
+                ),
+                None => respond(
+                    &mut stream,
+                    404,
+                    "Not Found",
+                    "text/plain; charset=utf-8",
+                    b"this bridge serves no module for its Spore\n",
+                    cors,
+                ),
+            }
+        }
         ("GET", "/v1/events") => handle_events(bridge.clone(), stream, &head, cors),
         ("GET", "/v1/session") => handle_session(bridge.clone(), stream, buffer, &head),
         _ => respond(

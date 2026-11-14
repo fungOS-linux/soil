@@ -13,7 +13,7 @@ A link is one record with schema `fungos.graph/link@1`:
 {
   "from": "soil",
   "rel": "references",
-  "to": "repository:fungOS-linux/soil",
+  "to": "repository:mycelium-linux/soil",
   "title": "Soil repository",
   "role": "primary"
 }

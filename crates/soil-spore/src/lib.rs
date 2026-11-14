@@ -84,6 +84,41 @@ type Result<T> = std::result::Result<T, Error>;
 
 // ---- manifest -------------------------------------------------------------
 
+/// The environment a Spore and its host children may see.
+///
+/// `spore` narrows what the shell can read (unset means the caller's whole
+/// environment, which is what an agent shell wants). `host` widens the floor a
+/// host child is spawned with — and is deliberately not allowed to name
+/// anything secret-shaped, because a child runs with the user's real
+/// privileges.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvPolicy {
+    #[serde(default)]
+    pub spore: Vec<String>,
+    #[serde(default)]
+    pub host: Vec<String>,
+}
+
+/// Names whose meaning inside the shell is the VFS, not the host: `cd $HOME`
+/// and command lookup would resolve outside the sandbox if a manifest could
+/// hand them real paths.
+pub const VFS_ENV_NAMES: &[&str] = &[
+    "PATH", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME", "TERM",
+];
+
+/// Whether a name looks like it carries a secret. A host child is the thing
+/// running with the user's privileges, so this is a review guard, not a
+/// sandbox: it refuses the obvious names and leaves the judgement to a human.
+pub fn secret_shaped(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["TOKEN", "SECRET", "PASSWORD", "PASSPHRASE", "API_KEY", "PRIVATE_KEY"]
+        .iter()
+        .any(|needle| upper.contains(needle))
+        || upper.ends_with("_KEY")
+        || upper.starts_with("AWS_")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -114,6 +149,15 @@ pub struct Manifest {
     pub deps: BTreeMap<String, String>,
     #[serde(default)]
     pub grants: BTreeMap<String, String>,
+    /// Which environment variables this Spore may read, and which a host child
+    /// may see while running on its behalf.
+    ///
+    /// This lives in the manifest rather than in an environment variable the
+    /// caller sets, because the thing being constrained is the caller: whoever
+    /// spawns the host could otherwise widen its own grant. The manifest is what
+    /// a reviewer reads and what the lock digests, so a widened grant is a diff.
+    #[serde(default)]
+    pub env: EnvPolicy,
     #[serde(default)]
     pub assets: BTreeMap<String, Asset>,
     /// Declared absences. Reviewed like grants: intent is written down.
@@ -144,6 +188,12 @@ pub struct Manifest {
     /// Launcher identity: a mark and the colour it is drawn in.
     #[serde(default)]
     pub presentation: Option<Presentation>,
+    /// Where this package belongs. A host has a class - a phone, a laptop, a
+    /// server - and installs the packages whose placement admits it. Absent
+    /// means anywhere: a package that says nothing is not a package that runs
+    /// nowhere.
+    #[serde(default)]
+    pub placement: Option<Placement>,
     /// What `man` prints: synopsis lines and an authored body.
     #[serde(default)]
     pub docs: Option<Docs>,
@@ -326,6 +376,24 @@ pub mod chrome {
     /// Height of an interactive control in the bar; the whole row, so the target
     /// is the row rather than the glyph.
     pub const DEFAULT_CONTROL_HEIGHT: u32 = DEFAULT_HEIGHT;
+}
+
+/// The device classes a package is meant for.
+///
+/// A closed vocabulary, for the same reason categories are: `phone` has to mean
+/// the same thing to a publisher in one repo and a host in another, or the
+/// filter is a spelling test.
+pub const DEVICES: [&str; 5] = ["phone", "tablet", "laptop", "desktop", "server"];
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placement {
+    /// Device classes this package is meant for. Empty means anywhere.
+    #[serde(default)]
+    pub devices: Vec<String>,
+    /// Hardware or host capability it cannot run without, e.g. `gpu`, `camera`.
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -863,6 +931,10 @@ impl Manifest {
                 "usage": docs.usage,
                 "man": docs.man,
             })),
+            "placement": self.placement.as_ref().map(|placement| serde_json::json!({
+                "devices": placement.devices,
+                "requires": placement.requires,
+            })),
             "presentation": self.presentation.as_ref().map(|presentation| serde_json::json!({
                 "badge": presentation.badge,
                 "color": presentation.color,
@@ -949,6 +1021,34 @@ impl Manifest {
                 "version {:?} is not semver-ish",
                 self.spore.version
             )));
+        }
+        for name in &self.env.spore {
+            if name.trim().is_empty() {
+                return Err(Error::Invalid("env.spore has an empty name".into()));
+            }
+            if VFS_ENV_NAMES.contains(&name.as_str()) {
+                return Err(Error::Invalid(format!(
+                    "env.spore may not name {name:?}: inside the shell it means the VFS, not the host"
+                )));
+            }
+            // The host's own control plane is never a package's to read: an MCP
+            // token or a principal is a capability and an identity, and a Spore
+            // holding either can act as the host that started it.
+            if name.starts_with("MUSH_") {
+                return Err(Error::Invalid(format!(
+                    "env.spore may not name {name:?}: the host's control variables never cross"
+                )));
+            }
+        }
+        for name in &self.env.host {
+            if name.trim().is_empty() {
+                return Err(Error::Invalid("env.host has an empty name".into()));
+            }
+            if secret_shaped(name) {
+                return Err(Error::Invalid(format!(
+                    "env.host may not name {name:?}: a host child runs with the user's privileges"
+                )));
+            }
         }
         for skill in &self.skills {
             if !identifier(&skill.name) {
@@ -1310,6 +1410,16 @@ impl Manifest {
                 if !(mark.ends_with(".svg") || mark.ends_with(".png")) {
                     return Err(Error::Invalid(format!(
                         "presentation.mark {mark:?} must be a .svg or .png inside the package"
+                    )));
+                }
+            }
+        }
+        if let Some(placement) = &self.placement {
+            for device in &placement.devices {
+                if !DEVICES.contains(&device.as_str()) {
+                    return Err(Error::Invalid(format!(
+                        "placement.devices {device:?} is not one of {}",
+                        DEVICES.join(", ")
                     )));
                 }
             }
@@ -2515,6 +2625,29 @@ pub fn sign_principal(
     }
     std::fs::write(signature, output.stdout)
         .map_err(|error| Error::Io(format!("{}: {error}", signature.display())))
+}
+
+#[cfg(test)]
+mod env_policy_tests {
+    use super::*;
+
+    #[test]
+    fn host_children_may_not_be_handed_a_secret_shaped_name() {
+        for name in ["GITHUB_TOKEN", "OPENAI_API_KEY", "AWS_PROFILE", "DB_PASSWORD"] {
+            assert!(secret_shaped(name), "{name} should look secret");
+        }
+        for name in ["SSH_AUTH_SOCK", "LANG", "TERM", "GIT_AUTHOR_NAME"] {
+            assert!(!secret_shaped(name), "{name} should be admissible");
+        }
+    }
+
+    #[test]
+    fn the_shell_may_not_be_handed_a_vfs_meaning_name() {
+        for name in ["PATH", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME", "TERM"] {
+            assert!(VFS_ENV_NAMES.contains(&name), "{name} should be reserved");
+        }
+        assert!(!VFS_ENV_NAMES.contains(&"GIT_AUTHOR_NAME"));
+    }
 }
 
 fn validate_geode_label(label: &str) -> Result<()> {

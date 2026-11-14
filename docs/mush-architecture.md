@@ -19,11 +19,11 @@ that gives an agent a prompt over both.
 | Shell docs | [`docs/mush.md`](mush.md) | the user surface: syntax, commands, config, doctor |
 | Operator docs | [`docs/mush-operator.md`](mush-operator.md) | running it for other people, service accounts |
 
-FungOS-linux keeps three things outside this repository:
+The mycelium-linux org keeps three things outside this repository:
 
 | Repo | What mush gets from it |
 | --- | --- |
-| [`fungos-vfs`](https://github.com/fungOS-linux/fungos-vfs) | the namespace and content store: `Vfs`, `FileEntry` (including `mode`), sync, worktree primitives |
+| [`fungos-vfs`](https://github.com/mycelium-linux/fungos-vfs) | the namespace and content store: `Vfs`, `FileEntry` (including `mode`), sync, worktree primitives |
 | [`bob`](https://github.com/FuturePresentLabs/bob) | the build plane: which lane a target goes to, per-agent `CARGO_HOME`, sccache, the fleet pool |
 | `mycelium` | identity and reachability. mush takes a principal string and uses it for the fetch policy, but does **not** verify it; the verifier (`crates/soil-principal-host`, a Mycelium CLI caller) exists and is not linked into mush. The `soil:mycelium` contract — directory plus remote session with host-key verification — is defined in `wit/` and has no host implementation yet. |
 

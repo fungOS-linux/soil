@@ -2407,7 +2407,7 @@ dependencies = [
 [[package]]
 name = "fungos-device-hal"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/fungos.git?rev=17534eb0b4780e2207bf1d865a9d85b3d51540a1#17534eb0b4780e2207bf1d865a9d85b3d51540a1"
+source = "git+https://github.com/mycelium-linux/fungos.git?rev=17534eb0b4780e2207bf1d865a9d85b3d51540a1#17534eb0b4780e2207bf1d865a9d85b3d51540a1"
 dependencies = [
  "libc",
 ]
@@ -2415,7 +2415,7 @@ dependencies = [
 [[package]]
 name = "fungos-records"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db#adc88b242957e5ee9b82d7e98f36d92a051635db"
+source = "git+https://github.com/mycelium-linux/records.git?rev=388d6dffbf8c68b48a581abe5bc618f35278241a#388d6dffbf8c68b48a581abe5bc618f35278241a"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2435,7 +2435,7 @@ dependencies = [
 [[package]]
 name = "fungos-records"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/records.git?rev=eb25c69f906eee645b5507f09017a776b1f39377#eb25c69f906eee645b5507f09017a776b1f39377"
+source = "git+https://github.com/mycelium-linux/records.git?rev=df294315b0f8e994f90e08ef46ac348197998f3b#df294315b0f8e994f90e08ef46ac348197998f3b"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2455,7 +2455,7 @@ dependencies = [
 [[package]]
 name = "fungos-vfs"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/fungos-vfs.git?rev=8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af#8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af"
+source = "git+https://github.com/mycelium-linux/fungos-vfs.git?rev=8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af#8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6910,7 +6910,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=eb25c69f906eee645b5507f09017a776b1f39377)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=df294315b0f8e994f90e08ef46ac348197998f3b)",
  "serde_json",
  "tempfile",
  "wasmtime",
@@ -7000,7 +7000,7 @@ dependencies = [
  "http",
  "serde",
  "serde_json",
- "soil-wasi-host",
+ "soil-host",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -7036,7 +7036,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fungos-content",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=388d6dffbf8c68b48a581abe5bc618f35278241a)",
  "serde",
  "serde_json",
  "tempfile",
@@ -7049,7 +7049,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "clap",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=388d6dffbf8c68b48a581abe5bc618f35278241a)",
  "serde",
  "serde_json",
  "tempfile",
@@ -7063,7 +7063,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=388d6dffbf8c68b48a581abe5bc618f35278241a)",
  "serde_json",
  "tempfile",
  "tiny_http",
@@ -7080,7 +7080,6 @@ dependencies = [
  "anyhow",
  "soil-ble-host",
  "soil-host",
- "soil-wasi-host",
  "wasmtime",
  "wasmtime-wasi",
 ]
@@ -7126,20 +7125,35 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "blake3",
+ "bytes",
  "clap",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "ed25519-dalek 2.2.0",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=388d6dffbf8c68b48a581abe5bc618f35278241a)",
  "fungos-vfs",
+ "hmac",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "ipnet",
  "model2vec-rs",
  "percent-encoding",
  "regex",
  "rusqlite",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tiny_http",
+ "tokio",
+ "tracing",
+ "unibus",
+ "unibus-sdk",
  "ureq 2.12.1",
  "url",
  "wasmtime",
  "wasmtime-wasi",
+ "wasmtime-wasi-http",
 ]
 
 [[package]]
@@ -7189,6 +7203,7 @@ dependencies = [
  "soil-store",
  "tempfile",
  "thiserror 2.0.21",
+ "ureq 2.12.1",
 ]
 
 [[package]]
@@ -7241,7 +7256,7 @@ name = "soil-marbles-import"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=388d6dffbf8c68b48a581abe5bc618f35278241a)",
  "rusqlite",
  "serde_json",
 ]
@@ -7262,7 +7277,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=388d6dffbf8c68b48a581abe5bc618f35278241a)",
  "serde_json",
  "tempfile",
 ]
@@ -7451,7 +7466,7 @@ name = "soil-search-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=388d6dffbf8c68b48a581abe5bc618f35278241a)",
  "fungos-vfs",
  "plist",
  "serde",
@@ -7473,7 +7488,6 @@ dependencies = [
  "serde_json",
  "soil-host",
  "soil-spore",
- "soil-wasi-host",
  "soil-web-bridge",
  "tempfile",
  "tokio",
@@ -7525,7 +7539,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ed25519-dalek 2.2.0",
- "fungos-records 0.1.0 (git+https://github.com/fungOS-linux/records.git?rev=adc88b242957e5ee9b82d7e98f36d92a051635db)",
+ "fungos-records 0.1.0 (git+https://github.com/mycelium-linux/records.git?rev=388d6dffbf8c68b48a581abe5bc618f35278241a)",
  "iroh",
  "mycelium-peer-protocol",
  "serde",
@@ -7587,35 +7601,6 @@ name = "soil-vt"
 version = "0.1.0"
 dependencies = [
  "ghostty-vt",
-]
-
-[[package]]
-name = "soil-wasi-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bytes",
- "ed25519-dalek 2.2.0",
- "hmac",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "ipnet",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "soil-host",
- "tempfile",
- "tokio",
- "tracing",
- "unibus",
- "unibus-sdk",
- "url",
- "wasmtime",
- "wasmtime-wasi",
- "wasmtime-wasi-http",
 ]
 
 [[package]]
@@ -8467,7 +8452,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "unibus"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/unibus.git?rev=8bf8f79#8bf8f79e48252feacd4ba84a04a5c8d3c0a91a9a"
+source = "git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79#8bf8f79e48252feacd4ba84a04a5c8d3c0a91a9a"
 dependencies = [
  "anyhow",
  "serde",
@@ -8477,7 +8462,7 @@ dependencies = [
 [[package]]
 name = "unibus-iroh"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/unibus.git?rev=8bf8f79#8bf8f79e48252feacd4ba84a04a5c8d3c0a91a9a"
+source = "git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79#8bf8f79e48252feacd4ba84a04a5c8d3c0a91a9a"
 dependencies = [
  "anyhow",
  "iroh",
@@ -8492,7 +8477,7 @@ dependencies = [
 [[package]]
 name = "unibus-sdk"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/unibus.git?rev=8bf8f79#8bf8f79e48252feacd4ba84a04a5c8d3c0a91a9a"
+source = "git+https://github.com/mycelium-linux/unibus.git?rev=8bf8f79#8bf8f79e48252feacd4ba84a04a5c8d3c0a91a9a"
 dependencies = [
  "anyhow",
  "serde",
@@ -8754,7 +8739,7 @@ dependencies = [
 [[package]]
 name = "wasi-gfx-runtime-shared"
 version = "0.5.0"
-source = "git+https://github.com/fungOS-linux/wasi-gfx-runtime?rev=9624cae#9624caec15e009644d2610897764d3ec1cdf807a"
+source = "git+https://github.com/mycelium-linux/wasi-gfx-runtime?rev=9624cae#9624caec15e009644d2610897764d3ec1cdf807a"
 dependencies = [
  "async-broadcast",
  "futures",
@@ -8764,7 +8749,7 @@ dependencies = [
 [[package]]
 name = "wasi-webgpu-wasmtime"
 version = "0.5.0"
-source = "git+https://github.com/fungOS-linux/wasi-gfx-runtime?rev=9624cae#9624caec15e009644d2610897764d3ec1cdf807a"
+source = "git+https://github.com/mycelium-linux/wasi-gfx-runtime?rev=9624cae#9624caec15e009644d2610897764d3ec1cdf807a"
 dependencies = [
  "async-broadcast",
  "callback-future",

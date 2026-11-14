@@ -15,7 +15,7 @@ fn main() -> ExitCode {
     let mut frame_path = None;
     let mut records_dir: Option<PathBuf> = None;
     let mut size = (480, 640);
-    let mut spores_root = None;
+    let mut spores_roots: Vec<PathBuf> = Vec::new();
     let mut origins = Vec::new();
     let mut store_origin: Option<String> = None;
     let mut geode_socket = None;
@@ -65,7 +65,7 @@ fn main() -> ExitCode {
                     eprintln!("--spores-root requires a directory");
                     return ExitCode::FAILURE;
                 };
-                spores_root = Some(path);
+                spores_roots.push(PathBuf::from(path));
             }
             "--allow-origin" => {
                 let Some(origin) = args.next() else {
@@ -126,7 +126,7 @@ fn main() -> ExitCode {
             _ => {
                 if component.replace(arg).is_some() {
                     eprintln!(
-                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--records-dir DIR] [--spores-root DIR] [--allow-origin URL]... [--store-origin URL] [--agents demo] [--view NAME] [--agent ID] [--geode-socket PATH --geode-purpose PURPOSE] <component.wasm>"
+                        "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--records-dir DIR] [--spores-root DIR]... [--allow-origin URL]... [--store-origin URL] [--agents demo] [--view NAME] [--agent ID] [--geode-socket PATH --geode-purpose PURPOSE] <component.wasm>"
                     );
                     return ExitCode::FAILURE;
                 }
@@ -135,7 +135,7 @@ fn main() -> ExitCode {
     }
     let Some(path) = component else {
         eprintln!(
-            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--records-dir DIR] [--spores-root DIR] [--allow-origin URL]... [--store-origin URL] [--agents demo] [--view NAME] [--agent ID] [--geode-socket PATH --geode-purpose PURPOSE] <component.wasm>"
+            "usage: soil-webgpu [--frame FILE.bgr] [--size WxH] [--records-dir DIR] [--spores-root DIR]... [--allow-origin URL]... [--store-origin URL] [--agents demo] [--view NAME] [--agent ID] [--geode-socket PATH --geode-purpose PURPOSE] <component.wasm>"
         );
         return ExitCode::FAILURE;
     };
@@ -149,7 +149,7 @@ fn main() -> ExitCode {
     let result = if frame_path.is_some() {
         if records_dir.is_some()
             && (!origins.is_empty()
-                || spores_root.is_some()
+                || !spores_roots.is_empty()
                 || store_origin.is_some()
                 || agents.is_some())
         {
@@ -161,10 +161,13 @@ fn main() -> ExitCode {
         let result = if let Some(root) = records_dir.as_deref() {
             run_component_capture_with_records(&bytes, size.0, size.1, root)
         } else {
-            let catalog = spores_root.as_ref().map(|root| {
-                Box::new(soil_webgpu::InstallCatalog::new(root.clone()))
-                    as Box<dyn soil_webgpu::CatalogHost>
-            });
+            let catalog = if spores_roots.is_empty() {
+                None
+            } else {
+                Some(Box::new(soil_webgpu::InstallCatalog::with_roots(
+                    spores_roots.clone(),
+                )) as Box<dyn soil_webgpu::CatalogHost>)
+            };
             let http = match build_http(origins, store_origin, geode_socket, geode_purpose) {
                 Ok(http) => http,
                 Err(error) => {

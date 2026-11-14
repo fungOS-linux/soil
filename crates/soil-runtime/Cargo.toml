@@ -8,7 +8,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 viewer-spore = { path = "../viewer-spore" }
-fungos-device-hal = { git = "https://github.com/fungOS-linux/fungos.git", rev = "17534eb0b4780e2207bf1d865a9d85b3d51540a1" }
+fungos-device-hal = { git = "https://github.com/mycelium-linux/fungos.git", rev = "17534eb0b4780e2207bf1d865a9d85b3d51540a1" }
 s22-canvas-surface = { path = "../s22-canvas-surface" }
 wasmtime = { version = "50", default-features = false, features = ["anyhow", "cranelift", "runtime", "std"] }
 fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "6b31e91c82fcc05cad3645e495ad1532014b9a43", default-features = false }

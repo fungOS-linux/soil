@@ -1,6 +1,6 @@
 [Unit]
 Description=Soil L4 SNI edge (TLS passthrough)
-Documentation=https://github.com/fungOS-linux/soil
+Documentation=https://github.com/mycelium-linux/soil
 After=network-online.target
 Wants=network-online.target
 

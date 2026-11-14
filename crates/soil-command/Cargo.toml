@@ -14,7 +14,12 @@ soil-host = { path = "../soil-host" }
 # A Spore can install commands, so the registry reads Spore manifests too.
 soil-spore = { path = "../soil-spore" }
 toml = "0.8"
-wasmtime = { version = "50", features = ["anyhow"] }
+# `cache` is wasmtime's own AOT cache: compiled components are kept on disk
+# and keyed by engine version, so a command that runs 500 times a day is
+# compiled once. It is the same mechanism the launcher needs; enabling it
+# here rather than hand-rolling a .cwasm directory keeps one answer for
+# "how does a component start hot".
+wasmtime = { version = "50", features = ["anyhow", "cache"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 
 [dev-dependencies]

@@ -113,7 +113,7 @@ reads `crm`, `contacts`, `calls` and `messages` namespaces, while the host maps
 those names to books and enforces grants. See [`docs/crm.md`](docs/crm.md).
 Personal contact editing and explicit first-name/token sharing live in a
 separate [`spores/contacts`](spores/contacts); see [`docs/contacts.md`](docs/contacts.md).
-The reusable WASI p2 profile is [`crates/soil-wasi-host`](crates/soil-wasi-host):
+The reusable WASI p2 profile is [`crates/soil-host`](crates/soil-host):
 `wasi:http` incoming/outgoing, `wasi:sockets` with per-use CIDR policy, clocks,
 random, filesystem preopens and a per-request store. `soil-wasi-http` serves a
 component's `wasi:http/incoming-handler` with a deny-by-default origin/network

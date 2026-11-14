@@ -18,7 +18,7 @@ use soil_ble_host::ble as ble_host;
 use soil_ble_host::session;
 use soil_host::http_host::{self, HttpHost, HttpPolicy};
 use soil_host::records_host::{self, Namespace, NamespacedRecordsHost, records};
-use soil_wasi_host::{MemoryBus, WasiHost, WasiHostBuilder, WasiHostPolicy, unibus::bus};
+use soil_host::{MemoryBus, WasiHost, WasiHostBuilder, WasiHostPolicy, unibus::bus};
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtxView, WasiView};
@@ -418,7 +418,7 @@ fn main() -> Result<()> {
     http_host::api::add_to_linker::<DevHost, HasSelf<DevHost>>(&mut linker, |state| state)
         .map_err(anyhow::Error::from)
         .context("link soil:http")?;
-    soil_wasi_host::unibus::add_to_linker::<DevHost>(&mut linker).context("link soil:unibus")?;
+    soil_host::unibus::add_to_linker::<DevHost>(&mut linker).context("link soil:unibus")?;
 
     let mut store = Store::new(&engine, state);
     let bindings = Runner::instantiate(&mut store, &component, &linker)

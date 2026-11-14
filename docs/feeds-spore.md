@@ -20,7 +20,7 @@ transport route. It never gets a socket, DNS API, or credential bytes.
 Spike files:
 
 - [feeds-reader](https://github.com/ajmwagar/spores/tree/main/spores/feeds-reader) — reader Spore, AppData config
-- [`records`](https://github.com/fungOS-linux/records) — `import-rss` and
+- [`records`](https://github.com/mycelium-linux/records) — `import-rss` and
   `sync-feeds` write `fungos.feeds/item@1`
 
 Host-side ingest:

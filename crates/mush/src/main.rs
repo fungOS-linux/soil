@@ -124,13 +124,23 @@ impl SporeCatalog {
 struct CommandHost {
     root: PathBuf,
     runner: CommandRunner,
+    /// The identity a command acts as, and the Marbles project the session is
+    /// in. Both are host facts: a Spore gets no ambient environment, so the
+    /// only way `mb claim` and `mb touch` agree on a holder is for the host to
+    /// put the same actor on both.
+    env: Vec<(String, String)>,
 }
 
 impl CommandHost {
-    fn new(root: PathBuf, records: Option<RecordsBinding>) -> Result<Self> {
+    fn new(
+        root: PathBuf,
+        records: Option<RecordsBinding>,
+        principal: Option<&str>,
+    ) -> Result<Self> {
         Ok(Self {
             root,
             runner: CommandRunner::new(records)?,
+            env: command_identity(principal),
         })
     }
 
@@ -179,6 +189,7 @@ impl CommandHost {
         if let Some(cwd) = &cwd {
             env.push(("PWD".into(), cwd.clone()));
         }
+        env.extend(self.env.iter().cloned());
         let output = self.runner.run(
             &entry,
             &RunRequest {
@@ -196,11 +207,42 @@ impl CommandHost {
     }
 }
 
+/// The identity environment every installed command runs with.
+///
+/// A Spore has no ambient environment, so a command that needs to know who it
+/// acts for has to be told. Marbles is the case that made this concrete: `mb
+/// claim` records a holder and `mb touch` renews a lease only for that holder,
+/// so a session whose actor changes between two commands cannot keep a claim
+/// alive. The principal Mush already resolved is that actor; the POSIX user is
+/// the fallback the native CLI uses in local mode.
+///
+/// The project is read once, from the host's own working directory, because the
+/// guest's `PWD` is a VFS path and resolving `.marbles/project.toml` against it
+/// would answer a question about the wrong filesystem. This is the same value
+/// `$MUSH_MARBLE_PROJECT` already carries into the shell.
+fn command_identity(principal: Option<&str>) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    let actor = principal.map(str::to_owned).or_else(|| {
+        std::env::var("USER")
+            .ok()
+            .or_else(|| std::env::var("LOGNAME").ok())
+    });
+    if let Some(actor) = actor {
+        env.push(("MARBLES_ACTOR".to_string(), actor));
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if let Some(project) = origin::resolve(&cwd).marble_project {
+        env.push(("MARBLES_PROJECT".to_string(), project));
+    }
+    env
+}
+
 impl Host {
     fn new(
         root: &std::path::Path,
         command_root: PathBuf,
         records: Option<RecordsBinding>,
+        principal: Option<&str>,
         store: Option<&std::path::Path>,
     ) -> Result<Self> {
         // Commands and Spores are siblings under the fungOS data directory;
@@ -213,7 +255,7 @@ impl Host {
             vfs: VfsHost::open_with_role_and_store(root, fungos_vfs::NodeRole::Full, store)?,
             wasi: WasiCtxBuilder::new().inherit_stdio().build(),
             table: ResourceTable::new(),
-            commands: CommandHost::new(command_root, records)?,
+            commands: CommandHost::new(command_root, records, principal)?,
             spores: SporeCatalog::new(spore_root),
             http: http::host(&access::from_env()),
         })
@@ -387,9 +429,15 @@ pub(crate) struct Runtime {
     budget: Option<std::time::Duration>,
     /// Set by the service when a caller cancels the running command.
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Extra names a host child may see, from the package's `[env] host`.
+    host_env: Vec<String>,
 }
 
 impl Runtime {
+    pub(crate) fn host_env(&self) -> &[String] {
+        &self.host_env
+    }
+
     pub(crate) fn open(
         root: &std::path::Path,
         wasm: &[u8],
@@ -400,12 +448,24 @@ impl Runtime {
         desktop: Option<&desktop::Desktop>,
         budget: Option<std::time::Duration>,
         store: Option<&std::path::Path>,
+        environment: Vec<(String, String)>,
+        host_env: Vec<String>,
     ) -> Result<Self> {
+        // Projected before the wasmtime store shadows the `store` path.
+        let home = project_home(root, store)?;
         let mut config = Config::new();
         config.wasm_component_model(true);
         // Epoch interruption is what lets a timer stop a command that outlives
         // its caller's patience instead of waiting for it forever.
         config.epoch_interruption(true);
+        // The shell's own Spore is embedded, so every `mush -c` and every daemon
+        // restart compiles the same bytes. Keep the compilation on disk.
+        match wasmtime::Cache::new(wasmtime::CacheConfig::default()) {
+            Ok(cache) => {
+                config.cache(Some(cache));
+            }
+            Err(error) => eprintln!("mush: component cache unavailable: {error}"),
+        }
         let engine = Engine::new(&config)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
@@ -415,42 +475,17 @@ impl Runtime {
         soil::net::net::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         soil::http::http::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         let component = Component::new(&engine, wasm)?;
-        let host = Host::new(root, command_root, records, store)?;
+        let host = Host::new(root, command_root, records, principal, store)?;
         let mut store = Store::new(&engine, host);
         // An epoch-interrupted engine starts at deadline 0, which traps on the
         // first tick. Disarm start-up; each command arms its own timer.
         store.set_epoch_deadline(u64::MAX);
         let instance = Mush::instantiate(&mut store, &component, &linker)?;
         let mut args = vec![format!("--term={term}")];
-        // The agent's environment is the Spore's: `$GIT_*`, its own keys, and
-        // the rest of what it was started with are visible to VFS commands.
-        // `PATH`, `HOME`, `PWD`, `OLDPWD`, `SHELL`, `USER`, `LOGNAME` and `TERM`
-        // keep their VFS meaning, so they are not forwarded.
-        //
-        // `MUSH_SPORE_ENV=NAME,...` narrows that to the names a caller chose,
-        // which is how a profile that knows better than the default (Geode, a
-        // Desktop with its own grants, a CI image) hands a Spore a *smaller*
-        // environment instead of the whole one. Unset means the whole
-        // environment, which is what an agent shell wants.
-        let only = std::env::var("MUSH_SPORE_ENV").ok().map(|list| {
-            list.split(',')
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<String>>()
-        });
-        for (key, value) in std::env::vars() {
-            if matches!(
-                key.as_str(),
-                "PATH" | "HOME" | "PWD" | "OLDPWD" | "SHELL" | "USER" | "LOGNAME" | "TERM"
-            ) {
-                continue;
-            }
-            if let Some(only) = &only
-                && !only.iter().any(|name| name == &key)
-            {
-                continue;
-            }
+        args.push(format!("--home={home}"));
+        // The agent's environment is the Spore's, narrowed by what this
+        // package's manifest declares it may read.
+        for (key, value) in &environment {
             args.push(format!("--env={key}={value}"));
         }
         if let Some(principal) = principal {
@@ -473,6 +508,7 @@ impl Runtime {
             engine,
             budget,
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            host_env,
         })
     }
 
@@ -1025,6 +1061,11 @@ fn run() -> Result<()> {
         }
     }
 
+    // The grants come from the package: `spore.toml` beside the module we were
+    // told to run. Computed before either path opens a Runtime, so the shell
+    // and the one-shot command see the same environment.
+    let manifest = spore_manifest(wasm.as_deref().map(Path::new))?;
+    let (environment, host_env) = manifest_grants(manifest.as_ref());
     let bytes = match wasm {
         Some(wasm) => std::fs::read(&wasm)
             .with_context(|| format!("read Mush component {}", wasm.display()))?,
@@ -1035,7 +1076,17 @@ fn run() -> Result<()> {
     // already went to the daemon above; this is the human-at-a-prompt path.
     if shell_mode && shell_command.is_none() {
         let shell_args = parse_shell_args(&mut args)?;
-        return run_shell(&root, &bytes, &term, command_root, records, store.as_deref(), shell_args);
+        return run_shell(
+            &root,
+            &bytes,
+            &term,
+            command_root,
+            records,
+            store.as_deref(),
+            environment,
+            host_env,
+            shell_args,
+        );
     }
 
     let interactive_command_root = command_root.clone();
@@ -1049,6 +1100,8 @@ fn run() -> Result<()> {
         desktop.as_ref(),
         budget,
         store.as_deref(),
+        environment,
+        host_env,
     )?;
 
     if serve {
@@ -2090,12 +2143,25 @@ fn run_shell(
     command_root: PathBuf,
     records: Option<RecordsBinding>,
     store: Option<&Path>,
+    environment: Vec<(String, String)>,
+    host_env: Vec<String>,
     args: ShellArgs,
 ) -> Result<()> {
     let key = session_key(args.session, root);
     let mut session = Session::load(root, &key);
-    let mut runtime =
-        Runtime::open(root, wasm, term, command_root, records, None, None, None, store)?;
+    let mut runtime = Runtime::open(
+        root,
+        wasm,
+        term,
+        command_root,
+        records,
+        None,
+        None,
+        None,
+        store,
+        environment,
+        host_env,
+    )?;
     session.restore(&mut runtime)?;
     let status = match args.command {
         Some(command) => execute_line(&mut runtime, root, &session, store, &command)?,
@@ -2187,7 +2253,7 @@ fn run_host_status(root: &Path, mut args: Vec<String>, store: Option<&Path>) -> 
     // Start empty: a host build needs its toolchain, not the agent's tokens.
     // The list lives with the shell's overlay bridge so both paths answer the
     // same question; anything beyond it is opt-in via --allow-env.
-    crate::shell::clear_and_seed(&mut command);
+    crate::shell::clear_and_seed(&mut command, &[]);
     for var in &extra_env {
         if let Ok(value) = std::env::var(var) {
             command.env(var, value);
@@ -2524,6 +2590,108 @@ fn root_slug(path: &Path) -> String {
     format!("{base}-{:08x}", hash as u32)
 }
 
+/// The manifest that came with the module we were told to run.
+///
+/// `spore.toml` sits beside the module; parsing it here means the grants come
+/// from the package a reviewer read, not from anything in the environment.
+fn spore_manifest(wasm: Option<&Path>) -> Result<Option<soil_spore::Manifest>> {
+    let Some(directory) = wasm.and_then(|wasm| wasm.parent()) else {
+        return Ok(None);
+    };
+    let path = directory.join("spore.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        // No manifest is the embedded-module case, not a failure.
+        return Ok(None);
+    };
+    // A manifest that exists but does not parse fails closed: silently treating
+    // it as "no grants" would widen the environment because of a typo.
+    let manifest = soil_spore::Manifest::parse(&text)
+        .with_context(|| format!("parse {}", path.display()))?;
+    Ok(Some(manifest))
+}
+
+/// What the manifest's `[env]` grants, applied to this process's environment.
+///
+/// No manifest, or an empty `env.spore`, means the caller's whole environment —
+/// the agent-shell default. Names whose meaning inside the shell is the VFS are
+/// never forwarded, whatever the manifest says.
+fn manifest_grants(manifest: Option<&soil_spore::Manifest>) -> (Vec<(String, String)>, Vec<String>) {
+    let only = manifest.map(|manifest| manifest.env.spore.clone());
+    let mut environment = Vec::new();
+    for (key, value) in std::env::vars() {
+        if soil_spore::VFS_ENV_NAMES.contains(&key.as_str()) {
+            continue;
+        }
+        // Mush's control plane is not the shell's business. `MUSH_MCP_TOKEN` is
+        // a capability for this same VFS, so a Spore that can read it can mint
+        // its own MCP calls; `MUSH_PRINCIPAL` and `MUSH_GROUPS` are the identity
+        // it was handed, not one it may forge. None of it crosses, whatever a
+        // manifest asks for.
+        if key.starts_with("MUSH_") {
+            continue;
+        }
+        if let Some(only) = &only
+            && !only.is_empty()
+            && !only.iter().any(|name| name == &key)
+        {
+            continue;
+        }
+        environment.push((key, value));
+    }
+    let host_env = manifest
+        .map(|manifest| manifest.env.host.clone())
+        .unwrap_or_default();
+    (environment, host_env)
+}
+
+/// Project the user's home into the VFS at `/home/<user>`.
+///
+/// The root is per checkout; the person is not. One host directory holds the
+/// files a shell should carry from project to project — `.mushrc` above all —
+/// and they are copied in on start, so `~/.mushrc` means the same thing in
+/// every root while the working tree stays where it belongs.
+fn project_home(root: &Path, store: Option<&Path>) -> Result<String> {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "mush".into());
+    let user: String = user
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let directory = format!("/home/{user}");
+    let source = config::expand_home("~/.local/share/fungos/home");
+    std::fs::create_dir_all(&source).with_context(|| format!("create {}", source.display()))?;
+    let mut vfs = fungos_vfs::Vfs::open_with(root, fungos_vfs::NodeRole::Full, store)
+        .context("open VFS to project the home directory")?;
+    for entry in std::fs::read_dir(&source)?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        // Best effort: a projection that cannot be written must not stop the
+        // shell from starting, and the next run tries again.
+        // VFS paths are root-relative: the leading `/` is the shell's, not
+        // the store's.
+        let _ = vfs.put(
+            &format!("home/{user}/{name}"),
+            &bytes,
+            "text/plain",
+            fungos_vfs::Expect::Any,
+        );
+    }
+    Ok(directory)
+}
+
 fn expand_home(value: &str) -> PathBuf {
     if value == "~" {
         return PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
@@ -2594,10 +2762,7 @@ mod tests {
         let b = build_session(Path::new("/src/soil/.delta/worktrees/x/soil"));
         assert_eq!(a, b);
         assert!(a.starts_with("mush-soil-"), "{a}");
-        assert!(
-            a.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        );
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         assert_ne!(a, build_session(Path::new("/src/other/soil")));
     }
 

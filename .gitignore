@@ -32,7 +32,3 @@ target/
 # Checked-in cpal threaded process fixture.
 !crates/soil-process/fixtures/cpal-tone.wasm
 
-# Checked-in wasi:http incoming-handler fixtures.
-!crates/soil-wasi-host/fixtures/echo.wasm
-!crates/soil-wasi-host/fixtures/context.wasm
-!crates/soil-wasi-host/fixtures/confluence.wasm

@@ -371,6 +371,87 @@ fn wasm_spore_sees_the_agent_environment_and_keeps_vfs_paths() {
     assert!(lines[2].starts_with("/commands"), "{}", lines[2]);
 }
 
+/// A package directory whose manifest narrows the shell's environment.
+#[test]
+fn a_manifest_narrows_the_environment_the_shell_may_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("package");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::copy(module(), package.join("module.wasm")).unwrap();
+    let source = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spores/mush/spore.toml"),
+    )
+    .unwrap();
+    // Declare one name: the shell should see it and nothing else of the
+    // caller's, even though the caller's environment is full of other things.
+    // The packaged manifest may be newer than this checkout's schema (`mark`
+    // became `badge` upstream); drop the fields the parser does not know so the
+    // test is about `[env]`, not about schema drift.
+    let source: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("mark ="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let narrowed = format!("{source}\n[env]\nspore = [\"KEEP_ME\"]\n");
+    std::fs::write(package.join("spore.toml"), narrowed).unwrap();
+
+    let output = mush_command()
+        .env("KEEP_ME", "kept")
+        .env("DROP_ME", "dropped")
+        .arg("--root")
+        .arg(dir.path().join("root"))
+        .arg("--wasm")
+        .arg(package.join("module.wasm"))
+        .arg("--command")
+        .arg("echo keep=$KEEP_ME drop=$DROP_ME")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "keep=kept drop=", "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// The host's own variables are not the shell's: an MCP token is a capability
+/// for this VFS, so a Spore that reads it can mint its own calls.
+///
+/// `MUSH_PRINCIPAL` is absent from this test on purpose: the host *configures*
+/// the principal (from `--principal`/`MUSH_PRINCIPAL`) and hands it to the
+/// Spore as identity. The token has no such legitimate path.
+#[test]
+fn mush_control_variables_never_reach_the_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = mush_command()
+        .env("MUSH_MCP_TOKEN", "supersecret-token")
+        .env("AGENT_TOKEN_KEY", "sk-test")
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg("echo mcp=$MUSH_MCP_TOKEN agent=$AGENT_TOKEN_KEY")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "mcp= agent=sk-test",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn prompt_themes_render_and_an_unknown_theme_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (status, out, err) = run(dir.path(), "prompt theme plain; prompt");
+    assert_eq!(status, 0, "{err}");
+    // `plain` is `\w\g \$ `, rendered twice: once by `theme`, once by `prompt`.
+    assert_eq!(out, "/ $ \n/ $ \n", "{out:?}");
+
+    let (status, _, err) = run(dir.path(), "prompt theme nope");
+    assert_ne!(status, 0);
+    assert!(err.contains("unknown theme"), "{err}");
+}
+
 #[test]
 fn wasm_spore_supports_arithmetic_and_case() {
     let dir = tempfile::tempdir().unwrap();

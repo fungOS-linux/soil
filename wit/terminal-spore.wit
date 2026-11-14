@@ -1,7 +1,7 @@
 // Host world for the terminal Spore.
 //
 // The host lives in Soil (`crates/terminal-host`); the Spore and its package
-// live in fungOS-linux/spores. Keeping the world beside the interfaces means
+// live in mycelium-linux/spores. Keeping the world beside the interfaces means
 // the host and the Spore cannot drift on a hand-copied dependency.
 package fungos:terminal-spore@0.1.0;
 

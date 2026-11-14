@@ -248,6 +248,16 @@ impl CommandRunner {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.epoch_interruption(true);
+        // Keep compiled components on disk. `mb` is invoked hundreds of times a
+        // day for the same 600 KB module, and without this every one of those
+        // invocations pays to compile it again. Failing to open the cache is not
+        // fatal: wasmtime falls back to compiling, which is the status quo ante.
+        match wasmtime::Cache::new(wasmtime::CacheConfig::default()) {
+            Ok(cache) => {
+                config.cache(Some(cache));
+            }
+            Err(error) => eprintln!("soil-command: component cache unavailable: {error}"),
+        }
         let engine = Engine::new(&config)?;
         Ok(Self {
             engine,
@@ -328,7 +338,20 @@ impl CommandRunner {
         });
 
         let command = Command::instantiate(&mut store, &component, &linker)?;
-        let result = command.wasi_cli_run().call_run(&mut store)?;
+        // A guest that traps has usually already said why on stderr — a panic
+        // message lands there before the abort. Returning the trap alone throws
+        // that away and leaves a wasm backtrace with no cause, so carry whatever
+        // the command managed to write.
+        let result = match command.wasi_cli_run().call_run(&mut store) {
+            Ok(result) => result,
+            Err(error) => {
+                let said = String::from_utf8_lossy(&stderr.contents()).trim().to_string();
+                if said.is_empty() {
+                    return Err(error.into());
+                }
+                return Err(anyhow::anyhow!("{error}\n{said}"));
+            }
+        };
         Ok(RunOutput {
             code: if result.is_ok() { 0 } else { 1 },
             stdout: stdout.contents().to_vec(),

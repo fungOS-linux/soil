@@ -18,7 +18,7 @@ or raw wgpu) runs in the guest and writes pixels.
 
 
 - **Guest shim at wgpu 30: done and proven.** The patched fork lives at
-  `fungOS-linux/wgpu-wasi-webgpu`, branch `wgpu-30`, rev `bec9213`. Both
+  `mycelium-linux/wgpu-wasi-webgpu`, branch `wgpu-30`, rev `bec9213`. Both
   fixtures build for `wasm32-wasip2` and run against the existing wgpu-core 29
   host (`webgpu: ok`; the present fixture's 480×640 frame has a red centre and
   clear corners). The WIT boundary is version-independent.

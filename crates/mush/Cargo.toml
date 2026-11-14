@@ -23,7 +23,7 @@ soil-host = { path = "../soil-host" }
 soil-scrub = { path = "../soil-scrub" }
 tiny_http = "0.12"
 ureq = { version = "2", features = ["json"] }
-fungos-vfs = { git = "https://github.com/fungOS-linux/fungos-vfs.git", rev = "8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af" }
+fungos-vfs = { git = "https://github.com/mycelium-linux/fungos-vfs.git", rev = "8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af" }
 soil-command = { path = "../soil-command" }
 soil-spore = { path = "../soil-spore" }
 tempfile = "3"
