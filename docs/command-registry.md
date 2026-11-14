@@ -28,12 +28,19 @@ max_memory_bytes = 268435456
 soil-command --list
 soil-command --records-root ~/.local/share/fungos/records \
   --book personal/avery/marbles --collection marbles \
+  --env MARBLES_ACTOR=avery \
   run mb --project elmers list
 ```
 
 The runner uses WASI stdio, memory/output caps and an epoch timeout. It links
 `soil:records` only when a records binding is configured. Commands never get
 host PATH, host filesystem, network or a Marbles-specific host.
+
+Commands do not inherit the host environment. `--env NAME=VALUE` is the only way
+a variable reaches one, so what a command can see is what a caller wrote down.
+The output caps are per command (`command.toml` `[limits]`): a command that
+answers with megabytes needs `max_stdout_bytes` sized for it, and a write past
+the cap surfaces as an error to the command rather than as a truncated answer.
 
 ## Profiles and installed Spores
 

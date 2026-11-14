@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -24,12 +24,25 @@ fn run() -> Result<()> {
     let mut records_root = None;
     let mut book = None;
     let mut collection = None;
+    // Nothing is inherited: a command gets exactly the variables a caller names.
+    let mut env = Vec::new();
     let mut list = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--root" => {
                 root = PathBuf::from(args.get(i + 1).context("--root DIR")?);
+                i += 2;
+            }
+            "--env" => {
+                let assignment = args.get(i + 1).context("--env NAME=VALUE")?;
+                let (name, value) = assignment
+                    .split_once('=')
+                    .with_context(|| format!("--env expects NAME=VALUE, got {assignment:?}"))?;
+                if name.is_empty() {
+                    bail!("--env expects NAME=VALUE, got {assignment:?}");
+                }
+                env.push((name.to_string(), value.to_string()));
                 i += 2;
             }
             "--records-root" => {
@@ -65,7 +78,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
     let Some(name) = args.get(i).cloned() else {
-        bail!("usage: soil-command [--list] run NAME [ARGS...]");
+        bail!("usage: soil-command [--list] [--env NAME=VALUE]... run NAME [ARGS...]");
     };
     let entry = registry.get(&name).context("unknown command")?.clone();
     let records = match (records_root, book, collection) {
@@ -77,15 +90,22 @@ fn run() -> Result<()> {
         (None, None, None) => None,
         _ => bail!("records binding needs --records-root, --book and --collection"),
     };
+    // Only a pipe is input. A human at a prompt has nothing to send, and
+    // reading a terminal to EOF blocks until Ctrl-D — which turns `mb list` into
+    // a hang. `is_terminal` is the difference between "no stdin" and "stdin
+    // that happens to be open".
     let mut stdin = Vec::new();
-    std::io::stdin().read_to_end(&mut stdin)?;
+    if !std::io::stdin().is_terminal() {
+        std::io::stdin().read_to_end(&mut stdin)?;
+    }
     let output = CommandRunner::new(records)?.run(
         &entry,
         &RunRequest {
             args: args[i + 1..].to_vec(),
             stdin,
-            // Commands do not inherit the host environment.
-            env: Vec::new(),
+            // Commands do not inherit the host environment; `--env` is the only
+            // way a variable reaches one.
+            env,
             cwd: None,
         },
     )?;

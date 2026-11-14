@@ -124,13 +124,23 @@ impl SporeCatalog {
 struct CommandHost {
     root: PathBuf,
     runner: CommandRunner,
+    /// The identity a command acts as, and the Marbles project the session is
+    /// in. Both are host facts: a Spore gets no ambient environment, so the
+    /// only way `mb claim` and `mb touch` agree on a holder is for the host to
+    /// put the same actor on both.
+    env: Vec<(String, String)>,
 }
 
 impl CommandHost {
-    fn new(root: PathBuf, records: Option<RecordsBinding>) -> Result<Self> {
+    fn new(
+        root: PathBuf,
+        records: Option<RecordsBinding>,
+        principal: Option<&str>,
+    ) -> Result<Self> {
         Ok(Self {
             root,
             runner: CommandRunner::new(records)?,
+            env: command_identity(principal),
         })
     }
 
@@ -179,6 +189,7 @@ impl CommandHost {
         if let Some(cwd) = &cwd {
             env.push(("PWD".into(), cwd.clone()));
         }
+        env.extend(self.env.iter().cloned());
         let output = self.runner.run(
             &entry,
             &RunRequest {
@@ -196,11 +207,42 @@ impl CommandHost {
     }
 }
 
+/// The identity environment every installed command runs with.
+///
+/// A Spore has no ambient environment, so a command that needs to know who it
+/// acts for has to be told. Marbles is the case that made this concrete: `mb
+/// claim` records a holder and `mb touch` renews a lease only for that holder,
+/// so a session whose actor changes between two commands cannot keep a claim
+/// alive. The principal Mush already resolved is that actor; the POSIX user is
+/// the fallback the native CLI uses in local mode.
+///
+/// The project is read once, from the host's own working directory, because the
+/// guest's `PWD` is a VFS path and resolving `.marbles/project.toml` against it
+/// would answer a question about the wrong filesystem. This is the same value
+/// `$MUSH_MARBLE_PROJECT` already carries into the shell.
+fn command_identity(principal: Option<&str>) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    let actor = principal.map(str::to_owned).or_else(|| {
+        std::env::var("USER")
+            .ok()
+            .or_else(|| std::env::var("LOGNAME").ok())
+    });
+    if let Some(actor) = actor {
+        env.push(("MARBLES_ACTOR".to_string(), actor));
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if let Some(project) = origin::resolve(&cwd).marble_project {
+        env.push(("MARBLES_PROJECT".to_string(), project));
+    }
+    env
+}
+
 impl Host {
     fn new(
         root: &std::path::Path,
         command_root: PathBuf,
         records: Option<RecordsBinding>,
+        principal: Option<&str>,
         store: Option<&std::path::Path>,
     ) -> Result<Self> {
         // Commands and Spores are siblings under the fungOS data directory;
@@ -213,7 +255,7 @@ impl Host {
             vfs: VfsHost::open_with_role_and_store(root, fungos_vfs::NodeRole::Full, store)?,
             wasi: WasiCtxBuilder::new().inherit_stdio().build(),
             table: ResourceTable::new(),
-            commands: CommandHost::new(command_root, records)?,
+            commands: CommandHost::new(command_root, records, principal)?,
             spores: SporeCatalog::new(spore_root),
             http: http::host(&access::from_env()),
         })
@@ -423,7 +465,7 @@ impl Runtime {
         soil::net::net::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         soil::http::http::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)?;
         let component = Component::new(&engine, wasm)?;
-        let host = Host::new(root, command_root, records, store)?;
+        let host = Host::new(root, command_root, records, principal, store)?;
         let mut store = Store::new(&engine, host);
         // An epoch-interrupted engine starts at deadline 0, which traps on the
         // first tick. Disarm start-up; each command arms its own timer.
@@ -2661,10 +2703,7 @@ mod tests {
         let b = build_session(Path::new("/src/soil/.delta/worktrees/x/soil"));
         assert_eq!(a, b);
         assert!(a.starts_with("mush-soil-"), "{a}");
-        assert!(
-            a.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        );
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         assert_ne!(a, build_session(Path::new("/src/other/soil")));
     }
 
