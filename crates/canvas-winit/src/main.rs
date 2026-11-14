@@ -249,6 +249,17 @@ impl CatalogHost for SporeCatalog {
             .as_ref()
             .ok_or(CatalogError::Unsupported)?;
         let path = installed.root.join(&module.path);
+        // Spawning a path that is not there would "succeed" and put the failure
+        // in a child's stderr, where nobody is looking. Refuse it here so the
+        // launcher can say which app did not open.
+        if !path.is_file() {
+            eprintln!(
+                "canvas-winit: {} declares {} but the package does not carry it",
+                installed.manifest.spore.id,
+                path.display()
+            );
+            return Err(CatalogError::NotFound);
+        }
         let executable = std::env::current_exe().map_err(|_| CatalogError::Io)?;
         // A package that ships a native host for this surface is launched in
         // that host, not in the window presenter. The presenter owns pixels
