@@ -175,20 +175,37 @@ impl CatalogHost for NoCatalog {
 /// unfinished — starting a window is the host's business, and a capture host
 /// has nowhere to put one.
 pub struct InstallCatalog {
-    root: std::path::PathBuf,
+    /// Every directory a Spore can live in, most specific first. A host joins
+    /// them rather than choosing one, because a launcher that shows only what
+    /// shipped or only what was installed is a launcher that lies about the
+    /// machine: the same host may have a bundled set, store installs, and a
+    /// project tree all at once.
+    roots: Vec<std::path::PathBuf>,
 }
 
 impl InstallCatalog {
     pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            roots: vec![root.into()],
+        }
+    }
+
+    /// Join several directories, most specific first: an id found in an earlier
+    /// root wins, so an install shadows a bundled copy of the same Spore.
+    pub fn with_roots(roots: Vec<std::path::PathBuf>) -> Self {
+        Self { roots }
     }
 }
 
 impl CatalogHost for InstallCatalog {
     fn entries(&mut self) -> Result<Vec<CatalogEntry>, CatalogError> {
-        let read = std::fs::read_dir(&self.root).map_err(|_| CatalogError::Io)?;
         let mut found = Vec::new();
-        for entry in read.flatten() {
+        let mut seen = std::collections::BTreeSet::new();
+        for root in &self.roots {
+            let Ok(read) = std::fs::read_dir(root) else {
+                continue;
+            };
+            for entry in read.flatten() {
             let dir = entry.path();
             if !dir.join("spore.toml").is_file() {
                 continue;
@@ -196,6 +213,9 @@ impl CatalogHost for InstallCatalog {
             let Ok(manifest) = soil_spore::Manifest::load(&dir) else {
                 continue;
             };
+            if !seen.insert(manifest.spore.id.clone()) {
+                continue;
+            }
             let surfaces = if manifest.surfaces.is_empty() {
                 manifest
                     .launch
@@ -236,6 +256,7 @@ impl CatalogHost for InstallCatalog {
                 default_surface: manifest.launch.default.clone(),
                 surfaces,
             });
+            }
         }
         found.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
         Ok(found)

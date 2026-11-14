@@ -261,6 +261,15 @@ fn entry_for(dir: &Path) -> Result<Entry> {
         ui: installed.ui,
         grants: manifest.grants.keys().cloned().collect(),
         system: manifest.system.as_ref().map(|system| system.role.clone()),
+        devices: {
+            let mut devices = manifest
+                .placement
+                .as_ref()
+                .map(|placement| placement.devices.clone())
+                .unwrap_or_default();
+            devices.sort();
+            devices
+        },
         publisher: None,
         publisher_key: None,
         signature: String::new(),

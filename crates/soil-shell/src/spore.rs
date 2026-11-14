@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use soil_spore::{Manifest, OriginAuth as ClaimedAuth};
-use soil_wasi_host::{
+use soil_host::{
     GatewayRoute, GeodeCredentials, HttpGatewayBuilder, HttpService, OriginAuth, UnibusBus,
     WasiHostBuilder, WasiHostPolicy,
 };
@@ -157,7 +157,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,soil_wasi_host=info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,soil_host=info")),
         )
         .with_writer(std::io::stderr)
         .try_init();
@@ -311,7 +311,7 @@ async fn serve(spore: Spore, run: Run) -> Result<()> {
             Arc::new(soil_web_bridge::SessionTransport::new(bridge)),
             Arc::new(soil_host::http_host::DirectTransport),
         ));
-        builder = builder.with_http(soil_wasi_host::HttpCapability::new(policy, transport));
+        builder = builder.with_http(soil_host::HttpCapability::new(policy, transport));
         _bridge_server = Some(server);
     }
     let service = Arc::new(
@@ -376,7 +376,7 @@ async fn serve(spore: Spore, run: Run) -> Result<()> {
 ///
 /// A Spore that observes or publishes needs a hub; one that does not must not
 /// be handed a connection it never asked for.
-fn bus(manifest: &Manifest, run: &Run) -> Result<Option<Arc<dyn soil_wasi_host::Bus>>> {
+fn bus(manifest: &Manifest, run: &Run) -> Result<Option<Arc<dyn soil_host::Bus>>> {
     let wants = manifest
         .grants
         .keys()
