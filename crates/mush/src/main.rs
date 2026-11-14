@@ -456,6 +456,14 @@ impl Runtime {
         // Epoch interruption is what lets a timer stop a command that outlives
         // its caller's patience instead of waiting for it forever.
         config.epoch_interruption(true);
+        // The shell's own Spore is embedded, so every `mush -c` and every daemon
+        // restart compiles the same bytes. Keep the compilation on disk.
+        match wasmtime::Cache::new(wasmtime::CacheConfig::default()) {
+            Ok(cache) => {
+                config.cache(Some(cache));
+            }
+            Err(error) => eprintln!("mush: component cache unavailable: {error}"),
+        }
         let engine = Engine::new(&config)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
