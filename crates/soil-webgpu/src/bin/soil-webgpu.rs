@@ -13,6 +13,7 @@ fn main() -> ExitCode {
     let mut agents = None;
     let mut acp_cmd = None;
     let mut keys: Vec<String> = Vec::new();
+    let mut seed: Vec<(String, String)> = Vec::new();
     let mut escalate_after: Option<u64> = None;
     let mut escalate_to: Option<String> = None;
     let mut escalate_grace: Option<u64> = None;
@@ -108,6 +109,31 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 keys.push(value);
+            }
+            "--bus-seed" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--bus-seed needs a file of `kind<TAB>body` lines");
+                    return ExitCode::FAILURE;
+                };
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                            match line.split_once('\t') {
+                                Some((kind, body)) => {
+                                    seed.push((kind.to_string(), body.to_string()));
+                                }
+                                None => {
+                                    eprintln!("--bus-seed: {path}: line is not kind<TAB>body");
+                                    return ExitCode::FAILURE;
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("--bus-seed: {path}: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
             }
             "--acp-cmd" => {
                 let Some(value) = args.next() else {
@@ -225,6 +251,7 @@ fn main() -> ExitCode {
             store_origin.clone(),
             cast,
             keys.clone(),
+            seed.clone(),
         ) {
             Ok((status, frame)) => {
                 if status != 0 {

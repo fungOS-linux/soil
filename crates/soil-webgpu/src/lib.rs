@@ -1383,7 +1383,16 @@ pub fn run_component_capture_with(
     store_origin: Option<String>,
     agents: Option<Box<dyn AgentBackend>>,
 ) -> Result<(u32, Option<CanvasFrame>)> {
-    run_component_capture_with_keys(bytes, width, height, catalog, store_origin, agents, Vec::new())
+    run_component_capture_with_keys(
+        bytes,
+        width,
+        height,
+        catalog,
+        store_origin,
+        agents,
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 /// A capture that presses keys first. A Spore gets one surface lease, so a
@@ -1397,6 +1406,10 @@ pub fn run_component_capture_with_keys(
     store_origin: Option<String>,
     agents: Option<Box<dyn AgentBackend>>,
     keys: Vec<String>,
+    // Frames published on the bus before the guest runs, as `(kind, body)`.
+    // A popup surface is driven by what a wall announced, and a one-shot
+    // capture has no wall: this is how a test says "someone is asking".
+    seed: Vec<(String, String)>,
 ) -> Result<(u32, Option<CanvasFrame>)> {
     // Compiling a Spore takes minutes; a capture that repeats should pay that
     // once. Every frame this host takes in a session runs the same module.
@@ -1413,6 +1426,10 @@ pub fn run_component_capture_with_keys(
         setup.agents = agents;
     }
     setup.store_origin = store_origin;
+    for (kind, body) in &seed {
+        soil_wasi_host::Bus::publish(&*setup.bus, kind, body.as_bytes(), None, 60 * 60 * 1000)
+            .map_err(|error| anyhow::anyhow!("bus seed {kind}: {error}"))?;
+    }
     for key in keys {
         let text = (key.chars().count() == 1).then(|| key.clone());
         setup.input.lock().expect("input queue").push_back(InputEvent::Key(InputKey {
