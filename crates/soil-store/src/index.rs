@@ -737,6 +737,7 @@ mod tests {
             ui: Some("ui".into()),
             grants: vec!["soil:canvas".into()],
             system: None,
+            devices: Vec::new(),
             publisher: Some("mycelium:publisher".into()),
             publisher_key: Some(delegation.fingerprint.clone()),
             signature: String::new(),

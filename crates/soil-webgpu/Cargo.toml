@@ -8,9 +8,11 @@ publish = false
 
 [dependencies]
 soil-spore = { path = "../soil-spore" }
+soil-host = { path = "../soil-host", default-features = false }
+soil-agent-host = { path = "../soil-agent-host" }
 ureq = "2"
 anyhow = "1"
-wasi-webgpu-wasmtime = { git = "https://github.com/fungOS-linux/wasi-gfx-runtime", rev = "9624cae" }
+wasi-webgpu-wasmtime = { git = "https://github.com/mycelium-linux/wasi-gfx-runtime", rev = "9624cae" }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 wasmtime = { version = "50", default-features = false, features = [
     "anyhow",

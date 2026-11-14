@@ -348,6 +348,30 @@ fn wasm_spore_supports_control_flow_test_read_and_script_args() {
 }
 
 #[test]
+fn wasm_spore_sees_the_agent_environment_and_keeps_vfs_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = mush_command()
+        .env("AGENT_TOKEN_KEY", "sk-test")
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--wasm")
+        .arg(module())
+        .arg("--command")
+        .arg("echo $AGENT_TOKEN_KEY; echo $HOME; echo $PATH")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    // The agent's own variables reach the Spore ...
+    assert_eq!(lines[0], "sk-test");
+    // ... while the names with VFS meaning keep it, so `cd $HOME` and command
+    // lookup still resolve inside the shell.
+    assert_eq!(lines[1], "/");
+    assert!(lines[2].starts_with("/commands"), "{}", lines[2]);
+}
+
+#[test]
 fn wasm_spore_supports_arithmetic_and_case() {
     let dir = tempfile::tempdir().unwrap();
     let (status, out, err) = run(

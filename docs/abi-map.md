@@ -49,7 +49,7 @@ review map for what else exists and what is missing.
 | `soil:vfs@1` | workspace namespace and bounded reads | `soil:vfs` | yes | Canonical workspace-relative paths, `ContentId`, paged listing and range reads. No host paths or providers. Canonical WIT: [`wit/soil-vfs.wit`](../wit/soil-vfs.wit). |
 | `soil:appdata@1` | private app storage | `soil:appdata` | yes | Local and per-user/per-app synced key-value storage. Opaque bytes, quota-bounded, not indexed, not shareable, not Git and not CID-addressed. Host adapter: [`crates/soil-appdata-host`](../crates/soil-appdata-host). Canonical WIT: [`wit/soil-appdata.wit`](../wit/soil-appdata.wit). |
 | `soil:records@0.1` | durable records | `soil:records` read/write/sync | draft | Schema-tagged entries, tombstones, scan/changes/apply, and compare-and-swap for single-writer claims. Host adapter: [`crates/soil-host`](../crates/soil-host); guest SDK: [`crates/soil-sdk-records`](../crates/soil-sdk-records). |
-| `soil:unibus@0.1` | Unibus connection (host-owned) | `soil:unibus` observe/publish | draft | Cursor-paged `poll(kinds, cursor, limit)` and `publish(kind, body, destination, ttl-ms)` over opaque JSON-object bodies. The Spore names kinds; the host owns the session, credential, hub selection and retention. `stale` means the cursor predates retention, never a silent gap. Host adapter: [`crates/soil-wasi-host/src/unibus.rs`](../crates/soil-wasi-host/src/unibus.rs); guest SDK: [`crates/soil-sdk-unibus`](../crates/soil-sdk-unibus). |
+| `soil:unibus@0.1` | Unibus connection (host-owned) | `soil:unibus` observe/publish | draft | Cursor-paged `poll(kinds, cursor, limit)` and `publish(kind, body, destination, ttl-ms)` over opaque JSON-object bodies. The Spore names kinds; the host owns the session, credential, hub selection and retention. `stale` means the cursor predates retention, never a silent gap. Host adapter: [`crates/soil-host/src/unibus.rs`](../crates/soil-host/src/unibus.rs); guest SDK: [`crates/soil-sdk-unibus`](../crates/soil-sdk-unibus). |
 | `soil:index@1.1` | derived browse/search index + KNN | `soil:index` | yes | Rebuildable, generationed, returns paths and snippets; fast direct-child traversal; explicit KNN when the host has embeddings. Never authority. Canonical WIT: [`wit/soil-index.wit`](../wit/soil-index.wit). |
 | `soil:vfs-mut@0.1` | bounded VFS mutation | `soil:vfs-mut` | draft | Separate write/remove/mkdir/rmdir/rename grant. Paths stay workspace-relative; no host handles. Canonical WIT: [`wit/soil-vfs-mut.wit`](../wit/soil-vfs-mut.wit). |
 | `soil:graph@0.1` | graph queries | `soil:graph` | draft | Read-only outgoing/incoming edge and reference queries over approved records books. Canonical WIT: [`wit/soil-graph.wit`](../wit/soil-graph.wit). |
@@ -255,6 +255,10 @@ interface time {
 | storage | local CID cache | local CID cache | app cache | bundle only | OPFS/Cache Storage via host |
 | time | `mach_absolute_time` | `CLOCK_MONOTONIC` | `SystemClock.elapsedRealtime` | `mach_absolute_time` | `performance.now` |
 
+CAT S22 is a **fungOS-mobile / mainline Linux** target, so it uses the Linux
+column (BlueZ over D-Bus, or a direct HCI backend if the image has no BlueZ).
+The Android BLE column is for Android/Fire TV, not the S22.
+
 Any unsupported row is a named denial, not an empty success.
 
 ## Priorities
@@ -270,8 +274,9 @@ Any unsupported row is a named denial, not an empty success.
 3. **Next, highest value:** build a small read-only file-browser Spore on the
    now-implemented `soil:vfs`/`soil:index` host adapter, then wire
    `soil:canvas-input` into the S22/Fire TV hosts,
-   finish the BLE gaps (signed lease, DIS `ring-id`, Unibus publish, Android
-   JNI), then the host adapters and denial fixtures for `time` and `storage`,
+   finish the BLE gaps (signed lease, DIS `device-id`, Unibus publish, Android
+   JNI for Fire TV/Android; CAT S22 is BlueZ/mainline Linux), then the host
+   adapters and denial fixtures for `time` and `storage`,
    then `api`, `mic`, `camera`. `audio` waits for a concrete Spore that plays
    something.
 4. **After that:** `notify`.

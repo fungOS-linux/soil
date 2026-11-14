@@ -84,6 +84,41 @@ type Result<T> = std::result::Result<T, Error>;
 
 // ---- manifest -------------------------------------------------------------
 
+/// The environment a Spore and its host children may see.
+///
+/// `spore` narrows what the shell can read (unset means the caller's whole
+/// environment, which is what an agent shell wants). `host` widens the floor a
+/// host child is spawned with — and is deliberately not allowed to name
+/// anything secret-shaped, because a child runs with the user's real
+/// privileges.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvPolicy {
+    #[serde(default)]
+    pub spore: Vec<String>,
+    #[serde(default)]
+    pub host: Vec<String>,
+}
+
+/// Names whose meaning inside the shell is the VFS, not the host: `cd $HOME`
+/// and command lookup would resolve outside the sandbox if a manifest could
+/// hand them real paths.
+pub const VFS_ENV_NAMES: &[&str] = &[
+    "PATH", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME", "TERM",
+];
+
+/// Whether a name looks like it carries a secret. A host child is the thing
+/// running with the user's privileges, so this is a review guard, not a
+/// sandbox: it refuses the obvious names and leaves the judgement to a human.
+pub fn secret_shaped(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["TOKEN", "SECRET", "PASSWORD", "PASSPHRASE", "API_KEY", "PRIVATE_KEY"]
+        .iter()
+        .any(|needle| upper.contains(needle))
+        || upper.ends_with("_KEY")
+        || upper.starts_with("AWS_")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -114,6 +149,15 @@ pub struct Manifest {
     pub deps: BTreeMap<String, String>,
     #[serde(default)]
     pub grants: BTreeMap<String, String>,
+    /// Which environment variables this Spore may read, and which a host child
+    /// may see while running on its behalf.
+    ///
+    /// This lives in the manifest rather than in an environment variable the
+    /// caller sets, because the thing being constrained is the caller: whoever
+    /// spawns the host could otherwise widen its own grant. The manifest is what
+    /// a reviewer reads and what the lock digests, so a widened grant is a diff.
+    #[serde(default)]
+    pub env: EnvPolicy,
     #[serde(default)]
     pub assets: BTreeMap<String, Asset>,
     /// Declared absences. Reviewed like grants: intent is written down.
@@ -482,6 +526,14 @@ pub struct Launch {
     /// directory; the entry point is a window, not a file in the package.
     #[serde(default)]
     pub canvas_module: Option<String>,
+    /// Native host for the `native` surface, when the package ships one.
+    ///
+    /// A bare name is resolved by the launcher on `PATH` and in the runtime
+    /// bin directories; an absolute path is used as-is. The host receives the
+    /// module path and package root in `SOIL_SPORE_MODULE` and
+    /// `SOIL_SPORE_PACKAGE`, so a native host needs no private convention.
+    #[serde(default)]
+    pub native: Option<String>,
 }
 
 /// A Spore's opt-in claim on an anycast name.
@@ -866,6 +918,7 @@ impl Manifest {
                 "default": self.launch.default,
                 "surfaces": self.launch.surfaces,
                 "canvas_module": self.launch.canvas_module,
+                "native": self.launch.native,
             },
             "surfaces": self.surfaces.iter().map(|surface| serde_json::json!({
                 "name": surface.name,
@@ -969,6 +1022,26 @@ impl Manifest {
                 self.spore.version
             )));
         }
+        for name in &self.env.spore {
+            if name.trim().is_empty() {
+                return Err(Error::Invalid("env.spore has an empty name".into()));
+            }
+            if VFS_ENV_NAMES.contains(&name.as_str()) {
+                return Err(Error::Invalid(format!(
+                    "env.spore may not name {name:?}: inside the shell it means the VFS, not the host"
+                )));
+            }
+        }
+        for name in &self.env.host {
+            if name.trim().is_empty() {
+                return Err(Error::Invalid("env.host has an empty name".into()));
+            }
+            if secret_shaped(name) {
+                return Err(Error::Invalid(format!(
+                    "env.host may not name {name:?}: a host child runs with the user's privileges"
+                )));
+            }
+        }
         for skill in &self.skills {
             if !identifier(&skill.name) {
                 return Err(Error::Invalid(format!(
@@ -1043,6 +1116,22 @@ impl Manifest {
                     "launch.default {:?} is not in launch.surfaces {:?}",
                     self.launch.default, self.launch.surfaces
                 )));
+            }
+            if let Some(native) = &self.launch.native {
+                if native.trim().is_empty() {
+                    return Err(Error::Invalid("launch.native must not be empty".into()));
+                }
+                if !self
+                    .launch
+                    .surfaces
+                    .iter()
+                    .any(|surface| surface == "native")
+                {
+                    return Err(Error::Invalid(
+                        "launch.native is set but launch.surfaces does not include \"native\""
+                            .into(),
+                    ));
+                }
             }
         } else {
             let mut seen = BTreeSet::new();
@@ -2530,6 +2619,29 @@ pub fn sign_principal(
         .map_err(|error| Error::Io(format!("{}: {error}", signature.display())))
 }
 
+#[cfg(test)]
+mod env_policy_tests {
+    use super::*;
+
+    #[test]
+    fn host_children_may_not_be_handed_a_secret_shaped_name() {
+        for name in ["GITHUB_TOKEN", "OPENAI_API_KEY", "AWS_PROFILE", "DB_PASSWORD"] {
+            assert!(secret_shaped(name), "{name} should look secret");
+        }
+        for name in ["SSH_AUTH_SOCK", "LANG", "TERM", "GIT_AUTHOR_NAME"] {
+            assert!(!secret_shaped(name), "{name} should be admissible");
+        }
+    }
+
+    #[test]
+    fn the_shell_may_not_be_handed_a_vfs_meaning_name() {
+        for name in ["PATH", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "LOGNAME", "TERM"] {
+            assert!(VFS_ENV_NAMES.contains(&name), "{name} should be reserved");
+        }
+        assert!(!VFS_ENV_NAMES.contains(&"GIT_AUTHOR_NAME"));
+    }
+}
+
 fn validate_geode_label(label: &str) -> Result<()> {
     let mut bytes = label.bytes();
     let starts_well = bytes
@@ -2757,6 +2869,42 @@ mod fixtures {
         format!(
             "schema = 1\n[spore]\nid = \"dev.fungos.chrome\"\nname = \"chrome\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nsummary = \"shell chrome\"\n[engine]\nsoil = \">=0.1\"\ntarget = \"wasm32-wasip2\"\n[module]\npath = \"module.wasm\"\n{ui}[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]\n{extra}"
         )
+    }
+}
+
+#[cfg(test)]
+mod native_launch_tests {
+    use super::fixtures::manifest;
+    use super::*;
+
+    fn with_launch(default: &str, surfaces: &str, native: Option<&str>) -> String {
+        let native = native
+            .map(|host| format!("native = {host:?}\n"))
+            .unwrap_or_default();
+        manifest("").replace(
+            "[launch]\ndefault = \"canvas\"\nsurfaces = [\"canvas\"]",
+            &format!("[launch]\ndefault = {default:?}\nsurfaces = {surfaces}\n{native}"),
+        )
+    }
+
+    #[test]
+    fn native_launch_names_its_host() {
+        let source = with_launch("native", "[\"web\", \"native\"]", Some("terminal-host"));
+        let manifest = Manifest::parse(&source).expect("a native launch is valid");
+        assert_eq!(manifest.launch.default, "native");
+        assert_eq!(manifest.launch.native.as_deref(), Some("terminal-host"));
+    }
+
+    #[test]
+    fn native_launch_requires_the_native_surface() {
+        let source = with_launch("canvas", "[\"canvas\"]", Some("terminal-host"));
+        assert!(Manifest::parse(&source).is_err());
+    }
+
+    #[test]
+    fn native_launch_rejects_an_empty_host() {
+        let source = with_launch("native", "[\"native\"]", Some("  "));
+        assert!(Manifest::parse(&source).is_err());
     }
 }
 

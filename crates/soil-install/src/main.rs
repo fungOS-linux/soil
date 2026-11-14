@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use soil_install::{
-    adopt, install_cid, sync, SyncOptions,ApplyOptions, InstallOptions, apply, install, rollback, status};
+    ApplyOptions, InstallOptions, SyncOptions, adopt, apply, install, install_cid, rollback,
+    status, sync,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -163,8 +165,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         "adopt" => {
             let root = PathBuf::from(required(rest, "--root")?);
-            let adopted =
-                adopt(&root, flag(rest, "--force")).map_err(|error| error.to_string())?;
+            let adopted = adopt(&root, flag(rest, "--force")).map_err(|error| error.to_string())?;
             if flag(rest, "--json") {
                 println!(
                     "{}",
@@ -210,8 +211,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 for outcome in outcomes {
                     println!(
                         "{:<32} {:<10} {} -> {}  {}",
-                        outcome.id, outcome.role, outcome.from.as_deref().unwrap_or("absent"),
-                        outcome.to, outcome.action
+                        outcome.id,
+                        outcome.role,
+                        outcome.from.as_deref().unwrap_or("absent"),
+                        outcome.to,
+                        outcome.action
                     );
                 }
             }

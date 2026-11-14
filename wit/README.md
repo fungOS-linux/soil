@@ -25,20 +25,21 @@ credential resolution stay in host adapters.
 | `soil:http@0.1.0` | wired | bounded host-mediated HTTP |
 | `soil:creds@1.0.0` | wired | host-held signing and verification; no secret export |
 | `fungos:http-context@0.1.0` | wired | host-attested invocation context for `wasi:http` handlers |
-| `soil:unibus@0.1.0` | wired | bounded poll/publish over Unibus; `soil-wasi-host` adapter |
+| `soil:unibus@0.1.0` | wired | bounded poll/publish over Unibus; `soil-host` adapter |
 | `soil:appdata@1.0.0` | contract | guest SDK exists; native host next |
 | `soil:storage@1.0.0` | contract | content-addressed asset cache |
 | `soil:media@0.1.0` | wired | playback, encoded chunks, image |
 | `soil:surface-import@0.1.0` | wired | host-owned imported surfaces |
 | `soil:inference@0.2.0` | wired | models, tools, completion stream |
 | `soil:notify@1.1.0` | wired | inbox/focus/history/cleanup and ringer |
+| `soil:agents@0.1.0` | contract | the set of agents for a principal or shared desktop: phase, goal, owner, activity, prompts, answers |
 | `fungos:actions@1.0.0` | wired | action bus plus presentation catalog |
 | `soil:ble@1.0.0` | wired | BLE host and COLMI ring Spore |
 | `soil:canvas@1.0.0` | wired | owner surface, `soil-scene` document, guest SDK and component host |
-| `soil:terminal@0.1.0` | contract | host-rendered terminal surface |
+| `soil:terminal@0.1.0` | wired | host-rendered terminal surface; `terminal-host` |
 | `soil:view@1.0.0` | contract | host-reviewed web/Spore/retained view |
 | `fungos:mycelium@0.1.0` | contract | Pulse control-plane bridge to myceliumd; host implementation pending |
-| `soil:mycelium@0.1.0` | deferred | directory/session; no host yet |
+| `soil:mycelium@0.1.0` | wired | directory/session; `terminal-host` in Soil |
 | `soil:device@0.1.0` | wired | battery/estimate/lid core-Wasm lowering |
 | `wasi:audio@0.1.0` | wired | draft cpal audio sink |
 

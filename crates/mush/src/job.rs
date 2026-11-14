@@ -128,6 +128,21 @@ fn threshold_for(key: &str, samples: &[u64]) -> Duration {
 /// Samples kept per command.
 const MAX_SAMPLES: usize = 16;
 
+/// How long a streaming caller waits without its own deadline. Long enough for
+/// a build, short enough that a wedged command eventually returns its status.
+const MAX_STREAM_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// One queued command: what to run, and where to send output while it runs.
+pub struct Task {
+    id: String,
+    command: String,
+    shell: bool,
+    budget: Option<Duration>,
+    /// A caller that streamed the command is watching it now, so the worker
+    /// copies output to it instead of waiting for the job record.
+    live: Option<Box<dyn crate::shell::Output + Send>>,
+}
+
 pub enum Outcome {
     /// The command finished before the threshold.
     Completed(Executed),
@@ -160,7 +175,7 @@ struct Shared {
 
 pub struct Jobs {
     shared: Arc<Shared>,
-    sender: std::sync::mpsc::Sender<(String, String, bool, Option<Duration>)>,
+    sender: std::sync::mpsc::Sender<Task>,
     /// The worker's cancel flag and engine, so a caller can stop a command
     /// that is already running instead of waiting for it to finish.
     cancel: Arc<AtomicBool>,
@@ -187,7 +202,7 @@ impl Jobs {
             inner: Mutex::new(Inner::default()),
             changed: Condvar::new(),
         });
-        let (sender, receiver) = std::sync::mpsc::channel::<(String, String, bool, Option<Duration>)>();
+        let (sender, receiver) = std::sync::mpsc::channel::<Task>();
         let worker_shared = Arc::clone(&shared);
         let cancel = runtime.cancel_flag();
         let engine = runtime.engine_handle();
@@ -196,7 +211,7 @@ impl Jobs {
         let worker_control_budget = runtime.budget();
         let mut runtime = runtime;
         let worker = thread::spawn(move || {
-            while let Ok((id, command, shell, budget)) = receiver.recv() {
+            while let Ok(Task { id, command, shell, budget, live }) = receiver.recv() {
                 // Cancelled while it sat in the queue: never run it.
                 if {
                     let mut inner = worker_shared.inner.lock().expect("job lock");
@@ -215,8 +230,15 @@ impl Jobs {
                 }
                 let mut control = worker_control.clone();
                 control.set_budget(budget.or(worker_control_budget));
-                let executed =
-                    run_command(&mut runtime, &root, store.as_deref(), &command, shell, &control);
+                let executed = run_command(
+                    &mut runtime,
+                    &root,
+                    store.as_deref(),
+                    &command,
+                    shell,
+                    &control,
+                    live,
+                );
                 worker_shared.inner.lock().expect("job lock").running = None;
                 worker_shared.finish(&id, command, executed);
             }
@@ -268,10 +290,43 @@ impl Jobs {
         shell: bool,
         budget: Option<Duration>,
     ) -> Result<Outcome> {
-        let after = threshold
-            .or(self.default_threshold)
-            .unwrap_or_else(|| self.suggest(command));
-        let after = after.clamp(MIN_BACKGROUND, MAX_BACKGROUND);
+        self.submit_with(command, threshold, shell, budget, None)
+    }
+
+    /// Same queue, but the caller watches it: output is streamed while the
+    /// command runs and the caller waits for the exit status instead of being
+    /// handed a job id. This is the `bash -c` path, where a caller that streams
+    /// has already decided to wait.
+    pub fn submit_streaming(
+        &self,
+        command: &str,
+        shell: bool,
+        budget: Option<Duration>,
+        live: Box<dyn crate::shell::Output + Send>,
+    ) -> Result<Outcome> {
+        self.submit_with(command, None, shell, budget, Some(live))
+    }
+
+    fn submit_with(
+        &self,
+        command: &str,
+        threshold: Option<Duration>,
+        shell: bool,
+        budget: Option<Duration>,
+        live: Option<Box<dyn crate::shell::Output + Send>>,
+    ) -> Result<Outcome> {
+        let streaming = live.is_some();
+        // A streaming caller is not asking to be handed a job id: its deadline
+        // is how long it is willing to watch, so backgrounding would only take
+        // the output away from it.
+        let after = if streaming {
+            budget.unwrap_or(MAX_STREAM_WAIT)
+        } else {
+            threshold
+                .or(self.default_threshold)
+                .unwrap_or_else(|| self.suggest(command))
+        };
+        let after = after.clamp(MIN_BACKGROUND, MAX_BACKGROUND.max(after));
         let id = {
             let mut inner = self.lock();
             inner.seq += 1;
@@ -287,7 +342,17 @@ impl Jobs {
             );
             id
         };
-        if self.sender.send((id.clone(), command.to_string(), shell, budget)).is_err() {
+        if self
+            .sender
+            .send(Task {
+                id: id.clone(),
+                command: command.to_string(),
+                shell,
+                budget,
+                live,
+            })
+            .is_err()
+        {
             bail!("mush worker stopped; cannot run {command:?}");
         }
 
@@ -401,9 +466,22 @@ fn run_command(
     command: &str,
     shell: bool,
     control: &crate::shell::Control,
+    live: Option<Box<dyn crate::shell::Output + Send>>,
 ) -> Executed {
     if shell {
-        return match crate::shell::run_line_captured(runtime, root, store, command, control) {
+        // A streaming caller gets a tee: the text goes out as it is produced
+        // and the job still ends up holding the same bytes.
+        let captured = match live {
+            Some(live) if shell => {
+                let mut tee = crate::shell::Tee::new(live);
+                match crate::shell::run_line_with(&mut tee, runtime, root, store, command, control) {
+                    Ok(status) => (Ok((status, tee.captured.out, tee.captured.err))),
+                    Err(error) => (Err(error)),
+                }
+            }
+            _ => crate::shell::run_line_captured(runtime, root, store, command, control),
+        };
+        return match captured {
             Ok((status, output, stderr)) => Executed {
                 output,
                 stderr,

@@ -31,7 +31,7 @@ and returns only the signature.
 
 ## Host side
 
-[`CredentialProvider`](../crates/soil-wasi-host/src/creds.rs) is the trait a host
+[`CredentialProvider`](../crates/soil-host/src/creds.rs) is the trait a host
 implements: `resolve`, `sign`, `verify`, `sign_pgp`, `verify_pgp`. Two
 implementations:
 

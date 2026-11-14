@@ -60,6 +60,14 @@ pub struct InstalledState {
     pub installed_at: u64,
 }
 
+impl InstalledState {
+    /// The directory this tree lives in: the package name, falling back to the
+    /// id for state files written before trees were named by package.
+    pub fn tree_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct InstallOptions<'a> {
     pub keyring: Option<&'a Path>,
@@ -191,7 +199,7 @@ pub fn rollback(id: &str, root: &Path) -> Result<InstalledState, Error> {
             .map_err(|error| Error::Io(format!("{}: {error}", staging.display())))?;
     }
     soil_spore::unpack(&bytes, &staging)?;
-    let current = root.join(state.name.as_deref().unwrap_or(id));
+    let current = root.join(state.tree_name());
     let backup = root.join(STAGING_DIR).join(format!(
         "{id}-rollback-old-{}-{}",
         std::process::id(),
@@ -521,7 +529,7 @@ surfaces = ["canvas"]
         assert_eq!(first.version, "0.1.0");
         assert_eq!(first.previous_digest, None);
         assert_eq!(
-            std::fs::read_to_string(root.join(&first.id).join("ui/main.lua")).unwrap(),
+            std::fs::read_to_string(root.join(first.tree_name()).join("ui/main.lua")).unwrap(),
             "return 'one'"
         );
 
@@ -532,7 +540,7 @@ surfaces = ["canvas"]
             Some(first.digest.as_str())
         );
         assert_eq!(
-            std::fs::read_to_string(root.join(&second.id).join("ui/main.lua")).unwrap(),
+            std::fs::read_to_string(root.join(second.tree_name()).join("ui/main.lua")).unwrap(),
             "return 'two'"
         );
 
@@ -544,7 +552,7 @@ surfaces = ["canvas"]
             Some(second.digest.as_str())
         );
         assert_eq!(
-            std::fs::read_to_string(root.join(&rolled.id).join("ui/main.lua")).unwrap(),
+            std::fs::read_to_string(root.join(rolled.tree_name()).join("ui/main.lua")).unwrap(),
             "return 'one'"
         );
         assert_eq!(status(&root).unwrap().len(), 1);
@@ -580,6 +588,7 @@ surfaces = ["canvas"]
             ui: Some("changed".into()),
             grants: vec!["soil:canvas".into()],
             system: None,
+            devices: Vec::new(),
             publisher: Some("mycelium:test".into()),
             publisher_key: None,
             signature: String::new(),
@@ -749,8 +758,12 @@ pub struct SyncOptions<'a> {
 /// does not install everything it lists.
 pub fn sync(root: &Path, options: SyncOptions<'_>) -> Result<Vec<SyncOutcome>, Error> {
     let index_path = options.seed.join("index.json");
-    let operator_key = fs::read(options.seed.join("operator.asc"))
-        .map_err(|error| Error::Io(format!("{}: {error}", operator_key_path(options.seed).display())))?;
+    let operator_key = fs::read(options.seed.join("operator.asc")).map_err(|error| {
+        Error::Io(format!(
+            "{}: {error}",
+            operator_key_path(options.seed).display()
+        ))
+    })?;
     let index = soil_store::Index::read(&index_path)?;
     let verified = index.verify(&operator_key)?;
     let packages = match options.packages {

@@ -349,6 +349,7 @@ mod tests {
                 ui: None,
                 grants: Vec::new(),
                 system: None,
+                devices: Vec::new(),
                 publisher: None,
                 publisher_key: None,
                 signature: String::new(),

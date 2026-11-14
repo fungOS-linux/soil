@@ -52,6 +52,10 @@ wasmtime::component::bindgen!({
 
 use soil::unibus::bus as api;
 
+/// The generated `soil:unibus` WIT trait and value types, for hosts that
+/// compose the WASI profile with their own store state.
+pub use soil::unibus::bus;
+
 /// Largest body a Spore may publish or observe through this profile.
 ///
 /// Matches the Unibus SDK control-plane ceiling (`MAX_BODY_BYTES`). Larger

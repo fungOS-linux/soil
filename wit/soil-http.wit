@@ -30,7 +30,9 @@ interface http {
     /// is rejected, and the host caps it with the same budget as a response.
     body: option<list<u8>>,
     /// Opaque host credential handle (for example a Geode entry). Never a
-    /// token, username, password, or private key.
+    /// token, username, password, or private key. If the URL contains the
+    /// literal `__CREDENTIAL__` marker, the host substitutes the resolved
+    /// credential into that path segment; otherwise it injects a header.
     credential: option<string>,
     /// Requested response cap. The host may return `over-budget`.
     max-bytes: u32,

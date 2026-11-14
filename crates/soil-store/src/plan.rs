@@ -307,6 +307,7 @@ mod tests {
             ui: Some(ui.to_owned()),
             grants: grants.iter().map(|grant| (*grant).to_owned()).collect(),
             system: None,
+            devices: Vec::new(),
             publisher: Some("fungos".into()),
             publisher_key: None,
             signature: String::new(),

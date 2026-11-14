@@ -4,7 +4,7 @@ Soil provides a reusable WASI p2 profile so Spores can use standard interfaces
 instead of a custom SDK for every host capability.
 
 ```text
-crates/soil-wasi-host
+crates/soil-host
 ```
 
 ## Interfaces
@@ -239,30 +239,22 @@ Useful flags:
 
 ## Fixture
 
-```text
-crates/soil-wasi-host/fixtures/echo/
-  wasip2 component exporting wasi:http/incoming-handler
-crates/soil-wasi-host/fixtures/context/
-  reads fungos:http-context over the same surface
-crates/soil-wasi-host/fixtures/confluence/
-  verifies soil:creds and publishes soil:unibus
-```
-
-The built `fixtures/echo.wasm` is used by `tests/http_service.rs` to verify the
-host listener, request construction, guest call, response outparam, and body
-streaming end to end. `fixtures/context.wasm` proves the context import.
-`fixtures/confluence.wasm` is the first full ingress: a Standard Webhooks
-signature check through `soil:creds`, a host-attested request id and receive
-time, and exactly one `confluence.webhook.received.v1` fact through
-`soil:unibus`.
+`crates/soil-host/fixtures/get/` is a wasip2 component exporting
+`wasi:http/incoming-handler`; [`docs/soil-http.md`](soil-http.md) builds it and
+serves it with `soil-wasi-http` end to end.
 
 ## Confluence ingress
+
+Point `--spore` at a component built from the confluence ingress world: a
+Standard Webhooks signature check through `soil:creds`, a host-attested request
+id and receive time, and exactly one `confluence.webhook.received.v1` fact
+through `soil:unibus`.
 
 ```sh
 cargo run -p soil-confluence -- spore \
   --listen 127.0.0.1:8787 \
   --unibus-config /tmp/confluence.json \
-  --spore crates/soil-wasi-host/fixtures/confluence.wasm \
+  --spore confluence.wasm \
   --host confluence.soil \
   --tenant tenant-a
 ```

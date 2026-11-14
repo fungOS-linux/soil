@@ -2,15 +2,22 @@
 //!
 //! This is intentionally a separate crate from `soil-runtime`: the Canvas
 //! runtime is a core-Wasm host, while WebGPU is a component-model capability.
-//! A Spore that imports `wasi:webgpu` gets exactly this linker and nothing
-//! else. Adapter/device creation, validation, limits and queue submission stay
-//! in the host through `wgpu-core`; no native handle crosses the boundary.
+//! A Spore that imports `wasi:webgpu` gets exactly this linker and the
+//! capabilities a presenter grants it. Adapter/device creation, validation,
+//! limits and queue submission stay in the host through `wgpu-core`; no native
+//! handle crosses the boundary.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use soil_host::http_host::{
+    self, CredentialProvider, DirectTransport, HttpPolicy, HttpTransport, NoCredentials,
+    Request as HttpRequest,
+};
+use soil_host::records_host::{self, Namespace, NamespacedRecordsHost};
 use wasi_webgpu_wasmtime::reexports::{wgpu_core, wgpu_types};
 use wasi_webgpu_wasmtime::{WasiWebGpuCtx, WasiWebGpuCtxView, WasiWebGpuOptions};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -18,6 +25,10 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use soil::present::input;
+use soil_agent_host::{AgentBackend, Answer, Binding, Page};
+
+/// The denying agent backend, for presenters that own no agent session.
+pub use soil_agent_host::NoAgents;
 
 wasmtime::component::bindgen!({
     path: "wit",
@@ -27,6 +38,9 @@ wasmtime::component::bindgen!({
     },
     with: {
         "wasi:webgpu/webgpu@0.3.0-rc.2.gpu-texture": wasi_webgpu_wasmtime::Texture,
+        // A subscription is host state, not a generated shadow type: the
+        // backend keeps the position, so two subscriptions cannot disagree.
+        "soil:agents/observe.subscription": AgentSubscription,
     },
     require_store_data_send: true,
 });
@@ -206,56 +220,56 @@ impl CatalogHost for InstallCatalog {
                 continue;
             };
             for entry in read.flatten() {
-            let dir = entry.path();
-            if !dir.join("spore.toml").is_file() {
-                continue;
-            }
-            let Ok(manifest) = soil_spore::Manifest::load(&dir) else {
-                continue;
-            };
-            if !seen.insert(manifest.spore.id.clone()) {
-                continue;
-            }
-            let surfaces = if manifest.surfaces.is_empty() {
-                manifest
-                    .launch
-                    .surfaces
-                    .iter()
-                    .filter_map(|kind| surface_kind(kind))
-                    .map(|kind| CatalogSurface {
-                        name: kind_name(kind).to_owned(),
-                        kind,
-                        entry: String::new(),
-                        requires: None,
-                    })
-                    .collect()
-            } else {
-                manifest
-                    .surfaces
-                    .iter()
-                    .filter_map(|surface| {
-                        Some(CatalogSurface {
-                            name: surface.name.clone(),
-                            kind: surface_kind(surface.kind.as_str())?,
-                            entry: surface
-                                .entry(manifest.ui.as_ref())
-                                .unwrap_or_default()
-                                .to_owned(),
-                            requires: surface.requires.clone(),
+                let dir = entry.path();
+                if !dir.join("spore.toml").is_file() {
+                    continue;
+                }
+                let Ok(manifest) = soil_spore::Manifest::load(&dir) else {
+                    continue;
+                };
+                if !seen.insert(manifest.spore.id.clone()) {
+                    continue;
+                }
+                let surfaces = if manifest.surfaces.is_empty() {
+                    manifest
+                        .launch
+                        .surfaces
+                        .iter()
+                        .filter_map(|kind| surface_kind(kind))
+                        .map(|kind| CatalogSurface {
+                            name: kind_name(kind).to_owned(),
+                            kind,
+                            entry: String::new(),
+                            requires: None,
                         })
-                    })
-                    .collect()
-            };
-            found.push(CatalogEntry {
-                id: manifest.spore.id.clone(),
-                title: soil_spore::display_title(&manifest.spore.name),
-                name: manifest.spore.name.clone(),
-                version: manifest.spore.version.clone(),
-                summary: manifest.spore.summary.clone(),
-                workspace: manifest.launch.canvas_module.clone(),
-                default_surface: manifest.launch.default.clone(),
-                surfaces,
-            });
+                        .collect()
+                } else {
+                    manifest
+                        .surfaces
+                        .iter()
+                        .filter_map(|surface| {
+                            Some(CatalogSurface {
+                                name: surface.name.clone(),
+                                kind: surface_kind(surface.kind.as_str())?,
+                                entry: surface
+                                    .entry(manifest.ui.as_ref())
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                requires: surface.requires.clone(),
+                            })
+                        })
+                        .collect()
+                };
+                found.push(CatalogEntry {
+                    id: manifest.spore.id.clone(),
+                    title: soil_spore::display_title(&manifest.spore.name),
+                    name: manifest.spore.name.clone(),
+                    version: manifest.spore.version.clone(),
+                    summary: manifest.spore.summary.clone(),
+                    workspace: manifest.launch.canvas_module.clone(),
+                    default_surface: manifest.launch.default.clone(),
+                    surfaces,
+                });
             }
         }
         found.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
@@ -454,8 +468,15 @@ pub struct WebGpuHost {
     input: Arc<Mutex<VecDeque<InputEvent>>>,
     interactive: bool,
     catalog: Box<dyn CatalogHost>,
-    /// The one origin a guest may reach with `soil:http`, if any.
-    store_origin: Option<String>,
+    /// The HTTP policy, credentials and transport a guest may use. `None`
+    /// refuses every request instead of quietly reaching the network.
+    http: Option<HttpAccess>,
+    /// A namespaced records book the guest may read or write, when granted.
+    records: Option<NamespacedRecordsHost>,
+    /// The cast of agents this run can see. `NoAgents` refuses every read, so a
+    /// host that forgot to attach an adapter fails loudly instead of drawing an
+    /// empty wall.
+    agents: Box<dyn AgentBackend>,
     terminal: Box<dyn TerminalHost>,
     cursor: Option<Box<dyn CursorHost>>,
     clipboard: Option<Box<dyn ClipboardHost>>,
@@ -466,6 +487,69 @@ pub struct WebGpuHost {
 /// leaves it out.
 pub const LOCAL_STORE_ORIGIN: &str = "http://127.0.0.1:8800";
 
+/// The HTTP capability one Spore run may use.
+///
+/// The policy, credentials and transport are host objects; the guest only
+/// names a URL and an opaque credential handle. `soil-host` owns the single
+/// implementation of what that request is allowed to do.
+#[derive(Clone)]
+pub struct HttpAccess {
+    policy: HttpPolicy,
+    credentials: Arc<dyn CredentialProvider>,
+    transport: Arc<dyn HttpTransport>,
+}
+
+impl HttpAccess {
+    pub fn new(policy: HttpPolicy) -> Self {
+        Self {
+            policy,
+            credentials: Arc::new(NoCredentials),
+            transport: Arc::new(DirectTransport),
+        }
+    }
+
+    pub fn with_credentials(mut self, credentials: Arc<dyn CredentialProvider>) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
+    pub fn with_transport(mut self, transport: Arc<dyn HttpTransport>) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// A GET-only grant for one origin: what the storefront browser needs.
+    pub fn store(origin: impl Into<String>) -> Result<Self> {
+        let policy = HttpPolicy::new(
+            [origin.into()],
+            16 * 1024 * 1024,
+            std::time::Duration::from_secs(30),
+        )?;
+        Ok(Self::new(policy))
+    }
+}
+
+/// A records root plus the named books a Spore may see inside it.
+#[derive(Clone, Debug)]
+pub struct RecordsAccess {
+    pub root: PathBuf,
+    pub namespaces: Vec<Namespace>,
+}
+
+impl RecordsAccess {
+    /// The read-only namespace the vitals renderer uses.
+    pub fn vitals(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            namespaces: vec![Namespace::read(
+                "vitals.view",
+                "dev/personal/telemetry",
+                "vitals.view",
+            )],
+        }
+    }
+}
+
 /// Everything one Spore run is allowed to talk to. A presenter fills in the
 /// parts it owns; anything left as the denying default refuses the guest loudly
 /// instead of quietly doing nothing.
@@ -475,8 +559,15 @@ pub struct HostSetup {
     /// Tells the guest to keep polling after the first frame.
     pub interactive: bool,
     pub catalog: Box<dyn CatalogHost>,
-    /// The one origin a guest may reach with `soil:http`. `None` denies every
-    /// request: a capture host that does not need the network has none.
+    /// The HTTP grant. `None` denies every request: a capture host that does
+    /// not need the network has none.
+    pub http: Option<HttpAccess>,
+    /// The records grant. `None` refuses every records call.
+    pub records: Option<RecordsAccess>,
+    pub agents: Box<dyn AgentBackend>,
+    /// Shorthand for a read-only `soil:http` grant for one origin, folded into
+    /// `http` when that is unset. The storefront browser names its own origin
+    /// this way.
     pub store_origin: Option<String>,
     pub terminal: Box<dyn TerminalHost>,
     /// `None` on hosts without a window; `soil:present/cursor` still succeeds.
@@ -493,6 +584,9 @@ impl HostSetup {
             input: Arc::new(Mutex::new(VecDeque::new())),
             interactive: false,
             catalog: Box::new(NoCatalog),
+            http: None,
+            records: None,
+            agents: Box::new(NoAgents),
             store_origin: None,
             terminal: Box::new(NoTerminal),
             cursor: None,
@@ -511,6 +605,13 @@ impl WebGpuHost {
             display: None,
         };
         let instance = wgpu_core::global::Global::new("webgpu", descriptor, None);
+        // One HTTP implementation, two ways in: a full policy from the host, or
+        // the single-origin shorthand the storefront browser uses.
+        let http = match (setup.http, setup.store_origin.as_deref()) {
+            (Some(http), _) => Some(http),
+            (None, Some(origin)) => Some(HttpAccess::store(origin)?),
+            (None, None) => None,
+        };
         Ok(Self {
             instance: Arc::new(instance),
             table: ResourceTable::new(),
@@ -520,7 +621,15 @@ impl WebGpuHost {
             input: setup.input,
             interactive: setup.interactive,
             catalog: setup.catalog,
-            store_origin: setup.store_origin,
+            http,
+            records: setup
+                .records
+                .map(|records| {
+                    NamespacedRecordsHost::open(&records.root, records.namespaces)
+                        .context("open records for the WebGPU guest")
+                })
+                .transpose()?,
+            agents: setup.agents,
             terminal: setup.terminal,
             cursor: setup.cursor,
             clipboard: setup.clipboard,
@@ -609,53 +718,148 @@ impl soil::present::surface::Host for WebGpuHost {
     }
 }
 
+impl records_host::records::Host for WebGpuHost {
+    fn get(
+        &mut self,
+        key: records_host::records::Key,
+    ) -> std::result::Result<records_host::records::Entry, records_host::records::Error> {
+        self.records
+            .as_mut()
+            .ok_or(records_host::records::Error::Unsupported)?
+            .get(key)
+    }
+
+    fn scan(
+        &mut self,
+        collection: String,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> std::result::Result<records_host::records::Page, records_host::records::Error> {
+        self.records
+            .as_mut()
+            .ok_or(records_host::records::Error::Unsupported)?
+            .scan(collection, cursor, limit)
+    }
+
+    fn upsert(
+        &mut self,
+        entry: records_host::records::Entry,
+    ) -> std::result::Result<records_host::records::Entry, records_host::records::Error> {
+        self.records
+            .as_mut()
+            .ok_or(records_host::records::Error::Unsupported)?
+            .upsert(entry)
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        key: records_host::records::Key,
+        expected: Option<records_host::records::Version>,
+        entry: records_host::records::Entry,
+    ) -> std::result::Result<records_host::records::CasResult, records_host::records::Error> {
+        self.records
+            .as_mut()
+            .ok_or(records_host::records::Error::Unsupported)?
+            .compare_and_swap(key, expected, entry)
+    }
+
+    fn delete(
+        &mut self,
+        key: records_host::records::Key,
+    ) -> std::result::Result<(), records_host::records::Error> {
+        self.records
+            .as_mut()
+            .ok_or(records_host::records::Error::Unsupported)?
+            .delete(key)
+    }
+
+    fn changes(
+        &mut self,
+        since: Option<String>,
+        limit: u32,
+    ) -> std::result::Result<records_host::records::Page, records_host::records::Error> {
+        self.records
+            .as_mut()
+            .ok_or(records_host::records::Error::Unsupported)?
+            .changes(since, limit)
+    }
+
+    fn apply(
+        &mut self,
+        entries: Vec<records_host::records::Entry>,
+    ) -> std::result::Result<records_host::records::ApplyResult, records_host::records::Error> {
+        self.records
+            .as_mut()
+            .ok_or(records_host::records::Error::Unsupported)?
+            .apply(entries)
+    }
+}
+
 impl soil::http::http::Host for WebGpuHost {
-    /// One origin, one method, one bounded body.
+    /// The guest adapter over `soil-host`'s one policy implementation.
     ///
-    /// The guest names a URL; this refuses anything outside the single origin
-    /// the run was given, refuses a body over the caller's own budget, and
-    /// reports a transport failure as `unavailable` rather than pretending the
-    /// upstream answered.
+    /// The guest names a URL and an opaque credential handle; the policy owns
+    /// the origin allowlist, method/header/body checks and the transport. A
+    /// host with no HTTP grant returns `unsupported`, not a silent empty
+    /// response.
     fn fetch(
         &mut self,
         request: soil::http::http::Request,
     ) -> std::result::Result<soil::http::http::Response, soil::http::http::Error> {
-        let Some(origin) = self.store_origin.as_deref() else {
-            return Err(soil::http::http::Error::Denied);
-        };
-        if !request.url.starts_with(origin) {
-            return Err(soil::http::http::Error::Denied);
-        }
-        if !matches!(request.method, soil::http::http::Method::Get) {
+        let Some(access) = self.http.as_ref() else {
             return Err(soil::http::http::Error::Unsupported);
-        }
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_millis(
-                request.timeout_ms.max(1) as u64
-            ))
-            .build();
-        let response = match agent.get(&request.url).call() {
-            Ok(response) => response,
-            Err(ureq::Error::Status(_, response)) => response,
-            Err(_) => return Err(soil::http::http::Error::Unavailable),
         };
-        let status = response.status();
-        let mut body = Vec::new();
-        use std::io::Read as _;
-        if response
-            .into_reader()
-            .take(request.max_bytes.max(1) as u64)
-            .read_to_end(&mut body)
-            .is_err()
-        {
-            return Err(soil::http::http::Error::Io);
-        }
+        let request = HttpRequest {
+            url: request.url,
+            method: match request.method {
+                soil::http::http::Method::Get => http_host::Method::Get,
+                soil::http::http::Method::Head => http_host::Method::Head,
+                soil::http::http::Method::Post => http_host::Method::Post,
+                soil::http::http::Method::Put => http_host::Method::Put,
+                soil::http::http::Method::Patch => http_host::Method::Patch,
+                soil::http::http::Method::Delete => http_host::Method::Delete,
+            },
+            headers: request
+                .headers
+                .into_iter()
+                .map(|header| (header.name, header.value))
+                .collect(),
+            body: request.body,
+            credential: request.credential,
+            max_bytes: request.max_bytes,
+            timeout_ms: request.timeout_ms,
+        };
+        let response = http_host::perform(
+            &access.policy,
+            &*access.credentials,
+            &*access.transport,
+            request,
+        )
+        .map_err(http_error)?;
         Ok(soil::http::http::Response {
-            status,
-            final_url: request.url,
-            headers: Vec::new(),
-            body,
+            status: response.status,
+            final_url: response.final_url,
+            headers: response
+                .headers
+                .into_iter()
+                .map(|(name, value)| soil::http::http::Header { name, value })
+                .collect(),
+            body: response.body,
         })
+    }
+}
+
+fn http_error(error: http_host::Error) -> soil::http::http::Error {
+    match error {
+        http_host::Error::Denied => soil::http::http::Error::Denied,
+        http_host::Error::Invalid => soil::http::http::Error::Invalid,
+        http_host::Error::OverBudget => soil::http::http::Error::OverBudget,
+        http_host::Error::Timeout => soil::http::http::Error::Timeout,
+        http_host::Error::Unavailable => soil::http::http::Error::Unavailable,
+        http_host::Error::Tls => soil::http::http::Error::Tls,
+        http_host::Error::Http => soil::http::http::Error::Http,
+        http_host::Error::Io => soil::http::http::Error::Io,
+        http_host::Error::Unsupported => soil::http::http::Error::Unsupported,
     }
 }
 
@@ -712,6 +916,299 @@ fn catalog_error(error: CatalogError) -> soil::spore::catalog::Error {
         CatalogError::Invalid => soil::spore::catalog::Error::Invalid,
         CatalogError::Unsupported => soil::spore::catalog::Error::Unsupported,
         CatalogError::Io => soil::spore::catalog::Error::Io,
+    }
+}
+
+/// One per `observe.subscribe`.
+pub struct AgentSubscription;
+
+fn agent_error(error: soil_agent_host::Error) -> soil::agents::types::Error {
+    use soil::agents::types::Error;
+    match error {
+        soil_agent_host::Error::Denied => Error::Denied,
+        soil_agent_host::Error::NotFound => Error::NotFound,
+        soil_agent_host::Error::NotReady => Error::NotReady,
+        soil_agent_host::Error::Invalid => Error::Invalid,
+        soil_agent_host::Error::OverBudget => Error::OverBudget,
+        soil_agent_host::Error::Stale => Error::Stale,
+        soil_agent_host::Error::Unsupported => Error::Unsupported,
+        soil_agent_host::Error::Io => Error::Io,
+    }
+}
+
+fn agent_phase(phase: soil_agent_host::Phase) -> soil::agents::types::Phase {
+    use soil::agents::types::Phase;
+    match phase {
+        soil_agent_host::Phase::Connecting => Phase::Connecting,
+        soil_agent_host::Phase::Idle => Phase::Idle,
+        soil_agent_host::Phase::Thinking => Phase::Thinking,
+        soil_agent_host::Phase::Working => Phase::Working,
+        soil_agent_host::Phase::NeedsYou => Phase::NeedsYou,
+        soil_agent_host::Phase::Finished => Phase::Finished,
+        soil_agent_host::Phase::Failed => Phase::Failed,
+        soil_agent_host::Phase::Paused => Phase::Paused,
+    }
+}
+
+fn agent_activity_kind(kind: soil_agent_host::ActivityKind) -> soil::agents::types::ActivityKind {
+    use soil::agents::types::ActivityKind;
+    match kind {
+        soil_agent_host::ActivityKind::You => ActivityKind::You,
+        soil_agent_host::ActivityKind::Model => ActivityKind::Model,
+        soil_agent_host::ActivityKind::Memory => ActivityKind::Memory,
+        soil_agent_host::ActivityKind::Files => ActivityKind::Files,
+        soil_agent_host::ActivityKind::Shell => ActivityKind::Shell,
+        soil_agent_host::ActivityKind::Network => ActivityKind::Network,
+        soil_agent_host::ActivityKind::Browser => ActivityKind::Browser,
+        soil_agent_host::ActivityKind::Agent => ActivityKind::Agent,
+        soil_agent_host::ActivityKind::Skill => ActivityKind::Skill,
+        soil_agent_host::ActivityKind::Hook => ActivityKind::Hook,
+        soil_agent_host::ActivityKind::Other => ActivityKind::Other,
+    }
+}
+
+fn agent_status(status: soil_agent_host::Status) -> soil::agents::types::Status {
+    use soil::agents::types::Status;
+    match status {
+        soil_agent_host::Status::Running => Status::Running,
+        soil_agent_host::Status::Ok => Status::Ok,
+        soil_agent_host::Status::Failed => Status::Failed,
+        soil_agent_host::Status::Blocked => Status::Blocked,
+    }
+}
+
+fn agent_prompt_kind(kind: soil_agent_host::PromptKind) -> soil::agents::types::PromptKind {
+    use soil::agents::types::PromptKind;
+    match kind {
+        soil_agent_host::PromptKind::Question => PromptKind::Question,
+        soil_agent_host::PromptKind::Approval => PromptKind::Approval,
+        soil_agent_host::PromptKind::Choice => PromptKind::Choice,
+    }
+}
+
+fn agent_role(role: soil_agent_host::Role) -> soil::agents::types::Role {
+    use soil::agents::types::Role;
+    match role {
+        soil_agent_host::Role::User => Role::User,
+        soil_agent_host::Role::Assistant => Role::Assistant,
+        soil_agent_host::Role::Tool => Role::Tool,
+    }
+}
+
+fn agent_owner(owner: soil_agent_host::Owner) -> soil::agents::types::Owner {
+    soil::agents::types::Owner {
+        actor: owner.actor,
+        display_name: owner.display_name,
+    }
+}
+
+fn agent_scope(scope: soil_agent_host::Scope) -> soil::agents::types::Scope {
+    use soil::agents::types::ScopeKind;
+    soil::agents::types::Scope {
+        kind: match scope.kind {
+            soil_agent_host::ScopeKind::Device => ScopeKind::Device,
+            soil_agent_host::ScopeKind::Desktop => ScopeKind::Desktop,
+            soil_agent_host::ScopeKind::Principal => ScopeKind::Principal,
+        },
+        id: scope.id,
+        label: scope.label,
+        owner: scope.owner.map(agent_owner),
+    }
+}
+
+fn agent_record(agent: soil_agent_host::Agent) -> soil::agents::types::Agent {
+    soil::agents::types::Agent {
+        id: agent.id,
+        harness: agent.harness,
+        title: agent.title,
+        workspace: agent.workspace,
+        model: agent.model,
+        phase: agent_phase(agent.phase),
+        goal: agent.goal.map(|goal| soil::agents::types::Goal {
+            text: goal.text,
+            set_at_ms: goal.set_at_ms,
+        }),
+        owner: agent.owner.map(agent_owner),
+        activity: agent
+            .activity
+            .into_iter()
+            .map(|row| soil::agents::types::Activity {
+                kind: agent_activity_kind(row.kind),
+                label: row.label,
+                detail: row.detail,
+                status: agent_status(row.status),
+                started_at_ms: row.started_at_ms,
+                finished_at_ms: row.finished_at_ms,
+            })
+            .collect(),
+        prompts: agent
+            .prompts
+            .into_iter()
+            .map(|prompt| soil::agents::types::Prompt {
+                id: prompt.id,
+                kind: agent_prompt_kind(prompt.kind),
+                title: prompt.title,
+                body: prompt.body,
+                details: prompt.details,
+                origin: prompt.origin,
+                options: prompt
+                    .choices
+                    .into_iter()
+                    .map(|choice| soil::agents::types::Choice {
+                        id: choice.id,
+                        label: choice.label,
+                        detail: choice.detail,
+                        danger: choice.danger,
+                    })
+                    .collect(),
+                allows_text: prompt.allows_text,
+                asked_at_ms: prompt.asked_at_ms,
+                deadline_at_ms: prompt.deadline_at_ms,
+            })
+            .collect(),
+        usage: soil::agents::types::Usage {
+            context_tokens: agent.usage.context_tokens,
+            context_window: agent.usage.context_window,
+            input_tokens: agent.usage.input_tokens,
+            output_tokens: agent.usage.output_tokens,
+            turns: agent.usage.turns,
+        },
+        revision: agent.revision,
+        started_at_ms: agent.started_at_ms,
+        updated_at_ms: agent.updated_at_ms,
+    }
+}
+
+fn agent_binding(binding: Binding) -> soil::agents::types::Binding {
+    soil::agents::types::Binding {
+        agent: binding.agent,
+        view: binding.view,
+    }
+}
+
+fn agent_page(page: Page) -> soil::agents::observe::Page {
+    soil::agents::observe::Page {
+        turns: page
+            .turns
+            .into_iter()
+            .map(|turn| soil::agents::types::Turn {
+                role: agent_role(turn.role),
+                text: turn.text,
+                at_ms: turn.at_ms,
+            })
+            .collect(),
+        before: page.before,
+    }
+}
+
+impl soil::agents::observe::Host for WebGpuHost {
+    fn agents(
+        &mut self,
+    ) -> std::result::Result<Vec<soil::agents::types::Agent>, soil::agents::types::Error> {
+        Ok(self.agents.list().into_iter().map(agent_record).collect())
+    }
+
+    fn get(
+        &mut self,
+        id: String,
+    ) -> std::result::Result<soil::agents::types::Agent, soil::agents::types::Error> {
+        self.agents
+            .get(&id)
+            .map(agent_record)
+            .ok_or(soil::agents::types::Error::NotFound)
+    }
+
+    fn intent(&mut self) -> soil::agents::types::Binding {
+        let binding = self.agents.binding();
+        agent_binding(binding)
+    }
+
+    fn current_scope(&mut self) -> soil::agents::types::Scope {
+        let scope = self.agents.scope();
+        agent_scope(scope)
+    }
+
+    fn transcript(
+        &mut self,
+        id: String,
+        before: Option<u64>,
+        limit: u32,
+    ) -> std::result::Result<soil::agents::observe::Page, soil::agents::types::Error> {
+        self.agents
+            .transcript(&id, before, limit)
+            .map(agent_page)
+            .map_err(agent_error)
+    }
+
+    fn subscribe(
+        &mut self,
+    ) -> std::result::Result<
+        wasmtime::component::Resource<AgentSubscription>,
+        soil::agents::types::Error,
+    > {
+        self.table
+            .push(AgentSubscription)
+            .map_err(|_| soil::agents::types::Error::Io)
+    }
+}
+
+impl soil::agents::observe::HostSubscription for WebGpuHost {
+    fn next(
+        &mut self,
+        subscription: wasmtime::component::Resource<AgentSubscription>,
+        timeout_ms: u32,
+    ) -> std::result::Result<Option<soil::agents::observe::Change>, soil::agents::types::Error>
+    {
+        // A handle the guest already dropped is `stale`, not an empty poll.
+        self.table
+            .get(&subscription)
+            .map_err(|_| soil::agents::types::Error::Stale)?;
+        Ok(self.agents.next(timeout_ms).map(|change| match change {
+            soil_agent_host::Change::Upserted(agent) => {
+                soil::agents::observe::Change::Upserted(agent_record(*agent))
+            }
+            soil_agent_host::Change::Removed(id) => soil::agents::observe::Change::Removed(id),
+        }))
+    }
+
+    fn drop(
+        &mut self,
+        subscription: wasmtime::component::Resource<AgentSubscription>,
+    ) -> std::result::Result<(), wasmtime::Error> {
+        let _ = self.table.delete(subscription);
+        Ok(())
+    }
+}
+
+impl soil::agents::control::Host for WebGpuHost {
+    fn respond(
+        &mut self,
+        id: String,
+        prompt_id: String,
+        answer: soil::agents::types::Response,
+    ) -> std::result::Result<(), soil::agents::types::Error> {
+        self.agents
+            .answer(
+                &id,
+                &prompt_id,
+                Answer {
+                    choice: answer.choice,
+                    text: answer.text,
+                },
+            )
+            .map_err(agent_error)
+    }
+
+    fn send(
+        &mut self,
+        id: String,
+        text: String,
+    ) -> std::result::Result<(), soil::agents::types::Error> {
+        self.agents.send(&id, &text).map_err(agent_error)
+    }
+
+    fn interrupt(&mut self, id: String) -> std::result::Result<(), soil::agents::types::Error> {
+        self.agents.interrupt(&id).map_err(agent_error)
     }
 }
 
@@ -838,6 +1335,9 @@ pub struct WebGpuRuntime {
     /// Where compiled components are cached. Compiling a Spore takes tens of
     /// seconds; deserializing one that has not changed takes milliseconds.
     component_cache: Option<std::path::PathBuf>,
+    /// The default records grant, when the host was built around a records
+    /// root. A caller can override it per run with `HostSetup::records`.
+    records: Option<RecordsAccess>,
 }
 
 impl WebGpuRuntime {
@@ -874,14 +1374,28 @@ impl WebGpuRuntime {
         soil::spore::catalog::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:spore catalog")?;
+        soil::agents::observe::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+            .map_err(anyhow::Error::from)
+            .context("link soil:agent observe")?;
+        soil::agents::control::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
+            .map_err(anyhow::Error::from)
+            .context("link soil:agent control")?;
         soil::terminal_screen::screen::add_to_linker::<_, HasSelf<_>>(&mut linker, |host| host)
             .map_err(anyhow::Error::from)
             .context("link soil:terminal-screen")?;
+        records_host::add_to_linker::<WebGpuHost>(&mut linker).context("link soil:records")?;
         Ok(Self {
             engine,
             linker,
             component_cache: None,
+            records: None,
         })
+    }
+
+    /// Build a runtime whose guests may read the vitals view from this root.
+    pub fn with_records(mut self, root: impl Into<PathBuf>) -> Self {
+        self.records = Some(RecordsAccess::vitals(root));
+        self
     }
 
     /// Keep compiled components in `directory`, named by the module's digest.
@@ -971,7 +1485,10 @@ impl WebGpuRuntime {
     }
 
     /// Run one guest against a fully specified host.
-    pub async fn run_component_with(&self, bytes: &[u8], setup: HostSetup) -> Result<u32> {
+    pub async fn run_component_with(&self, bytes: &[u8], mut setup: HostSetup) -> Result<u32> {
+        if setup.records.is_none() {
+            setup.records = self.records.clone();
+        }
         let component = self.component(bytes)?;
         let mut store = Store::new(&self.engine, WebGpuHost::new(setup)?);
         let instance = Runner::instantiate_async(&mut store, &component, &self.linker)
@@ -1001,16 +1518,20 @@ pub fn run_component_capture(
     width: u32,
     height: u32,
 ) -> Result<(u32, Option<CanvasFrame>)> {
-    run_component_capture_with(bytes, width, height, None, None)
+    run_component_capture_with(bytes, width, height, None, None, None)
 }
 
-/// Capture one frame with a host that can answer `soil:spore/catalog`.
+/// Capture one frame with a host that can answer `soil:spore/catalog` and
+/// `soil:http` and `soil:agent`. A capture host is interactive=false, so the
+/// guest renders one frame and exits: this is how a Spore's first screen is
+/// inspected in CI.
 pub fn run_component_capture_with(
     bytes: &[u8],
     width: u32,
     height: u32,
     catalog: Option<Box<dyn CatalogHost>>,
-    store_origin: Option<String>,
+    http: Option<HttpAccess>,
+    agents: Option<Box<dyn AgentBackend>>,
 ) -> Result<(u32, Option<CanvasFrame>)> {
     let runtime = WebGpuRuntime::new()?;
     let capture = FrameCapture::new(width, height);
@@ -1018,7 +1539,24 @@ pub fn run_component_capture_with(
     if let Some(catalog) = catalog {
         setup.catalog = catalog;
     }
-    setup.store_origin = store_origin;
+    if let Some(agents) = agents {
+        setup.agents = agents;
+    }
+    setup.http = http;
+    let status = pollster::block_on(runtime.run_component_with(bytes, setup))?;
+    Ok((status, capture.take()))
+}
+
+/// Capture one frame with a read-only `vitals.view` records grant.
+pub fn run_component_capture_with_records(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    records_root: impl Into<PathBuf>,
+) -> Result<(u32, Option<CanvasFrame>)> {
+    let runtime = WebGpuRuntime::new()?.with_records(records_root);
+    let capture = FrameCapture::new(width, height);
+    let setup = HostSetup::capture(Box::new(capture.clone()));
     let status = pollster::block_on(runtime.run_component_with(bytes, setup))?;
     Ok((status, capture.take()))
 }
@@ -1033,5 +1571,20 @@ mod tests {
         assert!(WEBGPU_WIT.starts_with("package wasi:webgpu@0.3.0-rc.2;"));
         assert!(RUNNER_WIT.contains("include wasi:webgpu/imports@0.3.0-rc.2;"));
         assert!(RUNNER_WIT.contains("export run: async func() -> u32;"));
+    }
+
+    #[test]
+    fn the_runner_offers_agents_but_not_their_authority() {
+        // The point of the surface is that it can watch and answer. Spawning a
+        // harness, choosing a model, or reading a credential is not here, and
+        // dropping this assertion is how one of them would quietly arrive.
+        assert!(RUNNER_WIT.contains("import soil:agents/observe@0.1.0;"));
+        assert!(RUNNER_WIT.contains("import soil:agents/control@0.1.0;"));
+        for forbidden in ["spawn", "config", "credential", "secrets"] {
+            assert!(
+                !RUNNER_WIT.contains(forbidden),
+                "the agent surface grew `{forbidden}` authority"
+            );
+        }
     }
 }

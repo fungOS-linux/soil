@@ -28,6 +28,51 @@ use crate::{Runtime, overlay::Overlay};
 ///
 /// This is the only copy of the policy: the daemon, the interactive shell and
 /// `mush run host` all read it from here.
+
+/// The environment a host child is allowed to see.
+///
+/// The agent's environment belongs to the Spore: that is where `$HOME`,
+/// `$GIT_*` and the agent's own keys are read. A host program is the thing that
+/// runs with the user's real privileges, so it starts from nothing and gets
+/// only what a toolchain or the build plane needs — otherwise every allowlisted
+/// program is a way to read the agent's tokens. `--allow-env NAME` on
+/// `mush run host` adds to this for one invocation.
+pub const HOST_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "TERM",
+    "TMPDIR",
+    "RUSTUP_HOME",
+    // The build plane's transport. `fpl-bob` is on the allowlist, so the
+    // variables that let it reach a builder are part of the tool, not a leak.
+    "BOB_SSH",
+    "BOB_POOL",
+    "BOB_NO_DNS_ROUTE",
+    "FPL_BOB_LINUX_HOST",
+    "FPL_BOB_LINUX_POOL",
+    "FPL_BOB_MAC_HOST",
+    "SSH_AUTH_SOCK",
+];
+
+/// Start a child from an empty environment and seed the allowlist.
+///
+/// Both ways a host program can run — the shell's overlay bridge and
+/// `mush run host` — go through this, so "what can a child see" has one answer.
+pub fn clear_and_seed(command: &mut std::process::Command) {
+    command.env_clear();
+    for key in HOST_ENV {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+    // Deliberately not settable from the environment: `MUSH_HOST_ENV=TOKEN`
+    // would let whoever can spawn mush widen the policy that exists to constrain
+    // them. The floor is a source constant, and a Spore that needs more says so
+    // in its manifest, which a reviewer reads and the lock digests.
+}
+
 pub const HOST_ALLOWLIST: &[&str] = &[
     "cargo",
     // bob is the build plane: `fpl bob` inspects and drives it, `bob-cargo` is
@@ -106,6 +151,38 @@ impl Output for Capture {
     }
     fn stderr(&mut self, text: &str) {
         self.err.push_str(text);
+    }
+    fn inherits_stdio(&self) -> bool {
+        false
+    }
+}
+
+/// Sends output to a live sink while keeping the copy a job still has to report.
+///
+/// This is what makes the `bash -c` path work: the caller watches the command
+/// as it runs, and the job record ends up with the same text when it finishes.
+pub struct Tee {
+    live: Box<dyn Output + Send>,
+    pub captured: Capture,
+}
+
+impl Tee {
+    pub fn new(live: Box<dyn Output + Send>) -> Self {
+        Self {
+            live,
+            captured: Capture::default(),
+        }
+    }
+}
+
+impl Output for Tee {
+    fn stdout(&mut self, text: &str) {
+        self.live.stdout(text);
+        self.captured.out.push_str(text);
+    }
+    fn stderr(&mut self, text: &str) {
+        self.live.stderr(text);
+        self.captured.err.push_str(text);
     }
     fn inherits_stdio(&self) -> bool {
         false
@@ -193,7 +270,7 @@ pub fn run_line_captured(
     Ok((status, capture.out, capture.err))
 }
 
-fn run_line_with(
+pub(crate) fn run_line_with(
     output: &mut dyn Output,
     runtime: &mut Runtime,
     root: &Path,
@@ -300,6 +377,10 @@ fn run_host(
             .map(|build| build.program(program))
             .unwrap_or_else(|| PathBuf::from(program)),
     );
+    // The agent's environment is the Spore's. A host program starts empty and
+    // gets the allowlist, plus the identity below and whatever the build plane
+    // needs — never the caller's tokens.
+    clear_and_seed(&mut command);
     command.args(args);
     // `cwd` is the Spore's directory; fall back to the overlay root when it does
     // not name a directory there (a stale session, or a directory the overlay

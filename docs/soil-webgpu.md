@@ -25,21 +25,33 @@ Canvas presentation is a separate, presentation-only package:
 - [`soil:present@0.1.0`](../crates/soil-webgpu/wit/deps/soil-present/package.wit)
 
 It accepts a `wasi:webgpu` `gpu-texture` by borrow and returns nothing but a
-success/error. It cannot create a device, texture, window, swapchain, or input
-event. The host chooses the target extent through `size()`; the guest does not
-control the Canvas surface.
+success/error. Its `input` interface carries normalized key, pointer, and scroll
+events in one ordered stream, and `cursor` lets the Spore ask what it is pointing
+at. The host chooses the target extent through `size()` and reports device scale
+through `scale()`; the guest does not control the Canvas surface or open a
+window.
+
+Renderer Spores that need the Spore-owned view model also import
+`soil:records`. The host links one read-only namespace, `vitals.view`, backed by
+the `dev/personal/telemetry` book. It cannot write, scan another collection, or
+name a filesystem path.
 
 ## Host
 
 [`crates/soil-webgpu`](../crates/soil-webgpu) is the host:
 
-- a forked `wasi-webgpu-wasmtime` (`fungOS-linux/wasi-gfx-runtime` revision
+- a forked `wasi-webgpu-wasmtime` (`mycelium-linux/wasi-gfx-runtime` revision
   `9624cae`) binds the WIT and adds host texture readback;
 - `wgpu-core` 29 (Metal / Vulkan / GLES / DX12) owns adapter, device, shaders,
   pipelines, buffers, textures, queues and error scopes;
+- `soil:records` is a read-only `vitals.view` namespace; the renderer cannot
+  mutate the store or read health signals directly;
+- `soil:http` is the bounded host transport from `soil-host`; origins,
+  credentials, methods, body caps, and deadlines are host policy;
 - one `Store` and `ResourceTable` per component, so two guests never share
   handles;
-- no native device, surface, pointer, queue or mapped memory crosses into Wasm.
+- no native device, surface, queue or mapped memory crosses into Wasm. Input is
+  normalized and queued by the presenter; the guest owns hit-testing.
 
 `wasi:io/poll` is linked because component-model async uses it as transport.
 The `WasiCtx` has no preopens, environment, arguments or network policy; a guest
@@ -56,7 +68,7 @@ let (device, queue) = pollster::block_on(adapter.request_device(&Default::defaul
 // ordinary wgpu from here
 ```
 
-The guest backend is a fork of [`wgpu-wasi-webgpu`](https://github.com/fungOS-linux/wgpu-wasi-webgpu)
+The guest backend is a fork of [`wgpu-wasi-webgpu`](https://github.com/mycelium-linux/wgpu-wasi-webgpu)
 updated from `wasi:webgpu@0.0.1` to `0.3.0-rc.2`. It uses wgpu's `custom`
 dispatch traits, so wgpu itself is not forked for the backend. The fixture is
 pinned to revision `88938bb`.
@@ -64,6 +76,14 @@ pinned to revision `88938bb`.
 This proves compute. It does **not** prove `wgpu::Surface`: the upstream WIT
 has a `gpu-canvas-context` resource but no constructor, and a guest-owned
 surface would bypass Canvas ownership.
+
+## Native presenter
+
+[`crates/canvas-winit`](../crates/canvas-winit) is the real desktop presenter:
+winit owns the window, `soil-webgpu` owns the component, and `soil:present` is
+the only surface contract. Pointer, key, scroll, cursor, catalog, PTY, HTTP, and
+records grants are wired there. `--capture` uses the same host path for
+screenshots, and `--size WxH` exercises the layouts a phone or flip presents.
 
 ## Canvas presentation
 
@@ -123,6 +143,14 @@ cargo run -p soil-webgpu -- crates/soil-webgpu/fixtures/wgpu-compute.wasm
 # both print: webgpu: ok
 ```
 
+A renderer that reads `vitals.view` names the records root explicitly:
+
+```sh
+cargo run -p soil-webgpu --bin soil-webgpu -- \
+  --records-dir .soil-dev/records \
+  --frame /tmp/vitals.bgr --size 1280x900 spores/vitals-view/module.wasm
+```
+
 The wgpu fixtures need a GPU adapter and are tested with:
 
 ```sh
@@ -147,6 +175,9 @@ the corners are the clear colour, and the frame is opaque.
 - Presentation is a full-frame handoff, not a composited Canvas layer yet. The
   owner UI does not blend a GPU texture with widgets; the next step is a
   `software-image`/layer adapter inside the Canvas owner.
+- The records grant is deliberately one read-only collection. A renderer that
+  needs another view model adds a namespace here rather than receiving the
+  whole store.
 - `gpu-canvas-context` remains unimplemented. It has no constructor in
   `wasi:webgpu@0.3.0-rc.2`; the narrow `soil:present` package is the
   presentation boundary instead of a guest-owned surface.
