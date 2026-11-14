@@ -13,6 +13,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 soil-ble-host = { path = "../soil-ble-host" }
-soil = { path = "../soil", default-features = false }
+soil = { path = "../soil", default-features = false, features = ["http", "records", "wasi"] }
 wasmtime = { version = "50", features = ["anyhow"] }
 wasmtime-wasi = "50"

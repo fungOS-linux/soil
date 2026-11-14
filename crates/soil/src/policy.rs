@@ -4,12 +4,17 @@
 //! use it. These types are deliberately conservative: the default policy denies
 //! outbound HTTP, DNS, TCP, and UDP.
 
-use std::{collections::BTreeSet, net::SocketAddr};
+use std::collections::BTreeSet;
+#[cfg(feature = "wasi")]
+use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use ipnet::IpNet;
 use url::Url;
-use wasmtime_wasi::{WasiCtxBuilder, sockets::SocketAddrUse};
+#[cfg(feature = "wasi")]
+use wasmtime_wasi::WasiCtxBuilder;
+#[cfg(feature = "wasi")]
+use wasmtime_wasi::sockets::SocketAddrUse;
 
 /// Outbound `wasi:http` policy.
 ///
@@ -47,6 +52,7 @@ impl HttpPolicy {
         self.max_field_size = Some(limit);
     }
 
+    #[cfg(feature = "wasi")]
     pub(crate) fn max_field_size(&self) -> usize {
         self.max_field_size.unwrap_or(128 * 1024)
     }
@@ -120,6 +126,7 @@ impl NetworkPolicy {
         self.allow_dns = allow;
     }
 
+    #[cfg(feature = "wasi")]
     pub(crate) fn apply(&self, builder: &mut WasiCtxBuilder) {
         let tcp = !(self.tcp_connect.is_empty()
             && self.tcp_bind.is_empty()
@@ -136,6 +143,7 @@ impl NetworkPolicy {
         });
     }
 
+    #[cfg(feature = "wasi")]
     fn allows(&self, addr: SocketAddr, use_: SocketAddrUse) -> bool {
         let ranges = match use_ {
             SocketAddrUse::TcpConnect => &self.tcp_connect,

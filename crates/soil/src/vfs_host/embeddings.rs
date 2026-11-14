@@ -4,8 +4,10 @@
 //! host operator supplies an endpoint explicitly; a Spore never chooses a
 //! model, endpoint, token, or network route.
 
+#[cfg(feature = "model2vec")]
 use std::sync::Mutex;
 
+#[cfg(feature = "model2vec")]
 use anyhow::Context;
 #[cfg(feature = "remote")]
 use anyhow::anyhow;

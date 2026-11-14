@@ -13,6 +13,7 @@
 //!   `fungos-vfs`;
 //! * `http_host` serves `soil:http`;
 //! * `records_host` serves `soil:records`;
+//! * `principal_host` serves `soil:principal`;
 //! * `unibus` serves `soil:unibus`;
 //! * `creds` serves `soil:creds`.
 //!
@@ -28,38 +29,73 @@
 //!   the policy allows the specific operation.
 //!
 //! Secrets, the Unibus session, sockets and TLS stay in the host.
+//!
+//! # Features
+//!
+//! Every module is behind the feature that names it, so a consumer links the
+//! capabilities it will actually grant instead of the whole host: a Spore
+//! runner that shows documents wants `vfs`, `records` and `principal`; a window
+//! that grants `soil:http` wants `http`. `wasi` is the runner profile — the
+//! WASI p2 imports, the credential and bus sessions, the gateway and
+//! [`WasiHost`] that links them — and it is the one feature that pulls the
+//! others in, because those modules are written against it. `cli` adds the
+//! `soil-*` commands.
 
+#[cfg(feature = "wasi")]
 pub mod context;
+#[cfg(feature = "wasi")]
 pub mod creds;
+#[cfg(feature = "wasi")]
 mod gateway;
-pub mod http_host;
+#[cfg(feature = "wasi")]
 mod host;
+#[cfg(any(feature = "http", feature = "wasi"))]
+pub mod http_host;
+#[cfg(any(feature = "http", feature = "wasi"))]
 mod policy;
+#[cfg(feature = "principal")]
+pub mod principal_host;
+#[cfg(feature = "records")]
 pub mod records_host;
+#[cfg(feature = "wasi")]
 mod service;
-pub mod unibus;
+#[cfg(feature = "wasi")]
 pub mod time;
+#[cfg(feature = "wasi")]
+pub mod unibus;
+#[cfg(feature = "vfs")]
 pub mod vfs_host;
 
+#[cfg(feature = "wasi")]
 pub use context::HttpContext;
+#[cfg(feature = "wasi")]
 pub use creds::{
     Algorithm, CredentialError, CredentialProvider, GeodeCredentials, GeodePgpCredentials,
     ResolvedHandle, StaticCredentials,
 };
+#[cfg(feature = "wasi")]
 pub use gateway::{
     GatewayRoute, GatewayVhost, HttpGateway, HttpGatewayBuilder, IngressError, OriginAuth,
 };
+#[cfg(feature = "wasi")]
 pub use host::{HttpCapability, Preopen, WasiHost, WasiHostBuilder};
+#[cfg(any(feature = "http", feature = "wasi"))]
 pub use http_host::HttpHost;
+#[cfg(any(feature = "http", feature = "wasi"))]
 pub use policy::{HttpPolicy, NetworkPolicy, WasiHostPolicy};
+#[cfg(feature = "records")]
 pub use records_host::RecordsBookHost;
+#[cfg(feature = "wasi")]
 pub use service::HttpService;
+#[cfg(feature = "wasi")]
 pub use unibus::{
     Bus, BusError, BusReceipt, Frame, MAX_BUS_BODY, MAX_POLL_LIMIT, MemoryBus, Page, UnibusBus,
 };
+#[cfg(feature = "vfs")]
 pub use vfs_host::VfsHost;
 
 /// The set of host facilities currently provided by this profile.
+#[cfg(feature = "wasi")]
 pub const WASI_PROFILE: &[&str] = &[
     "wasi:cli",
     "wasi:clocks",
