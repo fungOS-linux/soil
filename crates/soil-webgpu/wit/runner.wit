@@ -2,11 +2,18 @@ package soil:webgpu-host@0.1.0;
 
 /// A minimal WebGPU test world. The host adds only `wasi:webgpu`; the guest
 /// gets no WASI, filesystem, clock, network, or native device handle.
+///
+/// `soil:vfs`, `soil:records` and `soil:principal` are the three grants a
+/// document-shaped Spore needs: one workspace it may read, a book it may write
+/// entities into, and the identity the host attests for what it writes. Each
+/// is `denied` unless the presenter was given it.
 world runner {
   include wasi:webgpu/imports@0.3.0-rc.2;
   import soil:present/surface@0.1.0;
   import soil:present/input@0.1.0;
+  import soil:vfs/vfs@1.0.0;
   import soil:records/records@0.1.0;
+  import soil:principal/principal@0.1.0;
   import soil:present/cursor@0.1.0;
   import soil:present/clipboard@0.1.0;
   import soil:spore/catalog@0.1.0;

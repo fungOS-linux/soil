@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use ::soil::principal_host::PrincipalHost;
+use ::soil::vfs_host::VfsHost;
 use ::soil::http_host::{
     self, CredentialProvider, DirectTransport, HttpPolicy, HttpTransport, NoCredentials,
     Request as HttpRequest,
@@ -40,6 +42,11 @@ wasmtime::component::bindgen!({
     },
     with: {
         "wasi:webgpu/webgpu@0.3.0-rc.2.gpu-texture": wasi_webgpu_wasmtime::Texture,
+        // Same WIT package, one binding: the runner answers with the host
+        // crate's own `soil:vfs` and `soil:principal` types rather than a
+        // second generated copy that would need converting field by field.
+        "soil:vfs/vfs@1.0.0": ::soil::vfs_host::vfs,
+        "soil:principal/principal@0.1.0": ::soil::principal_host::api,
         // A subscription is host state, not a generated shadow type: the
         // backend keeps the position, so two subscriptions cannot disagree.
         "soil:agents/observe.subscription": AgentSubscription,
@@ -490,6 +497,10 @@ pub struct WebGpuHost {
     http: Option<HttpAccess>,
     /// A namespaced records book the guest may read or write, when granted.
     records: Option<NamespacedRecordsHost>,
+    /// One workspace the guest may list and read. `None` denies `soil:vfs`.
+    vfs: Option<VfsHost>,
+    /// Who the guest is acting as. `None` denies `soil:principal`.
+    principal: Option<PrincipalHost>,
     /// The cast of agents this run can see. `NoAgents` refuses every read, so a
     /// host that forgot to attach an adapter fails loudly instead of drawing an
     /// empty wall.
@@ -554,6 +565,22 @@ pub struct RecordsAccess {
 }
 
 impl RecordsAccess {
+    /// One named book collection a Spore may read and write.
+    ///
+    /// This is what a document-shaped Spore asks for: the guest names the
+    /// collection, and the grant decides the book it maps onto.
+    pub fn book(
+        root: impl Into<PathBuf>,
+        name: impl Into<String>,
+        book: impl Into<String>,
+        collection: impl Into<String>,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            namespaces: vec![Namespace::write(name.into(), book.into(), collection.into())],
+        }
+    }
+
     /// The read-only namespace the vitals renderer uses.
     pub fn vitals(root: impl Into<PathBuf>) -> Self {
         Self {
@@ -581,6 +608,12 @@ pub struct HostSetup {
     pub http: Option<HttpAccess>,
     /// The records grant. `None` refuses every records call.
     pub records: Option<RecordsAccess>,
+    /// The VFS grant: one workspace the guest may list and read. `None` denies
+    /// `soil:vfs`, which is the honest answer for a Spore that only draws.
+    pub vfs: Option<PathBuf>,
+    /// The principal grant. `None` denies `soil:principal`: a host that cannot
+    /// attest who is acting must not let a guest guess.
+    pub principal: Option<PrincipalHost>,
     pub agents: Box<dyn AgentBackend>,
     /// Shorthand for a read-only `soil:http` grant for one origin, folded into
     /// `http` when that is unset. The storefront browser names its own origin
@@ -603,6 +636,8 @@ impl HostSetup {
             catalog: Box::new(NoCatalog),
             http: None,
             records: None,
+            vfs: None,
+            principal: None,
             agents: Box::new(NoAgents),
             store_origin: None,
             terminal: Box::new(NoTerminal),
@@ -646,6 +681,11 @@ impl WebGpuHost {
                         .context("open records for the WebGPU guest")
                 })
                 .transpose()?,
+            vfs: setup
+                .vfs
+                .map(|root| VfsHost::open(&root).context("open the workspace for soil:vfs"))
+                .transpose()?,
+            principal: setup.principal,
             agents: setup.agents,
             terminal: setup.terminal,
             cursor: setup.cursor,
@@ -732,6 +772,71 @@ impl soil::present::surface::Host for WebGpuHost {
             rgba: image.rgba,
         };
         self.presenter.present(frame).map_err(|e| e.to_string())
+    }
+}
+
+impl ::soil::vfs_host::vfs::Host for WebGpuHost {
+    fn ls(
+        &mut self,
+        parent: String,
+        offset: u64,
+        limit: u32,
+    ) -> std::result::Result<::soil::vfs_host::vfs::Page, ::soil::vfs_host::vfs::Error>
+    {
+        self.vfs
+            .as_mut()
+            .ok_or(::soil::vfs_host::vfs::Error::Denied)?
+            .ls(parent, offset, limit)
+    }
+
+    fn stat(
+        &mut self,
+        path: String,
+    ) -> std::result::Result<::soil::vfs_host::vfs::Entry, ::soil::vfs_host::vfs::Error>
+    {
+        self.vfs
+            .as_mut()
+            .ok_or(::soil::vfs_host::vfs::Error::Denied)?
+            .stat(path)
+    }
+
+    fn read(
+        &mut self,
+        path: String,
+        offset: u64,
+        length: u32,
+    ) -> std::result::Result<::soil::vfs_host::vfs::Chunk, ::soil::vfs_host::vfs::Error>
+    {
+        self.vfs
+            .as_mut()
+            .ok_or(::soil::vfs_host::vfs::Error::Denied)?
+            .read(path, offset, length)
+    }
+}
+
+impl ::soil::principal_host::api::Host for WebGpuHost {
+    fn current(
+        &mut self,
+    ) -> std::result::Result<
+        ::soil::principal_host::api::Identity,
+        ::soil::principal_host::api::Error,
+    > {
+        self.principal
+            .as_mut()
+            .ok_or(::soil::principal_host::api::Error::Denied)?
+            .current()
+    }
+
+    fn signing_key(
+        &mut self,
+    ) -> std::result::Result<
+        Option<::soil::principal_host::api::SigningKeyInfo>,
+        ::soil::principal_host::api::Error,
+    > {
+        self.principal
+            .as_mut()
+            .ok_or(::soil::principal_host::api::Error::Denied)?
+            .signing_key()
     }
 }
 
@@ -1402,6 +1507,14 @@ impl WebGpuRuntime {
             .map_err(anyhow::Error::from)
             .context("link soil:terminal-screen")?;
         records_host::add_to_linker::<WebGpuHost>(&mut linker).context("link soil:records")?;
+        ::soil::vfs_host::vfs::add_to_linker::<WebGpuHost, HasSelf<WebGpuHost>>(
+            &mut linker,
+            |host| host,
+        )
+        .map_err(anyhow::Error::from)
+        .context("link soil:vfs")?;
+        ::soil::principal_host::add_to_linker::<WebGpuHost>(&mut linker)
+            .context("link soil:principal")?;
         Ok(Self {
             engine,
             linker,
@@ -1561,6 +1674,76 @@ pub fn run_component_capture_with(
         setup.agents = agents;
     }
     setup.http = http;
+    let status = pollster::block_on(runtime.run_component_with(bytes, setup))?;
+    Ok((status, capture.take()))
+}
+
+/// What a capture run is allowed to reach.
+///
+/// Everything a Spore can be granted is named here, once, so a caller that
+/// forgets a grant gets the denying default rather than a host that quietly
+/// answers as somebody else.
+#[derive(Default)]
+pub struct Grants {
+    /// One workspace the Spore may list and read through `soil:vfs`.
+    pub vfs: Option<PathBuf>,
+    /// The books the Spore may read or write through `soil:records`.
+    pub records: Option<RecordsAccess>,
+    /// Who the Spore is acting as, through `soil:principal`.
+    pub principal: Option<PrincipalHost>,
+    pub http: Option<HttpAccess>,
+    pub catalog: Option<Box<dyn CatalogHost>>,
+}
+
+impl Grants {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Attest `actor` as a human principal. Local development only: a host
+    /// that verifies a real identity builds its own provider.
+    pub fn actor(self, actor: impl Into<String>) -> Self {
+        let principal = PrincipalHost::new(::soil::principal_host::StaticPrincipalProvider::new(
+            ::soil::principal_host::Principal {
+                actor: actor.into(),
+                kind: ::soil::principal_host::PrincipalKind::Human,
+                display_name: None,
+                device: Some(gethostname()),
+                teams: Vec::new(),
+                roles: Vec::new(),
+                generation: 1,
+            },
+        ));
+        Self {
+            principal: Some(principal),
+            ..self
+        }
+    }
+}
+
+fn gethostname() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "localhost".into())
+}
+
+/// Capture one frame with whatever [`Grants`] the caller assembled.
+pub fn run_component_capture_with_grants(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    grants: Grants,
+) -> Result<(u32, Option<CanvasFrame>)> {
+    let runtime = WebGpuRuntime::new()?;
+    let capture = FrameCapture::new(width, height);
+    let mut setup = HostSetup::capture(Box::new(capture.clone()));
+    setup.vfs = grants.vfs;
+    setup.records = grants.records;
+    setup.principal = grants.principal;
+    setup.http = grants.http;
+    if let Some(catalog) = grants.catalog {
+        setup.catalog = catalog;
+    }
     let status = pollster::block_on(runtime.run_component_with(bytes, setup))?;
     Ok((status, capture.take()))
 }

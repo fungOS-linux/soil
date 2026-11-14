@@ -56,6 +56,20 @@ struct LaunchConfig {
     geode_purpose: Option<String>,
     hue_bridge: Option<Url>,
     records_root: Option<PathBuf>,
+    /// One workspace the Spore may list and read through `soil:vfs`.
+    vfs_root: Option<PathBuf>,
+    /// A book collection the Spore may read and write, when it was granted one.
+    records_book: Option<BookGrant>,
+    /// Who the Spore acts as, when this host was told. A window that was not
+    /// told denies `soil:principal` rather than inventing a name.
+    actor: Option<String>,
+}
+
+/// One book collection a Spore may read and write.
+#[derive(Clone, Debug)]
+struct BookGrant {
+    collection: String,
+    book: String,
 }
 
 impl LaunchConfig {
@@ -75,6 +89,18 @@ impl LaunchConfig {
         }
         if let Some(root) = &self.records_root {
             command.arg("--records-root").arg(root);
+        }
+        if let Some(root) = &self.vfs_root {
+            command.arg("--vfs-root").arg(root);
+        }
+        if let Some(grant) = &self.records_book {
+            command.arg("--records-book").arg(&grant.book);
+            command
+                .arg("--records-collection")
+                .arg(&grant.collection);
+        }
+        if let Some(actor) = &self.actor {
+            command.arg("--actor").arg(actor);
         }
     }
 }
@@ -563,6 +589,10 @@ struct App {
     http: Option<HttpAccess>,
     /// The records grant passed to the Spore, when it was given a root.
     records: Option<RecordsAccess>,
+    /// The workspace grant passed to the Spore, when it was given a root.
+    vfs_root: Option<PathBuf>,
+    /// The principal the host attests for this Spore, when it was told.
+    actor: Option<String>,
     /// Grants a child Spore inherits when the launcher opens it.
     launch: LaunchConfig,
     /// What runs on the terminal's pty: a login shell when absent.
@@ -656,6 +686,8 @@ impl App {
         let spores = self.spores.clone();
         let http = self.http.clone();
         let records = self.records.clone();
+        let vfs_root = self.vfs_root.clone();
+        let actor = self.actor.clone();
         let launch = self.launch.clone();
         thread::spawn(move || {
             let result = (|| -> Result<()> {
@@ -679,6 +711,10 @@ impl App {
                         catalog: Box::new(catalog),
                         http,
                         records,
+                        vfs: vfs_root,
+                        principal: actor.map(|actor| {
+                            ::soil_webgpu::Grants::new().actor(actor).principal
+                        }).flatten(),
                         // The storefront origin is already in the HTTP policy
                         // `build_http` constructs; this presenter has no agent
                         // cast of its own and needs no single-origin shorthand.
@@ -1482,6 +1518,10 @@ fn main() -> Result<()> {
     let mut geode_purpose = None;
     let mut hue_bridge = None;
     let mut records_root = None;
+    let mut vfs_root: Option<PathBuf> = None;
+    let mut records_book: Option<String> = None;
+    let mut records_collection: Option<String> = None;
+    let mut actor: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1558,6 +1598,24 @@ fn main() -> Result<()> {
                 }
                 hue_bridge = Some(url);
             }
+            "--vfs-root" => {
+                let path = args.next().context("--vfs-root needs a directory")?;
+                vfs_root = Some(PathBuf::from(path));
+            }
+            "--records-book" => {
+                let value = args.next().context("--records-book needs a book name")?;
+                records_book = Some(value);
+            }
+            "--records-collection" => {
+                let value = args
+                    .next()
+                    .context("--records-collection needs a collection name")?;
+                records_collection = Some(value);
+            }
+            "--actor" => {
+                let value = args.next().context("--actor needs a principal name")?;
+                actor = Some(value);
+            }
             "--records-root" => {
                 records_root = Some(PathBuf::from(
                     args.next().context("--records-root needs a directory")?,
@@ -1592,7 +1650,7 @@ fn main() -> Result<()> {
             };
             if !candidate.is_file() {
                 anyhow::bail!(
-                    "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--drag X1,Y1,X2,Y2] [--after MS] [--spores DIR] [--size WxH] [--allow-origin URL]... [--geode-socket PATH --geode-purpose PURPOSE] [--hue-bridge URL] [--records-root DIR]"
+                    "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--drag X1,Y1,X2,Y2] [--after MS] [--spores DIR] [--size WxH] [--allow-origin URL]... [--geode-socket PATH --geode-purpose PURPOSE] [--hue-bridge URL] [--vfs-root DIR] [--records-root DIR] [--records-book NAME --records-collection NAME] [--actor WHO]"
                 );
             }
             candidate
@@ -1707,9 +1765,28 @@ fn main() -> Result<()> {
         geode_purpose,
         hue_bridge,
         records_root,
+        vfs_root: vfs_root.clone(),
+        records_book: match (records_book.clone(), records_collection.clone()) {
+            (Some(book), Some(collection)) => Some(BookGrant { collection, book }),
+            (None, None) => None,
+            _ => anyhow::bail!("--records-book and --records-collection are given together"),
+        },
+        actor: actor.clone(),
     };
     let http = build_http(&launch)?;
-    let records = launch.records_root.clone().map(RecordsAccess::vitals);
+    // A named book replaces the read-only vitals view: a Spore that was given a
+    // book to write into reads and writes that collection, not somebody else's.
+    let records = match (&launch.records_book, &launch.records_root) {
+        (Some(grant), Some(root)) => Some(RecordsAccess::book(
+            root,
+            &grant.collection,
+            &grant.book,
+            &grant.collection,
+        )),
+        (None, Some(root)) => Some(RecordsAccess::vitals(root)),
+        (Some(_), None) => anyhow::bail!("--records-book needs --records-root"),
+        (None, None) => None,
+    };
     let (tx, rx) = mpsc::channel();
     let mut app = App {
         module,
@@ -1735,6 +1812,8 @@ fn main() -> Result<()> {
         command,
         http,
         records,
+        vfs_root,
+        actor,
         launch,
         spores: spores.map(|path| vec![path]).unwrap_or_else(|| {
             let home = std::env::var_os("HOME")

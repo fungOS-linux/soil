@@ -14,7 +14,7 @@ wasmtime::component::bindgen!({
     world: "host",
 });
 
-use self::soil::principal::principal as api;
+pub use self::soil::principal::principal as api;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalKind {
