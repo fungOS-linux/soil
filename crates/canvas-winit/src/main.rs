@@ -290,6 +290,7 @@ struct FramePresenter {
     size: Arc<Mutex<(u32, u32)>>,
     tx: mpsc::Sender<CanvasFrame>,
     window: Arc<Window>,
+    render_scale: f32,
 }
 
 impl CanvasGpuPresenter for FramePresenter {
@@ -298,8 +299,8 @@ impl CanvasGpuPresenter for FramePresenter {
     }
 
     fn scale(&self) -> f64 {
-        // The window is the only thing that knows which display it is on.
-        self.window.scale_factor()
+        // What the Spore renders at, not what the display is.
+        f64::from(self.render_scale)
     }
 
     fn present(&mut self, frame: CanvasFrame) -> Result<()> {
@@ -318,6 +319,10 @@ struct App {
     /// The window's opening size in points. A Spore lays out in this space, so
     /// a phone-shaped Spore opens phone-shaped.
     size: (f64, f64),
+    /// Device pixels per layout pixel the Spore renders at. `1.0` is a
+    /// point-for-point frame the window scales up: a quarter of the pixels of a
+    /// Retina render, for Spores where motion matters more than edges.
+    render_scale: f32,
     tx: mpsc::Sender<CanvasFrame>,
     rx: mpsc::Receiver<CanvasFrame>,
     window: Option<Arc<Window>>,
@@ -440,6 +445,7 @@ impl App {
         let tx = self.tx.clone();
         let input = self.input.clone();
         let spores = self.spores.clone();
+        let render_scale = self.render_scale;
         // Built in `main`, owned by the window until the guest starts.
         let agents = self
             .agents
@@ -461,6 +467,7 @@ impl App {
                             size: extent,
                             tx,
                             window: window.clone(),
+                            render_scale,
                         }),
                         input,
                         interactive: true,
@@ -1218,6 +1225,7 @@ fn main() -> Result<()> {
     let mut agents: Option<String> = None;
     let mut acp_cmd: Option<String> = None;
     let mut size: Option<(f64, f64)> = None;
+    let mut scale: Option<f32> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1272,6 +1280,14 @@ fn main() -> Result<()> {
                     width.parse().context("--size needs a width")?,
                     height.parse().context("--size needs a height")?,
                 ));
+            }
+            "--scale" => {
+                scale = Some(
+                    args.next()
+                        .context("--scale needs a number")?
+                        .parse()
+                        .context("--scale needs a number")?,
+                );
             }
             "--acp-cmd" => {
                 acp_cmd = Some(args.next().context("--acp-cmd needs a command")?);
@@ -1439,6 +1455,7 @@ fn main() -> Result<()> {
     let mut app = App {
         module,
         size: size.unwrap_or(LOGICAL_SIZE),
+        render_scale: scale.unwrap_or(1.0),
         tx,
         rx,
         window: None,
