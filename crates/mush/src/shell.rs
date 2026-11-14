@@ -67,17 +67,10 @@ pub fn clear_and_seed(command: &mut std::process::Command) {
             command.env(key, value);
         }
     }
-    // The list above is the floor, not the whole policy: a profile that knows
-    // more about this caller (Geode, a Desktop, a CI image) names extra
-    // variables in `MUSH_HOST_ENV`. Values still come from the daemon's own
-    // environment, so nothing is invented — only admitted.
-    if let Ok(extra) = std::env::var("MUSH_HOST_ENV") {
-        for key in extra.split(',').map(str::trim).filter(|key| !key.is_empty()) {
-            if let Ok(value) = std::env::var(key) {
-                command.env(key, value);
-            }
-        }
-    }
+    // Deliberately not settable from the environment: `MUSH_HOST_ENV=TOKEN`
+    // would let whoever can spawn mush widen the policy that exists to constrain
+    // them. The floor is a source constant, and a Spore that needs more says so
+    // in its manifest, which a reviewer reads and the lock digests.
 }
 
 pub const HOST_ALLOWLIST: &[&str] = &[
