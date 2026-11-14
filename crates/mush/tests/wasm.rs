@@ -440,6 +440,19 @@ fn mush_control_variables_never_reach_the_shell() {
 }
 
 #[test]
+fn prompt_themes_render_and_an_unknown_theme_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (status, out, err) = run(dir.path(), "prompt theme plain; prompt");
+    assert_eq!(status, 0, "{err}");
+    // `plain` is `\w\g \$ `, rendered twice: once by `theme`, once by `prompt`.
+    assert_eq!(out, "/ $ \n/ $ \n", "{out:?}");
+
+    let (status, _, err) = run(dir.path(), "prompt theme nope");
+    assert_ne!(status, 0);
+    assert!(err.contains("unknown theme"), "{err}");
+}
+
+#[test]
 fn wasm_spore_supports_arithmetic_and_case() {
     let dir = tempfile::tempdir().unwrap();
     let (status, out, err) = run(
