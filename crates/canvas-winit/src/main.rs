@@ -290,7 +290,7 @@ struct FramePresenter {
     size: Arc<Mutex<(u32, u32)>>,
     tx: mpsc::Sender<CanvasFrame>,
     window: Arc<Window>,
-    render_scale: f32,
+    render_scale: Option<f32>,
 }
 
 impl CanvasGpuPresenter for FramePresenter {
@@ -299,8 +299,10 @@ impl CanvasGpuPresenter for FramePresenter {
     }
 
     fn scale(&self) -> f64 {
-        // What the Spore renders at, not what the display is.
-        f64::from(self.render_scale)
+        // The display's own scale unless the caller asked for a cheaper frame.
+        self.render_scale
+            .map(f64::from)
+            .unwrap_or_else(|| self.window.scale_factor())
     }
 
     fn present(&mut self, frame: CanvasFrame) -> Result<()> {
@@ -322,7 +324,12 @@ struct App {
     /// Device pixels per layout pixel the Spore renders at. `1.0` is a
     /// point-for-point frame the window scales up: a quarter of the pixels of a
     /// Retina render, for Spores where motion matters more than edges.
-    render_scale: f32,
+    /// `None` renders at the display's own scale: one device pixel per device
+    /// pixel, which is the only way text is not resampled.
+    render_scale: Option<f32>,
+    /// How a frame that is smaller than the window is scaled up. A Spore that
+    /// draws pixel edges wants `Nearest`; a photographic one wants `Triangle`.
+    filter: image::imageops::FilterType,
     tx: mpsc::Sender<CanvasFrame>,
     rx: mpsc::Receiver<CanvasFrame>,
     window: Option<Arc<Window>>,
@@ -670,7 +677,7 @@ impl App {
                 &source,
                 size.width,
                 size.height,
-                image::imageops::FilterType::Triangle,
+                self.filter,
             );
             scaled.as_raw().as_slice()
         };
@@ -1225,6 +1232,8 @@ fn main() -> Result<()> {
     let mut agents: Option<String> = None;
     let mut acp_cmd: Option<String> = None;
     let mut size: Option<(f64, f64)> = None;
+    let mut scroll: Option<f32> = None;
+    let mut filter = image::imageops::FilterType::Nearest;
     let mut scale: Option<f32> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -1280,6 +1289,25 @@ fn main() -> Result<()> {
                     width.parse().context("--size needs a width")?,
                     height.parse().context("--size needs a height")?,
                 ));
+            }
+            "--filter" => {
+                filter = match args.next().context("--filter needs a name")?.as_str() {
+                    "nearest" | "pixel" => image::imageops::FilterType::Nearest,
+                    "triangle" | "linear" => image::imageops::FilterType::Triangle,
+                    "sharp" | "catmull" => image::imageops::FilterType::CatmullRom,
+                    "gaussian" | "blur" => image::imageops::FilterType::Gaussian,
+                    other => anyhow::bail!(
+                        "--filter takes nearest, triangle, sharp or gaussian, not {other}"
+                    ),
+                };
+            }
+            "--scroll" => {
+                scroll = Some(
+                    args.next()
+                        .context("--scroll needs a line count")?
+                        .parse()
+                        .context("--scroll needs a line count")?,
+                );
             }
             "--scale" => {
                 scale = Some(
@@ -1417,6 +1445,22 @@ fn main() -> Result<()> {
                 pressed: false,
             });
         }
+        if let Some(lines) = scroll {
+            // A wheel event has nothing to scroll until a list has been drawn
+            // and recorded its reach, so it lands a beat after the rest.
+            let input = input.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                input
+                    .lock()
+                    .expect("input queue poisoned")
+                    .push_back(InputEvent::Scrolled {
+                        x: 100.0,
+                        y: 100.0,
+                        lines,
+                    });
+            });
+        }
         if let Some((x, y)) = pointer {
             input
                 .lock()
@@ -1455,7 +1499,8 @@ fn main() -> Result<()> {
     let mut app = App {
         module,
         size: size.unwrap_or(LOGICAL_SIZE),
-        render_scale: scale.unwrap_or(1.0),
+        render_scale: scale,
+        filter,
         tx,
         rx,
         window: None,
