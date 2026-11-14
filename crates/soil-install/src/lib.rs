@@ -735,6 +735,9 @@ pub struct SyncOptions<'a> {
     /// Where the tars live. Defaults to `<seed>/packages`.
     pub packages: Option<&'a Path>,
     pub root: &'a Path,
+    /// This host's device class. Entries placed for other classes are reported
+    /// and left alone; an entry with no placement applies everywhere.
+    pub class: Option<&'a str>,
     pub write: bool,
 }
 
@@ -760,6 +763,19 @@ pub fn sync(root: &Path, options: SyncOptions<'_>) -> Result<Vec<SyncOutcome>, E
         let Some(role) = entry.system.as_ref() else {
             continue;
         };
+        if let Some(class) = options.class {
+            if !entry.devices.is_empty() && !entry.devices.iter().any(|device| device == class) {
+                outcomes.push(SyncOutcome {
+                    id: entry.spore_id.clone(),
+                    role: role.clone(),
+                    from: None,
+                    to: entry.version.clone(),
+                    digest: entry.digest.clone(),
+                    action: format!("skipped: not for {class}"),
+                });
+                continue;
+            }
+        }
         let current = installed
             .iter()
             .find(|app| app.manifest.spore.id == entry.spore_id)

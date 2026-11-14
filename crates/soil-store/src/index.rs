@@ -91,6 +91,11 @@ pub struct Entry {
     /// The declared system role, if any. A change is a reboot-class update.
     #[serde(default)]
     pub system: Option<String>,
+    /// Device classes this package is for; empty means anywhere. A host reads
+    /// this to decide whether an entry in the install set belongs on it, so it
+    /// never has to fetch a tar to find out.
+    #[serde(default)]
+    pub devices: Vec<String>,
     /// The publisher principal, so a store can show who signed the package.
     #[serde(default)]
     pub publisher: Option<String>,
@@ -189,7 +194,7 @@ impl Entry {
         let mut grants = self.grants.clone();
         grants.sort();
         format!(
-            "store-entry 1\nseq {}\nkind {}\nspore {}\nversion {}\ndigest {}\npackage {}\nlisting {}\nmodule {}\nui {}\ngrants {}\nsystem {}\npublisher {}\npublisher-key {}\n",
+            "store-entry 1\nseq {}\nkind {}\nspore {}\nversion {}\ndigest {}\npackage {}\nlisting {}\nmodule {}\nui {}\ngrants {}\nsystem {}\ndevices {}\npublisher {}\npublisher-key {}\n",
             self.seq,
             self.kind.as_str(),
             self.spore_id,
@@ -201,6 +206,7 @@ impl Entry {
             self.ui.as_deref().unwrap_or("-"),
             grants.join(","),
             self.system.as_deref().unwrap_or("-"),
+            self.devices.join(","),
             self.publisher.as_deref().unwrap_or("-"),
             self.publisher_key.as_deref().unwrap_or("-"),
         )

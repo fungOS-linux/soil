@@ -187,12 +187,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let seed = PathBuf::from(required(rest, "--seed")?);
             let root = PathBuf::from(required(rest, "--root")?);
             let packages = named(rest, "--packages").map(PathBuf::from);
+            let class = named(rest, "--class");
             let outcomes = sync(
                 &root,
                 SyncOptions {
                     seed: &seed,
                     packages: packages.as_deref(),
                     root: &root,
+                    class,
                     write: flag(rest, "--write"),
                 },
             )
@@ -223,7 +225,7 @@ fn usage() -> &'static str {
     "soil-install install <package.spore> --root DIR [--keyring FILE] [--key FP] [--publisher P] [--json]\n\
      soil-install install --cid ipfs://CID --index FILE --packages DIR [--origin URL] --root DIR [--json]\n\
      soil-install adopt --root DIR [--force] [--json]\n\
-     soil-install sync --seed DIR --root DIR [--packages DIR] [--write] [--json]\n\
+     soil-install sync --seed DIR --root DIR [--packages DIR] [--class DEVICE] [--write] [--json]\n\
      soil-install rollback --id ID --root DIR [--json]\n\
      soil-install status --root DIR [--json]\n\
      soil-install apply --index FILE --root DIR --packages DIR --operator-key FILE [--write] [--allow-unsigned-dev] [--json]\n\
