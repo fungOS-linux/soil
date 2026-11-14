@@ -9,7 +9,7 @@ use std::{env, fs, path::Path, process::ExitCode};
 fn main() -> ExitCode {
     let mut frame_path = None;
     let mut size = (480, 640);
-    let mut spores_root = None;
+    let mut spores_roots: Vec<std::path::PathBuf> = Vec::new();
     let mut store_origin = None;
     let mut component = None;
     let mut args = env::args().skip(1);
@@ -46,7 +46,7 @@ fn main() -> ExitCode {
                     eprintln!("--spores-root requires a directory");
                     return ExitCode::FAILURE;
                 };
-                spores_root = Some(path);
+                spores_roots.push(std::path::PathBuf::from(path));
             }
             "--store-origin" => {
                 let Some(origin) = args.next() else {
@@ -79,10 +79,13 @@ fn main() -> ExitCode {
         }
     };
     let result = if frame_path.is_some() {
-        let catalog = spores_root.as_ref().map(|root| {
-            Box::new(soil_webgpu::InstallCatalog::new(root.clone()))
-                as Box<dyn soil_webgpu::CatalogHost>
-        });
+        let catalog = if spores_roots.is_empty() {
+            None
+        } else {
+            Some(Box::new(soil_webgpu::InstallCatalog::with_roots(
+                spores_roots.clone(),
+            )) as Box<dyn soil_webgpu::CatalogHost>)
+        };
         match soil_webgpu::run_component_capture_with(
             &bytes,
             size.0,
