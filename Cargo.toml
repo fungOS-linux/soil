@@ -13,7 +13,7 @@ repository = "https://github.com/mycelium-linux/soil"
 # incompatible `Store` types and two `unibus` copies, so it is declared once
 # here and only here; a bump is one edit that moves every crate together.
 [workspace.dependencies]
-fungos-records = { git = "https://github.com/mycelium-linux/records.git", rev = "9285cc81303bc0d3617b7c274e23a706f2e6246a" }
+fungos-records = { git = "https://github.com/mycelium-linux/records.git", rev = "388d6dffbf8c68b48a581abe5bc618f35278241a" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
