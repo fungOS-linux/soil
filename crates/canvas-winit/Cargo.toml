@@ -17,7 +17,7 @@ pollster = "0.4"
 portable-pty = "0.9"
 softbuffer = "0.4"
 url = "2"
-soil-host = { path = "../soil-host", default-features = false }
+soil = { path = "../soil", default-features = false, features = ["http"] }
 soil-spore = { path = "../soil-spore" }
 soil-vt = { path = "../soil-vt" }
 soil-webgpu = { path = "../soil-webgpu" }

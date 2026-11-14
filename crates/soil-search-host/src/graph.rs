@@ -19,7 +19,7 @@ use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({ path: "wit/graph.wit", world: "graph-host" });
 
-use soil::graph::graph as graph_api;
+use self::soil::graph::graph as graph_api;
 
 use crate::search_api;
 

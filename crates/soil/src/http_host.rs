@@ -542,7 +542,7 @@ impl http::Host for HttpHost {
 /// The one implementation of `soil:http` policy, in host-internal types.
 ///
 /// Every host that links the interface calls this: the `runner`-world host
-/// above, `soil_host` through `fetch` below, and mush directly. A second
+/// above, `soil` through `fetch` below, and mush directly. A second
 /// copy would be a second answer to "is this request allowed".
 pub fn perform(
     policy: &HttpPolicy,

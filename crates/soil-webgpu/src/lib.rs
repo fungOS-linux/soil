@@ -13,18 +13,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use soil_host::http_host::{
+use ::soil::http_host::{
     self, CredentialProvider, DirectTransport, HttpPolicy, HttpTransport, NoCredentials,
     Request as HttpRequest,
 };
-use soil_host::records_host::{self, Namespace, NamespacedRecordsHost};
+use ::soil::records_host::{self, Namespace, NamespacedRecordsHost};
 use wasi_webgpu_wasmtime::reexports::{wgpu_core, wgpu_types};
 use wasi_webgpu_wasmtime::{WasiWebGpuCtx, WasiWebGpuCtxView, WasiWebGpuOptions};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use soil::present::input;
+use crate::soil::present::input;
 use soil_agent_host::{AgentBackend, Answer, Binding, Page};
 
 pub mod fb;
@@ -941,7 +941,7 @@ fn catalog_error(error: CatalogError) -> soil::spore::catalog::Error {
 pub struct AgentSubscription;
 
 fn agent_error(error: soil_agent_host::Error) -> soil::agents::types::Error {
-    use soil::agents::types::Error;
+    use crate::soil::agents::types::Error;
     match error {
         soil_agent_host::Error::Denied => Error::Denied,
         soil_agent_host::Error::NotFound => Error::NotFound,
@@ -955,7 +955,7 @@ fn agent_error(error: soil_agent_host::Error) -> soil::agents::types::Error {
 }
 
 fn agent_phase(phase: soil_agent_host::Phase) -> soil::agents::types::Phase {
-    use soil::agents::types::Phase;
+    use crate::soil::agents::types::Phase;
     match phase {
         soil_agent_host::Phase::Connecting => Phase::Connecting,
         soil_agent_host::Phase::Idle => Phase::Idle,
@@ -969,7 +969,7 @@ fn agent_phase(phase: soil_agent_host::Phase) -> soil::agents::types::Phase {
 }
 
 fn agent_activity_kind(kind: soil_agent_host::ActivityKind) -> soil::agents::types::ActivityKind {
-    use soil::agents::types::ActivityKind;
+    use crate::soil::agents::types::ActivityKind;
     match kind {
         soil_agent_host::ActivityKind::You => ActivityKind::You,
         soil_agent_host::ActivityKind::Model => ActivityKind::Model,
@@ -986,7 +986,7 @@ fn agent_activity_kind(kind: soil_agent_host::ActivityKind) -> soil::agents::typ
 }
 
 fn agent_status(status: soil_agent_host::Status) -> soil::agents::types::Status {
-    use soil::agents::types::Status;
+    use crate::soil::agents::types::Status;
     match status {
         soil_agent_host::Status::Running => Status::Running,
         soil_agent_host::Status::Ok => Status::Ok,
@@ -996,7 +996,7 @@ fn agent_status(status: soil_agent_host::Status) -> soil::agents::types::Status 
 }
 
 fn agent_prompt_kind(kind: soil_agent_host::PromptKind) -> soil::agents::types::PromptKind {
-    use soil::agents::types::PromptKind;
+    use crate::soil::agents::types::PromptKind;
     match kind {
         soil_agent_host::PromptKind::Question => PromptKind::Question,
         soil_agent_host::PromptKind::Approval => PromptKind::Approval,
@@ -1005,7 +1005,7 @@ fn agent_prompt_kind(kind: soil_agent_host::PromptKind) -> soil::agents::types::
 }
 
 fn agent_role(role: soil_agent_host::Role) -> soil::agents::types::Role {
-    use soil::agents::types::Role;
+    use crate::soil::agents::types::Role;
     match role {
         soil_agent_host::Role::User => Role::User,
         soil_agent_host::Role::Assistant => Role::Assistant,
@@ -1021,7 +1021,7 @@ fn agent_owner(owner: soil_agent_host::Owner) -> soil::agents::types::Owner {
 }
 
 fn agent_scope(scope: soil_agent_host::Scope) -> soil::agents::types::Scope {
-    use soil::agents::types::ScopeKind;
+    use crate::soil::agents::types::ScopeKind;
     soil::agents::types::Scope {
         kind: match scope.kind {
             soil_agent_host::ScopeKind::Device => ScopeKind::Device,

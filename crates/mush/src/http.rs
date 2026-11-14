@@ -12,7 +12,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use anyhow::Result;
-use soil_host::http_host::{CredentialProvider, Error, HttpHost, HttpPolicy, Method, Request};
+use ::soil::http_host::{CredentialProvider, Error, HttpHost, HttpPolicy, Method, Request};
 
 use crate::soil::http::http;
 

@@ -7,8 +7,8 @@
 use std::{env, fs, process::ExitCode, sync::Arc, time::Duration};
 
 #[cfg(unix)]
-use soil_host::http_host::GeodeCredentials;
-use soil_host::http_host::{BearerCredential, HttpHost, HttpPolicy, HttpRuntime};
+use soil::http_host::GeodeCredentials;
+use soil::http_host::{BearerCredential, HttpHost, HttpPolicy, HttpRuntime};
 
 fn main() -> ExitCode {
     match run() {

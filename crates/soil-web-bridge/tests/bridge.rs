@@ -592,7 +592,7 @@ fn a_provider_call_with_no_provider_is_unavailable() {
 
 #[test]
 fn a_spore_fetch_goes_through_the_session_when_one_is_offered() {
-    use soil_host::http_host::{HttpTransport, TransportError, TransportRequest};
+    use ::soil::http_host::{HttpTransport, TransportError, TransportRequest};
     use soil_web_bridge::SessionTransport;
 
     let (_dir, bridge, server) =

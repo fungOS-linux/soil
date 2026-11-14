@@ -21,7 +21,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use soil_host::vfs_host::{VfsHost, index, vfs};
+use soil::vfs_host::{VfsHost, index, vfs};
 
 const DEFAULT_ROOT: &str = "~/.local/share/fungos/vfs";
 const DEFAULT_LISTEN: &str = "127.0.0.1:8788";

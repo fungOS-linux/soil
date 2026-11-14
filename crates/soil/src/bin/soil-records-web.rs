@@ -22,7 +22,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use soil_host::records_host::{RecordsBookHost, records::Entry};
+use soil::records_host::{RecordsBookHost, records::Entry};
 
 const DEFAULT_ROOT: &str = "~/.local/share/fungos/records";
 const DEFAULT_BOOK: &str = "personal/avery/contacts";

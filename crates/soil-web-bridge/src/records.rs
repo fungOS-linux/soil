@@ -19,7 +19,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use soil_host::records_host::{RecordsBookHost, records};
+use ::soil::records_host::{RecordsBookHost, records};
 
 use crate::protocol::{CallError, Code, Event};
 use crate::{CallOutput, Capability};

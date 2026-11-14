@@ -448,7 +448,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records_host::soil::records::records::Host as _;
+    use self::soil::records::records::Host as _;
 
     fn contact(id: &str) -> records::Entry {
         let value = serde_json::json!({

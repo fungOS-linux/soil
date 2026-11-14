@@ -10,11 +10,11 @@ use serde::Deserialize;
 use wasmtime::component::{HasSelf, Linker};
 
 wasmtime::component::bindgen!({
-    path: "wit",
+    path: "wit/principal",
     world: "host",
 });
 
-use soil::principal::principal as api;
+use self::soil::principal::principal as api;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalKind {

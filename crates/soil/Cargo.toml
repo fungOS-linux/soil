@@ -1,0 +1,149 @@
+[package]
+name = "soil"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# Everything a host can be, which is what the `soil` front door links.
+default = [
+    "vfs",
+    "records",
+    "principal",
+    "http",
+    "wasi",
+    "model2vec",
+    "cli",
+]
+
+# One feature per capability contract, so a presenter that is not willing to
+# grant a capability turns its module off instead of linking it and never
+# calling it. `soil` links everything by default; a Spore runner or a window
+# picks the subset it actually grants.
+vfs = ["dep:blake3", "dep:fungos-vfs", "dep:regex", "dep:rusqlite"]
+records = ["dep:fungos-records"]
+principal = ["dep:serde", "dep:mycelium-peer-protocol"]
+# A principal verified by Mycelium identity rather than an OIDC claim set.
+mycelium = ["principal", "dep:mycelium-peer-protocol"]
+http = [
+    "dep:base64",
+    "dep:bytes",
+    "dep:http",
+    "dep:http-body",
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:ipnet",
+    "dep:percent-encoding",
+    "dep:url",
+    "dep:wasmtime-wasi",
+]
+unibus = ["dep:unibus", "dep:unibus-sdk"]
+creds = ["dep:base64", "dep:ed25519-dalek", "dep:hmac", "dep:sha2", "dep:tempfile"]
+# The WASI p2 profile around the capabilities: `wasi:http` in and out,
+# clocks, filesystem, sockets, the credential and bus sessions, and the policy
+# that bounds what a preopen or a socket may reach. It is the part that turns a
+# set of hosts into a runner, which is why the modules written against it
+# (context, creds, host, service, time, unibus) are behind this feature.
+wasi = [
+    "http",
+    "records",
+    "unibus",
+    "creds",
+    "dep:libc",
+    "dep:tokio",
+    "dep:wasmtime-wasi",
+    "dep:wasmtime-wasi-http",
+]
+# The embedding models `soil:index` reaches for, and the remote alternative.
+model2vec = ["vfs", "dep:model2vec-rs"]
+remote = ["vfs"]
+# The `soil-*` commands that ship beside the library.
+cli = [
+    "vfs",
+    "records",
+    "http",
+    "wasi",
+    "dep:clap",
+    "dep:tiny_http",
+    "dep:tokio",
+]
+
+[dependencies]
+anyhow = "1"
+base64 = { version = "0.22", optional = true }
+blake3 = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+libc = { version = "0.2", optional = true }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"], optional = true }
+fungos-records = { workspace = true, optional = true }
+fungos-vfs = { git = "https://github.com/mycelium-linux/fungos-vfs.git", rev = "8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af", optional = true }
+hmac = { version = "0.12", optional = true }
+http = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", default-features = false, features = ["http1", "server"], optional = true }
+ipnet = { version = "2", optional = true }
+model2vec-rs = { version = "0.4", default-features = false, features = ["fancy-regex", "hf-hub"], optional = true }
+mycelium-peer-protocol = { git = "https://github.com/ajmwagar/mycelium.git", rev = "83a8cf8a818c29db84845eba8128477f38ab39ca", optional = true }
+percent-encoding = { version = "2", optional = true }
+regex = { version = "1", optional = true }
+rusqlite = { version = "0.41", features = ["bundled"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = "1"
+sha2 = { version = "0.10", optional = true }
+tempfile = { version = "3", optional = true }
+tiny_http = { version = "0.12", optional = true }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"], optional = true }
+tracing = "0.1"
+unibus = { git = "https://github.com/mycelium-linux/unibus.git", rev = "8bf8f79", optional = true }
+unibus-sdk = { git = "https://github.com/mycelium-linux/unibus.git", rev = "8bf8f79", optional = true }
+url = { version = "2", optional = true }
+ureq = { version = "2", features = ["json"] }
+wasmtime = { version = "50", default-features = false, features = [
+    "anyhow",
+    "component-model",
+    "cranelift",
+    "runtime",
+    "std",
+] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"], optional = true }
+wasmtime-wasi-http = { version = "50", default-features = false, features = [
+    "default-send-request",
+    "p2",
+], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "soil-grep"
+path = "src/bin/soil-grep.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "soil-http"
+path = "src/bin/soil-http.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "soil-records-ingest"
+path = "src/bin/soil-records-ingest.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "soil-records-web"
+path = "src/bin/soil-records-web.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "soil-vfs-web"
+path = "src/bin/soil-vfs-web.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "soil-wasi-http"
+path = "src/bin/soil-wasi-http.rs"
+required-features = ["cli"]

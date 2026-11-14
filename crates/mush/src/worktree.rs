@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use fungos_vfs::{ApplyOutcome, ContentId, Expect, Vfs, pull_over_ssh};
 use rand::Rng;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use soil_host::records_host::{RecordsBookHost, records};
+use ::soil::records_host::{RecordsBookHost, records};
 
 const THREAD_SCHEMA: &str = "fungos.thread/v1";
 const TURN_SCHEMA: &str = "fungos.turn/v1";
