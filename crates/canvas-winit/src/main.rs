@@ -62,7 +62,18 @@ impl SporeCatalog {
             if !package.join("spore.toml").is_file() {
                 continue;
             }
-            let manifest = Manifest::load(&package).map_err(|_| CatalogError::Invalid)?;
+            // One unreadable package is a broken shelf, not a broken window:
+            // skip it out loud, and let the Spore we were asked to run start.
+            let manifest = match Manifest::load(&package) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    eprintln!(
+                        "canvas-winit: skipping {}: {error}",
+                        package.display()
+                    );
+                    continue;
+                }
+            };
             installed.push(Installed {
                 root: package,
                 manifest,
@@ -304,6 +315,9 @@ impl CanvasGpuPresenter for FramePresenter {
 
 struct App {
     module: PathBuf,
+    /// The window's opening size in points. A Spore lays out in this space, so
+    /// a phone-shaped Spore opens phone-shaped.
+    size: (f64, f64),
     tx: mpsc::Sender<CanvasFrame>,
     rx: mpsc::Receiver<CanvasFrame>,
     window: Option<Arc<Window>>,
@@ -313,6 +327,9 @@ struct App {
     capture: Option<PathBuf>,
     frames: usize,
     frames_seen: usize,
+    /// The cast this window is looking at. Taken once, when the Spore starts:
+    /// the backend belongs to the guest's thread, not to the window.
+    agents: Option<Box<dyn AgentBackend>>,
     input: Arc<Mutex<VecDeque<InputEvent>>>,
     /// Last surface-space pointer position, so a click can name its location.
     pointer: (f32, f32),
@@ -423,6 +440,11 @@ impl App {
         let tx = self.tx.clone();
         let input = self.input.clone();
         let spores = self.spores.clone();
+        // Built in `main`, owned by the window until the guest starts.
+        let agents = self
+            .agents
+            .take()
+            .unwrap_or_else(|| Box::new(NoAgents));
         thread::spawn(move || {
             let result = (|| -> Result<()> {
                 let bytes =
@@ -442,7 +464,7 @@ impl App {
                         }),
                         input,
                         interactive: true,
-                        agents: cast,
+                        agents,
                         catalog: Box::new(catalog),
                         store_origin: Some(soil_webgpu::LOCAL_STORE_ORIGIN.to_string()),
                         terminal: Box::new(Terminals::new(80, 24, command)),
@@ -677,7 +699,7 @@ impl ApplicationHandler for App {
         }
         let attributes = Window::default_attributes()
             .with_title(window_title(&self.module))
-            .with_inner_size(LogicalSize::new(LOGICAL_SIZE.0, LOGICAL_SIZE.1))
+            .with_inner_size(LogicalSize::new(self.size.0, self.size.1))
             .with_resizable(true);
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -716,7 +738,7 @@ impl ApplicationHandler for App {
                 (inner.height as f32 / self.scale).round() as u32,
             );
         }
-        let physical = LogicalSize::new(LOGICAL_SIZE.0, LOGICAL_SIZE.1)
+        let physical = LogicalSize::new(self.size.0, self.size.1)
             .to_physical::<u32>(window.scale_factor());
         self.window = Some(window);
         self.context = Some(context);
@@ -1195,6 +1217,7 @@ fn main() -> Result<()> {
     let mut spores = None;
     let mut agents: Option<String> = None;
     let mut acp_cmd: Option<String> = None;
+    let mut size: Option<(f64, f64)> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1239,6 +1262,16 @@ fn main() -> Result<()> {
             }
             "--agents" => {
                 agents = Some(args.next().context("--agents takes demo or acp")?);
+            }
+            "--size" => {
+                let value = args.next().context("--size needs WxH")?;
+                let (width, height) = value
+                    .split_once('x')
+                    .with_context(|| format!("--size needs WxH, not {value}"))?;
+                size = Some((
+                    width.parse().context("--size needs a width")?,
+                    height.parse().context("--size needs a height")?,
+                ));
             }
             "--acp-cmd" => {
                 acp_cmd = Some(args.next().context("--acp-cmd needs a command")?);
@@ -1405,6 +1438,7 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let mut app = App {
         module,
+        size: size.unwrap_or(LOGICAL_SIZE),
         tx,
         rx,
         window: None,
@@ -1414,6 +1448,7 @@ fn main() -> Result<()> {
         capture,
         frames,
         frames_seen: 0,
+        agents: Some(cast),
         input,
         pointer: (0.0, 0.0),
         scale: 1.0,
