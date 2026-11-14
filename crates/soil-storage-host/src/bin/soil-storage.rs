@@ -1,13 +1,9 @@
 //! Operator path for the content-addressed cache behind `soil:storage`.
 //!
-//! This cache holds content Soil *ships*: the storefront already publishes a
-//! CID for every package (`soil_store::cid::raw` over the packed bytes), and a
-//! Spore reads it back by that address. The binary is how an operator fills the
-//! local mirror and proves what came out; it mints no authority and is not a
-//! place for a user's own files — those belong in a `soil:vfs` workspace.
+//! A Spore names a CID; something has to put the bytes there and be able to
+//! prove what came back out. That is this binary.
 //!
-//!   soil-storage import FILE CID   fill the cache, refusing bytes that do not
-//!                                  match the published address
+//!   soil-storage put FILE          print the CID, store the bytes
 //!   soil-storage get CID OUT       write the bytes out, verifying the address
 //!   soil-storage has CID           exit 0 when present
 //!   soil-storage size              bytes and object count in the cache
@@ -34,18 +30,14 @@ fn run() -> Result<()> {
     let command = args.next().context("usage: soil-storage put|get|has|size ...")?;
     let root = root();
     match command.as_str() {
-        "import" => {
-            let path = PathBuf::from(args.next().context("import needs FILE")?);
-            let address = args.next().context("import needs CID")?;
+        "put" => {
+            let path = PathBuf::from(args.next().context("put needs FILE")?);
             let storage = Storage::new(&root)?;
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("read {}", path.display()))?;
-            // The address is the published one, never computed from whatever
-            // bytes happen to be at the path: a mismatch is refused, so this
-            // cannot mint an address for content Soil never shipped.
-            cid::verify(&address, &bytes).map_err(|error| anyhow::anyhow!("{error}"))?;
+            let address = cid::raw(&bytes);
             storage.write(&address, &bytes).map_err(|error| anyhow::anyhow!("{error}"))?;
-            println!("ok {address}");
+            println!("{address}");
         }
         "get" => {
             let address = args.next().context("get needs CID")?;
@@ -70,7 +62,7 @@ fn run() -> Result<()> {
             let storage = Storage::new(&root)?;
             println!("{} bytes at {}", storage.used_bytes()?, root.display());
         }
-        other => bail!("unknown command {other:?}; expected import, get, has, or size"),
+        other => bail!("unknown command {other:?}; expected put, get, has, or size"),
     }
     Ok(())
 }
