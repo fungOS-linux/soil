@@ -1,13 +1,15 @@
 //! Narrow capability routing only. Implementations must call the actual Canvas
 //! owner model/render library; this module contains no UI schema or rasterizer.
 use crate::{HEIGHT, Key, WIDTH};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use fpl_gfx::SoftwareImage;
 
 pub const ANIMATED_BATTERY_GUEST: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/animated-battery-canvas.wasm"));
 pub const IMPORT: &str = "soil:canvas/surface@0.1.0";
 pub const CANVAS_GUEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/canvas-client.wasm"));
+/// A Spore that owns its pixels and hands them over as RGBA bytes.
+pub const PIXEL_GUEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pixel-client.wasm"));
 
 /// Host-selected physical extent, never selected by the guest.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -131,6 +133,9 @@ impl CanvasSurface for OwnerSurface {
 #[derive(Default)]
 pub(crate) struct CanvasHost {
     pub surface: Option<Box<dyn CanvasSurface>>,
+    /// Host-selected extent when no owner surface is granted. A guest that
+    /// renders its own pixels still never chooses the display.
+    pub size: SurfaceSize,
     pub frame: Option<SoftwareImage>,
     pub presents: usize,
     pub actions: usize,
@@ -181,6 +186,52 @@ pub(crate) fn link(linker: &mut wasmtime::Linker<crate::Limits>) -> Result<()> {
                     "nonopaque Canvas frame"
                 );
                 host.frame = Some(frame);
+                Ok(0)
+            })())
+        },
+    )?;
+    // A Spore that renders its own pixels hands them over here: bytes, not a
+    // document. Extent is the host's, so the guest fills `size.dimensions()` and
+    // the host validates length and opacity before retaining the frame.
+    linker.func_wrap(
+        IMPORT,
+        "present_rgba",
+        |mut caller: wasmtime::Caller<'_, crate::Limits>,
+         ptr: i32,
+         len: i32|
+         -> wasmtime::Result<i32> {
+            crate::host((|| -> Result<i32> {
+                let (width, height) = caller
+                    .data()
+                    .2
+                    .surface
+                    .as_ref()
+                    .map(|surface| surface.size())
+                    .unwrap_or(caller.data().2.size)
+                    .dimensions();
+                let expected = width as usize * height as usize * 4;
+                ensure!(
+                    len >= 0 && len as usize == expected,
+                    "Canvas frame is {len} bytes, {width}x{height} RGBA8 is {expected}"
+                );
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(|export| export.into_memory())
+                    .context("Canvas guest has no memory export")?;
+                let mut pixels = vec![0u8; expected];
+                memory.read(&caller, ptr as usize, &mut pixels)?;
+                ensure!(
+                    pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255),
+                    "nonopaque Canvas frame"
+                );
+                let host = &mut caller.data_mut().2;
+                host.presents += 1;
+                ensure!(host.presents <= 1, "canvas present budget");
+                host.frame = Some(SoftwareImage {
+                    width,
+                    height,
+                    pixels,
+                });
                 Ok(0)
             })())
         },

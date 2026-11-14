@@ -9,6 +9,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod profile;
+
 /// Modifier state that accompanies one Canvas input event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {

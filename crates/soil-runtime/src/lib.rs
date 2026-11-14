@@ -21,8 +21,80 @@ pub mod lid;
 pub const PHONE_SHELL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/phone-shell.wasm"));
 
 pub const MAX_MODULE_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_MEMORY_BYTES: usize = 16 * 1024 * 1024;
+/// Per-Spore linear-memory ceiling.
+///
+/// A UI Spore needs room for fonts, its own rasterizer and two 480x640 RGBA
+/// frames (~2.4 MiB). 256 MiB is generous headroom without letting one Spore
+/// starve the device it shares with the OS.
+pub const MAX_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+
+/// Ceiling for every Spore in one host process. Spores share a phone with the
+/// OS and each other, so the per-Spore number alone is not a policy.
+pub const DEFAULT_TOTAL_MEMORY_BYTES: usize = 1536 * 1024 * 1024;
+
 pub const DEFAULT_FUEL: u64 = 10_000_000;
+
+/// Linear-memory allowances: one Spore ceiling and one shared total.
+///
+/// `Clone` is shallow on purpose: every clone charges the same counter, so
+/// sharing a budget across spores is a `clone()`, and a fresh `default()` is a
+/// fresh host process.
+#[derive(Clone, Debug)]
+pub struct MemoryBudget {
+    per_spore: usize,
+    total: usize,
+    in_use: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Default for MemoryBudget {
+    fn default() -> Self {
+        Self::new(MAX_MEMORY_BYTES, DEFAULT_TOTAL_MEMORY_BYTES)
+    }
+}
+
+impl MemoryBudget {
+    pub fn new(per_spore: usize, total: usize) -> Self {
+        Self {
+            per_spore,
+            total,
+            in_use: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+    pub fn per_spore(&self) -> usize {
+        self.per_spore
+    }
+    pub fn total(&self) -> usize {
+        self.total
+    }
+    pub fn in_use(&self) -> usize {
+        self.in_use.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Charge `bytes` against the shared total, all or nothing.
+    fn charge(&self, bytes: usize) -> bool {
+        self.in_use
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |used| {
+                    let next = used.saturating_add(bytes);
+                    (next <= self.total).then_some(next)
+                },
+            )
+            .is_ok()
+    }
+    fn release(&self, bytes: usize) {
+        if bytes != 0 {
+            self.in_use
+                .fetch_sub(bytes, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+}
+
+/// What one store has charged against its [`MemoryBudget`].
+struct MemoryCharge {
+    budget: MemoryBudget,
+    charged: usize,
+}
 
 struct Limits(
     StoreLimits,
@@ -30,10 +102,22 @@ struct Limits(
     canvas::CanvasHost,
     battery::BatteryHost,
     estimate::EstimateHost,
+    MemoryCharge,
 );
 impl ResourceLimiter for Limits {
+    /// The per-Spore ceiling comes from `StoreLimits`; the shared total is
+    /// charged here, so one Spore cannot starve the others by growing into
+    /// memory they are about to need.
     fn memory_growing(&mut self, c: usize, d: usize, m: Option<usize>) -> wasmtime::Result<bool> {
-        self.0.memory_growing(c, d, m)
+        if !self.0.memory_growing(c, d, m)? {
+            return Ok(false);
+        }
+        let delta = d.saturating_sub(c);
+        if !self.5.budget.charge(delta) {
+            return Ok(false);
+        }
+        self.5.charged += delta;
+        Ok(true)
     }
     fn table_growing(&mut self, c: usize, d: usize, m: Option<usize>) -> wasmtime::Result<bool> {
         self.0.table_growing(c, d, m)
@@ -46,6 +130,12 @@ impl ResourceLimiter for Limits {
     }
     fn memories(&self) -> usize {
         self.0.memories()
+    }
+}
+impl Drop for Limits {
+    fn drop(&mut self) {
+        let charged = self.5.charged;
+        self.5.budget.release(charged);
     }
 }
 
@@ -162,7 +252,18 @@ impl GuestScene {
         enable: bool,
         grant: Option<lid::LidGrant>,
     ) -> Result<Self> {
-        Self::instantiate(bytes, fuel, enable, grant, false, None, None, None, false)
+        Self::instantiate(
+            bytes,
+            fuel,
+            enable,
+            grant,
+            false,
+            None,
+            None,
+            None,
+            false,
+            MemoryBudget::default(),
+        )
     }
 
     /// Grants only a host-selected actual Canvas owner surface, never raw DRM.
@@ -171,7 +272,29 @@ impl GuestScene {
         fuel: u64,
         surface: Option<Box<dyn canvas::CanvasSurface>>,
     ) -> Result<Self> {
-        Self::instantiate(bytes, fuel, false, None, true, surface, None, None, false)
+        Self::instantiate(
+            bytes,
+            fuel,
+            false,
+            None,
+            true,
+            surface,
+            None,
+            None,
+            false,
+            MemoryBudget::default(),
+        )
+    }
+
+    /// Same grant as [`Self::with_canvas`], with a shared memory budget so a
+    /// host can cap every Spore it runs together.
+    pub fn with_canvas_budget(
+        bytes: &[u8],
+        fuel: u64,
+        surface: Option<Box<dyn canvas::CanvasSurface>>,
+        budget: MemoryBudget,
+    ) -> Result<Self> {
+        Self::instantiate(bytes, fuel, false, None, true, surface, None, None, false, budget)
     }
 
     pub fn with_battery_canvas(
@@ -190,6 +313,7 @@ impl GuestScene {
             Some(grant),
             None,
             false,
+            MemoryBudget::default(),
         )
     }
 
@@ -210,6 +334,7 @@ impl GuestScene {
             None,
             Some(grant),
             false,
+            MemoryBudget::default(),
         )
     }
 
@@ -230,6 +355,7 @@ impl GuestScene {
             Some(grant),
             None,
             true,
+            MemoryBudget::default(),
         )
     }
 
@@ -244,6 +370,7 @@ impl GuestScene {
         battery: Option<Option<battery::BatteryGrant>>,
         estimate: Option<Option<estimate::EstimateGrant>>,
         animation: bool,
+        budget: MemoryBudget,
     ) -> Result<Self> {
         let enable_battery = battery.is_some();
         let enable_estimate = estimate.is_some();
@@ -274,6 +401,10 @@ impl GuestScene {
                 },
                 battery::BatteryHost::new(enable_battery, battery.flatten()),
                 estimate::EstimateHost::new(enable_estimate, estimate.flatten()),
+                MemoryCharge {
+                    budget,
+                    charged: 0,
+                },
             ),
         );
         store.limiter(|x| x as &mut dyn ResourceLimiter);
@@ -521,6 +652,10 @@ pub fn run(bytes: &[u8], fuel: u64) -> Result<i32> {
             canvas::CanvasHost::default(),
             battery::BatteryHost::default(),
             estimate::EstimateHost::default(),
+            MemoryCharge {
+                budget: MemoryBudget::default(),
+                charged: 0,
+            },
         ),
     );
     store.limiter(|x| x as &mut dyn ResourceLimiter);
@@ -613,11 +748,38 @@ mod tests {
             );
             assert!(render_guest_scene(&wasm, DEFAULT_FUEL).is_err());
         }
-        let wasm = wat::parse_str(
-            "(module (memory 257) (func (export \"run\") (result i32) i32.const 0))",
-        )
+        // One page past the ceiling, derived so a cap change cannot silently
+        // turn this into a passing test of nothing.
+        let pages = MAX_MEMORY_BYTES / 65_536 + 1;
+        let wasm = wat::parse_str(format!(
+            "(module (memory {pages}) (func (export \"run\") (result i32) i32.const 0))"
+        ))
         .unwrap();
         assert!(GuestScene::new(&wasm, DEFAULT_FUEL).is_err());
+    }
+
+    #[test]
+    fn memory_budget_is_shared_across_spores() {
+        let budget = MemoryBudget::new(1024, 2048);
+        let other_spore = budget.clone();
+        assert!(budget.charge(1024));
+        assert_eq!(budget.in_use(), 1024);
+        // The second Spore may use what is left of the shared total, no more.
+        assert!(!other_spore.charge(1025));
+        assert!(other_spore.charge(1024));
+        assert_eq!(budget.in_use(), 2048);
+        other_spore.release(1024);
+        assert_eq!(budget.in_use(), 1024);
+        other_spore.release(1024);
+        assert_eq!(budget.in_use(), 0);
+    }
+
+    #[test]
+    fn a_default_budget_is_one_spore_ceiling_and_a_device_total() {
+        let budget = MemoryBudget::default();
+        assert_eq!(budget.per_spore(), MAX_MEMORY_BYTES);
+        assert_eq!(budget.total(), DEFAULT_TOTAL_MEMORY_BYTES);
+        assert_eq!(budget.in_use(), 0);
     }
 
     /// Build a guest module that writes one 32-byte primitive record at offset 0,
