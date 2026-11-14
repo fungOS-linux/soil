@@ -36,6 +36,8 @@ credential resolution stay in host adapters.
 | `fungos:actions@1.0.0` | wired | action bus plus presentation catalog |
 | `soil:ble@1.0.0` | wired | BLE host and COLMI ring Spore |
 | `soil:canvas@1.0.0` | wired | owner surface, `soil-scene` document, guest SDK and component host |
+| `soil:present@0.1.0` | wired | one package, two arms: `owner` takes encoded RGBA8 from core-Wasm guests (`soil-runtime` `present_rgba`), `surface`/`input`/`cursor`/`clipboard` serve `wasm32-wasip2` guests that hand over a `wasi:webgpu` texture (`soil-webgpu`, `canvas-winit`) |
+| `soil:terminal-screen@0.1.0` | wired | bounded cell grid for Spores that render a terminal; the host owns the pty |
 | `soil:terminal@0.1.0` | wired | host-rendered terminal surface; `terminal-host` |
 | `soil:view@1.0.0` | contract | host-reviewed web/Spore/retained view |
 | `fungos:mycelium@0.1.0` | contract | Pulse control-plane bridge to myceliumd; host implementation pending |

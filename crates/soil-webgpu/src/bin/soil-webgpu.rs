@@ -13,6 +13,7 @@ use soil_webgpu::{HttpAccess, run_component_capture_with_records};
 
 fn main() -> ExitCode {
     let mut frame_path = None;
+    let mut fb_path: Option<String> = None;
     let mut records_dir: Option<PathBuf> = None;
     let mut size = (480, 640);
     let mut spores_roots: Vec<PathBuf> = Vec::new();
@@ -33,6 +34,13 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 frame_path = Some(path);
+            }
+            "--fb" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--fb requires a framebuffer device, e.g. /dev/fb0");
+                    return ExitCode::FAILURE;
+                };
+                fb_path = Some(path);
             }
             "--records-dir" => {
                 let Some(path) = args.next() else {
@@ -146,7 +154,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = if frame_path.is_some() {
+    let result = if frame_path.is_some() || fb_path.is_some() {
         if records_dir.is_some()
             && (!origins.is_empty()
                 || !spores_roots.is_empty()
@@ -179,13 +187,25 @@ fn main() -> ExitCode {
                 Box::new(soil_agent_host::FixtureAgents::new().bind(agent.clone(), view.clone()))
                     as Box<dyn soil_agent_host::AgentBackend>
             });
-            soil_webgpu::run_component_capture_with(&bytes, size.0, size.1, catalog, http, cast)
+            match fb_path.as_deref() {
+                Some(device) => run_on_framebuffer(&bytes, size, device, catalog, http, cast),
+                None => soil_webgpu::run_component_capture_with(
+                    &bytes, size.0, size.1, catalog, http, cast,
+                ),
+            }
         };
         match result {
             Ok((status, frame)) => {
                 if status != 0 {
                     eprintln!("webgpu: guest status {status}");
                     return ExitCode::FAILURE;
+                }
+                if let Some(device) = fb_path.as_deref() {
+                    println!(
+                        "webgpu: ok fb={device} width={} height={} format=rgb565",
+                        size.0, size.1
+                    );
+                    return ExitCode::SUCCESS;
                 }
                 let Some(frame) = frame else {
                     eprintln!("webgpu: guest did not present a Canvas frame");
@@ -259,6 +279,29 @@ fn build_http(
         }
     }
     Ok(Some(access))
+}
+
+/// Present one Spore frame directly on a framebuffer device.
+fn run_on_framebuffer(
+    bytes: &[u8],
+    size: (u32, u32),
+    device: &str,
+    catalog: Option<Box<dyn soil_webgpu::CatalogHost>>,
+    http: Option<HttpAccess>,
+    agents: Option<Box<dyn soil_agent_host::AgentBackend>>,
+) -> anyhow::Result<(u32, Option<soil_webgpu::CanvasFrame>)> {
+    let presenter = soil_webgpu::fb::FramebufferPresenter::open(device, size.0, size.1)?;
+    let runtime = soil_webgpu::WebGpuRuntime::new()?;
+    let mut setup = soil_webgpu::HostSetup::capture(Box::new(presenter));
+    if let Some(catalog) = catalog {
+        setup.catalog = catalog;
+    }
+    if let Some(agents) = agents {
+        setup.agents = agents;
+    }
+    setup.http = http;
+    let status = pollster::block_on(runtime.run_component_with(bytes, setup))?;
+    Ok((status, None))
 }
 
 fn write_bgr(path: &str, frame: &soil_webgpu::CanvasFrame) -> anyhow::Result<()> {

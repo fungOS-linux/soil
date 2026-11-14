@@ -27,6 +27,8 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use soil::present::input;
 use soil_agent_host::{AgentBackend, Answer, Binding, Page};
 
+pub mod fb;
+
 /// The denying agent backend, for presenters that own no agent session.
 pub use soil_agent_host::NoAgents;
 
