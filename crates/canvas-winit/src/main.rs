@@ -499,10 +499,19 @@ impl App {
     fn take_frames(&mut self, event_loop: &ActiveEventLoop) {
         while let Ok(frame) = self.rx.try_recv() {
             eprintln!("canvas-winit: frame {}x{}", frame.width, frame.height);
-            if let Some(path) = &self.capture
-                && let Err(error) = std::fs::write(path, &frame.rgba)
-            {
-                eprintln!("canvas-winit: write {}: {error}", path.display());
+            if let Some(path) = &self.capture {
+                // One frame is a still; several are a sequence, and they cannot
+                // share a path or every write lands on the last one. A sequence
+                // writes `x.rgba` as `x.0000.rgba`, `x.0001.rgba`, so an
+                // animation can be assembled from what was actually drawn.
+                let path = if self.frames > 1 {
+                    sequence_path(path, self.frames_seen)
+                } else {
+                    path.clone()
+                };
+                if let Err(error) = std::fs::write(&path, &frame.rgba) {
+                    eprintln!("canvas-winit: write {}: {error}", path.display());
+                }
             }
             self.frames_seen += 1;
             self.frame = Some(frame);
@@ -1213,6 +1222,19 @@ fn key_name(key: &WinitKey) -> String {
         WinitKey::Character(text) => text.to_string(),
         other => format!("{other:?}").to_lowercase(),
     }
+}
+
+/// `dir/frame.rgba` -> `dir/frame.0007.rgba`.
+fn sequence_path(path: &std::path::Path, index: usize) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "frame".to_string());
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "rgba".to_string());
+    path.with_file_name(format!("{stem}.{index:04}.{extension}"))
 }
 
 fn main() -> Result<()> {
