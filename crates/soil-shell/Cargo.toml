@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 fungos-vfs = { git = "https://github.com/mycelium-linux/fungos-vfs.git", rev = "8ad45a7fb1ce01fbbc6f764d10524baf5a24c0af" }
-soil-host = { path = "../soil-host" }
+soil = { path = "../soil" }
 # Hosting any `.spore`: the launcher is the generic one, so it links the host
 # instead of re-implementing it per product.
 soil-spore = { path = "../soil-spore" }

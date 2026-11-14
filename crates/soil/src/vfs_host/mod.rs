@@ -629,8 +629,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs_host::soil::index::index::Host as _;
-    use crate::vfs_host::soil::vfs::vfs::Host as _;
+    use self::soil::index::index::Host as _;
+    use self::soil::vfs::vfs::Host as _;
     use std::path::Path;
 
     fn seed(root: &Path) {

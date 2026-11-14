@@ -26,7 +26,7 @@ use git::GitIndex;
 use graph::GraphIndex;
 use mru::{MruCache, hit_from_usage, now_ms, usage_from_hit};
 use soil_marbles::MarblesIndex;
-use soil_host::vfs_host::{EmbeddingProvider, VfsHost, index};
+use ::soil::vfs_host::{EmbeddingProvider, VfsHost, index};
 use tgrep::TgrepSource;
 use wasmtime::component::{HasSelf, Linker};
 
@@ -34,10 +34,10 @@ wasmtime::component::bindgen!({ path: "wit/search.wit", world: "search-host" });
 
 pub use launcher::{LauncherConfig, Profile};
 pub use mru::{Usage, recency};
-pub use soil::search::mentions as mention_api;
-use soil::search::search as search_api;
+pub use crate::soil::search::mentions as mention_api;
+use crate::soil::search::search as search_api;
 
-pub use soil::search::search as api;
+pub use crate::soil::search::search as api;
 
 /// The wire name of a kind. One table, because the HTTP surface, the usage cache
 /// and anything else that names a kind would drift apart in a second one.
@@ -553,7 +553,7 @@ impl SearchService {
             offset: 0,
             limit: MAX_PAGE,
         };
-        use soil_host::vfs_host::index::Host as _;
+        use ::soil::vfs_host::index::Host as _;
         let page = vfs.search(index_query).map_err(index_error)?;
         Ok(page
             .hits
@@ -792,7 +792,7 @@ impl SearchService {
         let Some(vfs) = self.vfs.as_mut() else {
             return Ok(Vec::new());
         };
-        use soil_host::vfs_host::index::Host as _;
+        use ::soil::vfs_host::index::Host as _;
         let page = vfs
             .search(index::Query {
                 text: text.to_string(),

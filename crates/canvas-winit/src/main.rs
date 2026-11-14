@@ -20,8 +20,8 @@ use url::Url;
 mod terminal;
 
 #[cfg(unix)]
-use soil_host::http_host::GeodeCredentials;
-use soil_host::http_host::{
+use ::soil::http_host::GeodeCredentials;
+use ::soil::http_host::{
     DirectTransport, HttpPolicy, HttpTransport, TransportError, TransportRequest, TransportResponse,
 };
 use soil_webgpu::{

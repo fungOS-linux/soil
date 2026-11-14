@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-soil-host = { path = "../soil-host" }
+soil = { path = "../soil" }
 anyhow = "1"
 base64 = "0.22"
 getrandom = "0.2"

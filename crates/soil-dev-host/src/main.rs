@@ -16,17 +16,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use soil_ble_host::ble as ble_host;
 use soil_ble_host::session;
-use soil_host::http_host::{self, HttpHost, HttpPolicy};
-use soil_host::records_host::{self, Namespace, NamespacedRecordsHost, records};
-use soil_host::{MemoryBus, WasiHost, WasiHostBuilder, WasiHostPolicy, unibus::bus};
+use ::soil::http_host::{self, HttpHost, HttpPolicy};
+use ::soil::records_host::{self, Namespace, NamespacedRecordsHost, records};
+use ::soil::{MemoryBus, WasiHost, WasiHostBuilder, WasiHostPolicy, unibus::bus};
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({ path: "wit", world: "runner" });
 
-use soil::ble::ble::Error as BleError;
-use soil::ble::types::{Characteristic, Device, Event, Notification, Service};
+use crate::soil::ble::ble::Error as BleError;
+use crate::soil::ble::types::{Characteristic, Device, Event, Notification, Service};
 
 const MAX_DEVICES: usize = 64;
 const MAX_READ_BYTES: u32 = 512;
@@ -164,7 +164,7 @@ impl DevHost {
     }
 }
 
-impl soil::ble::ble::Host for DevHost {
+impl crate::soil::ble::ble::Host for DevHost {
     fn scan(&mut self, timeout_ms: u32) -> std::result::Result<Vec<Device>, BleError> {
         let timeout_ms = u64::from(timeout_ms.min(30_000));
         let found = self.ble.scan(timeout_ms).map_err(io_error)?;
@@ -408,7 +408,7 @@ fn main() -> Result<()> {
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
         .map_err(anyhow::Error::from)
         .context("link wasi:cli")?;
-    soil::ble::ble::add_to_linker::<DevHost, HasSelf<DevHost>>(&mut linker, |state| state)
+    crate::soil::ble::ble::add_to_linker::<DevHost, HasSelf<DevHost>>(&mut linker, |state| state)
         .map_err(anyhow::Error::from)
         .context("link soil:ble")?;
     soil::time::time::add_to_linker::<DevHost, HasSelf<DevHost>>(&mut linker, |state| state)
@@ -418,7 +418,7 @@ fn main() -> Result<()> {
     http_host::api::add_to_linker::<DevHost, HasSelf<DevHost>>(&mut linker, |state| state)
         .map_err(anyhow::Error::from)
         .context("link soil:http")?;
-    soil_host::unibus::add_to_linker::<DevHost>(&mut linker).context("link soil:unibus")?;
+    ::soil::unibus::add_to_linker::<DevHost>(&mut linker).context("link soil:unibus")?;
 
     let mut store = Store::new(&engine, state);
     let bindings = Runner::instantiate(&mut store, &component, &linker)

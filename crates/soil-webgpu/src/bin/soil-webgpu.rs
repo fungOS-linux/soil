@@ -7,8 +7,8 @@
 use std::{env, fs, path::Path, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 #[cfg(unix)]
-use soil_host::http_host::GeodeCredentials;
-use soil_host::http_host::HttpPolicy;
+use soil::http_host::GeodeCredentials;
+use soil::http_host::HttpPolicy;
 use soil_webgpu::{HttpAccess, run_component_capture_with_records};
 
 fn main() -> ExitCode {
