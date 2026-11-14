@@ -31,7 +31,15 @@ fn store_error(context: &str, error: anyhow::Error) -> records::Error {
 
 
 
-const MAX_PAGE: u32 = 512;
+/// Records one `scan` call may return.
+///
+/// Reading a 6,000-record book crossed this boundary 12 times at 512 and twice
+/// at 4096, and wall-clock did not move: the cost is copying every body into the
+/// component, not the call. So this is a memory knob more than a speed one, and
+/// it is set high enough that a whole book is two or three crossings without
+/// holding an unbounded page at once. The real lever is not fetching bodies a
+/// query does not need — see the records-backend follow-ups.
+const MAX_PAGE: u32 = 4096;
 const CONTACT_SCHEMA: &str = "fungos.contacts/contact";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
