@@ -46,6 +46,7 @@ fn run() -> Result<()> {
     let mut env = Vec::new();
     let mut list = false;
     let mut shims = false;
+    let mut warm = false;
     let mut shim_dir: Option<PathBuf> = None;
     let mut prune = false;
     let mut i = 0;
@@ -102,6 +103,10 @@ fn run() -> Result<()> {
                 shims = true;
                 i += 1;
             }
+            "warm" => {
+                warm = true;
+                i += 1;
+            }
             other => bail!("unknown option {other}"),
         }
     }
@@ -119,6 +124,19 @@ fn run() -> Result<()> {
     if list {
         for entry in registry.entries() {
             println!("{}\t{}\t{}", entry.name, entry.version, entry.summary);
+        }
+        return Ok(());
+    }
+    if warm {
+        let report = soil_command::warm(&roots)?;
+        for name in &report.warmed {
+            println!("warmed {name}");
+        }
+        for name in &report.already {
+            println!("already warm {name}");
+        }
+        for (name, why) in &report.skipped {
+            eprintln!("skipped {name}: {why}");
         }
         return Ok(());
     }
@@ -148,7 +166,7 @@ fn run() -> Result<()> {
     }
     let Some(name) = args.get(i).cloned() else {
         bail!(
-            "usage: soil-command [--root DIR]... [--env NAME=VALUE]... [--list] run NAME [ARGS...]\n       soil-command [--root DIR]... shims [--dir DIR] [--prune]"
+            "usage: soil-command [--root DIR]... [--env NAME=VALUE]... [--list] run NAME [ARGS...]\n       soil-command [--root DIR]... shims [--dir DIR] [--prune]\n       soil-command [--root DIR]... warm"
         );
     };
     let entry = registry.get(&name).context("unknown command")?.clone();

@@ -94,6 +94,19 @@ A command whose package declares a `soil:*` capability this runner does not link
 is refused by name at scan time, with the reason. A PATH entry that traps on
 start is worse than an honest refusal.
 
+## Warm
+
+`soil-command warm` compiles every registered command into wasmtime's on-disk
+cache and writes the module's digest beside the package, in `.warm/<name>.json`.
+A component is in that cache only once it has been compiled, so compiling *is*
+the warm step; the marker is what lets a later reader tell warm from merely
+installed without compiling again - `warmed mb` the first time, `already warm
+mb` after that.
+
+Only a host can warm what it will run, so this covers the cache `soil-command`,
+`mush` and every engine built the same way share. The launcher keeps its own
+`.cwasm` files and warms them itself.
+
 ## Profiles and installed Spores
 
 The next layer is profile-aware resolution:

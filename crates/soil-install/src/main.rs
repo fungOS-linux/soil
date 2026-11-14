@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use soil_install::{
-    ApplyOptions, InstallOptions, InstalledState, SyncOptions, adopt, apply, commands, install,
-    install_cid, rollback, status, sync,
+    ApplyOptions, InstallOptions, InstalledState, SyncOptions, UpdateOptions, adopt, apply,
+    commands, install, install_cid, progress, rollback, status, sync, update,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -169,6 +169,75 @@ fn run(args: Vec<String>) -> Result<(), String> {
             }
             Ok(())
         }
+        "update" => {
+            let index = PathBuf::from(required(rest, "--index")?);
+            let root = PathBuf::from(required(rest, "--root")?);
+            let packages = PathBuf::from(required(rest, "--packages")?);
+            let operator_key = PathBuf::from(required(rest, "--operator-key")?);
+            let warm = named(rest, "--warm")
+                .map(PathBuf::from)
+                .or_else(default_runner);
+            let runs = update(
+                &root,
+                UpdateOptions {
+                    index: &index,
+                    packages: &packages,
+                    operator_key: &operator_key,
+                    origin: named(rest, "--origin"),
+                    warm: warm.as_deref(),
+                    only: named(rest, "--id"),
+                    write: flag(rest, "--write"),
+                    allow_unsigned_dev: flag(rest, "--allow-unsigned-dev"),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            if flag(rest, "--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&runs).map_err(|error| error.to_string())?
+                );
+            } else {
+                for run in runs {
+                    let detail = run.error.as_deref().unwrap_or("");
+                    println!(
+                        "{:<32} {:<9} {} -> {}  {}{}",
+                        run.id,
+                        run.class,
+                        run.from,
+                        run.to,
+                        run.phase,
+                        if detail.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  {detail}")
+                        }
+                    );
+                }
+            }
+            Ok(())
+        }
+        "progress" => {
+            let root = PathBuf::from(required(rest, "--root")?);
+            let runs = progress(&root);
+            if flag(rest, "--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&runs).map_err(|error| error.to_string())?
+                );
+            } else if runs.is_empty() {
+                println!("no update has run here");
+            } else {
+                for run in runs {
+                    println!(
+                        "{:<32} {:<10} {}",
+                        run.id,
+                        if run.done() { "done" } else { "pending" },
+                        run.phase
+                    );
+                }
+            }
+            Ok(())
+        }
         "adopt" => {
             let root = PathBuf::from(required(rest, "--root")?);
             let adopted = adopt(&root, flag(rest, "--force")).map_err(|error| error.to_string())?;
@@ -234,12 +303,23 @@ fn run(args: Vec<String>) -> Result<(), String> {
 fn usage() -> &'static str {
     "soil-install install <package.spore> --root DIR [--keyring FILE] [--key FP] [--publisher P] [--json]\n\
      soil-install install --cid ipfs://CID --index FILE --packages DIR [--origin URL] --root DIR [--json]\n\
+     soil-install update --index FILE --root DIR --packages DIR --operator-key FILE [--origin URL] [--warm BIN] [--id ID] [--write] [--allow-unsigned-dev] [--json]\n\
+     soil-install progress --root DIR [--json]\n\
      soil-install adopt --root DIR [--force] [--json]\n\
      soil-install sync --seed DIR --root DIR [--packages DIR] [--class DEVICE] [--write] [--json]\n\
      soil-install rollback --id ID --root DIR [--json]\n\
      soil-install status --root DIR [--json]\n\
      soil-install apply --index FILE --root DIR --packages DIR --operator-key FILE [--write] [--allow-unsigned-dev] [--json]\n\
      soil-install --version"
+}
+
+/// The runner that warms a compiled module, if one is installed: a host only
+/// warms what it will run, and `soil-command` is the host that runs commands.
+fn default_runner() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("soil-command"))
+        .find(|candidate| candidate.is_file())
 }
 
 fn named<'a>(args: &'a [String], name: &str) -> Option<&'a str> {

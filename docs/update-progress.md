@@ -47,17 +47,19 @@ be missing.
 
 ## Where the work goes
 
-1. **A phase projection the store can read.** `soil-store` emits, per update,
-the phases it can derive locally (`fetched`, `installed`, `warm`) and leaves
-`everywhere` absent. This is a projection, not state: it is recomputed on read.
-2. **A warm step.** Something must compile a module into the host's cache as
-explicit work, and record that it did - `wasmtime`'s `Config::cache` answers
-"is it compiled" only by compiling. A marker beside the install, written by the
-step that ran it, is the honest record.
-3. **The runner.** Today `soil-install apply` performs install and nothing else;
-phases advance because a person ran one command. An updater that walks a row
-through fetched -> verified -> installed -> warm and publishes each step is what
-makes a progress bar mean anything.
+1. **The runner** - done. `soil-install update` walks each pending update through
+`fetching -> fetched -> installed -> warm -> done`, journals every step to
+`<root>/.updates/<id>.json`, and continues past a failure instead of stopping the
+machine's whole queue. `soil-install progress --root DIR` reads the journal back.
+Classes that need a person (`consent`, `system`) are staged, never applied.
+2. **The warm step** - done. `soil-command warm` compiles each module into
+wasmtime's cache and records the digest in `.warm/<name>.json`, so warm is
+readable without compiling again. `done` requires it: with no runner the run
+stops at `installed`.
+3. **The surface.** The journal is what a storefront reads. What remains is the
+path from the journal to the pixels: `soil-store serve` exposing it, and the
+store Spore drawing a bar per row. Opening must not wait on it - the journal is a
+file read, and a missing entry means unknown, not failed.
 4. **The fleet.** `everywhere` needs two facts this tree does not have yet: the
 account's devices (and their classes) and what each of them has installed.
 `[placement] devices` already says which devices a package is *for*; the

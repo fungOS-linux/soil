@@ -13,6 +13,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{
     WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
@@ -321,8 +322,8 @@ pub fn write_shims(
             if known.contains(name.as_str()) {
                 continue;
             }
-            let owned = std::fs::read_to_string(entry.path())
-                .is_ok_and(|text| text.contains(SHIM_MARKER));
+            let owned =
+                std::fs::read_to_string(entry.path()).is_ok_and(|text| text.contains(SHIM_MARKER));
             if owned && std::fs::remove_file(entry.path()).is_ok() {
                 report.pruned.push(entry.path());
             }
@@ -399,6 +400,113 @@ fn unsupported(requires: &[String]) -> Option<Vec<String>> {
         .cloned()
         .collect();
     (!missing.is_empty()).then_some(missing)
+}
+
+/// Compile every registered command into the engine's on-disk cache.
+///
+/// A component is in wasmtime's cache only after it has been compiled, so the
+/// honest way to warm one is to compile it. The marker beside the package says
+/// which module was warmed and when, so a later reader can tell warm from
+/// merely installed without compiling anything.
+///
+/// This warms the cache shared by `soil-command` and every host that builds its
+/// engine the same way. A host that keeps its own cache - the launcher writes
+/// `.cwasm` files of its own - warms what it will run, on its own schedule.
+pub fn warm(roots: &[PathBuf]) -> Result<WarmReport> {
+    let registry = CommandRegistry::scan_roots(roots)?;
+    let engine = Engine::new(&caching_config())?;
+    let mut report = WarmReport::default();
+    for entry in registry.entries() {
+        let digest = match std::fs::read(&entry.module) {
+            Ok(bytes) => hex(&Sha256::digest(&bytes)),
+            Err(error) => {
+                report
+                    .skipped
+                    .push((entry.name.clone(), format!("read module: {error}")));
+                continue;
+            }
+        };
+        let marker = warm_marker(&entry.package, &entry.name);
+        if marker_digest(&marker).as_deref() == Some(digest.as_str()) {
+            report.already.push(entry.name.clone());
+            continue;
+        }
+        if let Err(error) = wasmtime::component::Component::from_file(&engine, &entry.module) {
+            report
+                .skipped
+                .push((entry.name.clone(), format!("compile: {error}")));
+            continue;
+        }
+        let body = serde_json::json!({
+            "name": entry.name,
+            "module": entry.module.display().to_string(),
+            "sha256": digest,
+            "warmed_at": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default(),
+        });
+        if let Some(dir) = marker.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("create warm directory {}", dir.display()))?;
+        }
+        std::fs::write(&marker, serde_json::to_vec_pretty(&body)?)
+            .with_context(|| format!("write {}", marker.display()))?;
+        report.warmed.push(entry.name.clone());
+    }
+    Ok(report)
+}
+
+/// What a warm pass did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct WarmReport {
+    pub warmed: Vec<String>,
+    pub already: Vec<String>,
+    pub skipped: Vec<(String, String)>,
+}
+
+/// Where a command's warm marker lives: beside the package, in the bookkeeping
+/// directory the scans skip.
+#[must_use]
+pub fn warm_marker(package: &Path, name: &str) -> PathBuf {
+    package
+        .parent()
+        .unwrap_or(package)
+        .join(".warm")
+        .join(format!("{name}.json"))
+}
+
+fn marker_digest(marker: &Path) -> Option<String> {
+    let bytes = std::fs::read(marker).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn caching_config() -> Config {
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    // Keep compiled components on disk. `mb` is invoked hundreds of times a day
+    // for the same 600 KB module, and without this every one of those invocations
+    // pays to compile it again. Failing to open the cache is not fatal: wasmtime
+    // falls back to compiling, which is the status quo ante.
+    match wasmtime::Cache::new(wasmtime::CacheConfig::default()) {
+        Ok(cache) => {
+            config.cache(Some(cache));
+        }
+        Err(error) => eprintln!("soil-command: component cache unavailable: {error}"),
+    }
+    config
 }
 
 fn package_name(package: &Path) -> String {
@@ -507,19 +615,8 @@ pub struct CommandRunner {
 
 impl CommandRunner {
     pub fn new(records: Option<RecordsBinding>) -> Result<Self> {
-        let mut config = Config::new();
-        config.wasm_component_model(true);
+        let mut config = caching_config();
         config.epoch_interruption(true);
-        // Keep compiled components on disk. `mb` is invoked hundreds of times a
-        // day for the same 600 KB module, and without this every one of those
-        // invocations pays to compile it again. Failing to open the cache is not
-        // fatal: wasmtime falls back to compiling, which is the status quo ante.
-        match wasmtime::Cache::new(wasmtime::CacheConfig::default()) {
-            Ok(cache) => {
-                config.cache(Some(cache));
-            }
-            Err(error) => eprintln!("soil-command: component cache unavailable: {error}"),
-        }
         let engine = Engine::new(&config)?;
         Ok(Self {
             engine,
