@@ -39,6 +39,87 @@ type SoftSurface = softbuffer::Surface<Arc<Window>, Arc<Window>>;
 
 const LOGICAL_SIZE: (f64, f64) = (1000.0, 700.0);
 
+/// One window: its own resolution, and the view it should open on.
+///
+/// A wall and a popup are different shapes. The wall is a phone because it is
+/// read at a glance from a desk; a popup is a card because it exists to be
+/// answered and then go away. Nothing in the Spore assumes one size — it lays
+/// out in `surface::size()` — so the resolution belongs to the window, not to
+/// the module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SurfaceSpec {
+    /// The window's opening size in points.
+    pub size: (u32, u32),
+    /// The view to open on, as the Spore names it (`grid`, `popup`, ...).
+    pub view: Option<String>,
+    /// The agent to open on, when the surface is about one agent.
+    pub agent: Option<String>,
+}
+
+impl SurfaceSpec {
+    /// `420x300:view=popup:agent=op-7f3a`, or `430x680` for a plain wall.
+    pub fn parse(text: &str) -> Result<Self> {
+        let mut parts = text.split(':');
+        let size = parts.next().context("surface needs a WxH size")?;
+        let (width, height) = size
+            .split_once('x')
+            .context("surface size is WxH, e.g. 430x680")?;
+        let size = (
+            width.parse::<u32>().context("surface width")?,
+            height.parse::<u32>().context("surface height")?,
+        );
+        anyhow::ensure!(size.0 > 0 && size.1 > 0, "surface size must be positive");
+        let mut view = None;
+        let mut agent = None;
+        for part in parts {
+            match part.split_once('=') {
+                Some(("view", value)) if known_view(value) => {
+                    view = Some(value.to_string());
+                }
+                Some(("agent", value)) if !value.is_empty() => {
+                    agent = Some(value.to_string());
+                }
+                _ => anyhow::bail!("surface setting {part:?} is not view= or agent="),
+            }
+        }
+        Ok(Self { size, view, agent })
+    }
+}
+
+/// Views a host may open a surface on. A typo is a startup error, not a window
+/// that silently opens on the grid.
+fn known_view(name: &str) -> bool {
+    matches!(name, "grid" | "board" | "roster" | "stage" | "focus" | "popup")
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::SurfaceSpec;
+
+    #[test]
+    fn a_size_alone_is_a_wall() {
+        let spec = SurfaceSpec::parse("430x680").unwrap();
+        assert_eq!(spec.size, (430, 680));
+        assert_eq!(spec.view, None);
+    }
+
+    #[test]
+    fn a_popup_carries_its_view_and_agent() {
+        let spec = SurfaceSpec::parse("420x300:view=popup:agent=op-7f3a").unwrap();
+        assert_eq!(spec.size, (420, 300));
+        assert_eq!(spec.view.as_deref(), Some("popup"));
+        assert_eq!(spec.agent.as_deref(), Some("op-7f3a"));
+    }
+
+    #[test]
+    fn a_typo_is_refused_rather_than_opened() {
+        assert!(SurfaceSpec::parse("420x300:view=popupp").is_err());
+        assert!(SurfaceSpec::parse("420x300:volume=up").is_err());
+        assert!(SurfaceSpec::parse("420").is_err());
+        assert!(SurfaceSpec::parse("0x300").is_err());
+    }
+}
+
 struct Installed {
     root: PathBuf,
     manifest: Manifest,
@@ -484,6 +565,7 @@ impl App {
                         terminal: Box::new(Terminals::new(80, 24, command)),
                         cursor: Some(Box::new(WindowCursor(window))),
                         clipboard: Some(Box::new(SystemClipboard)),
+                        bus: soil_webgpu::in_process_bus(),
                     },
                 ))?;
                 eprintln!("canvas-winit: guest returned {status}");
@@ -1243,6 +1325,7 @@ fn main() -> Result<()> {
     let mut frames = None;
     let mut key = None;
     let mut keys = None;
+    let mut surfaces: Vec<SurfaceSpec> = Vec::new();
     let mut command = None;
     let mut pointer = None;
     let mut click = None;
@@ -1272,6 +1355,10 @@ fn main() -> Result<()> {
                         .parse()
                         .context("--frames needs a number")?,
                 );
+            }
+            "--surface" => {
+                let text = args.next().context("--surface needs WxH:view=..")?;
+                surfaces.push(SurfaceSpec::parse(&text)?);
             }
             "--key" => key = Some(args.next().context("--key needs a key name")?),
             "--keys" => keys = Some(args.next().context("--keys needs text")?),
@@ -1349,7 +1436,7 @@ fn main() -> Result<()> {
             }
             value if module.is_none() => module = Some(PathBuf::from(value)),
             _ => anyhow::bail!(
-                "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--drag X1,Y1,X2,Y2] [--after MS] [--spores DIR]"
+                "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--surface WxH:view=NAME] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--drag X1,Y1,X2,Y2] [--after MS] [--spores DIR]"
             ),
         }
     }
@@ -1376,7 +1463,7 @@ fn main() -> Result<()> {
             };
             if !candidate.is_file() {
                 anyhow::bail!(
-                    "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--drag X1,Y1,X2,Y2] [--after MS] [--spores DIR]"
+                    "usage: canvas-winit <module.wasm> [--capture FILE.rgba] [--frames N] [--surface WxH:view=NAME] [--key KEY] [--keys TEXT] [--command LINE] [--pointer X,Y] [--click X,Y] [--drag X1,Y1,X2,Y2] [--after MS] [--spores DIR]"
                 );
             }
             candidate
@@ -1520,7 +1607,12 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let mut app = App {
         module,
-        size: size.unwrap_or(LOGICAL_SIZE),
+        size: size.unwrap_or(
+            surfaces
+                .first()
+                .map(|surface| (surface.size.0 as f64, surface.size.1 as f64))
+                .unwrap_or(LOGICAL_SIZE),
+        ),
         render_scale: scale,
         filter,
         tx,

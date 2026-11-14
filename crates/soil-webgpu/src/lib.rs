@@ -483,6 +483,15 @@ pub struct HostSetup {
     pub bus: Arc<soil_wasi_host::MemoryBus>,
 }
 
+/// The bus a surface publishes its notices to.
+///
+/// One per host process, shared by every window in it: a wall announces a prompt
+/// and a popup on the same process reads it. Cross-process needs a hub, which is
+/// what `UnibusBus` is for.
+pub fn in_process_bus() -> Arc<soil_wasi_host::MemoryBus> {
+    Arc::new(soil_wasi_host::MemoryBus::default())
+}
+
 impl HostSetup {
     /// A one-shot capture host: one frame, no input, no catalog, no terminal.
     pub fn capture(presenter: Box<dyn CanvasGpuPresenter>) -> Self {
@@ -496,7 +505,7 @@ impl HostSetup {
             terminal: Box::new(NoTerminal),
             cursor: None,
             clipboard: None,
-            bus: Arc::new(soil_wasi_host::MemoryBus::default()),
+            bus: in_process_bus(),
         }
     }
 }
