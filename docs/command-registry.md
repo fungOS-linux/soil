@@ -69,6 +69,31 @@ The output caps are per command (`command.toml` `[limits]`): a command that
 answers with megabytes needs `max_stdout_bytes` sized for it, and a write past
 the cap surfaces as an error to the command rather than as a truncated answer.
 
+## Shells that are not Mush
+
+`soil-command shims --dir DIR` writes one executable per command, so zsh - or any
+other shell - resolves a Spore's program like any other binary:
+
+```sh
+soil-command shims --dir ~/.local/share/fungos/bin   # then put that on PATH
+```
+
+The runner and the roots are baked into each shim, so it works from any directory
+and does not depend on `FUNGOS_COMMAND_ROOT` being exported. A shim carries no
+policy of its own: it sources `~/.config/fungos/commands/<name>.env`, a plain
+`KEY=VALUE` file holding the records binding (`FUNGOS_RECORDS_ROOT`,
+`FUNGOS_RECORDS_BOOK`, `FUNGOS_RECORDS_COLLECTION`) and anything else a person
+decides a command may have.
+
+A file the generator did not write is never touched. `mb` keeps a hand-written
+shim because a book and an actor are decisions, not defaults, and replacing it
+would be a data-loss bug rather than an update. `--prune` removes only shims it
+wrote, and only for commands that are gone.
+
+A command whose package declares a `soil:*` capability this runner does not link
+is refused by name at scan time, with the reason. A PATH entry that traps on
+start is worse than an honest refusal.
+
 ## Profiles and installed Spores
 
 The next layer is profile-aware resolution:

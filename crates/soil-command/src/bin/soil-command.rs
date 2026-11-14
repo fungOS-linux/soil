@@ -4,6 +4,21 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use soil_command::{CommandRegistry, CommandRunner, RecordsBinding, RunRequest};
 
+fn on_path(dir: &std::path::Path) -> bool {
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|candidate| candidate == dir))
+        .unwrap_or(false)
+}
+
+/// Where shims go when `--dir` is not given: the directory fungos already owns,
+/// beside `commands/` and `records/`.
+fn default_shim_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(".local/share/fungos/bin")
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("soil-command: {error:#}");
@@ -30,12 +45,23 @@ fn run() -> Result<()> {
     // Nothing is inherited: a command gets exactly the variables a caller names.
     let mut env = Vec::new();
     let mut list = false;
+    let mut shims = false;
+    let mut shim_dir: Option<PathBuf> = None;
+    let mut prune = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--root" => {
                 roots.push(PathBuf::from(args.get(i + 1).context("--root DIR")?));
                 i += 2;
+            }
+            "--dir" => {
+                shim_dir = Some(PathBuf::from(args.get(i + 1).context("--dir DIR")?));
+                i += 2;
+            }
+            "--prune" => {
+                prune = true;
+                i += 1;
             }
             "--env" => {
                 let assignment = args.get(i + 1).context("--env NAME=VALUE")?;
@@ -70,6 +96,12 @@ fn run() -> Result<()> {
                 i += 1;
                 break;
             }
+            // Not `run`: a shim run has no guest argv to protect, so the flags
+            // after it are still this binary's.
+            "shims" => {
+                shims = true;
+                i += 1;
+            }
             other => bail!("unknown option {other}"),
         }
     }
@@ -90,8 +122,34 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
+    if shims {
+        let dir = shim_dir.unwrap_or_else(default_shim_dir);
+        let runner = std::env::current_exe().context("resolve this binary")?;
+        let report = soil_command::write_shims(&registry, &dir, &runner, prune)?;
+        for path in &report.written {
+            println!("wrote {}", path.display());
+        }
+        for (name, why) in &report.kept {
+            eprintln!("kept {name}: {why}");
+        }
+        for path in &report.pruned {
+            println!("pruned {}", path.display());
+        }
+        if !report.written.is_empty() && !on_path(&dir) {
+            eprintln!(
+                "note: {} is not on PATH; add it to use these from a shell",
+                dir.display()
+            );
+        }
+        return Ok(());
+    }
+    if prune || shim_dir.is_some() {
+        bail!("--dir and --prune belong to `shims`");
+    }
     let Some(name) = args.get(i).cloned() else {
-        bail!("usage: soil-command [--root DIR]... [--env NAME=VALUE]... [--list] run NAME [ARGS...]");
+        bail!(
+            "usage: soil-command [--root DIR]... [--env NAME=VALUE]... [--list] run NAME [ARGS...]\n       soil-command [--root DIR]... shims [--dir DIR] [--prune]"
+        );
     };
     let entry = registry.get(&name).context("unknown command")?.clone();
     let records = match (records_root, book, collection) {
